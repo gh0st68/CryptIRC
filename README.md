@@ -310,6 +310,150 @@ Or inline on one line:
 CRYPTIRC_PORT=8080 CRYPTIRC_DATA=./data /opt/cryptirc/cryptirc
 ```
 
+## Reverse Proxy Setup
+
+CryptIRC listens on `127.0.0.1:9001` by default and should never be exposed directly to the internet. Put it behind a reverse proxy that handles TLS.
+
+### Nginx
+
+If you're serving CryptIRC at a **subpath** (e.g. `https://yourdomain.com/cryptirc`):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name yourdomain.com;
+
+    ssl_certificate     /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
+
+    location /cryptirc/ {
+        proxy_pass http://127.0.0.1:9001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 26m;
+    }
+}
+
+server {
+    listen 80;
+    server_name yourdomain.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+If you're serving CryptIRC at the **root** of a domain (e.g. `https://cryptirc.yourdomain.com`):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name cryptirc.yourdomain.com;
+
+    ssl_certificate     /etc/letsencrypt/live/cryptirc.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/cryptirc.yourdomain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:9001;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        client_max_body_size 26m;
+    }
+}
+
+server {
+    listen 80;
+    server_name cryptirc.yourdomain.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+Set `CRYPTIRC_BASE_PATH=/` in your environment when serving from the root.
+
+After editing, test and reload:
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+**Important:** The `proxy_http_version 1.1`, `Upgrade`, and `Connection "upgrade"` headers are required for WebSocket support. Without them, IRC connections won't work.
+
+### Caddy
+
+Caddy handles TLS automatically via Let's Encrypt — no certificate configuration needed.
+
+If you're serving CryptIRC at a **subpath**:
+
+```caddyfile
+yourdomain.com {
+    handle_path /cryptirc/* {
+        reverse_proxy localhost:9001 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+}
+```
+
+If you're serving CryptIRC at the **root** of a dedicated domain:
+
+```caddyfile
+cryptirc.yourdomain.com {
+    reverse_proxy localhost:9001 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Robots-Tag "noindex, nofollow"
+        -Server
+    }
+}
+```
+
+Set `CRYPTIRC_BASE_PATH=/` in your environment when serving from the root.
+
+After editing, validate and reload:
+
+```bash
+caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+Caddy automatically handles WebSocket upgrades — no extra headers needed.
+
+### TLS Certificates
+
+- **Caddy**: Automatic. Caddy obtains and renews Let's Encrypt certs with zero configuration.
+- **Nginx + Let's Encrypt**: Use [certbot](https://certbot.eff.org/) to obtain certs:
+
+```bash
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d yourdomain.com
+```
+
+Certbot auto-renews via a systemd timer. Verify with:
+
+```bash
+sudo certbot renew --dry-run
+```
+
 ## Requirements
 
 - Rust 1.78+ (installed automatically by deploy script)
