@@ -75,19 +75,62 @@ CryptIRC uses email verification to authenticate new accounts. Here's how regist
 5. Clicking the link sets `verified: true` — the user can now log in
 6. Verification tokens expire after **24 hours**
 
-Emails are sent from `noreply@cryptirc.local` through Postfix configured as a local-only relay. The deploy script sets this up automatically.
+### Configuring the From Address
+
+The sender address for verification emails is controlled by the `CRYPTIRC_FROM_EMAIL` environment variable. Set it in your systemd unit or environment:
+
+```ini
+Environment=CRYPTIRC_FROM_EMAIL=noreply@yourdomain.com
+```
+
+If not set, it defaults to `noreply@cryptirc.local`. The deploy script automatically sets this to the admin email you provide.
+
+Emails are sent through Postfix running on `localhost:25` as a local relay. The deploy script configures this automatically.
 
 ### Getting Email Delivery Working
 
-The deploy script configures Postfix for local relay out of the box, but emails may not arrive depending on your server's reputation:
+Out of the box, Postfix sends email directly from your server — but emails may not arrive depending on your server's reputation:
 
 - **Cloud VMs** (AWS, DigitalOcean, Vultr, etc.) often have their IPs on spam blocklists, so emails get silently dropped by recipients like Gmail or Outlook
 - **Self-hosted / home servers** usually lack proper PTR records and SPF/DKIM, causing the same issue
 
-**If verification emails aren't arriving**, the easiest fix is to route through a transactional mail service. Add the following to `/etc/postfix/main.cf`:
+The most reliable fix is to relay through an external SMTP provider. Here are two options:
+
+#### Option A: Gmail SMTP Relay
+
+1. Enable [2-Step Verification](https://myaccount.google.com/security) on your Google account
+2. Generate an [App Password](https://myaccount.google.com/apppasswords) (select "Mail")
+3. Configure Postfix to relay through Gmail:
 
 ```ini
-# Route through an external SMTP relay (example: Mailgun)
+# Add to /etc/postfix/main.cf
+relayhost = [smtp.gmail.com]:587
+smtp_sasl_auth_enable = yes
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_tls_security_level = encrypt
+smtp_tls_CAfile = /etc/ssl/certs/ca-certificates.crt
+```
+
+4. Create the credentials file:
+
+```bash
+echo "[smtp.gmail.com]:587 youremail@gmail.com:your-app-password" | sudo tee /etc/postfix/sasl_passwd
+sudo postmap /etc/postfix/sasl_passwd
+sudo chmod 600 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
+sudo systemctl restart postfix
+```
+
+5. Set your from address to match:
+
+```ini
+Environment=CRYPTIRC_FROM_EMAIL=youremail@gmail.com
+```
+
+#### Option B: Transactional Mail Service (Mailgun, Brevo, etc.)
+
+```ini
+# Add to /etc/postfix/main.cf (example: Mailgun)
 relayhost = [smtp.mailgun.org]:587
 smtp_sasl_auth_enable = yes
 smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
@@ -95,15 +138,8 @@ smtp_sasl_security_options = noanonymous
 smtp_tls_security_level = encrypt
 ```
 
-Then create `/etc/postfix/sasl_passwd`:
-
-```
-[smtp.mailgun.org]:587 postmaster@yourdomain.com:your-smtp-password
-```
-
-And run:
-
 ```bash
+echo "[smtp.mailgun.org]:587 postmaster@yourdomain.com:your-smtp-password" | sudo tee /etc/postfix/sasl_passwd
 sudo postmap /etc/postfix/sasl_passwd
 sudo chmod 600 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
 sudo systemctl restart postfix
