@@ -89,12 +89,9 @@ Emails are sent through Postfix running on `localhost:25` as a local relay. The 
 
 ### Getting Email Delivery Working
 
-Out of the box, Postfix sends email directly from your server — but emails may not arrive depending on your server's reputation:
+Out of the box, Postfix sends email directly from your server with no relay or external service required. **This works fine** — emails will be sent and delivered, but they'll most likely land in the recipient's **spam/junk folder** since your server probably doesn't have proper SPF, DKIM, or DMARC records set up and the IP may not have a good sending reputation. If you're running a small private instance, just tell your users to check their spam folder for the verification email.
 
-- **Cloud VMs** (AWS, DigitalOcean, Vultr, etc.) often have their IPs on spam blocklists, so emails get silently dropped by recipients like Gmail or Outlook
-- **Self-hosted / home servers** usually lack proper PTR records and SPF/DKIM, causing the same issue
-
-The most reliable fix is to relay through an external SMTP provider. Here are two options:
+If you want emails to land in the inbox reliably, you can relay through an external SMTP provider. Here are two options:
 
 #### Option A: Gmail SMTP Relay
 
