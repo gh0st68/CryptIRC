@@ -64,6 +64,16 @@ sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
 
 That's it. Visit `https://yourdomain.com`, register an account, and connect.
 
+### Adding Users Manually
+
+To create a user from the command line (skips email verification):
+
+```bash
+sudo bash adduser.sh <username> <email> <password>
+```
+
+The user will be pre-verified and can log in immediately.
+
 See [`deploy/README.md`](deploy/README.md) for detailed deployment docs, backup instructions, and troubleshooting.
 
 ## Architecture
