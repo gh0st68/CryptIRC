@@ -123,6 +123,40 @@ This creates the user with `verified: true` so they can log in immediately — n
 
 See [`deploy/README.md`](deploy/README.md) for detailed deployment docs, backup instructions, and troubleshooting.
 
+## Install as a PWA (Mobile & Desktop)
+
+CryptIRC is a Progressive Web App — you can install it to your home screen and it runs like a native app with its own window, push notifications, and offline splash screen. No app store needed.
+
+### iPhone / iPad (Safari)
+
+1. Open your CryptIRC URL in **Safari** (this only works in Safari on iOS)
+2. Tap the **Share** button (the square with an arrow at the bottom of the screen)
+3. Scroll down and tap **Add to Home Screen**
+4. Name it whatever you want (defaults to "CryptIRC") and tap **Add**
+5. The CryptIRC icon appears on your home screen — tap it to launch in full-screen mode
+
+### Android (Chrome)
+
+1. Open your CryptIRC URL in **Chrome**
+2. Tap the **three-dot menu** (top right)
+3. Tap **Add to Home screen** (or **Install app** if Chrome shows it)
+4. Tap **Install** on the confirmation dialog
+5. CryptIRC is now in your app drawer and home screen
+
+### Desktop (Chrome / Edge)
+
+1. Open your CryptIRC URL in Chrome or Edge
+2. Click the **install icon** in the address bar (looks like a monitor with a down arrow), or go to the three-dot menu and click **Install CryptIRC**
+3. Click **Install** — it opens in its own window, separate from your browser
+
+### What you get with the PWA
+
+- **Full-screen mode** — no browser chrome, looks and feels like a native app
+- **Push notifications** — get alerts for mentions, DMs, or all messages even when the app is closed
+- **Home screen icon** — quick access with the CryptIRC icon
+- **Safe-area support** — properly handles iPhone notch and home indicator
+- **Swipe gestures** — swipe to open/close the sidebar on mobile
+
 ## Architecture
 
 ```
