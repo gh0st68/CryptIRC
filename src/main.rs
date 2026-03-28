@@ -59,6 +59,7 @@ pub struct AppState {
     pub user_events:         UserEventMap,
     pub upload_dir:          String,
     pub base_url:            String,
+    pub from_email:          String,
     pub data_dir:            String,
 }
 
@@ -277,7 +278,8 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let data_dir   = std::env::var("CRYPTIRC_DATA").unwrap_or_else(|_| "./data".into());
     let upload_dir = format!("{}/uploads", data_dir);
-    let base_url   = std::env::var("CRYPTIRC_BASE_URL").unwrap_or_else(|_| "http://localhost:9000".into());
+    let base_url    = std::env::var("CRYPTIRC_BASE_URL").unwrap_or_else(|_| "http://localhost:9000".into());
+    let from_email  = std::env::var("CRYPTIRC_FROM_EMAIL").unwrap_or_else(|_| "noreply@cryptirc.local".into());
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&upload_dir)?;
     std::fs::create_dir_all(format!("{}/certs", data_dir))?;
@@ -297,7 +299,7 @@ async fn main() -> Result<()> {
         disconnect_requests: Arc::new(DashSet::new()),
         crypto, certs, logger, auth, notifier, e2e_store, global_tx,
         user_events:         Arc::new(DashMap::new()),
-        upload_dir, base_url,
+        upload_dir, base_url, from_email,
         data_dir: data_dir.clone(),
     };
 
@@ -385,9 +387,9 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 async fn route_register(State(state): State<AppState>, Json(body): Json<RegisterBody>) -> impl IntoResponse {
     match state.auth.register(&body.username, &body.email, &body.password).await {
         Ok(token) => {
-            let (email, uname, base) = (body.email.clone(), body.username.to_lowercase(), state.base_url.clone());
+            let (email, uname, base, from) = (body.email.clone(), body.username.to_lowercase(), state.base_url.clone(), state.from_email.clone());
             tokio::spawn(async move {
-                if let Err(e) = email::send_verification(&email, &uname, &token, &base) { error!("Email: {}", e); }
+                if let Err(e) = email::send_verification(&email, &uname, &token, &base, &from) { error!("Email: {}", e); }
             });
             (StatusCode::OK, Json(Msg { message: "Registered! Check your email.".into() })).into_response()
         }

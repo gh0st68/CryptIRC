@@ -7,7 +7,7 @@ use lettre::{
     Address, Message, Transport,
 };
 
-pub fn send_verification(to_email: &str, username: &str, token: &str, base_url: &str) -> Result<()> {
+pub fn send_verification(to_email: &str, username: &str, token: &str, base_url: &str, from_email: &str) -> Result<()> {
     let body = format!(
         "Hello {username},\n\n\
         Someone registered a CryptIRC account with this email address.\n\
@@ -18,7 +18,7 @@ pub fn send_verification(to_email: &str, username: &str, token: &str, base_url: 
         — CryptIRC"
     );
 
-    let from_addr: Address = "twistednetirc@gmail.com".parse()?;
+    let from_addr: Address = from_email.parse()?;
     let to_addr: Address = to_email.parse()?;
 
     let email = Message::builder()

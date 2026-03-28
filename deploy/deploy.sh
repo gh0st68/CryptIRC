@@ -191,6 +191,7 @@ StartLimitBurst=5
 
 Environment=CRYPTIRC_DATA=$DATA_DIR
 Environment=CRYPTIRC_BASE_URL=https://$DOMAIN
+Environment=CRYPTIRC_FROM_EMAIL=$EMAIL
 Environment=RUST_LOG=info
 
 NoNewPrivileges=true

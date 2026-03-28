@@ -37,6 +37,7 @@ StartLimitBurst=5
 # Environment
 Environment=CRYPTIRC_DATA=/var/lib/cryptirc
 Environment=CRYPTIRC_BASE_URL=https://cryptirc.yourdomain.com
+Environment=CRYPTIRC_FROM_EMAIL=noreply@yourdomain.com
 Environment=RUST_LOG=info
 
 # ── Security hardening ─────────────────────────────────────────────────────────
