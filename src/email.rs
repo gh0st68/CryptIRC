@@ -36,3 +36,32 @@ pub fn send_verification(to_email: &str, username: &str, token: &str, base_url: 
     mailer.send(&email)?;
     Ok(())
 }
+
+pub fn send_password_reset(to_email: &str, username: &str, token: &str, base_url: &str, from_email: &str) -> Result<()> {
+    let body = format!(
+        "Hello {username},\n\n\
+        Someone requested a password reset for your CryptIRC account.\n\
+        Click the link below to set a new password:\n\n\
+        {base_url}/auth/reset?token={token}\n\n\
+        This link expires in 1 hour.\n\n\
+        If you did not request this, ignore this email — your password will not be changed.\n\n\
+        — CryptIRC"
+    );
+
+    let from_addr: Address = from_email.parse()?;
+    let to_addr: Address = to_email.parse()?;
+
+    let email = Message::builder()
+        .from(lettre::message::Mailbox::new(Some("CryptIRC".into()), from_addr))
+        .to(lettre::message::Mailbox::new(None, to_addr))
+        .subject("Reset your CryptIRC password")
+        .header(ContentType::TEXT_PLAIN)
+        .body(body)?;
+
+    let mailer = SmtpTransport::builder_dangerous("127.0.0.1")
+        .port(25)
+        .build();
+
+    mailer.send(&email)?;
+    Ok(())
+}

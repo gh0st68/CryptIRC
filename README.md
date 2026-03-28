@@ -144,6 +144,18 @@ sudo systemctl restart postfix
 
 Free tiers on **Mailgun** (100 emails/day) or **Brevo** (300/day) are more than enough for a self-hosted IRC client.
 
+### Password Reset
+
+Users can reset their password from the login page by clicking **"Forgot password?"**. This sends a reset link to their registered email address. Reset links expire after **1 hour**.
+
+The reset page lets them set a new password (minimum 10 characters) and redirects them back to the login screen.
+
+To reset a user's password manually from the command line:
+
+```bash
+sudo bash resetpass.sh <username> <new_password>
+```
+
 ### Adding Users Manually (No Email Required)
 
 If you don't want to set up email at all, you can create pre-verified users from the command line:

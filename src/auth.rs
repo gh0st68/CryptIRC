@@ -44,6 +44,13 @@ pub struct PendingVerification {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingReset {
+    pub username:   String,
+    pub token:      String,
+    pub expires_at: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct Session {
     pub username:   String,
@@ -171,6 +178,86 @@ impl AuthManager {
             .join(format!("{}.json", token));
         tokio::fs::write(pending_path, serde_json::to_string_pretty(&pending)?).await?;
         Ok(token)
+    }
+
+    // ── Password reset ────────────────────────────────────────────────────────
+
+    pub async fn request_password_reset(&self, email_addr: &str) -> Result<Option<(String, String)>> {
+        let email_lower = email_addr.trim().to_lowercase();
+        self.check_rate_limit(&format!("reset:{}", email_lower))?;
+
+        // Find user by email
+        let users_dir = PathBuf::from(&self.data_dir).join("users");
+        let mut entries = tokio::fs::read_dir(&users_dir).await?;
+        let mut found_user: Option<User> = None;
+        while let Some(entry) = entries.next_entry().await? {
+            if let Ok(json) = tokio::fs::read_to_string(entry.path()).await {
+                if let Ok(user) = serde_json::from_str::<User>(&json) {
+                    if user.email == email_lower && user.verified {
+                        found_user = Some(user);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let user = match found_user {
+            Some(u) => u,
+            None => return Ok(None), // Don't reveal whether the email exists
+        };
+
+        let token = Uuid::new_v4().to_string();
+        let reset_dir = PathBuf::from(&self.data_dir).join("resets");
+        tokio::fs::create_dir_all(&reset_dir).await?;
+
+        let reset = PendingReset {
+            username: user.username.clone(),
+            token: token.clone(),
+            expires_at: Utc::now().timestamp() + 3600, // 1 hour
+        };
+        let reset_path = reset_dir.join(format!("{}.json", token));
+        tokio::fs::write(reset_path, serde_json::to_string_pretty(&reset)?).await?;
+
+        Ok(Some((token, user.username)))
+    }
+
+    pub async fn reset_password(&self, raw_token: &str, new_password: &str) -> Result<String> {
+        let token = validate_uuid(raw_token)
+            .ok_or_else(|| anyhow::anyhow!("Invalid reset link"))?;
+
+        if new_password.len() < 10 {
+            bail!("Password must be at least 10 characters");
+        }
+
+        let reset_path = PathBuf::from(&self.data_dir)
+            .join("resets")
+            .join(format!("{}.json", token));
+        let json = tokio::fs::read_to_string(&reset_path)
+            .await
+            .map_err(|_| anyhow::anyhow!("Invalid or expired reset link"))?;
+        let reset: PendingReset = serde_json::from_str(&json)?;
+
+        if reset.expires_at < Utc::now().timestamp() {
+            let _ = tokio::fs::remove_file(&reset_path).await;
+            bail!("Reset link has expired");
+        }
+
+        let user_path = PathBuf::from(&self.data_dir)
+            .join("users")
+            .join(format!("{}.json", reset.username));
+        let user_json = tokio::fs::read_to_string(&user_path).await
+            .map_err(|_| anyhow::anyhow!("Account not found"))?;
+        let mut user: User = serde_json::from_str(&user_json)?;
+
+        let salt = SaltString::generate(&mut OsRng);
+        user.password_hash = Argon2::default()
+            .hash_password(new_password.as_bytes(), &salt)
+            .map_err(|_| anyhow::anyhow!("Password hashing failed"))?
+            .to_string();
+
+        tokio::fs::write(&user_path, serde_json::to_string_pretty(&user)?).await?;
+        let _ = tokio::fs::remove_file(&reset_path).await;
+        Ok(reset.username)
     }
 
     // ── Email verification ────────────────────────────────────────────────────

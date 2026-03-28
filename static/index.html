@@ -805,6 +805,19 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <input class="auth-input" type="password" id="l-pass" placeholder="••••••••" autocomplete="current-password"></div>
       <div class="auth-err" id="login-err"></div>
       <button class="auth-btn" id="login-btn" onclick="doLogin()">Sign In</button>
+      <div style="text-align:center;margin-top:12px;"><a href="#" onclick="switchAuthTab('forgot');return false;" style="color:var(--text3);font-size:11px;text-decoration:none;">Forgot password?</a></div>
+    </div>
+    <div id="forgot-form" style="display:none">
+      <div style="color:var(--text3);font-size:11px;text-align:center;margin-bottom:16px;line-height:1.6;">Enter your email address and we'll send you a link to reset your password.</div>
+      <div class="auth-field"><label class="auth-label">Email</label>
+        <input class="auth-input" type="email" id="f-email" placeholder="you@example.com" autocomplete="email" autocapitalize="none"></div>
+      <div class="auth-err" id="forgot-err"></div>
+      <button class="auth-btn" id="forgot-btn" onclick="doForgot()">Send Reset Link</button>
+      <div style="text-align:center;margin-top:12px;"><a href="#" onclick="switchAuthTab('login');return false;" style="color:var(--text3);font-size:11px;text-decoration:none;">← Back to sign in</a></div>
+    </div>
+    <div id="forgot-success" style="display:none;color:var(--join);font-size:12px;text-align:center;line-height:1.7;padding:8px 0;">
+      ✓ If that email is registered, a reset link has been sent.<br>Check your inbox (and spam folder).
+      <div style="margin-top:12px;"><a href="#" onclick="switchAuthTab('login');return false;" style="color:var(--text3);font-size:11px;text-decoration:none;">← Back to sign in</a></div>
     </div>
     <div id="register-form" style="display:none">
       <div class="auth-field"><label class="auth-label">Username</label>
@@ -1246,10 +1259,12 @@ function initSwipeGesture() {
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 function switchAuthTab(tab) {
-  document.getElementById('login-form').style.display    = tab==='login'    ? '' : 'none';
-  document.getElementById('register-form').style.display = tab==='register' ? '' : 'none';
-  document.getElementById('reg-success').style.display  = 'none';
-  document.getElementById('tab-login').classList.toggle('active',    tab==='login');
+  document.getElementById('login-form').style.display      = tab==='login'    ? '' : 'none';
+  document.getElementById('register-form').style.display   = tab==='register' ? '' : 'none';
+  document.getElementById('forgot-form').style.display     = tab==='forgot'   ? '' : 'none';
+  document.getElementById('forgot-success').style.display  = 'none';
+  document.getElementById('reg-success').style.display     = 'none';
+  document.getElementById('tab-login').classList.toggle('active',    tab==='login' || tab==='forgot');
   document.getElementById('tab-register').classList.toggle('active', tab==='register');
 }
 async function doLogin() {
@@ -1268,6 +1283,19 @@ async function doLogin() {
     showApp();
   } catch(e){setErr('login-err','Network error');}
   finally{btn.disabled=false;btn.textContent='Sign In';}
+}
+async function doForgot() {
+  const email=document.getElementById('f-email').value.trim();
+  if(!email){setErr('forgot-err','Enter your email address');return;}
+  const btn=document.getElementById('forgot-btn');
+  btn.disabled=true; btn.textContent='Sending…';
+  try {
+    const r=await fetch('/cryptirc/auth/forgot',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email})});
+    await r.json();
+    document.getElementById('forgot-form').style.display='none';
+    document.getElementById('forgot-success').style.display='';
+  } catch(e){setErr('forgot-err','Network error');}
+  finally{btn.disabled=false;btn.textContent='Send Reset Link';}
 }
 async function doRegister() {
   const user=document.getElementById('r-user').value.trim();
@@ -1647,6 +1675,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     else if(e.key==='Tab')       {e.preventDefault();tabComplete(inp);}
   });
   ['l-user','l-pass'].forEach(id=>document.getElementById(id)?.addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();}));
+  document.getElementById('f-email')?.addEventListener('keydown',e=>{if(e.key==='Enter')doForgot();});
   document.getElementById('vault-pass')?.addEventListener('keydown',e=>{if(e.key==='Enter')doUnlock();});
 
   // Drag & drop

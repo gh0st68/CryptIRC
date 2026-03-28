@@ -242,9 +242,12 @@ pub struct LogLine { pub ts: i64, pub from: String, pub text: String, pub kind: 
 
 // ─── HTTP types ───────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)] struct RegisterBody { username: String, email: String, password: String }
-#[derive(Deserialize)] struct LoginBody    { username: String, password: String }
-#[derive(Deserialize)] struct VerifyQuery  { token: String }
+#[derive(Deserialize)] struct RegisterBody      { username: String, email: String, password: String }
+#[derive(Deserialize)] struct LoginBody          { username: String, password: String }
+#[derive(Deserialize)] struct VerifyQuery        { token: String }
+#[derive(Deserialize)] struct ForgotBody         { email: String }
+#[derive(Deserialize)] struct ResetQuery         { token: String }
+#[derive(Deserialize)] struct ResetPasswordBody  { token: String, password: String }
 #[derive(Deserialize)] struct FileQuery    { token: Option<String> }
 #[derive(Serialize)]   struct AuthOkBody   { token: String, username: String }
 #[derive(Serialize)]   struct MeOk         { username: String }
@@ -322,6 +325,9 @@ async fn main() -> Result<()> {
         .route("/auth/login",            post(route_login).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/logout",           post(route_logout))
         .route("/auth/verify",           get(route_verify))
+        .route("/auth/forgot",           post(route_forgot).layer(DefaultBodyLimit::max(8_192)))
+        .route("/auth/reset",            get(route_reset_page))
+        .route("/auth/reset",            post(route_reset_password).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/me",               get(route_me))
         .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(26_214_400)))
         .route("/files/:name",           get(serve_file))
@@ -428,6 +434,91 @@ a{color:#00d4aa;text-decoration:none;}</style></head>
         Err(e) => Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Error</title>
 <style>body{{background:#0b0d0f;color:#ff4466;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}}
 a{{color:#00d4aa;}}</style></head><body><p>{}</p><a href="/cryptirc">← Back</a></body></html>"#, html_escape(&e.to_string()))),
+    }
+}
+
+async fn route_forgot(State(state): State<AppState>, Json(body): Json<ForgotBody>) -> impl IntoResponse {
+    let (email_addr, base, from) = (body.email.clone(), state.base_url.clone(), state.from_email.clone());
+    match state.auth.request_password_reset(&body.email).await {
+        Ok(Some((token, username))) => {
+            tokio::spawn(async move {
+                if let Err(e) = email::send_password_reset(&email_addr, &username, &token, &base, &from) { error!("Reset email: {}", e); }
+            });
+        }
+        _ => {} // Don't reveal whether the email exists
+    }
+    // Always return success to prevent email enumeration
+    (StatusCode::OK, Json(Msg { message: "If that email is registered, a reset link has been sent.".into() }))
+}
+
+async fn route_reset_page(Query(q): Query<ResetQuery>) -> impl IntoResponse {
+    Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Reset Password — CryptIRC</title>
+<style>
+body{{background:#0b0d0f;color:#c8d8e8;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}}
+.b{{background:#111418;border:1px solid #2a3444;border-radius:14px;padding:32px 36px;width:100%;max-width:380px;box-shadow:0 24px 64px rgba(0,0,0,.7);}}
+h2{{background:linear-gradient(135deg,#00d4aa,#0099ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;text-align:center;margin:0 0 8px;font-size:20px;}}
+.sub{{color:#6a7a8a;font-size:11px;text-align:center;margin-bottom:20px;}}
+label{{color:#8899aa;font-size:11px;display:block;margin-bottom:4px;}}
+input{{width:100%;padding:10px 12px;background:#0b0d0f;border:1px solid #2a3444;border-radius:8px;color:#c8d8e8;font-family:inherit;font-size:13px;margin-bottom:12px;box-sizing:border-box;}}
+input:focus{{outline:none;border-color:#00d4aa;}}
+button{{width:100%;padding:12px;background:linear-gradient(135deg,#00d4aa,#0099ff);border:none;border-radius:8px;color:#0b0d0f;font-weight:700;font-size:14px;cursor:pointer;font-family:inherit;}}
+button:hover{{opacity:.9;}}
+button:disabled{{opacity:.5;cursor:default;}}
+.err{{color:#ff4466;font-size:12px;text-align:center;margin-bottom:8px;min-height:16px;}}
+.ok{{color:#44cc88;font-size:12px;text-align:center;line-height:1.7;}}
+a{{color:#00d4aa;text-decoration:none;}}
+</style></head><body><div class="b">
+<h2>Reset Password</h2>
+<div class="sub">Enter your new password</div>
+<div id="reset-form">
+  <label>New Password</label>
+  <input type="password" id="rp-pass" placeholder="Min. 10 characters" autocomplete="new-password">
+  <label>Confirm Password</label>
+  <input type="password" id="rp-pass2" placeholder="Repeat password" autocomplete="new-password">
+  <div class="err" id="rp-err"></div>
+  <button id="rp-btn" onclick="doReset()">Set New Password</button>
+</div>
+<div id="reset-ok" style="display:none" class="ok">
+  ✓ Password reset!<br>You can now <a href="/cryptirc">sign in</a> with your new password.
+</div>
+<script>
+const TOKEN="{}";
+async function doReset(){{
+  const pass=document.getElementById('rp-pass').value;
+  const pass2=document.getElementById('rp-pass2').value;
+  const err=document.getElementById('rp-err');
+  err.textContent='';
+  if(!pass||!pass2){{err.textContent='Fill in both fields';return;}}
+  if(pass!==pass2){{err.textContent='Passwords do not match';return;}}
+  if(pass.length<10){{err.textContent='Password must be at least 10 characters';return;}}
+  const btn=document.getElementById('rp-btn');
+  btn.disabled=true;btn.textContent='Resetting…';
+  try{{
+    const r=await fetch('/cryptirc/auth/reset',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:TOKEN,password:pass}})}});
+    const d=await r.json();
+    if(!r.ok){{err.textContent=d.message||'Reset failed';return;}}
+    document.getElementById('reset-form').style.display='none';
+    document.getElementById('reset-ok').style.display='';
+  }}catch(e){{err.textContent='Network error';}}
+  finally{{btn.disabled=false;btn.textContent='Set New Password';}}
+}}
+document.querySelectorAll('input').forEach(i=>i.addEventListener('keydown',e=>{{if(e.key==='Enter')doReset();}}));
+</script>
+</div></body></html>"#, html_escape(&q.token)))
+}
+
+async fn route_reset_password(State(state): State<AppState>, Json(body): Json<ResetPasswordBody>) -> impl IntoResponse {
+    match state.auth.reset_password(&body.token, &body.password).await {
+        Ok(username) => {
+            info!("Password reset for user: {}", username);
+            (StatusCode::OK, Json(Msg { message: "Password reset successfully.".into() })).into_response()
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let safe = if ["Invalid","expired","Password","10 characters"].iter().any(|w| msg.contains(w)) { msg } else { "Reset failed".into() };
+            (StatusCode::BAD_REQUEST, Json(Msg { message: safe })).into_response()
+        }
     }
 }
 
