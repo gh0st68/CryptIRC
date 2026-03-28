@@ -256,6 +256,60 @@ deploy/
 └── README.md         # Deployment documentation
 ```
 
+## Configuration
+
+CryptIRC is configured entirely through environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CRYPTIRC_DATA` | `./data` | Path to the data directory (users, logs, certs, etc.) |
+| `CRYPTIRC_BASE_URL` | `http://localhost:9000` | Public URL of your CryptIRC instance |
+| `CRYPTIRC_BASE_PATH` | `/cryptirc` | URL path prefix (for running behind a reverse proxy at a subpath) |
+| `CRYPTIRC_PORT` | `9001` | Port the server listens on |
+| `CRYPTIRC_FROM_EMAIL` | `noreply@cryptirc.local` | Sender address for verification and password reset emails |
+| `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+
+### If installed via systemd (deploy script)
+
+Edit the service file:
+
+```bash
+sudo nano /etc/systemd/system/cryptirc.service
+```
+
+Change or add environment lines:
+
+```ini
+Environment=CRYPTIRC_PORT=9001
+Environment=CRYPTIRC_BASE_URL=https://yourdomain.com/cryptirc
+Environment=CRYPTIRC_FROM_EMAIL=noreply@yourdomain.com
+```
+
+Then reload and restart:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart cryptirc
+```
+
+### If running manually (no systemd)
+
+Set the environment variables before running the binary:
+
+```bash
+export CRYPTIRC_PORT=8080
+export CRYPTIRC_DATA=/var/lib/cryptirc
+export CRYPTIRC_BASE_URL=https://yourdomain.com/cryptirc
+export CRYPTIRC_FROM_EMAIL=noreply@yourdomain.com
+/opt/cryptirc/cryptirc
+```
+
+Or inline on one line:
+
+```bash
+CRYPTIRC_PORT=8080 CRYPTIRC_DATA=./data /opt/cryptirc/cryptirc
+```
+
 ## Requirements
 
 - Rust 1.78+ (installed automatically by deploy script)
