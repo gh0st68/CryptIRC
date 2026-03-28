@@ -1,0 +1,37 @@
+[package]
+name = "cryptirc"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "=1.38.0", features = ["full"] }
+axum = { version = "=0.7.5", features = ["ws", "multipart"] }
+tower-http = { version = "=0.5.2", features = ["fs", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
+futures-util = "0.3"
+dashmap = "5"
+hex = "0.4"
+tokio-native-tls = "0.3"
+native-tls = { version = "0.2", features = ["vendored"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "builder", "tokio1", "tokio1-native-tls"] }
+mime_guess = "2"
+rcgen = "0.12"
+sha2 = "0.10"
+openssl = { version = "0.10", features = ["v102", "v110"] }
+openssl-sys = "0.9"
+tokio-openssl = "0.6"
+web-push = "0.9"
+serde_urlencoded = "0.7"
+hkdf = "0.12"
+hmac = "0.12"
+p256 = { version = "0.13", features = ["ecdsa"] }

@@ -1,0 +1,14 @@
+{
+  "name": "CryptIRC",
+  "short_name": "CryptIRC",
+  "description": "End-to-end encrypted IRC client",
+  "start_url": "/cryptirc/",
+  "scope": "/cryptirc/",
+  "display": "standalone",
+  "background_color": "#0b0d0f",
+  "theme_color": "#0b0d0f",
+  "orientation": "any",
+  "icons": [
+    { "src": "/cryptirc/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

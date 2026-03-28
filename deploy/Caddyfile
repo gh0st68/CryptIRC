@@ -1,0 +1,87 @@
+# CryptIRC Caddyfile
+# Place at /etc/caddy/Caddyfile
+#
+# Caddy automatically:
+#   - Obtains and renews Let's Encrypt TLS certificates
+#   - Enforces HTTPS (redirects HTTP → HTTPS)
+#   - Proxies WebSocket connections transparently
+#   - Enables HTTP/2 and HTTP/3
+#   - Adds HSTS headers
+#   - Compresses responses
+
+{
+    # Global options
+    email admin@yourdomain.com          # Let's Encrypt notifications
+    admin off                           # Disable Caddy admin API (not needed)
+
+    # Uncomment to use Let's Encrypt staging while testing
+    # (avoids hitting rate limits during setup)
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+cryptirc.yourdomain.com {
+    # Reverse proxy everything to the CryptIRC Rust server
+    # Caddy handles TLS; CryptIRC speaks plain HTTP internally
+    reverse_proxy localhost:9000 {
+        # WebSocket upgrade support (transparent — Caddy handles it)
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+
+        # Health check — if CryptIRC is down, Caddy returns 502
+        health_uri /manifest.json
+        health_interval 30s
+        health_timeout 5s
+    }
+
+    # Compression (text, JSON, HTML)
+    encode zstd gzip
+
+    # Cache static assets aggressively
+    @static {
+        path /icon.svg /manifest.json /sw.js
+    }
+    header @static Cache-Control "public, max-age=3600, stale-while-revalidate=86400"
+
+    # Service worker must not be cached (browsers enforce this,
+    # but being explicit avoids issues with some CDN setups)
+    @sw {
+        path /sw.js
+    }
+    header @sw Cache-Control "public, max-age=0"
+
+    # Security headers (supplements what CryptIRC already sets)
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Robots-Tag "noindex, nofollow"    # Don't index your IRC client
+        -Server                              # Remove Caddy server header
+    }
+
+    # Rate limit sensitive auth endpoints at the proxy layer
+    # Requires caddy-ratelimit plugin — see install notes below
+    # rate_limit {
+    #     zone auth_zone {
+    #         key {remote_host}
+    #         events 20
+    #         window 1m
+    #     }
+    #     match path /auth/login /auth/register
+    # }
+
+    # Access log — useful for debugging, comment out for privacy
+    log {
+        output file /var/log/caddy/cryptirc.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+        format json
+        # Don't log query strings (could contain session tokens)
+        format filter {
+            wrap json
+            fields {
+                uri query replace
+            }
+        }
+    }
+}

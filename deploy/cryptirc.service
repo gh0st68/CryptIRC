@@ -1,0 +1,92 @@
+# CryptIRC systemd service
+# Place at /etc/systemd/system/cryptirc.service
+#
+# Install:
+#   sudo cp deploy/cryptirc.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cryptirc
+
+[Unit]
+Description=CryptIRC — Encrypted IRC Client
+Documentation=https://github.com/youruser/cryptirc
+After=network-online.target
+Wants=network-online.target
+# Start after Caddy so it's behind the proxy when it comes up
+After=caddy.service
+
+[Service]
+Type=simple
+User=cryptirc
+Group=cryptirc
+WorkingDirectory=/opt/cryptirc
+
+# The compiled binary
+ExecStart=/opt/cryptirc/cryptirc
+
+# Graceful shutdown — sends SIGTERM, waits up to 30s, then SIGKILL
+ExecStop=/bin/kill -s TERM $MAINPID
+TimeoutStopSec=30
+KillMode=mixed
+
+# Restart policy — always restart on crash, but not if we stop it intentionally
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=5
+
+# Environment
+Environment=CRYPTIRC_DATA=/var/lib/cryptirc
+Environment=CRYPTIRC_BASE_URL=https://cryptirc.yourdomain.com
+Environment=RUST_LOG=info
+
+# ── Security hardening ─────────────────────────────────────────────────────────
+
+# Run as unprivileged user (never root)
+NoNewPrivileges=true
+
+# Private /tmp — app can't see other processes' temp files
+PrivateTmp=true
+
+# Read-only filesystem except explicitly allowed paths
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cryptirc
+ReadWritePaths=/var/log/cryptirc
+
+# Can't see /home, /root directories
+ProtectHome=true
+
+# Restrict syscalls to what a typical server app needs
+# (prevents exotic exploitation paths)
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# No access to kernel namespaces, module loading, etc.
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+# Lock down address families — only need TCP/UDP
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Memory execution prevention
+MemoryDenyWriteExecute=true
+
+# Capability bounding — app needs no Linux capabilities
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Can't create setuid/setgid files
+LockPersonality=true
+ProtectClock=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectHostname=true
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target

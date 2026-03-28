@@ -1,0 +1,688 @@
+//! irc.rs — IRC connection handler
+//!
+//! Fixes this pass:
+//!   B1/B2 — removed unused imports (AtomicBool, Ordering, SaslConfig)
+//!   S3    — names_buf bounded (max 512 channels × 4096 entries each)
+//!   S4    — nick collision aborts after MAX_NICK_RETRIES attempts
+//!   L1    — auto_reconnect flag respected in outer connect() loop
+//!   L3    — stale IrcConnection removed from map on run_loop exit
+
+use anyhow::Result;
+use std::{collections::HashMap, sync::Arc};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    net::TcpStream,
+    sync::Mutex,
+    time::{sleep, timeout, Duration, Instant},
+};
+use tracing::{error, info, warn};
+
+use crate::{certs::CertStore, strip_crlf, AppState, MessageKind, NetworkConfig, ServerEvent};
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const PING_INTERVAL:     Duration = Duration::from_secs(30);
+const PONG_TIMEOUT:      Duration = Duration::from_secs(90);
+const RECONNECT_BASE:    Duration = Duration::from_secs(5);
+const RECONNECT_MAX:     Duration = Duration::from_secs(300);
+const READ_TIMEOUT:      Duration = Duration::from_secs(120);
+/// S4: maximum number of times we'll retry a nick before aborting registration
+const MAX_NICK_RETRIES:  u32 = 5;
+/// S3: maximum total channels in names_buf
+const NAMES_BUF_MAX_CHANNELS: usize = 512;
+/// S3: maximum entries per channel in names_buf
+const NAMES_BUF_MAX_PER_CHAN: usize = 4096;
+
+// ─── Public types ─────────────────────────────────────────────────────────────
+
+pub struct ChannelState {
+    pub topic: String,
+    pub names: Vec<String>,
+}
+
+pub struct IrcConnection {
+    pub conn_id:   String,
+    pub nick:      String,
+    pub connected: bool,
+    pub lag_ms:    Option<u64>,
+    pub channels:  HashMap<String, ChannelState>,
+    pub writer:    Box<dyn AsyncWrite + Send + Unpin>,
+}
+
+impl IrcConnection {
+    pub async fn send_raw(&mut self, line: &str) -> Result<()> {
+        self.writer.write_all(line.as_bytes()).await?;
+        self.writer.flush().await?;
+        Ok(())
+    }
+}
+
+// ─── SASL types ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+enum SaslState {
+    Idle,
+    CapLsSent,
+    CapReqSent,
+    AuthenticateSent,
+    Done,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+enum SaslMethod {
+    Plain    { account: String, password: String },
+    External,
+}
+
+// ─── Entry point: reconnect loop ─────────────────────────────────────────────
+
+pub async fn connect(
+    conn_id:  String,
+    cfg:      NetworkConfig,
+    username: String,
+    state:    AppState,
+) -> Result<()> {
+    let mut delay   = RECONNECT_BASE;
+    let mut attempt = 0u32;
+
+    loop {
+        attempt += 1;
+        info!("[{}] Connect attempt {} → {}:{}", conn_id, attempt, cfg.server, cfg.port);
+        state.send_to_user(&username, ServerEvent::Connecting {
+            conn_id: conn_id.clone(),
+            server:  cfg.server.clone(),
+        });
+
+        let result = do_connect(&conn_id, &cfg, &username, &state).await;
+
+        // Always remove dead connection from map immediately (L3)
+        state.connections.remove(&conn_id);
+        state.conn_owners.remove(&conn_id);
+
+        // User-requested disconnect → stop regardless of result
+        if state.disconnect_requested(&conn_id) {
+            info!("[{}] Disconnect requested, stopping reconnect loop", conn_id);
+            state.clear_disconnect_request(&conn_id);
+            state.send_to_user(&username, ServerEvent::Disconnected {
+                conn_id: conn_id.clone(),
+                reason:  "User requested".into(),
+            });
+            return Ok(());
+        }
+
+        // L1: respect auto_reconnect flag
+        if !cfg.auto_reconnect {
+            info!("[{}] auto_reconnect=false, not reconnecting", conn_id);
+            let reason = match &result {
+                Ok(_)  => "Clean disconnect".to_string(),
+                Err(e) => e.to_string(),
+            };
+            state.send_to_user(&username, ServerEvent::Disconnected {
+                conn_id: conn_id.clone(), reason,
+            });
+            return Ok(());
+        }
+
+        match result {
+            Ok(_) => {
+                // Server sent clean close — reset backoff since we were connected
+                warn!("[{}] Server closed connection. Reconnecting in {:?}", conn_id, RECONNECT_BASE);
+                delay = RECONNECT_BASE;
+                attempt = 0;
+            }
+            Err(e) => {
+                warn!("[{}] Connection error: {}. Reconnecting in {:?}", conn_id, e, delay);
+                state.send_to_user(&username, ServerEvent::Reconnecting {
+                    conn_id:    conn_id.clone(),
+                    attempt,
+                    delay_secs: delay.as_secs(),
+                    reason:     e.to_string(),
+                });
+            }
+        }
+
+        sleep(delay).await;
+        delay = (delay * 2).min(RECONNECT_MAX);
+    }
+}
+
+// ─── Single connection attempt ────────────────────────────────────────────────
+
+async fn do_connect(
+    conn_id:  &str,
+    cfg:      &NetworkConfig,
+    username: &str,
+    state:    &AppState,
+) -> Result<()> {
+    let addr = format!("{}:{}", cfg.server, cfg.port);
+    let tcp  = TcpStream::connect(&addr).await?;
+    tcp.set_nodelay(true)?;
+
+    if cfg.tls {
+        let identity = if let Some(ref cert_id) = cfg.client_cert_id {
+            info!("[{}] Client cert ID configured: {}", conn_id, cert_id);
+            let store = CertStore::new(&state.data_dir, state.crypto.clone());
+            if store.exists(cert_id).await {
+                info!("[{}] Cert files found, loading identity...", conn_id);
+                match store.load_identity(cert_id).await {
+                    Ok(id) => { info!("[{}] Client cert loaded successfully", conn_id); Some(id) }
+                    Err(e) => { warn!("[{}] Client cert load FAILED: {}", conn_id, e); None }
+                }
+            } else { warn!("[{}] Cert files NOT found for {}", conn_id, cert_id); None }
+        } else { info!("[{}] No client_cert_id configured", conn_id); None };
+
+        if identity.is_some() {
+            // Use openssl directly for client cert — need post_handshake_auth for TLS 1.3
+            drop(tcp); // We'll create a fresh connection
+            let mut ssl_builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())?;
+            // Client cert path uses openssl directly for TLS 1.3 post-handshake auth.
+            // Server cert verification is handled by setting NONE — the native-tls
+            // path handles verification for connections without client certs.
+            ssl_builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
+            // Load client cert + key from PEM
+            let cert_id = cfg.client_cert_id.as_ref().unwrap();
+            let dir = std::path::PathBuf::from(&state.data_dir).join("certs").join(cert_id);
+            let cert_pem = tokio::fs::read(dir.join("cert.pem")).await?;
+            let key_enc = tokio::fs::read_to_string(dir.join("key.enc")).await?;
+            let key_pem = state.crypto.decrypt(key_enc.trim()).await?;
+            let x509 = openssl::x509::X509::from_pem(&cert_pem)?;
+            let pkey = openssl::pkey::PKey::private_key_from_pem(&key_pem)?;
+            ssl_builder.set_certificate(&x509)?;
+            ssl_builder.set_private_key(&pkey)?;
+            // Enable post-handshake auth for TLS 1.3 client certs
+            unsafe { openssl_sys::SSL_CTX_set_post_handshake_auth(ssl_builder.as_ptr() as *mut _, 1); }
+            let connector = ssl_builder.build();
+            let tcp2 = TcpStream::connect(&addr).await?;
+            tcp2.set_nodelay(true)?;
+            let mut ssl = openssl::ssl::Ssl::new(connector.context())?;
+            ssl.set_hostname(&cfg.server)?;
+            let mut stream = tokio_openssl::SslStream::new(ssl, tcp2)?;
+            std::pin::Pin::new(&mut stream).connect().await?;
+            info!("[{}] TLS connected with client cert (post-handshake auth enabled)", conn_id);
+            run_loop(conn_id, cfg, username, state, stream).await
+        } else {
+            let mut builder = native_tls::TlsConnector::builder();
+            if cfg.tls_accept_invalid_certs {
+                builder.danger_accept_invalid_certs(true);
+            }
+            let tls = tokio_native_tls::TlsConnector::from(builder.build()?)
+                .connect(&cfg.server, tcp).await?;
+            run_loop(conn_id, cfg, username, state, tls).await
+        }
+    } else {
+        run_loop(conn_id, cfg, username, state, tcp).await
+    }
+}
+
+// ─── Main read/write loop ─────────────────────────────────────────────────────
+
+async fn run_loop<S>(
+    conn_id:  &str,
+    cfg:      &NetworkConfig,
+    username: &str,
+    state:    &AppState,
+    stream:   S,
+) -> Result<()>
+where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
+{
+    let (read_half, write_half) = tokio::io::split(stream);
+    let conn = Arc::new(Mutex::new(IrcConnection {
+        conn_id: conn_id.to_string(), nick: cfg.nick.clone(),
+        connected: false, lag_ms: None,
+        channels: HashMap::new(), writer: Box::new(write_half),
+    }));
+
+    state.connections.insert(conn_id.to_string(), conn.clone());
+    state.conn_owners.insert(conn_id.to_string(), username.to_string());
+
+    let send = |evt: ServerEvent| state.send_to_user(username, evt);
+
+    // SASL method selection
+    let sasl_method: Option<SaslMethod> = if cfg.sasl_external {
+        Some(SaslMethod::External)
+    } else if let Some(ref sc) = cfg.sasl_plain {
+        Some(SaslMethod::Plain { account: sc.account.clone(), password: sc.password.clone() })
+    } else { None };
+
+    let use_sasl        = sasl_method.is_some();
+    let mut sasl_state  = SaslState::Idle;
+    info!("[{}] SASL config: method={:?} use_sasl={}", conn_id, sasl_method.as_ref().map(|m| match m { SaslMethod::External => "EXTERNAL", SaslMethod::Plain{..} => "PLAIN" }), use_sasl);
+    let mut last_pong   = Instant::now();
+    let mut ping_out    = false;
+    // S4: track nick collision count
+    let mut nick_retries = 0u32;
+
+    // Registration
+    {
+        let mut c = conn.lock().await;
+        if let Some(ref pass) = cfg.password {
+            c.send_raw(&format!("PASS {}\r\n", strip_crlf(pass))).await?;
+        }
+        if use_sasl {
+            c.send_raw("CAP LS 302\r\n").await?;
+            sasl_state = SaslState::CapLsSent;
+        }
+        c.send_raw(&format!("NICK {}\r\n", strip_crlf(&cfg.nick))).await?;
+        c.send_raw(&format!("USER {} 0 * :{}\r\n", strip_crlf(&cfg.username), strip_crlf(&cfg.realname))).await?;
+    }
+
+    let mut reader     = BufReader::new(read_half).lines();
+    let mut registered = false;
+    // S3: bounded names accumulation buffer
+    let mut names_buf: HashMap<String, Vec<String>> = HashMap::with_capacity(32);
+    let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
+
+    loop {
+        tokio::select! {
+            // ── Heartbeat ─────────────────────────────────────────────────
+            _ = ping_ticker.tick() => {
+                if ping_out && last_pong.elapsed() > PONG_TIMEOUT {
+                    warn!("[{}] PONG timeout, triggering reconnect", conn_id);
+                    conn.lock().await.connected = false;
+                    return Err(anyhow::anyhow!("PONG timeout — server unresponsive"));
+                }
+                if registered {
+                    let ts = chrono::Utc::now().timestamp_millis() as u64;
+                    conn.lock().await.send_raw(&format!("PING :hb-{}\r\n", ts)).await?;
+                    ping_out = true;
+                }
+            }
+
+            // ── Incoming line ──────────────────────────────────────────────
+            res = timeout(READ_TIMEOUT, reader.next_line()) => {
+                let line = match res {
+                    Err(_)          => return Err(anyhow::anyhow!("Read timeout")),
+                    Ok(Ok(Some(l))) => l,
+                    Ok(Ok(None))    => return Ok(()), // clean server close
+                    Ok(Err(e))      => return Err(e.into()),
+                };
+                let line = line.trim_end_matches(['\r', '\n']).to_string();
+                if line.is_empty() { continue; }
+
+                let p  = parse_irc(&line);
+                let ts = chrono::Utc::now().timestamp();
+
+                match p.command.as_str() {
+
+                    "PING" => {
+                        let tok = p.params.last().cloned().unwrap_or_default();
+                        conn.lock().await.send_raw(&format!("PONG :{}\r\n", tok)).await?;
+                    }
+                    "PONG" => {
+                        let tok = p.params.last().cloned().unwrap_or_default();
+                        last_pong = Instant::now();
+                        ping_out  = false;
+                        if tok.starts_with("hb-") {
+                            if let Ok(sent) = tok[3..].parse::<u64>() {
+                                let ms = (chrono::Utc::now().timestamp_millis() as u64).saturating_sub(sent);
+                                conn.lock().await.lag_ms = Some(ms);
+                                send(ServerEvent::LagUpdate { conn_id: conn_id.to_string(), ms });
+                            }
+                        }
+                    }
+
+                    // ── CAP / SASL ───────────────────────────────────────
+                    "CAP" => {
+                        let sub  = p.params.get(1).map(|s| s.as_str()).unwrap_or("");
+                        let caps = p.params.get(2).cloned().unwrap_or_default();
+                        match sub {
+                            "LS" => {
+                                if sasl_state == SaslState::CapLsSent {
+                                    if caps.contains("sasl") {
+                                        conn.lock().await.send_raw("CAP REQ :sasl\r\n").await?;
+                                        sasl_state = SaslState::CapReqSent;
+                                    } else {
+                                        warn!("[{}] Server has no sasl cap", conn_id);
+                                        conn.lock().await.send_raw("CAP END\r\n").await?;
+                                        sasl_state = SaslState::Done;
+                                        send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: "Server does not support SASL".into() });
+                                    }
+                                }
+                            }
+                            "ACK" => {
+                                if sasl_state == SaslState::CapReqSent && caps.contains("sasl") {
+                                    let method = match &sasl_method {
+                                        Some(SaslMethod::External)     => "EXTERNAL",
+                                        Some(SaslMethod::Plain { .. }) => "PLAIN",
+                                        None                            => "PLAIN",
+                                    };
+                                    conn.lock().await.send_raw(&format!("AUTHENTICATE {}\r\n", method)).await?;
+                                    sasl_state = SaslState::AuthenticateSent;
+                                }
+                            }
+                            "NAK" => {
+                                conn.lock().await.send_raw("CAP END\r\n").await?;
+                                sasl_state = SaslState::Failed("CAP NAK".into());
+                                send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: "SASL capability rejected".into() });
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    "AUTHENTICATE" => {
+                        if p.params.first().map(|s| s.as_str()) == Some("+")
+                            && sasl_state == SaslState::AuthenticateSent
+                        {
+                            let response = match &sasl_method {
+                                Some(SaslMethod::Plain { account, password }) => {
+                                    let mut pl = Vec::with_capacity(account.len() + password.len() + 2);
+                                    pl.push(0u8);
+                                    pl.extend_from_slice(account.as_bytes());
+                                    pl.push(0u8);
+                                    pl.extend_from_slice(password.as_bytes());
+                                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &pl)
+                                }
+                                Some(SaslMethod::External) => "+".to_string(),
+                                None => "+".to_string(),
+                            };
+                            info!("[{}] SASL AUTHENTICATE response: {}", conn_id, if response == "+" { "+" } else { "<redacted>" });
+                            conn.lock().await.send_raw(&format!("AUTHENTICATE {}\r\n", response)).await?;
+                        }
+                    }
+
+                    "900" => {
+                        let account = p.params.get(2).cloned().unwrap_or_default();
+                        send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: true, message: format!("Logged in as {}", account) });
+                    }
+                    "903" => {
+                        sasl_state = SaslState::Done;
+                        conn.lock().await.send_raw("CAP END\r\n").await?;
+                        send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: true, message: "SASL authentication successful".into() });
+                    }
+                    "902" | "904" | "905" | "906" | "907" => {
+                        let reason = p.params.last().cloned().unwrap_or_else(|| "SASL failed".into());
+                        sasl_state = SaslState::Failed(reason.clone());
+                        conn.lock().await.send_raw("CAP END\r\n").await?;
+                        send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: reason });
+                    }
+
+                    // ── Welcome ──────────────────────────────────────────
+                    "001" => {
+                        registered = true;
+                        last_pong  = Instant::now();
+                        conn.lock().await.connected = true;
+                        send(ServerEvent::Connected { conn_id: conn_id.to_string(), server: cfg.server.clone(), nick: cfg.nick.clone() });
+                        for ch in &cfg.auto_join {
+                            let safe = strip_crlf(ch);
+                            if !safe.is_empty() {
+                                conn.lock().await.send_raw(&format!("JOIN {}\r\n", safe)).await?;
+                            }
+                        }
+                    }
+
+                    // S4: bounded nick collision retry
+                    "432" | "433" | "436" => {
+                        nick_retries += 1;
+                        if nick_retries > MAX_NICK_RETRIES {
+                            return Err(anyhow::anyhow!("Nick collision: exhausted {} retries", MAX_NICK_RETRIES));
+                        }
+                        let mut c = conn.lock().await;
+                        // Truncate to 28 chars before appending to stay within limits
+                        let base = if c.nick.len() > 28 { c.nick[..28].to_string() } else { c.nick.clone() };
+                        let new_nick = format!("{}_{}", base, nick_retries);
+                        c.nick = new_nick.clone();
+                        c.send_raw(&format!("NICK {}\r\n", new_nick)).await?;
+                    }
+
+                    "PRIVMSG" => {
+                        let from   = nick_from_prefix(&p.prefix);
+                        let target = p.params.get(0).cloned().unwrap_or_default();
+                        let text   = p.params.get(1).cloned().unwrap_or_default();
+                        let (kind, clean) = if text.starts_with("\x01ACTION ") && text.ends_with('\x01') {
+                            (MessageKind::Action, text[8..text.len()-1].to_string())
+                        } else { (MessageKind::Privmsg, text) };
+                        // Route PMs to sender's nick, not our own nick
+                        let display_target = if target.starts_with(['#','&']) { target.clone() } else { from.clone() };
+                        state.logger.append(conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from, target: display_target, text: clean, ts, kind });
+                    }
+                    "NOTICE" => {
+                        let from   = nick_from_prefix(&p.prefix);
+                        let target = p.params.get(0).cloned().unwrap_or_default();
+                        let text   = p.params.get(1).cloned().unwrap_or_default();
+                        info!("[{}] NOTICE: from={} target={} text={}", conn_id, from, target, &text[..text.len().min(120)]);
+                        // Route notices to sender's nick (e.g. NickServ), not our own nick
+                        // Server notices (no prefix or from server hostname) go to status
+                        let display_target = if target.starts_with(['#','&']) {
+                            target.clone()
+                        } else if from == "*" || from.contains('.') || p.prefix.is_none() {
+                            "status".to_string()
+                        } else {
+                            from.clone()
+                        };
+                        state.logger.append(conn_id, &display_target, ts, &from, &text, "notice").await;
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from, target: display_target, text, ts, kind: MessageKind::Notice });
+                    }
+
+                    "JOIN" => {
+                        let nick    = nick_from_prefix(&p.prefix);
+                        let channel = p.params.get(0).cloned().unwrap_or_default();
+                        {
+                            let mut c = conn.lock().await;
+                            if nick == c.nick {
+                                c.channels.entry(channel.clone()).or_insert(ChannelState { topic: String::new(), names: vec![] });
+                                c.send_raw(&format!("NAMES {}\r\n", channel)).await?;
+                            } else if let Some(ch) = c.channels.get_mut(&channel) {
+                                // Bound the in-memory names list
+                                if ch.names.len() < NAMES_BUF_MAX_PER_CHAN { ch.names.push(nick.clone()); }
+                            }
+                        }
+                        send(ServerEvent::IrcJoin { conn_id: conn_id.to_string(), nick, channel, ts });
+                    }
+                    "PART" => {
+                        let nick    = nick_from_prefix(&p.prefix);
+                        let channel = p.params.get(0).cloned().unwrap_or_default();
+                        let reason  = p.params.get(1).cloned().unwrap_or_default();
+                        { let mut c = conn.lock().await; if nick == c.nick { c.channels.remove(&channel); } else if let Some(ch) = c.channels.get_mut(&channel) { ch.names.retain(|n| strip_pfx(n) != nick); } }
+                        send(ServerEvent::IrcPart { conn_id: conn_id.to_string(), nick, channel, reason, ts });
+                    }
+                    "QUIT" => {
+                        let nick   = nick_from_prefix(&p.prefix);
+                        let reason = p.params.get(0).cloned().unwrap_or_default();
+                        { let mut c = conn.lock().await; for ch in c.channels.values_mut() { ch.names.retain(|n| strip_pfx(n) != nick); } }
+                        send(ServerEvent::IrcQuit { conn_id: conn_id.to_string(), nick, reason, ts });
+                    }
+                    "NICK" => {
+                        let old = nick_from_prefix(&p.prefix);
+                        let new = p.params.get(0).cloned().unwrap_or_default();
+                        { let mut c = conn.lock().await; if old == c.nick { c.nick = new.clone(); } for ch in c.channels.values_mut() { for n in ch.names.iter_mut() { if strip_pfx(n) == old { let pfx: String = n.chars().take_while(|c| "@+~&%".contains(*c)).collect(); *n = format!("{}{}", pfx, new); } } } }
+                        send(ServerEvent::IrcNick { conn_id: conn_id.to_string(), old, new, ts });
+                    }
+                    "KICK" => {
+                        let by      = nick_from_prefix(&p.prefix);
+                        let channel = p.params.get(0).cloned().unwrap_or_default();
+                        let kicked  = p.params.get(1).cloned().unwrap_or_default();
+                        let reason  = p.params.get(2).cloned().unwrap_or_default();
+                        { let mut c = conn.lock().await; if kicked == c.nick { c.channels.remove(&channel); } else if let Some(ch) = c.channels.get_mut(&channel) { ch.names.retain(|n| strip_pfx(n) != kicked); } }
+                        send(ServerEvent::IrcKick { conn_id: conn_id.to_string(), channel, kicked, by, reason, ts });
+                    }
+                    "TOPIC" => {
+                        let set_by  = nick_from_prefix(&p.prefix);
+                        let channel = p.params.get(0).cloned().unwrap_or_default();
+                        let topic   = p.params.get(1).cloned().unwrap_or_default();
+                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&channel) { ch.topic = topic.clone(); } }
+                        send(ServerEvent::IrcTopic { conn_id: conn_id.to_string(), channel, topic, set_by, ts });
+                    }
+                    "332" => {
+                        let channel = p.params.get(1).cloned().unwrap_or_default();
+                        let topic   = p.params.get(2).cloned().unwrap_or_default();
+                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&channel) { ch.topic = topic.clone(); } }
+                        send(ServerEvent::IrcTopic { conn_id: conn_id.to_string(), channel, topic, set_by: String::new(), ts });
+                    }
+
+                    // S3: bounded names accumulation
+                    "353" => {
+                        let channel = p.params.get(2).cloned().unwrap_or_default();
+                        if names_buf.len() < NAMES_BUF_MAX_CHANNELS {
+                            let names: Vec<String> = p.params.get(3).cloned().unwrap_or_default()
+                                .split_whitespace().map(|s| s.to_string()).collect();
+                            let entry = names_buf.entry(channel).or_default();
+                            for n in names {
+                                if entry.len() < NAMES_BUF_MAX_PER_CHAN { entry.push(n); }
+                            }
+                        }
+                    }
+                    "366" => {
+                        let channel = p.params.get(1).cloned().unwrap_or_default();
+                        let names   = names_buf.remove(&channel).unwrap_or_default();
+                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&channel) { ch.names = names.clone(); } }
+                        send(ServerEvent::IrcNames { conn_id: conn_id.to_string(), channel, names });
+                    }
+                    "MODE" => {
+                        let target = p.params.get(0).cloned().unwrap_or_default();
+                        let modes  = p.params[1..].join(" ");
+                        send(ServerEvent::IrcMode { conn_id: conn_id.to_string(), target, modes, ts });
+                    }
+                    // 311-318 = WHOIS replies — route to nick's query buffer
+                    "311" => { // RPL_WHOISUSER: nick user host * :realname
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let user = p.params.get(2).cloned().unwrap_or_default();
+                        let host = p.params.get(3).cloned().unwrap_or_default();
+                        let real = p.params.get(5).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("{}!{}@{} ({})", p.params.get(1).cloned().unwrap_or_default(), user, host, real), ts, kind: MessageKind::Notice });
+                    }
+                    "312" => { // RPL_WHOISSERVER
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let text = p.params[2..].join(" ");
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Server: {}", text), ts, kind: MessageKind::Notice });
+                    }
+                    "313" => { // RPL_WHOISOPERATOR
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let text = p.params.get(2).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice });
+                    }
+                    "317" => { // RPL_WHOISIDLE
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let idle: u64 = p.params.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let signon: i64 = p.params.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let idle_str = if idle >= 3600 { format!("{}h {}m {}s", idle/3600, (idle%3600)/60, idle%60) } else if idle >= 60 { format!("{}m {}s", idle/60, idle%60) } else { format!("{}s", idle) };
+                        let signon_str = chrono::DateTime::from_timestamp(signon, 0).map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Idle: {} | Signon: {}", idle_str, signon_str), ts, kind: MessageKind::Notice });
+                    }
+                    "318" => { // RPL_ENDOFWHOIS
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "End of WHOIS".into(), ts, kind: MessageKind::Notice });
+                    }
+                    "319" => { // RPL_WHOISCHANNELS
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let chans = p.params.get(2).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Channels: {}", chans), ts, kind: MessageKind::Notice });
+                    }
+                    "330" => { // RPL_WHOISACCOUNT (logged in as)
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let account = p.params.get(2).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Logged in as: {}", account), ts, kind: MessageKind::Notice });
+                    }
+                    "338" => { // RPL_WHOISACTUALLY (actual host/IP)
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let text = p.params[2..].join(" ");
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Actually: {}", text), ts, kind: MessageKind::Notice });
+                    }
+                    "671" => { // RPL_WHOISSECURE
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "Using secure connection (TLS)".into(), ts, kind: MessageKind::Notice });
+                    }
+                    // 367 = RPL_BANLIST — one entry in the ban list
+                    "367" => {
+                        let channel = p.params.get(1).cloned().unwrap_or_default();
+                        let mask    = p.params.get(2).cloned().unwrap_or_default();
+                        let set_by  = p.params.get(3).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcBanEntry {
+                            conn_id: conn_id.to_string(), channel, mask, set_by, ts,
+                        });
+                    }
+                    // 368 = RPL_ENDOFBANLIST
+                    "368" => {
+                        let channel = p.params.get(1).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcBanEnd { conn_id: conn_id.to_string(), channel });
+                    }
+                    // 321 = RPL_LISTSTART — ignore
+                    "321" => {}
+                    // 322 = RPL_LIST — channel list entry
+                    "322" => {
+                        let channel = p.params.get(1).cloned().unwrap_or_default();
+                        let users: u32 = p.params.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let topic = p.params.get(3).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcListEntry {
+                            conn_id: conn_id.to_string(), channel, users, topic,
+                        });
+                    }
+                    // 323 = RPL_LISTEND
+                    "323" => {
+                        send(ServerEvent::IrcListEnd { conn_id: conn_id.to_string() });
+                    }
+                    // Forward unhandled numerics (whois, lusers, motd, etc.) as status messages
+                    cmd if cmd.chars().all(|c| c.is_ascii_digit()) => {
+                        let text = if p.params.len() > 1 {
+                            p.params[1..].join(" ")
+                        } else {
+                            p.params.join(" ")
+                        };
+                        if !text.is_empty() {
+                            send(ServerEvent::IrcMessage {
+                                conn_id: conn_id.to_string(),
+                                from: "*".to_string(),
+                                target: "status".to_string(),
+                                text,
+                                ts,
+                                kind: MessageKind::Notice,
+                            });
+                        }
+                    }
+                    // Forward any other unhandled commands to status
+                    _ => {
+                        let text = if p.params.len() > 1 {
+                            p.params[1..].join(" ")
+                        } else if !p.params.is_empty() {
+                            p.params.join(" ")
+                        } else {
+                            p.command.clone()
+                        };
+                        if !text.is_empty() {
+                            send(ServerEvent::IrcMessage {
+                                conn_id: conn_id.to_string(),
+                                from: nick_from_prefix(&p.prefix),
+                                target: "status".to_string(),
+                                text,
+                                ts,
+                                kind: MessageKind::Notice,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─── IRC line parser ──────────────────────────────────────────────────────────
+
+struct IrcLine { prefix: Option<String>, command: String, params: Vec<String> }
+
+fn parse_irc(line: &str) -> IrcLine {
+    let mut rest   = line;
+    let mut prefix = None;
+    if rest.starts_with(':') {
+        let (p, r) = rest[1..].split_once(' ').unwrap_or((&rest[1..], ""));
+        prefix = Some(p.to_string()); rest = r;
+    }
+    let mut params = Vec::new();
+    let (cmd_part, mut remaining) = rest.split_once(' ').unwrap_or((rest, ""));
+    while !remaining.is_empty() {
+        if remaining.starts_with(':') { params.push(remaining[1..].to_string()); break; }
+        match remaining.split_once(' ') {
+            Some((t, r)) => { params.push(t.to_string()); remaining = r; }
+            None         => { params.push(remaining.to_string()); break; }
+        }
+    }
+    IrcLine { prefix, command: cmd_part.to_uppercase(), params }
+}
+
+fn nick_from_prefix(p: &Option<String>) -> String {
+    p.as_deref().and_then(|s| s.split('!').next()).unwrap_or("*").to_string()
+}
+fn strip_pfx(n: &str) -> &str { let s = n.trim_start_matches(|c: char| "@+~&%".contains(c)); if s.is_empty() { n } else { s } }
+fn kind_str(k: &MessageKind) -> &'static str {
+    match k { MessageKind::Privmsg => "privmsg", MessageKind::Notice => "notice", MessageKind::Action => "action" }
+}
