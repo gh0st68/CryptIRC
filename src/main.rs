@@ -422,10 +422,10 @@ async fn route_verify(State(state): State<AppState>, Query(q): Query<VerifyQuery
 .b{background:#111418;border:1px solid #2a3444;border-radius:12px;padding:32px 40px;text-align:center;}
 h2{background:linear-gradient(135deg,#00d4aa,#0099ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
 a{color:#00d4aa;text-decoration:none;}</style></head>
-<body><div class="b"><h2>✓ Email Verified</h2><p>Your account is now active.</p><br><a href="/">Open CryptIRC →</a></div></body></html>"#.to_string()),
+<body><div class="b"><h2>✓ Email Verified</h2><p>Your account is now active.</p><br><a href="/cryptirc">Open CryptIRC →</a></div></body></html>"#.to_string()),
         Err(e) => Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Error</title>
 <style>body{{background:#0b0d0f;color:#ff4466;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}}
-a{{color:#00d4aa;}}</style></head><body><p>{}</p><a href="/">← Back</a></body></html>"#, html_escape(&e.to_string()))),
+a{{color:#00d4aa;}}</style></head><body><p>{}</p><a href="/cryptirc">← Back</a></body></html>"#, html_escape(&e.to_string()))),
     }
 }
 

@@ -18,7 +18,7 @@ pub fn send_verification(to_email: &str, username: &str, token: &str, base_url: 
         — CryptIRC"
     );
 
-    let from_addr: Address = "noreply@cryptirc.local".parse()?;
+    let from_addr: Address = "twistednetirc@gmail.com".parse()?;
     let to_addr: Address = to_email.parse()?;
 
     let email = Message::builder()
