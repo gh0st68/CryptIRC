@@ -64,15 +64,62 @@ sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
 
 That's it. Visit `https://yourdomain.com`, register an account, and connect.
 
-### Adding Users Manually
+## User Registration & Email Verification
 
-To create a user from the command line (skips email verification):
+CryptIRC uses email verification to authenticate new accounts. Here's how registration works:
+
+1. A user visits the web UI and fills in a **username**, **email**, and **password** (minimum 10 characters)
+2. The server creates the account (with `verified: false`) and generates a unique verification token
+3. A verification email is sent to the user via **Postfix** running on `localhost:25`
+4. The email contains a link: `https://yourdomain.com/auth/verify?token=<uuid>`
+5. Clicking the link sets `verified: true` — the user can now log in
+6. Verification tokens expire after **24 hours**
+
+Emails are sent from `noreply@cryptirc.local` through Postfix configured as a local-only relay. The deploy script sets this up automatically.
+
+### Getting Email Delivery Working
+
+The deploy script configures Postfix for local relay out of the box, but emails may not arrive depending on your server's reputation:
+
+- **Cloud VMs** (AWS, DigitalOcean, Vultr, etc.) often have their IPs on spam blocklists, so emails get silently dropped by recipients like Gmail or Outlook
+- **Self-hosted / home servers** usually lack proper PTR records and SPF/DKIM, causing the same issue
+
+**If verification emails aren't arriving**, the easiest fix is to route through a transactional mail service. Add the following to `/etc/postfix/main.cf`:
+
+```ini
+# Route through an external SMTP relay (example: Mailgun)
+relayhost = [smtp.mailgun.org]:587
+smtp_sasl_auth_enable = yes
+smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
+smtp_sasl_security_options = noanonymous
+smtp_tls_security_level = encrypt
+```
+
+Then create `/etc/postfix/sasl_passwd`:
+
+```
+[smtp.mailgun.org]:587 postmaster@yourdomain.com:your-smtp-password
+```
+
+And run:
+
+```bash
+sudo postmap /etc/postfix/sasl_passwd
+sudo chmod 600 /etc/postfix/sasl_passwd /etc/postfix/sasl_passwd.db
+sudo systemctl restart postfix
+```
+
+Free tiers on **Mailgun** (100 emails/day) or **Brevo** (300/day) are more than enough for a self-hosted IRC client.
+
+### Adding Users Manually (No Email Required)
+
+If you don't want to set up email at all, you can create pre-verified users from the command line:
 
 ```bash
 sudo bash adduser.sh <username> <email> <password>
 ```
 
-The user will be pre-verified and can log in immediately.
+This creates the user with `verified: true` so they can log in immediately — no email sent, no verification needed. Useful for small private instances where you know everyone.
 
 See [`deploy/README.md`](deploy/README.md) for detailed deployment docs, backup instructions, and troubleshooting.
 
