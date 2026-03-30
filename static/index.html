@@ -1416,6 +1416,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <button class="settings-menu-item" onclick="showMonitorPanel();closeSettingsMenu()">👁 Monitor</button>
           <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b">🧹 Clear All Logs</button>
           <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b">🗑 Delete Account</button>
+          <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()">❓ Help</button>
         </div>
       </div>
       <button class="sidebar-btn" onclick="doLogout()">Logout</button>
@@ -4193,6 +4194,51 @@ const HELP_TEXT = {
   help:        '/help [command]             — Show this help or help for a command',
 };
 
+function showHelpPanel(){
+  const body=document.getElementById('help-body');
+  body.innerHTML='';
+  const sections=[
+    ['Channel','join #channel — Join a channel','part — Leave current channel','cycle — Part and rejoin','topic [text] — View or set topic','list — List all channels','invite nick — Invite user to channel','names — Refresh user list'],
+    ['Messaging','msg nick text — Send private message','me text — Send action (/me waves)','say text — Send text to current target','notice nick text — Send notice','ctcp nick cmd — Send CTCP','slap nick — Slap with a trout','query nick — Open DM window'],
+    ['Identity','nick newnick — Change nickname','away [msg] — Set away','back — Remove away','whois nick — Look up user info','whowas nick — Look up offline user','who #channel — List channel users'],
+    ['User Modes','op nick — Give operator status','deop nick — Remove operator','voice nick — Give voice','devoice nick — Remove voice','halfop nick — Give half-op','owner nick — Give owner','mode +mode — Set raw mode'],
+    ['Mass Operations','opall — Op everyone in channel','deopall — Deop everyone','voiceall — Voice everyone','devoiceall — Devoice everyone','kickall — Kick everyone (except you)'],
+    ['Moderation','kick nick [reason] — Kick user','ban nick — Ban user','unban mask — Remove ban','kickban nick — Kick and ban','tban nick duration — Temporary ban','banlist — View ban list','unbanall — Remove all bans','ignore nick — Ignore user','unignore nick — Remove ignore','ignorelist — Show ignored users'],
+    ['Services','ns command — Send to NickServ','cs command — Send to ChanServ','identify password — Identify to NickServ','ghost nick — Ghost a nick','regain nick — Recover a nick'],
+    ['IRCOp','oper user pass — Authenticate as IRCOp','kill nick reason — Kill user','shun/gline/zline/kline — Server bans','rehash — Reload server config','squit server — Disconnect server'],
+    ['Connection','connect — Connect to server','disconnect — Disconnect from server','quote text — Send raw IRC command'],
+    ['Client','close — Close current DM or channel','clear — Clear current chat','clearall — Clear all chat buffers','ping nick — CTCP ping user','version nick — CTCP version','time nick — CTCP time','monitor nick — Add nick to monitor','unmonitor nick — Remove from monitor','encrypt on/off — Toggle E2E encryption','help [cmd] — Show command help'],
+  ];
+  for(const[title,...cmds] of sections){
+    const sec=document.createElement('div');sec.className='help-section';
+    sec.innerHTML=`<div class="help-section-title">${title}</div>`;
+    for(const cmd of cmds){
+      const[name,desc]=cmd.split(' — ');
+      sec.innerHTML+=`<div class="help-cmd"><span class="help-cmd-name">/${name}</span><span class="help-cmd-desc">${desc||''}</span></div>`;
+    }
+    body.appendChild(sec);
+  }
+  // Keyboard shortcuts
+  const kb=document.createElement('div');kb.className='help-section';
+  kb.innerHTML=`<div class="help-section-title">Keyboard Shortcuts</div>
+    <div class="help-cmd"><span class="help-cmd-name">Enter</span><span class="help-cmd-desc">Send message</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">↑ / ↓</span><span class="help-cmd-desc">Scroll through input history</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Tab</span><span class="help-cmd-desc">Nick completion</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">: (colon)</span><span class="help-cmd-desc">Emoji autocomplete</span></div>`;
+  body.appendChild(kb);
+  // Support section
+  const sup=document.createElement('div');sup.className='help-support';
+  sup.innerHTML=`<div class="help-support-title">💬 Need Help?</div>
+    <div class="help-support-text">
+      Join us on <span class="help-support-server">irc.twistednet.org</span><br>
+      Channels: <span class="help-support-chan">#dev</span> and <span class="help-support-chan">#twisted</span><br><br>
+      <span style="font-size:11px;color:var(--text3)">CryptIRC v0.4 — End-to-end encrypted IRC</span>
+    </div>`;
+  body.appendChild(sup);
+  document.getElementById('help-overlay').classList.add('show');
+}
+function closeHelpPanel(){document.getElementById('help-overlay').classList.remove('show');}
+
 function showHelp(conn_id, target, specific) {
   if (specific) {
     const key  = specific.toLowerCase().replace(/^\//, '');
@@ -4546,7 +4592,30 @@ function timeAgo(ts){
     <div id="monitor-list" style="overflow-y:auto;flex:1"></div>
   </div>
 </div>
+
+<div id="help-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(560px,94vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <span style="font-family:var(--sans);font-weight:700;font-size:16px;color:var(--text)">❓ Help</span>
+      <span onclick="closeHelpPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+    </div>
+    <div id="help-body" style="overflow-y:auto;flex:1;padding:16px 20px;-webkit-overflow-scrolling:touch"></div>
+  </div>
+</div>
+
 <style>
+#help-overlay.show{display:flex !important;}
+.help-section { margin-bottom:18px; }
+.help-section-title { font-size:12px; font-weight:700; color:var(--accent); text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; padding-bottom:4px; border-bottom:1px solid var(--border); }
+.help-cmd { display:flex; gap:8px; padding:3px 0; font-size:12px; }
+.help-cmd-name { color:var(--accent2); font-weight:600; min-width:110px; flex-shrink:0; }
+.help-cmd-desc { color:var(--text2); }
+.help-support { margin-top:20px; padding:14px; background:var(--bg2); border:1px solid var(--border); border-radius:8px; text-align:center; }
+.help-support-title { font-size:13px; font-weight:600; color:var(--text); margin-bottom:6px; }
+.help-support-text { font-size:12px; color:var(--text2); line-height:1.6; }
+.help-support-server { color:var(--accent); font-weight:600; }
+.help-support-chan { color:var(--accent2); font-weight:600; }
+</style>
 #monitor-overlay.show{display:flex !important;}
 .monitor-card {
   border-bottom:1px solid var(--border); padding:14px 16px;
