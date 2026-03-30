@@ -328,6 +328,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let caps = p.params.get(2).cloned().unwrap_or_default();
                         match sub {
                             "LS" => {
+                                // Request chghost if available
+                                if caps.contains("chghost") {
+                                    conn.lock().await.send_raw("CAP REQ :chghost\r\n").await?;
+                                }
                                 if sasl_state == SaslState::CapLsSent {
                                     if caps.contains("sasl") {
                                         conn.lock().await.send_raw("CAP REQ :sasl\r\n").await?;
@@ -506,6 +510,30 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let new = p.params.get(0).cloned().unwrap_or_default();
                         { let mut c = conn.lock().await; if old == c.nick { c.nick = new.clone(); } for ch in c.channels.values_mut() { for n in ch.names.iter_mut() { if strip_pfx(n) == old { let pfx: String = n.chars().take_while(|c| "@+~&%".contains(*c)).collect(); *n = format!("{}{}", pfx, new); } } } }
                         send(ServerEvent::IrcNick { conn_id: conn_id.to_string(), old, new, ts });
+                    }
+                    "CHGHOST" => {
+                        let nick = nick_from_prefix(&p.prefix);
+                        let new_host = p.params.get(1).cloned().unwrap_or_else(|| p.params.get(0).cloned().unwrap_or_default());
+                        let c = conn.lock().await;
+                        let chans: Vec<String> = c.channels.iter()
+                            .filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == nick))
+                            .map(|(name, _)| name.clone())
+                            .collect();
+                        drop(c);
+                        for ch in &chans {
+                            send(ServerEvent::IrcMessage {
+                                conn_id: conn_id.to_string(), from: "*".into(), target: ch.clone(),
+                                text: format!("*** {} has changed hostname to {}", nick, new_host),
+                                ts, kind: MessageKind::Notice,
+                            });
+                        }
+                        if chans.is_empty() {
+                            send(ServerEvent::IrcMessage {
+                                conn_id: conn_id.to_string(), from: "*".into(), target: "status".into(),
+                                text: format!("*** {} has changed hostname to {}", nick, new_host),
+                                ts, kind: MessageKind::Notice,
+                            });
+                        }
                     }
                     "KICK" => {
                         let by      = nick_from_prefix(&p.prefix);
