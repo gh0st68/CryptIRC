@@ -1204,6 +1204,10 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <span class="appear-label">Show nick list</span>
           <button class="appear-toggle" id="a-nicklist" onclick="this.classList.toggle('on');applyAppearance()"></button>
         </div>
+        <div class="appear-row">
+          <span class="appear-label">Spell check</span>
+          <button class="appear-toggle" id="a-spellcheck" onclick="this.classList.toggle('on');applyAppearance()"></button>
+        </div>
       </div>
 
       <div class="appear-section">
@@ -1466,7 +1470,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     <div id="input-wrap">
       <span id="input-nick">—</span>
       <div id="input-inner">
-        <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" spellcheck="false" autocorrect="off" autocapitalize="off">
+        <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" spellcheck="true" autocorrect="on" autocapitalize="off">
         <button id="send-btn" onclick="doSend()" title="Send">➤</button>
       </div>
       <button class="upload-btn" title="Emoji" onclick="toggleEmojiPicker()" id="emoji-btn">😀</button>
@@ -3133,7 +3137,7 @@ const APPEAR_DEFAULTS={
   theme:'midnight', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:160, lineHeight:1.55,
   timestamps:true, joinpart:true, compact:false, coloredNicks:true,
-  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, msgGap:4,
+  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, msgGap:4,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
 };
@@ -3163,6 +3167,7 @@ function applyAppearance(){
     compact:    el('a-compact').classList.contains('on'),
     coloredNicks: el('a-colorednicks').classList.contains('on'),
     nickList:   el('a-nicklist').classList.contains('on'),
+    spellcheck: el('a-spellcheck').classList.contains('on'),
     msgGap:     +el('a-msg-gap').value,
     accent:     el('a-accent-color').value,
     accent2:    el('a-accent2-color').value,
@@ -3227,6 +3232,13 @@ function applyThemeCSS(cfg){
     ${cfg.coloredNicks===false?'.nc0,.nc1,.nc2,.nc3,.nc4,.nc5,.nc6,.nc7,.nc8,.nc9{color:var(--text2)!important;}':''}
     ${cfg.nickList===false?'#nick-panel{display:none!important;}':''}
   `;
+  // Apply spellcheck setting to input
+  const inp=document.getElementById('msg-input');
+  if(inp){
+    const sc=cfg.spellcheck!==false;
+    inp.setAttribute('spellcheck',sc?'true':'false');
+    inp.setAttribute('autocorrect',sc?'on':'off');
+  }
 }
 function populateAppearanceModal(cfg){
   const el=id=>document.getElementById(id);
@@ -3243,6 +3255,7 @@ function populateAppearanceModal(cfg){
   cfg.compact ? el('a-compact').classList.add('on') : el('a-compact').classList.remove('on');
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
+  cfg.spellcheck!==false ? el('a-spellcheck').classList.add('on') : el('a-spellcheck').classList.remove('on');
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;
   el('a-accent-swatch').style.background=cfg.accent;
