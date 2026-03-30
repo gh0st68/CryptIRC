@@ -584,13 +584,13 @@ body {
   /* M5: contain rubber-band */
   overscroll-behavior:contain;
 }
-.msg-row { display:block; padding:1px 12px; line-height:1.5; transition:background .1s; }
+.msg-row { display:flex; align-items:baseline; padding:1px 12px; line-height:1.5; transition:background .1s; }
 
-.msg-row:hover { background:rgba(255,255,255,.02); }
-.msg-ts { display:inline; color:var(--text3); font-size:10px; margin-right:4px; }
-.msg-nick { display:inline; padding-right:0; margin-right:5px; white-space:nowrap; font-weight:600; cursor:pointer; }
+.msg-row:hover { background:rgba(255,255,255,.03); }
+.msg-ts { color:var(--text3); font-size:11px; width:72px; flex-shrink:0; text-align:right; padding-right:8px; }
+.msg-nick { width:auto; max-width:120px; flex-shrink:0; text-align:right; padding-right:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; cursor:pointer; }
 .msg-nick:hover { text-decoration:underline; }
-.msg-body { display:inline; word-break:break-word; overflow-wrap:anywhere; }
+.msg-body { flex:1; min-width:0; word-break:break-word; overflow-wrap:anywhere; }
 .msg-body a { color:var(--accent2); text-decoration:none; }
 .msg-body a:hover { text-decoration:underline; }
 .msg-img { display:block; max-width:min(320px,90%); max-height:240px; border-radius:6px; margin-top:5px; cursor:pointer; border:1px solid var(--border); transition:opacity .2s; }
@@ -927,9 +927,11 @@ body {
   }
   #sidebar.open { transform:translateX(0); }
   #sidebar-backdrop.show { display:block; }
-  /* Mobile tweaks on top of shared inline layout */
-  .msg-row { padding:3px 8px; }
-  .msg-ts { font-size:10px; opacity:.6; }
+  /* Mobile: inline flow layout */
+  .msg-row { display:block; padding:3px 8px; }
+  .msg-ts { display:inline; width:auto; text-align:left; padding-right:0; margin-right:4px; font-size:10px; opacity:.6; }
+  .msg-nick { display:inline; width:auto; max-width:none; text-align:left; padding-right:0; margin-right:4px; overflow:visible; }
+  .msg-body { display:inline; }
   #topbar   { padding:0 6px; padding-top:var(--sat); gap:4px; }
   .settings-menu {
     position:fixed !important; bottom:auto !important; top:auto !important;
