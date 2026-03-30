@@ -584,13 +584,13 @@ body {
   /* M5: contain rubber-band */
   overscroll-behavior:contain;
 }
-.msg-row { display:flex; align-items:flex-start; padding:2px 12px; line-height:1.55; transition:background .1s; }
+.msg-row { display:block; padding:1px 12px; line-height:1.5; transition:background .1s; }
 
 .msg-row:hover { background:rgba(255,255,255,.02); }
-.msg-ts { color:var(--text3); font-size:10px; width:56px; flex-shrink:0; padding-top:2px; }
-.msg-nick { width:100px; flex-shrink:0; text-align:right; padding-right:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:500; cursor:pointer; }
+.msg-ts { display:inline; color:var(--text3); font-size:10px; margin-right:4px; }
+.msg-nick { display:inline; padding-right:0; margin-right:5px; white-space:nowrap; font-weight:600; cursor:pointer; }
 .msg-nick:hover { text-decoration:underline; }
-.msg-body { flex:1; word-break:break-word; min-width:0; overflow-wrap:anywhere; }
+.msg-body { display:inline; word-break:break-word; overflow-wrap:anywhere; }
 .msg-body a { color:var(--accent2); text-decoration:none; }
 .msg-body a:hover { text-decoration:underline; }
 .msg-img { display:block; max-width:min(320px,90%); max-height:240px; border-radius:6px; margin-top:5px; cursor:pointer; border:1px solid var(--border); transition:opacity .2s; }
@@ -927,22 +927,9 @@ body {
   }
   #sidebar.open { transform:translateX(0); }
   #sidebar-backdrop.show { display:block; }
-  /* Mobile: Lounge-style inline layout — time nick message all flow together */
-  .msg-row {
-    display:block; padding:3px 8px; line-height:1.45;
-  }
-  .msg-ts {
-    width:auto; display:inline; font-size:11px; padding:0; margin-right:4px;
-    color:var(--text3); opacity:.6;
-  }
-  .msg-nick {
-    width:auto; display:inline; text-align:left; padding-right:0;
-    font-size:inherit; font-weight:700; margin-right:4px;
-    overflow:visible; white-space:normal;
-  }
-  .msg-body {
-    display:inline; padding:0; font-size:inherit; line-height:inherit;
-  }
+  /* Mobile tweaks on top of shared inline layout */
+  .msg-row { padding:3px 8px; }
+  .msg-ts { font-size:10px; opacity:.6; }
   #topbar   { padding:0 6px; padding-top:var(--sat); gap:4px; }
   .settings-menu {
     position:fixed !important; bottom:auto !important; top:auto !important;

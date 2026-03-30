@@ -1,7 +1,7 @@
 // CryptIRC Service Worker v9
 // Handles: offline caching, push notifications, notification click actions
 
-const CACHE = 'cryptirc-v95';
+const CACHE = 'cryptirc-v96';
 const STATIC = ['/cryptirc/', '/cryptirc/manifest.json', '/cryptirc/icon.svg'];
 
 // ─── Install ──────────────────────────────────────────────────────────────────
