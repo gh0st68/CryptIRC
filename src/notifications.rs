@@ -220,6 +220,29 @@ impl NotificationManager {
         }
     }
 
+    pub async fn send_monitor_notification(&self, username: &str, nick: &str, status: &str) {
+        let subs = self.load_subscriptions(username).await;
+        if subs.is_empty() { return; }
+        let icon = if status == "online" { "🟢" } else { "🔴" };
+        let payload = serde_json::json!({
+            "title": format!("CryptIRC — Monitor"),
+            "body": format!("{} {} is {}", icon, nick, status),
+            "tag": format!("monitor-{}", nick.to_lowercase()),
+        }).to_string();
+        let mut stale = vec![];
+        for sub in &subs {
+            if let Err(e) = self.send_push(sub, &payload).await {
+                let msg = e.to_string();
+                if msg.contains("410") || msg.contains("404") || msg.contains("Gone") {
+                    stale.push(sub.endpoint.clone());
+                }
+            }
+        }
+        for endpoint in &stale {
+            let _ = self.remove_subscription(username, endpoint).await;
+        }
+    }
+
     pub async fn send_test_notification(&self, username: &str) {
         let subs = self.load_subscriptions(username).await;
         let payload = serde_json::json!({

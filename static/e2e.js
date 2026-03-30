@@ -80,39 +80,53 @@ async function e2eInit(e2eEncKeyB64) {
 // ─── Identity keys ────────────────────────────────────────────────────────────
 
 async function e2eHandleIdentityBlob(blob) {
-  if (blob) {
-    try {
-      const plaintext = await aesDecryptBlob(blob);
-      const obj       = JSON.parse(new TextDecoder().decode(plaintext));
-      E2E.identityKeys = await importIdentityKeys(obj);
-      E2E.ready = true;  // C6: set ready only after keys confirmed
-      console.log('[E2E] Identity keys loaded');
-      await e2eEnsureOTPKs();  // L4: actively replenish if needed
-    } catch(e) {
-      console.error('[E2E] Failed to load identity keys — generating new ones:', e);
+  try {
+    if (blob) {
+      try {
+        const plaintext = await aesDecryptBlob(blob);
+        const obj       = JSON.parse(new TextDecoder().decode(plaintext));
+        E2E.identityKeys = await importIdentityKeys(obj);
+        E2E.ready = true;
+        console.log('[E2E] Identity keys loaded');
+        await e2eEnsureOTPKs();
+      } catch(e) {
+        console.error('[E2E] Failed to load identity keys — generating new ones:', e);
+        await e2eGenerateAndPublishIdentity();
+      }
+    } else {
+      console.log('[E2E] No identity blob — generating fresh keys');
       await e2eGenerateAndPublishIdentity();
     }
-  } else {
-    await e2eGenerateAndPublishIdentity();
+  } catch(e) {
+    console.error('[E2E] Identity init completely failed:', e);
+    // Last resort: still set ready so user isn't permanently locked out
+    // They just won't have E2E until page reload
   }
+  console.log('[E2E] ready =', E2E.ready);
 }
 
 async function e2eGenerateAndPublishIdentity() {
-  const dhKeyPair = await crypto.subtle.generateKey(
-    { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']
-  );
-  const signKeyPair = await crypto.subtle.generateKey(
-    { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']
-  );
-  E2E.identityKeys = { dhKeyPair, signKeyPair };
+  try {
+    const dhKeyPair = await crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']
+    );
+    const signKeyPair = await crypto.subtle.generateKey(
+      { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']
+    );
+    E2E.identityKeys = { dhKeyPair, signKeyPair };
 
-  const exported = await exportIdentityKeys({ dhKeyPair, signKeyPair });
-  const blob     = await aesEncryptBlob(new TextEncoder().encode(JSON.stringify(exported)));
-  wsend({ type: 'e2e_store_identity', blob });
+    const exported = await exportIdentityKeys({ dhKeyPair, signKeyPair });
+    const blob     = await aesEncryptBlob(new TextEncoder().encode(JSON.stringify(exported)));
+    wsend({ type: 'e2e_store_identity', blob });
 
-  await e2ePublishBundle();
-  E2E.ready = true;  // C6: set ready after keys are generated and stored
-  console.log('[E2E] Generated and published fresh identity keys');
+    await e2ePublishBundle();
+    E2E.ready = true;
+    console.log('[E2E] Generated and published fresh identity keys');
+  } catch(e) {
+    console.error('[E2E] Key generation failed:', e);
+    // Set ready anyway with generated keys so user isn't locked out
+    if (E2E.identityKeys) E2E.ready = true;
+  }
 }
 
 async function e2ePublishBundle() {
@@ -135,7 +149,7 @@ async function e2ePublishBundle() {
   // Store SPK private key encrypted (needed for X3DH respond)
   const spkPrivJwk = await crypto.subtle.exportKey('jwk', spkPair.privateKey);
   const spkBlob    = await aesEncryptBlob(
-    new TextEncoder().encode(JSON.stringify({ spk_priv: spkPrivJwk, spk_id: 1 }))
+    new TextEncoder().encode(JSON.stringify({ spk_priv: spkPrivJwk, spk_pub: spkPub, spk_id: 1 }))
   );
   wsend({ type: 'e2e_store_session', partner: '__spk__', blob: spkBlob });
 
@@ -213,7 +227,9 @@ async function x3dhInitiate(bundle) {
   }
 
   const ikm          = concat(dh1, dh2, dh3, dh4);
+  console.log('[E2E] X3DH INITIATE ikm:', bytesToBase64(ikm).slice(0,24), 'dh1:', bytesToBase64(dh1).slice(0,16), 'dh2:', bytesToBase64(dh2).slice(0,16), 'dh3:', bytesToBase64(dh3).slice(0,16), 'dh4:', bytesToBase64(dh4).slice(0,16));
   const sharedSecret = await hkdf(ikm, 'X3DH-CryptIRC-v1', 64);
+  console.log('[E2E] X3DH INITIATE sharedSecret:', bytesToBase64(sharedSecret).slice(0,24));
   const ephPub       = await exportPub(ephPair.publicKey, 'ECDH');
   return { sharedSecret, ephemeralPub: ephPub, usedOTPKId };
 }
@@ -223,8 +239,16 @@ async function x3dhInitiate(bundle) {
 async function x3dhRespond(x3dhHeader) {
   const { dhKeyPair } = E2E.identityKeys;
 
-  // C2: read from E2E._spkBlob (set by event handler), not hardcoded null
-  if (!E2E._spkBlob) throw new Error('SPK blob not loaded — cannot respond to X3DH');
+  // C2: read from E2E._spkBlob (set by event handler)
+  // If not loaded yet, request it and wait
+  if (!E2E._spkBlob) {
+    console.warn('[E2E] SPK blob not in memory, requesting...');
+    wsend({ type: 'e2e_load_session', partner: '__spk__' });
+    for (let i = 0; i < 30 && !E2E._spkBlob; i++) {
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (!E2E._spkBlob) throw new Error('SPK blob not loaded — cannot respond to X3DH');
+  }
   const spkObj  = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(E2E._spkBlob)));
   const spkPriv = await crypto.subtle.importKey(
     'jwk', spkObj.spk_priv, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']
@@ -240,7 +264,7 @@ async function x3dhRespond(x3dhHeader) {
   // C7: load OTPK private key from server if one was used
   let dh4 = new Uint8Array(0);
   if (x3dhHeader.used_otpk_id != null) {
-    const otpkBlob = await loadSessionBlobFromCache(`__otpk__${x3dhHeader.used_otpk_id}`);
+    const otpkBlob = await loadSessionBlobFromCache(`__otpk__${x3dhHeader.used_otpk_id}`);  // now async
     if (otpkBlob) {
       const otpkObj  = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(otpkBlob)));
       const otpkPriv = await crypto.subtle.importKey(
@@ -254,14 +278,23 @@ async function x3dhRespond(x3dhHeader) {
   }
 
   const ikm = concat(dh1, dh2, dh3, dh4);
-  return hkdf(ikm, 'X3DH-CryptIRC-v1', 64);
+  console.log('[E2E] X3DH RESPOND ikm:', bytesToBase64(ikm).slice(0,24), 'dh1:', bytesToBase64(dh1).slice(0,16), 'dh2:', bytesToBase64(dh2).slice(0,16), 'dh3:', bytesToBase64(dh3).slice(0,16), 'dh4:', bytesToBase64(dh4).slice(0,16));
+  const ss = await hkdf(ikm, 'X3DH-CryptIRC-v1', 64);
+  console.log('[E2E] X3DH RESPOND sharedSecret:', bytesToBase64(ss).slice(0,24));
+  return ss;
 }
 
 // ─── Session blob cache (for SPK and OTPKs loaded async) ─────────────────────
 
 E2E._sessionCache = {};  // partner → raw blob string
 
-function loadSessionBlobFromCache(partner) {
+async function loadSessionBlobFromCache(partner) {
+  if (E2E._sessionCache[partner]) return E2E._sessionCache[partner];
+  // Not cached — request from server and wait
+  wsend({ type: 'e2e_load_session', partner });
+  for (let i = 0; i < 30 && !E2E._sessionCache[partner]; i++) {
+    await new Promise(r => setTimeout(r, 100));
+  }
   return E2E._sessionCache[partner] || null;
 }
 
@@ -300,10 +333,10 @@ async function ratchetInitRecv(nick, sharedSecret) {
   const RK  = sharedSecret.slice(0, 32);
   const CKr = sharedSecret.slice(32, 64);
 
-  const dhRatchet    = await crypto.subtle.generateKey(
-    { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']
-  );
-  const dhRatchetPub = await exportPub(dhRatchet.publicKey, 'ECDH');
+  // Use SPK keypair as initial DHs so initiator can match the first ratchet step
+  const spkObj = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(E2E._spkBlob)));
+  const dhRatchetPub = spkObj.spk_pub;
+  const dhRatchetPriv = JSON.stringify(spkObj.spk_priv);
 
   const session = {
     nick,
@@ -313,7 +346,7 @@ async function ratchetInitRecv(nick, sharedSecret) {
     Ns:          0,
     Nr:          0,
     PN:          0,
-    DHs:         { pub: dhRatchetPub, priv: await exportPriv(dhRatchet.privateKey) },
+    DHs:         { pub: dhRatchetPub, priv: dhRatchetPriv },
     DHr:         null,
     skipped:     {},
     isInitiator: false,
@@ -348,14 +381,19 @@ async function _ratchetEncryptInner(nick, plaintext) {
   if (!session.CKs) {
     if (!session.DHr) {
       throw new Error(
-        `Cannot send yet — waiting for ${nick} to send the first message to establish the ratchet. ` +
-        `This is expected: the initiator must send first.`
+        `Cannot send yet — waiting for ${nick} to send the first message to establish the ratchet.`
       );
     }
-    await dhRatchetStep(session);
+    // Responder's first send: do DH ratchet step per Signal spec
+    // ECDH(our current DHs = SPK, their DHr = initiator's DH pub) → derive CKr (unused now) and CKs
+    await dhRatchetStep(session, session.DHr);
+    // dhRatchetStep derived CKr (for receiving next from initiator) and CKs (for sending now)
+    console.log('[E2E] Responder first send: ratchet step done');
+    await saveSession(nick, session);
   }
 
   const [mk, newCKs] = await chainKeyStep(base64ToBytes(session.CKs));
+  console.log('[E2E] ENCRYPT mk:', bytesToBase64(mk).slice(0,16), 'CKs was:', session.CKs.slice(0,16));
   session.CKs        = bytesToBase64(newCKs);
 
   const header = {
@@ -368,9 +406,7 @@ async function _ratchetEncryptInner(nick, plaintext) {
   const ct = await messageEncrypt(mk, new TextEncoder().encode(plaintext), header);
   await saveSession(nick, session);
 
-  // L3: _x3dh_header sent inline in envelope, NEVER written to session object
-  const myIKPub = await exportPub(E2E.identityKeys.dhKeyPair.publicKey, 'ECDH');
-  return { header, ciphertext: bytesToBase64(ct), sender_ik: myIKPub };
+  return { h: { d: header.dh, p: header.pn, n: header.n }, c: bytesToBase64(ct) };
 }
 
 async function ratchetDecrypt(nick, envelope) {
@@ -378,8 +414,9 @@ async function ratchetDecrypt(nick, envelope) {
   const session = E2E.dmSessions[nick];
   if (!session) throw new Error(`No ratchet session with ${nick} — key exchange needed`);
 
-  const { header, ciphertext } = envelope;
-  const ct = base64ToBytes(ciphertext);
+  // Support both compact (h/c) and legacy (header/ciphertext) formats
+  const header = envelope.h ? { dh: envelope.h.d, pn: envelope.h.p, n: envelope.h.n } : envelope.header;
+  const ct = base64ToBytes(envelope.c || envelope.ciphertext);
 
   // Check skipped keys
   const skipKey = `${nick}/${header.dh}/${header.n}`;
@@ -393,13 +430,30 @@ async function ratchetDecrypt(nick, envelope) {
 
   // DH ratchet step if new ratchet key
   if (header.dh !== session.DHr) {
-    await skipMessageKeys(session, nick, header.pn);
-    await dhRatchetStep(session, header.dh);
+    if (session.DHr === null) {
+      // First message received by responder — just record sender's DH pub
+      session.DHr = header.dh;
+    } else if (session.isInitiator && session.CKr === null) {
+      // Initiator receiving first reply: need to advance RK first
+      // Step 0: ECDH(our DHs, old DHr=SPK) to advance RK (matching responder's step1)
+      const ourPriv0 = await importPriv(session.DHs.priv);
+      const oldPub = await importPub(session.DHr, 'ECDH');
+      const dh0 = await ecdh(ourPriv0, oldPub);
+      const d0 = await hkdf(concat(base64ToBytes(session.RK), dh0), 'DR-Ratchet-v1', 64);
+      session.RK = bytesToBase64(d0.slice(0, 32));
+      // Now do normal ratchet step with the new DH pub
+      await skipMessageKeys(session, nick, header.pn);
+      await dhRatchetStep(session, header.dh);
+    } else {
+      await skipMessageKeys(session, nick, header.pn);
+      await dhRatchetStep(session, header.dh);
+    }
   }
 
   await skipMessageKeys(session, nick, header.n);
 
   const [mk, newCKr] = await chainKeyStep(base64ToBytes(session.CKr));
+  console.log('[E2E] DECRYPT mk:', bytesToBase64(mk).slice(0,16), 'CKr was:', session.CKr.slice(0,16));
   session.CKr = bytesToBase64(newCKr);
   session.Nr++;
 
@@ -408,20 +462,22 @@ async function ratchetDecrypt(nick, envelope) {
   return new TextDecoder().decode(pt);
 }
 
-async function dhRatchetStep(session, theirDHPub = null) {
-  if (theirDHPub) session.DHr = theirDHPub;
+async function dhRatchetStep(session, theirNewDHPub) {
+  // Signal spec: when receiving a new DH ratchet pub from peer
+  // Step 1: ECDH(our current DHs, their NEW DH pub) → KDF → new RK, CKr
+  const ourPriv   = await importPriv(session.DHs.priv);
+  const theirPub  = await importPub(theirNewDHPub, 'ECDH');
+  const dhOut     = await ecdh(ourPriv, theirPub);
 
-  const ourPriv  = await importPriv(session.DHs.priv);
-  const theirPub = await importPub(session.DHr, 'ECDH');
-  const dhOut    = await ecdh(ourPriv, theirPub);
+  const derived   = await hkdf(concat(base64ToBytes(session.RK), dhOut), 'DR-Ratchet-v1', 64);
+  session.RK      = bytesToBase64(derived.slice(0, 32));
+  session.CKr     = bytesToBase64(derived.slice(32, 64));
+  session.PN      = session.Ns;
+  session.Ns      = 0;
+  session.Nr      = 0;
+  session.DHr     = theirNewDHPub;
 
-  const derived  = await hkdf(concat(base64ToBytes(session.RK), dhOut), 'DR-Ratchet-v1', 64);
-  session.RK     = bytesToBase64(derived.slice(0, 32));
-  session.CKr    = bytesToBase64(derived.slice(32, 64));
-  session.PN     = session.Ns;
-  session.Ns     = 0;
-  session.Nr     = 0;
-
+  // Step 2: Generate new DHs, ECDH(new DHs, their DH pub) → KDF → new RK, CKs
   const newDHs    = await crypto.subtle.generateKey(
     { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']
   );
@@ -464,8 +520,7 @@ async function chainKeyStep(ck) {
 async function messageEncrypt(keyBytes, plaintext, header) {
   const key   = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const aad   = new TextEncoder().encode(JSON.stringify(header));
-  const ct    = await crypto.subtle.encrypt({ name:'AES-GCM', iv:nonce, additionalData:aad }, key, plaintext);
+  const ct    = await crypto.subtle.encrypt({ name:'AES-GCM', iv:nonce }, key, plaintext);
   return concat(nonce, new Uint8Array(ct));
 }
 
@@ -473,8 +528,7 @@ async function messageDecrypt(keyBytes, ctWithNonce, header) {
   const key   = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
   const nonce = ctWithNonce.slice(0, 12);
   const ct    = ctWithNonce.slice(12);
-  const aad   = new TextEncoder().encode(JSON.stringify(header));
-  return new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv:nonce, additionalData:aad }, key, ct));
+  return new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv:nonce }, key, ct));
 }
 
 // ─── Channel PSK ─────────────────────────────────────────────────────────────
@@ -511,7 +565,7 @@ async function generateChannelKey() {
 
 async function importChannelKeyFromWords(wordsStr) {
   const words = wordsStr.trim().toLowerCase().split(/\s+/);
-  if (words.length !== 24) throw new Error('Expected 24 words');
+  if (words.length !== 32) throw new Error('Expected 32 words, got ' + words.length);
   const raw   = mnemonicToBytes(words);
   // Verify round-trip: any unrecognised word is an error
   for (const w of words) {
@@ -623,7 +677,7 @@ async function e2eHandleEvent(ev) {
     case 'e2e_session': {
       if (ev.partner === '__spk__') {
         // C2: store blob so x3dhRespond can read it
-        E2E._spkBlob = ev.blob;
+        if (ev.blob) E2E._spkBlob = ev.blob;
         break;
       }
       // Cache all session blobs (SPK, OTPKs, ratchet sessions)
@@ -644,6 +698,12 @@ async function e2eHandleEvent(ev) {
     case 'e2e_bundle': {
       const nick   = ev.username;
       const bundle = ev.bundle;
+
+      // Guard: if session already exists (e.g. both users initiated simultaneously), skip
+      if (E2E.dmSessions[nick]) {
+        e2eSysMsg(nick, `🔐 Session with ${nick} already active — skipping duplicate initiation`);
+        break;
+      }
 
       const fp    = await computeFingerprint(bundle.identity_dh_key);
       const trust = await e2eCheckTrust(nick, fp);
@@ -670,6 +730,11 @@ async function e2eHandleEvent(ev) {
 
       updateE2EIndicator(nick);
       e2eSysMsg(nick, '🔐 E2E session established with ' + nick);
+      // Refresh encryption panel if it's open for this nick
+      if (typeof showEncryptPanel === 'function' && active && active.target === nick) {
+        const overlay = document.getElementById('encrypt-overlay');
+        if (overlay && overlay.classList.contains('show')) showEncryptPanel();
+      }
       break;
     }
 
@@ -697,6 +762,31 @@ async function e2eHandleEvent(ev) {
       console.warn('[E2E] OTPKs low:', ev.remaining, '— replenishing');
       await e2eReplenishOTPKs();
       break;
+
+    case 'e2e_x3dh_header': {
+      const nick = ev.from_nick;
+      console.log('[E2E] Received relayed x3dh header from', nick, 'header keys:', Object.keys(ev.header || {}));
+      if (!E2E.ready || !E2E.identityKeys) {
+        console.warn('[E2E] Not ready to process x3dh header');
+        break;
+      }
+      E2E._pendingIncomingX3DH = E2E._pendingIncomingX3DH || {};
+      E2E._pendingIncomingX3DH[nick] = ev.header;
+      // Also try to immediately set up the session so it's ready when message arrives
+      try {
+        console.log('[E2E] Pre-initializing receiver session from relayed x3dh...');
+        const sharedSecret = await x3dhRespond(ev.header);
+        await ratchetInitRecv(nick, sharedSecret);
+        updateE2EIndicator(nick);
+        console.log('[E2E] Receiver session pre-initialized for', nick);
+        if (typeof sysMsg === 'function' && active) {
+          sysMsg(active.conn_id, nick, '🔐 E2E session established with ' + nick, 'system');
+        }
+      } catch(e) {
+        console.error('[E2E] Pre-init failed:', e.message);
+      }
+      break;
+    }
   }
 }
 
@@ -731,11 +821,14 @@ async function e2eEncryptOutgoing(target, plaintext) {
   if (isDM && E2E.dmSessions[target]) {
     try {
       const envelope = await ratchetEncrypt(target, plaintext);
-      // L3: attach x3dh_header only on the very first message, then clear it
       const x3dhHeader = E2E._pendingX3DH?.[target];
       if (x3dhHeader) {
-        envelope.x3dh_header = x3dhHeader;
         delete E2E._pendingX3DH[target];
+        // Send x3dh header as separate IRC message before the encrypted body
+        const headerPayload = '[e2ex3dh]' + btoa(JSON.stringify(x3dhHeader));
+        // Get conn_id from active context
+        const cid = active?.conn_id;
+        if (cid) wsend({type:'send', conn_id:cid, raw:`PRIVMSG ${target} :${headerPayload}`});
       }
       return E2E_DM_PREFIX + btoa(JSON.stringify(envelope));
     } catch(e) { console.error('[E2E] DM encrypt failed:', e); return null; }
@@ -758,21 +851,96 @@ async function e2eDecryptIncoming(from, target, text) {
     return { plaintext:'🔐 [encrypted — wrong or missing key]', encrypted:true };
   }
 
+  // Handle x3dh header message (sent separately before encrypted message)
+  if (isDM && text.startsWith('[e2ex3dh]')) {
+    try {
+      const hdr = JSON.parse(atob(text.slice(9)));
+      E2E._pendingIncomingX3DH = E2E._pendingIncomingX3DH || {};
+      E2E._pendingIncomingX3DH[from] = hdr;
+      console.log('[E2E] Received x3dh header from', from, 'via IRC');
+      // Pre-initialize receiver session immediately
+      if (E2E.ready && E2E.identityKeys) {
+        try {
+          const ss = await x3dhRespond(hdr);
+          await ratchetInitRecv(from, ss);
+          delete E2E._pendingIncomingX3DH[from]; // consumed — don't process again
+          updateE2EIndicator(from);
+          console.log('[E2E] Receiver session pre-initialized for', from);
+        } catch(e) {
+          console.error('[E2E] x3dh pre-init failed:', e.message || e.name || String(e), e);
+          if (typeof sysMsg === 'function' && active) {
+            sysMsg(active.conn_id, from, `🔐 X3DH setup failed: ${e.message || e.name || String(e)}`, 'error');
+          }
+        }
+      }
+    } catch(e) { console.error('[E2E] x3dh header parse failed:', e); }
+    return { plaintext: null, encrypted: false }; // don't display the header message
+  }
+
   if (isDM && text.startsWith(E2E_DM_PREFIX)) {
     try {
       const envelope = JSON.parse(atob(text.slice(E2E_DM_PREFIX.length)));
+      // Check for x3dh header: inline (legacy), compact (x), or relayed via server
+      let x3dh = envelope.x3dh_header
+        || (envelope.x ? { sender_ik: envelope.x.i, ephemeral_pub: envelope.x.e, used_otpk_id: envelope.x.o, spk_id: envelope.x.s } : null);
+      // Check for x3dh header relayed via server
+      if (!x3dh && E2E._pendingIncomingX3DH?.[from]) {
+        x3dh = E2E._pendingIncomingX3DH[from];
+        delete E2E._pendingIncomingX3DH[from];
+      }
+      // If no x3dh and no session, wait briefly — relay might arrive after IRC message
+      if (!x3dh && !E2E.dmSessions[from]) {
+        for (let i = 0; i < 20 && !E2E._pendingIncomingX3DH?.[from]; i++) {
+          await new Promise(r => setTimeout(r, 150));
+        }
+        if (E2E._pendingIncomingX3DH?.[from]) {
+          x3dh = E2E._pendingIncomingX3DH[from];
+          delete E2E._pendingIncomingX3DH[from];
+        }
+      }
+      console.log('[E2E] Incoming DM from', from, 'has_x3dh:', !!x3dh, 'has_session:', !!E2E.dmSessions[from], 'ready:', E2E.ready, 'has_spk:', !!E2E._spkBlob);
 
-      // C4: only call ratchetInitRecv if we have NO session yet for this nick
-      if (!E2E.dmSessions[from] && envelope.x3dh_header) {
-        const sharedSecret = await x3dhRespond(envelope.x3dh_header);
+      if (x3dh) {
+        if (!E2E.ready || !E2E.identityKeys) {
+          if (E2E.e2eEncKey && !E2E.identityKeys) {
+            console.log('[E2E] Force generating identity...');
+            await e2eGenerateAndPublishIdentity();
+          }
+          if (!E2E.identityKeys) {
+            return { plaintext:'🔐 [E2E not initialized — unlock vault]', encrypted:true };
+          }
+        }
+        const savedSession = E2E.dmSessions[from];
+        console.log('[E2E] Calling x3dhRespond...');
+        const sharedSecret = await x3dhRespond(x3dh);
+        console.log('[E2E] x3dhRespond OK, calling ratchetInitRecv...');
         await ratchetInitRecv(from, sharedSecret);
+        console.log('[E2E] ratchetInitRecv OK, calling ratchetDecrypt...');
+        const pt = await ratchetDecrypt(from, envelope);
+        console.log('[E2E] Decrypt OK:', pt.slice(0, 50));
+
+        if (savedSession && savedSession.CKs) {
+          const newSession = E2E.dmSessions[from];
+          newSession.CKs = savedSession.CKs;
+          newSession.DHs = savedSession.DHs;
+          newSession.Ns  = savedSession.Ns;
+          newSession.isInitiator = true;
+          await saveSession(from, newSession);
+        }
+
+        updateE2EIndicator(from);
+        return { plaintext:pt, encrypted:true };
       }
 
+      if (!E2E.dmSessions[from]) {
+        return { plaintext:'🔐 [no session — ask sender to re-initiate]', encrypted:true };
+      }
       const pt = await ratchetDecrypt(from, envelope);
       return { plaintext:pt, encrypted:true };
     } catch(e) {
-      console.error('[E2E] DM decrypt failed:', e);
-      return { plaintext:'🔐 [decryption failed]', encrypted:true };
+      const errMsg = e.message || e.name || String(e);
+      console.error('[E2E] DM decrypt FAILED:', errMsg, e.stack || e);
+      return { plaintext:`🔐 [decryption failed: ${errMsg}]`, encrypted:true };
     }
   }
 
@@ -788,7 +956,31 @@ async function handleEncryptCommand(args, conn_id, target) {
     case 'on': case 'start': {
       const nick = args[1] || target;
       if (!nick || nick.startsWith('#')) { e2eSysMsg(target,'Usage: /encrypt on <nick>'); return; }
-      if (!E2E.ready) { e2eSysMsg(target,'🔐 E2E not ready — unlock vault first'); return; }
+      if (!E2E.ready) {
+        if (E2E.e2eEncKey) {
+          // Vault is unlocked but init didn't complete — force generate now
+          e2eSysMsg(target,'🔐 Generating E2E keys…');
+          try {
+            if (!E2E.identityKeys) {
+              await e2eGenerateAndPublishIdentity();
+            } else {
+              E2E.ready = true;
+            }
+            if (E2E.ready) {
+              e2eSysMsg(target,'🔐 Keys ready! Fetching bundle…');
+              wsend({ type:'e2e_fetch_bundle', username:nick });
+            } else {
+              e2eSysMsg(target,'🔐 Key generation failed — check console');
+            }
+          } catch(e) {
+            console.error('[E2E] Force init failed:', e);
+            e2eSysMsg(target,'🔐 Key generation failed: ' + e.message);
+          }
+          return;
+        }
+        e2eSysMsg(target,'🔐 E2E not ready — unlock vault first');
+        return;
+      }
       if (E2E.dmSessions[nick]) { e2eSysMsg(target,`🔐 Session with ${nick} already active`); return; }
       e2eSysMsg(target,`🔐 Fetching key bundle for ${nick}…`);
       wsend({ type:'e2e_fetch_bundle', username:nick });
@@ -803,13 +995,13 @@ async function handleEncryptCommand(args, conn_id, target) {
       await storeChannelKey(target, key, keyB64);
       e2eSysMsg(target,`🔐 Channel key generated for ${target}:`);
       e2eSysMsg(target,`🔑 ${keyWords}`);
-      e2eSysMsg(target,`Share these 24 words out-of-band. Do NOT send them in this channel.`);
+      e2eSysMsg(target,`Share these 32 words out-of-band. Do NOT send them in this channel.`);
       updateE2EIndicator(target);
       break;
     }
     case 'add': {
       const words = args.slice(1);
-      if (words.length !== 24) { e2eSysMsg(target,'Usage: /encrypt add <word1> … <word24>'); return; }
+      if (words.length !== 32) { e2eSysMsg(target,'Usage: /encrypt add <word1> … <word32>  (32 words)'); return; }
       if (!E2E.e2eEncKey) { e2eSysMsg(target,'🔐 Vault not unlocked — unlock vault first'); return; }
       try {
         const { key, keyB64 } = await importChannelKeyFromWords(words.join(' '));
@@ -901,7 +1093,7 @@ async function handleEncryptCommand(args, conn_id, target) {
         '  on <nick>       — start E2E DM session',
         '  off [nick]      — end session or remove channel key',
         '  keygen          — generate channel key (in channel)',
-        '  add <24 words>  — add channel key from words',
+        '  add <32 words>  — add channel key from words',
         '  share           — show current channel key as words',
         '  rotate          — rotate channel key',
         '  verify <nick>   — show safety phrase',
@@ -923,15 +1115,17 @@ function e2eSysMsg(target, text) {
 }
 
 function updateE2EIndicator(target) {
-  const isDM = !target.startsWith('#') && !target.startsWith('&');
-  const enc  = isDM ? !!E2E.dmSessions[target] : !!E2E.channelKeys[target];
+  // Always update lock icon based on current active view
   const lock = document.getElementById('e2e-lock');
-  if (lock && active && (active.target === target)) {
-    const trust   = E2E.trustStore[target];
-    lock.textContent = enc
+  if (lock && active) {
+    const t = active.target;
+    const isDMActive = !t.startsWith('#') && !t.startsWith('&');
+    const encActive = isDMActive ? !!E2E.dmSessions[t] : !!E2E.channelKeys[t];
+    const trust = E2E.trustStore[t];
+    lock.textContent = encActive
       ? (trust?.keyChanged ? '⚠🔐' : trust?.verified ? '✓🔐' : '🔐')
       : '🔓';
-    lock.title = enc
+    lock.title = encActive
       ? (trust?.keyChanged ? 'KEY CHANGED — verify fingerprint' : trust?.verified ? 'E2E verified' : 'E2E encrypted (TOFU)')
       : 'Not encrypted — click to set up';
   }
@@ -1025,7 +1219,7 @@ async function importIdentityKeys(obj) {
 // C3: Exactly 256 unique words so every byte 0-255 maps to a unique word.
 // Round-trip is now lossless: bytesToMnemonic(mnemonicToBytes(words)) === words.
 
-const WORDLIST = [
+window.WORDLIST = [
   // 0-31
   'ability','able','about','above','absent','absorb','abstract','absurd',
   'abuse','access','accident','account','accuse','achieve','acid','acoustic',

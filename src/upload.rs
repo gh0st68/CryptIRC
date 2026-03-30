@@ -132,3 +132,9 @@ pub fn content_type_for(filename: &str) -> &'static str {
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     safe_content_type(&ext)
 }
+
+/// Returns true if the filename has an image extension (safe for inline display).
+pub fn is_image(filename: &str) -> bool {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "ico")
+}

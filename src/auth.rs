@@ -257,6 +257,12 @@ impl AuthManager {
 
         tokio::fs::write(&user_path, serde_json::to_string_pretty(&user)?).await?;
         let _ = tokio::fs::remove_file(&reset_path).await;
+        // Purge all existing sessions for this user
+        let to_remove: Vec<String> = self.sessions.iter()
+            .filter(|s| s.username == reset.username)
+            .map(|s| s.key().clone())
+            .collect();
+        for k in to_remove { self.sessions.remove(&k); }
         Ok(reset.username)
     }
 
@@ -355,6 +361,32 @@ impl AuthManager {
         if let Some(token) = validate_uuid(raw_token) {
             self.sessions.remove(&token);
         }
+    }
+
+    /// Delete a user account: remove user file, sessions, and user data directory.
+    pub async fn delete_account(&self, username: &str) {
+        let uname = username.trim().to_lowercase();
+        // Remove user JSON
+        let user_file = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", uname));
+        let _ = tokio::fs::remove_file(&user_file).await;
+        // Remove user data directory (appearance, etc.)
+        let user_dir = PathBuf::from(&self.data_dir).join("users").join(&uname);
+        let _ = tokio::fs::remove_dir_all(&user_dir).await;
+        // Remove networks directory
+        let net_dir = PathBuf::from(&self.data_dir).join("networks").join(&uname);
+        let _ = tokio::fs::remove_dir_all(&net_dir).await;
+        // Remove logs directory
+        let log_dir = PathBuf::from(&self.data_dir).join("logs").join(&uname);
+        let _ = tokio::fs::remove_dir_all(&log_dir).await;
+        // Remove E2E data
+        let e2e_dir = PathBuf::from(&self.data_dir).join("e2e").join(&uname);
+        let _ = tokio::fs::remove_dir_all(&e2e_dir).await;
+        // Purge all sessions for this user
+        let to_remove: Vec<String> = self.sessions.iter()
+            .filter(|s| s.username == uname)
+            .map(|s| s.key().clone())
+            .collect();
+        for k in to_remove { self.sessions.remove(&k); }
     }
 
     pub fn purge_expired_sessions(&self) {

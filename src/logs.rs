@@ -47,7 +47,7 @@ impl EncryptedLogger {
 
     pub async fn read_logs(&self, conn_id: &str, target: &str, limit: usize) -> Result<Vec<LogLine>> {
         if !self.crypto.is_unlocked().await { anyhow::bail!("Vault locked"); }
-        let safe_limit = limit.min(1000); // H10: cap at 1000 lines
+        let safe_limit = limit.min(10000);
 
         let dir = PathBuf::from(&self.data_dir)
             .join("logs")

@@ -100,30 +100,52 @@ pub enum ClientMessage {
     Send             { conn_id: String, raw: String },
     JoinChannel      { conn_id: String, channel: String, key: Option<String> },
     PartChannel      { conn_id: String, channel: String },
-    GetLogs          { conn_id: String, target: String, limit: Option<usize> },
+    GetLogs          { conn_id: String, target: String, limit: Option<usize>, before: Option<i64> },
     GetState         {},
     // Certificate management
     GenerateCert     { conn_id: String },
     DeleteCert       { conn_id: String },
     GetCertInfo      { conn_id: String },
-    // E2E encryption
+    // E2E encryption — explicit renames because snake_case turns E2E into e2_e
+    #[serde(rename = "e2e_store_identity")]
     E2EStoreIdentity  { blob: String },
+    #[serde(rename = "e2e_load_identity")]
     E2ELoadIdentity   {},
+    #[serde(rename = "e2e_publish_bundle")]
     E2EPublishBundle  { bundle: KeyBundle },
     #[serde(rename = "e2e_add_otpks")]
     E2EAddOTPKs       { keys: Vec<OneTimePrekey> },
+    #[serde(rename = "e2e_fetch_bundle")]
     E2EFetchBundle    { username: String },
+    #[serde(rename = "e2e_store_session")]
     E2EStoreSession   { partner: String, blob: String },
+    #[serde(rename = "e2e_load_session")]
     E2ELoadSession    { partner: String },
+    #[serde(rename = "e2e_delete_session")]
     E2EDeleteSession  { partner: String },
+    #[serde(rename = "e2e_store_channel_key")]
     E2EStoreChannelKey  { channel: String, blob: String },
+    #[serde(rename = "e2e_load_channel_key")]
     E2ELoadChannelKey   { channel: String },
+    #[serde(rename = "e2e_delete_channel_key")]
     E2EDeleteChannelKey { channel: String },
+    #[serde(rename = "e2e_list_channel_keys")]
     E2EListChannelKeys  {},
+    #[serde(rename = "e2e_update_trust")]
     E2EUpdateTrust    { nick: String, fingerprint: String, verified: bool },
+    #[serde(rename = "e2e_load_trust")]
     E2ELoadTrust      {},
+    #[serde(rename = "e2e_relay_x3dh")]
+    E2ERelayX3DH      { target_nick: String, header: serde_json::Value },
     #[serde(rename = "e2e_check_otpk_count")]
     E2ECheckOTPKCount {},
+    // Appearance
+    SaveAppearance    { settings: String },
+    LoadAppearance    {},
+    // Account
+    DeleteAccount     { password: String },
+    // Monitor push
+    MonitorPush       { nick: String, status: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,22 +185,25 @@ pub enum ServerEvent {
     State            { networks: Vec<NetworkState>, vault_unlocked: bool },
     LogLines         { conn_id: String, target: String, lines: Vec<LogLine> },
     CertInfo         { conn_id: String, fingerprint: String, cert_pem: String },
-    // ── E2E events ──────────────────────────────────────────────────────────
-    /// Fetched key bundle for another user (to initiate X3DH)
+    // ── E2E events — explicit renames because snake_case turns E2E into e2_e
+    #[serde(rename = "e2e_bundle")]
     E2EBundle        { username: String, bundle: FetchedBundle },
-    /// Our stored encrypted identity key blob (load on unlock)
+    #[serde(rename = "e2e_identity_blob")]
     E2EIdentityBlob  { blob: String },
-    /// Encrypted ratchet session state for a DM partner
+    #[serde(rename = "e2e_session")]
     E2ESession       { partner: String, blob: String },
-    /// Encrypted channel PSK blob
+    #[serde(rename = "e2e_channel_key")]
     E2EChannelKey    { channel: String, blob: String },
-    /// List of channels for which we have a stored key
+    #[serde(rename = "e2e_channel_list")]
     E2EChannelList   { channels: Vec<String> },
-    /// Trust record update result
+    #[serde(rename = "e2e_trust")]
     E2ETrust         { nick: String, fingerprint: String, verified: bool, key_changed: bool },
-    /// Low one-time prekey warning
     #[serde(rename = "e2e_otpk_low")]
     E2EOTPKLow       { remaining: usize },
+    #[serde(rename = "e2e_x3dh_header")]
+    E2EX3DHHeader    { from_nick: String, header: serde_json::Value },
+    Appearance       { settings: String },
+    AccountDeleted   {},
     Error            { message: String },
 }
 
@@ -204,6 +229,10 @@ pub struct NetworkConfig {
     pub client_cert_id:        Option<String>,
     pub auto_join:             Vec<String>,
     pub auto_reconnect:        bool,
+    #[serde(default)]
+    pub oper_login:            Option<String>,
+    #[serde(default)]
+    pub oper_pass:             Option<String>,
 }
 
 impl Default for NetworkConfig {
@@ -216,6 +245,7 @@ impl Default for NetworkConfig {
             password: None, sasl_plain: None,
             sasl_external: false, client_cert_id: None,
             auto_join: vec![], auto_reconnect: true,
+            oper_login: None, oper_pass: None,
         }
     }
 }
@@ -331,6 +361,7 @@ async fn main() -> Result<()> {
         .route("/auth/me",               get(route_me))
         .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(26_214_400)))
         .route("/files/:name",           get(serve_file))
+        .route("/pub/:name",            get(serve_file_public))
         .route("/push/vapid-public-key", get(route_push_vapid_key))
         .route("/push/subscribe",        post(route_push_subscribe).layer(DefaultBodyLimit::max(4_096)))
         .route("/push/subscribe",        axum::routing::delete(route_push_unsubscribe).layer(DefaultBodyLimit::max(2_048)))
@@ -362,8 +393,35 @@ async fn serve_sw()       -> impl IntoResponse { ([(header::CONTENT_TYPE,"applic
 async fn serve_icon()     -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/svg+xml")], include_str!("../static/icon.svg")) }
 async fn serve_e2e_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/e2e.js")) }
 
-async fn serve_file(Path(name): Path<String>, Query(q): Query<FileQuery>, State(state): State<AppState>) -> impl IntoResponse {
-    if state.auth.validate_session(&q.token.unwrap_or_default()).is_none() {
+async fn serve_file_public(Path(name): Path<String>, State(state): State<AppState>) -> impl IntoResponse {
+    let name: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.').collect();
+    if name.contains("..") || name.starts_with('.') { return StatusCode::BAD_REQUEST.into_response(); }
+    let path = std::path::PathBuf::from(&state.upload_dir).join(&name);
+    match tokio::fs::read(&path).await {
+        Ok(data) => Response::builder()
+            .header(header::CONTENT_TYPE, upload::content_type_for(&name))
+            .header(header::CACHE_CONTROL, "public, max-age=86400")
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+            .header(HeaderName::from_static("content-disposition"),
+                     if upload::is_image(&name) { "inline" } else { "attachment" })
+            .body(Body::from(data))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn serve_file(Path(name): Path<String>, Query(q): Query<FileQuery>, headers: HeaderMap, State(state): State<AppState>) -> impl IntoResponse {
+    // Accept token from query param, cookie, or Authorization header
+    let token = q.token.clone()
+        .or_else(|| headers.get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(';').find_map(|c| {
+                let c = c.trim();
+                c.strip_prefix("cryptirc_token=").map(|t| t.to_string())
+            })))
+        .or_else(|| bearer_token(&headers).map(|s| s.to_string()))
+        .unwrap_or_default();
+    if state.auth.validate_session(&token).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let name: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.').collect();
@@ -374,7 +432,8 @@ async fn serve_file(Path(name): Path<String>, Query(q): Query<FileQuery>, State(
             .header(header::CONTENT_TYPE, upload::content_type_for(&name))
             .header(header::CACHE_CONTROL, "private, max-age=86400")
             .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-            .header(HeaderName::from_static("content-disposition"), "attachment")
+            .header(HeaderName::from_static("content-disposition"),
+                     if upload::is_image(&name) { "inline" } else { "attachment" })
             .body(Body::from(data))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
@@ -505,7 +564,7 @@ async function doReset(){{
 }}
 document.querySelectorAll('input').forEach(i=>i.addEventListener('keydown',e=>{{if(e.key==='Enter')doReset();}}));
 </script>
-</div></body></html>"#, html_escape(&q.token)))
+</div></body></html>"#, js_escape(&q.token)))
 }
 
 async fn route_reset_password(State(state): State<AppState>, Json(body): Json<ResetPasswordBody>) -> impl IntoResponse {
@@ -681,8 +740,12 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
             // S6: reject oversized messages before parsing
             if let Message::Text(ref text) = msg {
                 if text.len() > WS_MAX_MSG_BYTES { continue; }
-                if let Ok(cmd) = serde_json::from_str::<ClientMessage>(text) {
-                    handle_command(cmd, &user2, &state2).await;
+                match serde_json::from_str::<ClientMessage>(text) {
+                    Ok(cmd) => handle_command(cmd, &user2, &state2).await,
+                    Err(e) => {
+                        let preview = if text.len() > 100 { &text[..100] } else { text };
+                        info!("[WS] parse error for {}: {} — msg: {}", user2, e, preview);
+                    }
                 }
             }
         }
@@ -735,6 +798,23 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             if let Err(e) = state.save_network(&network, username).await {
                 send(ServerEvent::Error { message: e.to_string() }); return;
             }
+            // Auto-generate client cert if SASL EXTERNAL is enabled
+            if network.sasl_external && state.crypto.is_unlocked().await {
+                let has_cert = state.certs.load_info(&network.id).await.is_ok();
+                if !has_cert {
+                    let nick = network.nick.clone();
+                    if let Ok(info) = state.certs.generate(&network.id, &nick).await {
+                        let mut cfg = network.clone();
+                        cfg.client_cert_id = Some(network.id.clone());
+                        let _ = state.save_network(&cfg, username).await;
+                        send(ServerEvent::CertInfo {
+                            conn_id: network.id.clone(),
+                            fingerprint: info.fingerprint,
+                            cert_pem: info.cert_pem,
+                        });
+                    }
+                }
+            }
             send(ServerEvent::State {
                 networks: state.user_network_states(username).await,
                 vault_unlocked: state.crypto.is_unlocked().await,
@@ -750,6 +830,23 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             }
             if let Err(e) = state.save_network(&network, username).await {
                 send(ServerEvent::Error { message: e.to_string() }); return;
+            }
+            // Auto-generate client cert if SASL EXTERNAL is enabled and no cert exists
+            if network.sasl_external && state.crypto.is_unlocked().await {
+                let has_cert = state.certs.load_info(&network.id).await.is_ok();
+                if !has_cert {
+                    let nick = network.nick.clone();
+                    if let Ok(info) = state.certs.generate(&network.id, &nick).await {
+                        let mut cfg = network.clone();
+                        cfg.client_cert_id = Some(network.id.clone());
+                        let _ = state.save_network(&cfg, username).await;
+                        send(ServerEvent::CertInfo {
+                            conn_id: network.id.clone(),
+                            fingerprint: info.fingerprint,
+                            cert_pem: info.cert_pem,
+                        });
+                    }
+                }
             }
             send(ServerEvent::State {
                 networks: state.user_network_states(username).await,
@@ -808,9 +905,32 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             if let Some(conn) = state.connections.get(&conn_id) {
                 let safe = strip_crlf(&raw);
                 if safe.is_empty() { return; }
-                info!("[{}] SEND: {}", conn_id, &safe[..safe.len().min(200)]);
+                info!("[{}] SEND ({}B): {}", conn_id, safe.len(), &safe[..safe.len().min(80)]);
                 let mut c = conn.lock().await;
                 let _ = c.send_raw(&format!("{}\r\n", safe)).await;
+                drop(c);
+                // Persist JOIN/PART in auto_join
+                let upper = safe.to_uppercase();
+                if upper.starts_with("JOIN ") || upper.starts_with("PART ") {
+                    let parts: Vec<&str> = safe.splitn(3, ' ').collect();
+                    if parts.len() >= 2 {
+                        let ch = parts[1].split(',').next().unwrap_or("");
+                        if !ch.is_empty() && is_valid_channel(ch) {
+                            if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
+                                let lc = ch.to_lowercase();
+                                if upper.starts_with("JOIN ") {
+                                    if !cfg.auto_join.iter().any(|c| c.to_lowercase() == lc) {
+                                        cfg.auto_join.push(ch.to_string());
+                                        let _ = state.save_network(&cfg, username).await;
+                                    }
+                                } else {
+                                    cfg.auto_join.retain(|c| c.to_lowercase() != lc);
+                                    let _ = state.save_network(&cfg, username).await;
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 info!("[{}] SEND failed: no connection found", conn_id);
             }
@@ -825,6 +945,14 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                     _ => format!("JOIN {}\r\n", safe_ch),
                 };
                 let _ = conn.lock().await.send_raw(&cmd).await;
+                // Persist channel in auto_join
+                if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
+                    let lc = safe_ch.to_lowercase();
+                    if !cfg.auto_join.iter().any(|c| c.to_lowercase() == lc) {
+                        cfg.auto_join.push(safe_ch);
+                        let _ = state.save_network(&cfg, username).await;
+                    }
+                }
             }
         }
         ClientMessage::PartChannel { conn_id, channel } => {
@@ -834,10 +962,25 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             if let Some(conn) = state.connections.get(&conn_id) {
                 let _ = conn.lock().await.send_raw(&format!("PART {}\r\n", safe)).await;
             }
+            // Remove channel from auto_join
+            if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
+                let lc = safe.to_lowercase();
+                cfg.auto_join.retain(|c| c.to_lowercase() != lc);
+                let _ = state.save_network(&cfg, username).await;
+            }
         }
-        ClientMessage::GetLogs { conn_id, target, limit } => {
+        ClientMessage::GetLogs { conn_id, target, limit, before } => {
             if !state.owns_network(username, &conn_id).await { return; }
-            let lines = state.logger.read_logs(&conn_id, &target, limit.unwrap_or(200)).await.unwrap_or_default();
+            let lim = limit.unwrap_or(200).min(500);
+            // Read all logs (up to internal cap), then filter and slice
+            let all_lines = state.logger.read_logs(&conn_id, &target, 10000).await.unwrap_or_default();
+            let filtered: Vec<LogLine> = if let Some(ts) = before {
+                all_lines.into_iter().filter(|l| l.ts < ts).collect()
+            } else {
+                all_lines
+            };
+            let start = filtered.len().saturating_sub(lim);
+            let lines = filtered[start..].to_vec();
             send(ServerEvent::LogLines { conn_id, target, lines });
         }
         ClientMessage::GetState {} => {
@@ -893,22 +1036,24 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
 
         // ── E2E: identity key blob (browser-encrypted private keys) ───────────
         ClientMessage::E2EStoreIdentity { blob } => {
+            info!("[E2E] store_identity for {} ({} bytes)", username, blob.len());
             match state.e2e_store.store_identity_enc(username, &blob).await {
-                Ok(_)  => {} // silent success
-                Err(e) => send(ServerEvent::Error { message: format!("E2E store identity: {}", e) }),
+                Ok(_)  => info!("[E2E] identity stored for {}", username),
+                Err(e) => { info!("[E2E] identity store FAILED for {}: {}", username, e); send(ServerEvent::Error { message: format!("E2E store identity: {}", e) }); },
             }
         }
         ClientMessage::E2ELoadIdentity {} => {
             match state.e2e_store.load_identity_enc(username).await {
                 Some(blob) => send(ServerEvent::E2EIdentityBlob { blob }),
-                None       => {} // no blob yet — client will generate fresh keys
+                None       => send(ServerEvent::E2EIdentityBlob { blob: String::new() }),
             }
         }
 
         // ── E2E: public key bundle + one-time prekeys ─────────────────────────
         ClientMessage::E2EPublishBundle { bundle } => {
+            info!("[E2E] publish_bundle for {}", username);
             match state.e2e_store.store_bundle(username, &bundle).await {
-                Ok(info) => {
+                Ok(info) => { info!("[E2E] bundle published for {}", username);
                     // L5: use same threshold as client OTPK_REFILL_BELOW = 10
                     let remaining = state.e2e_store.otpk_count(username).await;
                     if remaining < 10 {
@@ -925,20 +1070,32 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             }
         }
         ClientMessage::E2EFetchBundle { username: target_user } => {
-            // Sanitize target username
+            // Sanitize target username/nick
             let safe: String = target_user.chars()
                 .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
                 .take(64).collect();
-            match state.e2e_store.fetch_bundle(&safe).await {
+            // Try direct username lookup first, then resolve IRC nick to username
+            info!("[E2E] fetch_bundle request for '{}' from {}", safe, username);
+            let resolved = if state.e2e_store.fetch_bundle(&safe).await.is_some() {
+                info!("[E2E] direct lookup found bundle for '{}'", safe);
+                safe.clone()
+            } else if let Some(real_user) = state.resolve_nick_to_username(&safe).await {
+                info!("[E2E] nick resolved '{}' → '{}'", safe, real_user);
+                real_user
+            } else {
+                info!("[E2E] no bundle and no nick resolution for '{}'", safe);
+                safe.clone()
+            };
+            match state.e2e_store.fetch_bundle(&resolved).await {
                 Some(bundle) => {
                     send(ServerEvent::E2EBundle { username: safe.clone(), bundle });
                     // Check if the target user's prekeys are running low and notify them
-                    let remaining = state.e2e_store.otpk_count(&safe).await;
+                    let remaining = state.e2e_store.otpk_count(&resolved).await;
                     if remaining < 10 {
-                        state.send_to_user(&safe, ServerEvent::E2EOTPKLow { remaining });
+                        state.send_to_user(&resolved, ServerEvent::E2EOTPKLow { remaining });
                     }
                 }
-                None => send(ServerEvent::Error { message: format!("No E2E key bundle for {}", safe) }),
+                None => send(ServerEvent::Error { message: format!("No E2E key bundle for {} — they may need to unlock their vault first", safe) }),
             }
         }
 
@@ -958,7 +1115,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 .take(128).collect::<String>();
             match state.e2e_store.load_session(username, &safe_partner).await {
                 Some(blob) => send(ServerEvent::E2ESession { partner: safe_partner, blob }),
-                None       => {} // no session yet — client will initiate X3DH
+                None       => send(ServerEvent::E2ESession { partner: safe_partner, blob: String::new() }),
             }
         }
         ClientMessage::E2EDeleteSession { partner } => {
@@ -1028,11 +1185,87 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 });
             }
         }
+        ClientMessage::E2ERelayX3DH { target_nick, header } => {
+            // Relay X3DH header to target user via server (too large for IRC)
+            let safe: String = target_nick.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '[' || *c == ']' || *c == '\\' || *c == '`' || *c == '^')
+                .take(64).collect();
+            // Find the target user's CryptIRC username from their IRC nick
+            if let Some(target_user) = state.resolve_nick_to_username(&safe).await {
+                // Get sender's IRC nick to include in the relay
+                let sender_nick = {
+                    let mut found = String::new();
+                    let conn_ids: Vec<String> = state.conn_owners.iter()
+                        .filter(|e| e.value() == username)
+                        .map(|e| e.key().clone()).collect();
+                    for cid in conn_ids {
+                        if let Some(conn) = state.connections.get(&cid) {
+                            found = conn.lock().await.nick.clone();
+                            break;
+                        }
+                    }
+                    found
+                };
+                info!("[E2E] Relaying x3dh header from {} ({}) to {} ({})", username, sender_nick, target_user, safe);
+                state.send_to_user(&target_user, ServerEvent::E2EX3DHHeader {
+                    from_nick: sender_nick,
+                    header,
+                });
+            }
+        }
         // L7: dedicated handler so client can proactively check OTPK level
         ClientMessage::E2ECheckOTPKCount {} => {
             let remaining = state.e2e_store.otpk_count(username).await;
             if remaining < 10 {
                 send(ServerEvent::E2EOTPKLow { remaining });
+            }
+        }
+        ClientMessage::SaveAppearance { settings } => {
+            // Limit to 4KB to prevent abuse; validate it's well-formed JSON
+            if settings.len() <= 4096 && serde_json::from_str::<serde_json::Value>(&settings).is_ok() {
+                let dir = std::path::PathBuf::from(&state.data_dir)
+                    .join("users").join(username);
+                let _ = tokio::fs::create_dir_all(&dir).await;
+                let _ = tokio::fs::write(dir.join("appearance.json"), &settings).await;
+            }
+        }
+        ClientMessage::LoadAppearance {} => {
+            let path = std::path::PathBuf::from(&state.data_dir)
+                .join("users").join(username).join("appearance.json");
+            if let Ok(data) = tokio::fs::read_to_string(&path).await {
+                send(ServerEvent::Appearance { settings: data });
+            }
+        }
+        ClientMessage::MonitorPush { nick, status } => {
+            let safe_nick: String = nick.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '[' || *c == ']' || *c == '\\' || *c == '`' || *c == '^').take(32).collect();
+            let safe_status = if status == "online" { "online" } else { "offline" };
+            state.notifier.send_monitor_notification(username, &safe_nick, safe_status).await;
+        }
+        ClientMessage::DeleteAccount { password } => {
+            // Verify password before deleting
+            match state.auth.login(username, &password).await {
+                Ok(_) => {
+                    // Disconnect all IRC connections for this user
+                    let conns: Vec<String> = state.conn_owners.iter()
+                        .filter(|e| e.value() == username)
+                        .map(|e| e.key().clone())
+                        .collect();
+                    for cid in &conns {
+                        state.request_disconnect(cid);
+                        if let Some(conn) = state.connections.get(cid) {
+                            let mut c = conn.lock().await;
+                            let _ = c.send_raw("QUIT :Account deleted\r\n").await;
+                        }
+                        state.connections.remove(cid);
+                        state.conn_owners.remove(cid);
+                    }
+                    // Delete account data
+                    state.auth.delete_account(username).await;
+                    send(ServerEvent::AccountDeleted {});
+                }
+                Err(_) => {
+                    send(ServerEvent::AuthFailed { message: "Incorrect password".into() });
+                }
             }
         }
     }
@@ -1043,6 +1276,30 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
 impl AppState {
     fn owns_conn(&self, username: &str, conn_id: &str) -> bool {
         self.conn_owners.get(conn_id).map(|v| v.as_str() == username).unwrap_or(false)
+    }
+
+    /// Resolve an IRC nick to a CryptIRC username by searching active connections.
+    /// Returns the CryptIRC username if an online user with that nick is found.
+    async fn resolve_nick_to_username(&self, nick: &str) -> Option<String> {
+        let nick_lower = nick.to_lowercase();
+        // Collect connection IDs first to avoid holding DashMap shard locks while awaiting Mutex
+        let conn_ids: Vec<String> = self.connections.iter()
+            .map(|e| e.key().clone())
+            .collect();
+        for conn_id in conn_ids {
+            if let Some(conn) = self.connections.get(&conn_id) {
+                let conn_nick = {
+                    let c = conn.lock().await;
+                    c.nick.clone()
+                };
+                if conn_nick.to_lowercase() == nick_lower {
+                    if let Some(owner) = self.conn_owners.get(&conn_id) {
+                        return Some(owner.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     async fn owns_network(&self, username: &str, id: &str) -> bool {
@@ -1078,6 +1335,15 @@ impl AppState {
     pub async fn reconnect_for_user(&self, username: &str) {
         for cfg in self.load_user_configs(username).await {
             let id = cfg.id.clone();
+            // Kill any existing connection first to prevent duplicate sessions
+            self.request_disconnect(&id);
+            if let Some(conn) = self.connections.get(&id) {
+                let mut c = conn.lock().await;
+                let _ = c.send_raw("QUIT :CryptIRC\r\n").await;
+            }
+            self.connections.remove(&id);
+            self.conn_owners.remove(&id);
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             self.clear_disconnect_request(&id);
             self.send_to_user(username, ServerEvent::Connecting { conn_id: id.clone(), server: cfg.server.clone() });
             let (s, u) = (self.clone(), username.to_string());
@@ -1107,6 +1373,12 @@ impl AppState {
                     account:  sc.account.clone(),
                     password: format!("enc:{}", enc),
                 });
+            }
+            if let Some(ref p) = cfg.oper_pass {
+                if !p.is_empty() {
+                    let enc = self.crypto.encrypt(p.as_bytes()).await?;
+                    persisted.oper_pass = Some(format!("enc:{}", enc));
+                }
             }
         }
 
@@ -1148,6 +1420,13 @@ impl AppState {
                     }
                 }
             }
+            if let Some(ref p) = cfg.oper_pass.clone() {
+                if let Some(enc) = p.strip_prefix("enc:") {
+                    if let Ok(plain) = self.crypto.decrypt(enc).await {
+                        cfg.oper_pass = Some(String::from_utf8_lossy(&plain).into_owned());
+                    }
+                }
+            }
         }
         Some(cfg)
     }
@@ -1184,4 +1463,23 @@ fn is_valid_channel(s: &str) -> bool {
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
      .replace('"', "&#34;").replace('\'', "&#39;")
+}
+
+/// Escape a string for safe embedding inside a JavaScript string literal (double-quoted).
+/// Prevents injection in `<script>` blocks where HTML entities are NOT decoded.
+fn js_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"'  => out.push_str("\\\""),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '<'  => out.push_str("\\x3c"),  // prevent </script> breakout
+            '>'  => out.push_str("\\x3e"),
+            _    => out.push(c),
+        }
+    }
+    out
 }

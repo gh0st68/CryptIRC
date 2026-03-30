@@ -401,8 +401,18 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "001" => {
                         registered = true;
                         last_pong  = Instant::now();
-                        conn.lock().await.connected = true;
-                        send(ServerEvent::Connected { conn_id: conn_id.to_string(), server: cfg.server.clone(), nick: cfg.nick.clone() });
+                        let actual_nick = {
+                            let mut c = conn.lock().await;
+                            c.connected = true;
+                            c.nick.clone()
+                        };
+                        send(ServerEvent::Connected { conn_id: conn_id.to_string(), server: cfg.server.clone(), nick: actual_nick });
+                        // Send OPER if configured
+                        if let (Some(login), Some(pass)) = (&cfg.oper_login, &cfg.oper_pass) {
+                            if !login.is_empty() && !pass.is_empty() {
+                                conn.lock().await.send_raw(&format!("OPER {} {}\r\n", strip_crlf(login), strip_crlf(pass))).await?;
+                            }
+                        }
                         for ch in &cfg.auto_join {
                             let safe = strip_crlf(ch);
                             if !safe.is_empty() {
@@ -429,6 +439,14 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let from   = nick_from_prefix(&p.prefix);
                         let target = p.params.get(0).cloned().unwrap_or_default();
                         let text   = p.params.get(1).cloned().unwrap_or_default();
+                        // Reply to CTCP VERSION
+                        if text == "\x01VERSION\x01" {
+                            conn.lock().await.send_raw(&format!(
+                                "NOTICE {} :\x01VERSION CryptIRC v0.3 - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
+                                from
+                            )).await?;
+                            continue;
+                        }
                         let (kind, clean) = if text.starts_with("\x01ACTION ") && text.ends_with('\x01') {
                             (MessageKind::Action, text[8..text.len()-1].to_string())
                         } else { (MessageKind::Privmsg, text) };
