@@ -21,7 +21,7 @@
 ## Screenshots
 
 <p align="center">
-  <img src="screenshots/client.jpg" width="800" alt="CryptIRC — Main Client">
+  <img src="screenshots/client.png" width="800" alt="CryptIRC — Main Client">
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@
 <br>
 
 <p align="center">
-  <img src="screenshots/login.jpg" width="400" alt="CryptIRC — Login">
+  <img src="screenshots/login.png" width="400" alt="CryptIRC — Login">
 </p>
 
 <p align="center">
