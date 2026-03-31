@@ -18,7 +18,11 @@
 <style>
 /* ── CSS custom properties ─────────────────────────────────────────────────── */
 :root {
-  /* Theme colors set by early JS (no defaults here to avoid specificity conflicts) */
+  /* Theme defaults — overridden by applyThemeCSS() after login */
+  --bg0:#0b0d0f; --bg1:#111418; --bg2:#181d24; --bg3:#1e242e; --bg4:#252c38;
+  --border:#2a3444; --border2:#3a4a60;
+  --text:#c8d8e8; --text2:#7a9ab8; --text3:#4a6278;
+  --accent:#00d4aa; --accent2:#0099ff;
   --warn:#ffaa00; --error:#ff4466; --join:#44cc88; --part:#cc6644;
   --notice:#9988cc; --action:#ffcc44;
   --mono:'JetBrains Mono',monospace; --sans:'Syne',sans-serif;
@@ -98,7 +102,7 @@ body > style, body > script { display:none !important; }
 .auth-err { color:var(--error); font-size:11px; min-height:14px; margin-bottom:6px; }
 .auth-btn {
   width:100%; padding:14px; border-radius:7px; border:none;
-  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  background:linear-gradient(135deg,var(--accent,#00d4aa),var(--accent2,#0099ff));
   color:#000; font-family:var(--mono); font-weight:700; font-size:15px;
   cursor:pointer; transition:opacity .2s; margin-bottom:8px;
   /* M9: 44px minimum */
@@ -810,7 +814,7 @@ body > style, body > script { display:none !important; }
 }
 .btn-cancel:hover, .btn-cancel:active { background:var(--bg4); color:var(--text); }
 .btn-save {
-  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  background:linear-gradient(135deg,var(--accent,#00d4aa),var(--accent2,#0099ff));
   border:none; border-radius:8px; color:#000;
   font-family:var(--mono); font-weight:700; font-size:14px;
   padding:12px 20px; min-height:48px;
