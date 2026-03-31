@@ -237,7 +237,7 @@ body > style, body > script { display:none !important; }
 .chan-item.drag-over { border-top:2px solid var(--accent); margin-top:-2px; }
 .chan-item.active { background:var(--bg4); color:var(--accent); }
 .chan-unread-dot { display:none; }
-.chan-unread-badge { margin-left:auto; flex-shrink:0; background:var(--accent2); color:#000; font-size:10px; font-weight:700; min-width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; padding:0 5px; }
+.chan-unread-badge { margin-left:auto; flex-shrink:0; background:#e53e3e; color:#fff; font-size:10px; font-weight:700; min-width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; padding:0 5px; }
 .chan-kebab {
   display:none; cursor:pointer; font-size:15px; font-weight:700; flex-shrink:0;
   color:var(--text3); padding:0 4px; border-radius:3px; line-height:1;
@@ -4880,7 +4880,7 @@ async function showAdminPanel(){
         <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Username</label><input id="admin-add-user" placeholder="username" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none"></div>
         <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Password (min 10)</label><input id="admin-add-pass" type="password" placeholder="password" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none"></div>
         <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Email (optional)</label><input id="admin-add-email" placeholder="user@example.com" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none"></div>
-        <button onclick="adminAddUser()" style="background:var(--accent);border:none;border-radius:6px;color:#000;font-weight:700;padding:8px 16px;cursor:pointer;min-height:38px">Add</button>
+        <button onclick="adminAddUser()" style="background:linear-gradient(135deg,#00d4aa,#0099ff);border:none;border-radius:6px;color:#000;font-weight:700;padding:8px 16px;cursor:pointer;min-height:38px">Add</button>
       </div>
       <div id="admin-add-err" style="font-size:11px;color:var(--error);margin-top:6px"></div>
     `;
