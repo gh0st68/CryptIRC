@@ -540,9 +540,9 @@ body > style, body > script { display:none !important; }
 /* ── MAIN AREA ─────────────────────────────────────────────────────────────── */
 #main { flex:1; display:flex; flex-direction:column; min-width:0; position:relative; }
 #topbar {
-  min-height:44px; padding:0 12px; padding-top:var(--sat);
+  min-height:38px; padding:0 10px; padding-top:var(--sat);
   background:var(--bg1); border-bottom:1px solid var(--border);
-  display:flex; align-items:center; gap:6px; flex-shrink:0;
+  display:flex; align-items:center; gap:4px; flex-shrink:0;
   overflow:hidden;
 }
 #hamburger {
@@ -639,9 +639,9 @@ body > style, body > script { display:none !important; }
 
 /* ── INPUT BAR ─────────────────────────────────────────────────────────────── */
 #input-wrap {
-  padding:6px 8px calc(6px + var(--sab));
+  padding:4px 6px calc(4px + var(--sab));
   background:var(--bg1); border-top:1px solid var(--border);
-  display:flex; gap:4px; align-items:center; flex-shrink:0;
+  display:flex; gap:3px; align-items:center; flex-shrink:0;
 }
 #input-nick {
   color:var(--accent); font-size:11px; font-weight:600; white-space:nowrap; user-select:none;
@@ -656,19 +656,18 @@ body > style, body > script { display:none !important; }
   flex:1; background:none; border:none;
   color:var(--text); font-family:var(--mono);
   font-size:16px;
-  padding:7px 0 7px 14px;
+  padding:6px 0 6px 12px;
   outline:none; min-width:0;
   -webkit-appearance:none; appearance:none;
 }
 #msg-input::placeholder { color:var(--text3); }
 #send-btn {
   background:none; border:none; color:var(--accent); cursor:pointer;
-  width:36px; height:36px; min-width:36px;
+  width:30px; height:30px; min-width:30px;
   display:flex; align-items:center; justify-content:center;
-  font-size:16px; flex-shrink:0; border-radius:50%;
+  font-size:15px; flex-shrink:0; border-radius:50%;
   transition:background .12s;
   -webkit-appearance:none; appearance:none;
-  /* Touch target padding extends tap area beyond visual */
   padding:4px; box-sizing:content-box;
 }
 #send-btn:hover { background:rgba(0,212,170,.12); }
@@ -715,8 +714,8 @@ body > style, body > script { display:none !important; }
 .slash-ac-desc { color:var(--text3); font-size:12px; }
 .upload-btn {
   background:none; border:none;
-  color:var(--text3); cursor:pointer; font-size:16px;
-  padding:6px; min-width:32px; min-height:32px;
+  color:var(--text3); cursor:pointer; font-size:15px;
+  padding:4px; min-width:28px; min-height:28px;
   display:flex; align-items:center; justify-content:center;
   transition:color .15s; flex-shrink:0;
   -webkit-appearance:none; appearance:none;
@@ -977,11 +976,11 @@ body > style, body > script { display:none !important; }
   #sidebar.open { transform:translateX(0); }
   #sidebar-backdrop.show { display:block; }
   /* Mobile: inline flow layout */
-  .msg-row { display:block; padding:3px 8px; }
+  .msg-row { display:block; padding:2px 8px; }
   .msg-ts { display:inline; width:auto; text-align:left; padding-right:0; margin-right:4px; font-size:10px; opacity:.6; }
   .msg-nick { display:inline; width:auto; max-width:none; text-align:left; padding-right:0; margin-right:4px; overflow:visible; }
   .msg-body { display:inline; }
-  #topbar   { padding:0 6px; padding-top:var(--sat); gap:4px; }
+  #topbar   { padding:0 4px; padding-top:var(--sat); gap:3px; min-height:36px; }
   .settings-menu {
     position:fixed !important; bottom:auto !important; top:auto !important;
     left:8px !important; right:auto !important; transform:none !important;
@@ -996,12 +995,13 @@ body > style, body > script { display:none !important; }
   .net-kebab { opacity:.6; }
 }
 @media(max-width:480px) {
-  .upload-btn { font-size:14px; padding:6px; }
+  .upload-btn { font-size:13px; padding:3px; }
   .sidebar-btn { font-size:11px; }
+  #input-wrap { padding:3px 4px calc(3px + var(--sab)); gap:2px; }
+  #input-inner { border-radius:16px; }
+  #msg-input { padding:5px 0 5px 10px; font-size:16px; }
+  #send-btn { width:26px; height:26px; min-width:26px; font-size:13px; padding:3px; }
 }
-@media(max-width:375px) {
-}
-/* Very small phones */
 @media(max-width:360px) {
   .auth-box { padding:16px; }
 }
@@ -1493,7 +1493,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()">📜 Certs</button>
           <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()">🔔 Notifications</button>
           <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()">🎨 Theme</button>
-          <button class="settings-menu-item" onclick="closeSettingsMenu();setTimeout(showMonitorPanel,100)">👁 Monitor</button>
+          <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)">👁 Monitor</button>
           <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b">🧹 Clear All Logs</button>
           <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()">👑 Admin</button>
           <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b">🗑 Delete Account</button>
@@ -5266,6 +5266,7 @@ function monitorRefreshOnline(){
   if(changed) saveMonitor(m);
 }
 function showMonitorPanel(){
+  try{
   const m=loadMonitor();
   const ov=document.getElementById('monitor-overlay');
   const list=document.getElementById('monitor-list');
@@ -5318,6 +5319,7 @@ function showMonitorPanel(){
     }
   }
   ov.classList.add('show');
+  }catch(e){console.error('Monitor panel error:',e);document.getElementById('monitor-overlay')?.classList.add('show');}
 }
 function monitorViewMsg(nick){
   const m=loadMonitor();
