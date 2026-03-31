@@ -745,6 +745,13 @@ async function e2eHandleEvent(ev) {
       break;
 
     case 'e2e_channel_list':
+      // Remove keys for channels no longer in the list
+      for (const ch of Object.keys(E2E.channelKeys)) {
+        if (!ev.channels.includes(ch)) {
+          delete E2E.channelKeys[ch];
+          updateE2EIndicator(ch);
+        }
+      }
       for (const ch of ev.channels) wsend({ type:'e2e_load_channel_key', channel:ch });
       break;
 
@@ -777,6 +784,7 @@ async function e2eHandleEvent(ev) {
         console.log('[E2E] Pre-initializing receiver session from relayed x3dh...');
         const sharedSecret = await x3dhRespond(ev.header);
         await ratchetInitRecv(nick, sharedSecret);
+        delete E2E._pendingIncomingX3DH[nick]; // consumed
         updateE2EIndicator(nick);
         console.log('[E2E] Receiver session pre-initialized for', nick);
         if (typeof sysMsg === 'function' && active) {

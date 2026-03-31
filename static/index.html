@@ -42,10 +42,11 @@ body {
   background:var(--bg0); color:var(--text);
   font-family:var(--mono); font-size:13px;
   overflow:hidden;
-  /* Prevent iOS text-size adjustment */
   -webkit-text-size-adjust:100%;
   text-size-adjust:100%;
 }
+/* Hide raw source text that iOS exposes when keyboard scrolls the page */
+body > style, body > script { display:none !important; }
 
 /* ── AUTH SCREEN ───────────────────────────────────────────────────────────── */
 #auth-screen {
@@ -147,7 +148,10 @@ body {
   /* M3: landscape safe area */
   padding-left:var(--sal);
   padding-right:var(--sar);
+  position:relative; z-index:1;
 }
+/* Prevent iOS keyboard from exposing content below #app */
+.upload-progress, #monitor-overlay, #help-overlay { z-index:1000; }
 
 /* ── SIDEBAR ───────────────────────────────────────────────────────────────── */
 #sidebar {
@@ -232,6 +236,7 @@ body {
   min-height:44px;
 }
 .chan-item:hover, .chan-item:active { background:var(--bg3); color:var(--text); }
+.chan-item.drag-over { border-top:2px solid var(--accent); margin-top:-2px; }
 .chan-item.active { background:var(--bg4); color:var(--accent); }
 .chan-unread-dot { display:none; }
 .chan-unread-badge { margin-left:auto; flex-shrink:0; background:var(--accent2); color:#000; font-size:10px; font-weight:700; min-width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; padding:0 5px; }
@@ -270,6 +275,20 @@ body {
 #mentions-panel.show { display:flex; flex-direction:column; }
 #mentions-panel-hdr { padding:10px 12px; font-size:12px; font-weight:600; color:var(--text); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
 #mentions-list { overflow-y:auto; flex:1; max-height:360px; }
+/* Search panel */
+#search-panel { display:none; position:absolute; top:36px; right:0; width:min(400px, 90vw); max-height:450px; background:var(--bg1); border:1px solid var(--border); border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.5); z-index:100; overflow:hidden; }
+#search-panel.show { display:flex; flex-direction:column; }
+#search-panel-hdr { padding:8px 10px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px; }
+#search-input { flex:1; background:var(--bg2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:14px; padding:8px 10px; outline:none; -webkit-appearance:none; }
+#search-input:focus { border-color:var(--accent); }
+#search-results { overflow-y:auto; flex:1; max-height:380px; -webkit-overflow-scrolling:touch; }
+.search-empty { color:var(--text3); padding:20px; text-align:center; font-size:12px; }
+.search-result { padding:8px 12px; border-bottom:1px solid var(--border); cursor:pointer; transition:background .1s; }
+.search-result:hover { background:var(--bg3); }
+.search-result:last-child { border-bottom:none; }
+.search-result-meta { font-size:10px; color:var(--text3); margin-bottom:2px; }
+.search-result-text { font-size:12px; color:var(--text); }
+.search-result-text mark { background:rgba(0,212,170,.3); color:var(--text); border-radius:2px; padding:0 1px; }
 .mention-item { padding:10px 12px; border-bottom:1px solid var(--border); cursor:pointer; transition:background .1s; min-height:44px; box-sizing:border-box; }
 .mention-item:hover { background:var(--bg3); }
 .mention-item:last-child { border-bottom:none; }
@@ -678,6 +697,19 @@ body {
   padding:8px 10px; cursor:pointer; font-size:13px; display:flex; align-items:center; gap:6px; min-height:44px;
 }
 .emoji-ac-item:hover,.emoji-ac-item.active { background:var(--bg3); }
+#slash-autocomplete {
+  position:absolute; bottom:100%; left:0; right:0; background:var(--bg1);
+  border:1px solid var(--border); border-radius:8px; max-height:280px; overflow-y:auto;
+  display:none; z-index:101; box-shadow:0 -4px 16px rgba(0,0,0,.4);
+  -webkit-overflow-scrolling:touch;
+}
+.slash-ac-item {
+  padding:8px 12px; cursor:pointer; display:flex; align-items:center; gap:8px;
+  min-height:40px; transition:background .1s;
+}
+.slash-ac-item:hover,.slash-ac-item.active { background:var(--bg3); }
+.slash-ac-cmd { color:var(--accent); font-weight:600; font-size:13px; min-width:90px; flex-shrink:0; }
+.slash-ac-desc { color:var(--text3); font-size:12px; }
 .upload-btn {
   background:none; border:none;
   color:var(--text3); cursor:pointer; font-size:16px;
@@ -1433,6 +1465,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       </span>
       <span id="e2e-lock" title="Enable channel encryption" style="font-size:14px;flex-shrink:0;cursor:pointer" onclick="showEncryptPanel()">🔓</span>
       <span id="mentions-btn" onclick="toggleMentionsPanel()" title="Mentions">@<span class="mentions-count" id="mentions-count"></span></span>
+      <span id="search-btn" onclick="toggleSearchPanel()" title="Search" style="cursor:pointer;font-size:14px;padding:4px;color:var(--text2);flex-shrink:0">🔍</span>
       <span id="topic-sep" style="display:none;color:var(--border);font-size:14px;flex-shrink:0">│</span>
       <span id="topic-inline" style="display:none;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3);font-size:11px;cursor:pointer" onclick="showTopicMenu(event)"></span>
       <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:4px;flex-shrink:0" onclick="showTopicMenu(event)" title="Topic options">⋮</button>
@@ -1449,6 +1482,13 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div id="mentions-panel">
         <div id="mentions-panel-hdr">Mentions <span style="cursor:pointer;font-size:10px;color:var(--text3)" onclick="clearMentions()">Clear</span></div>
         <div id="mentions-list"><div class="mention-empty">No mentions yet</div></div>
+      </div>
+      <div id="search-panel">
+        <div id="search-panel-hdr">
+          <input id="search-input" placeholder="Search messages…" autocomplete="off" spellcheck="false">
+          <span onclick="closeSearchPanel()" style="cursor:pointer;color:var(--text3);font-size:16px;padding:4px">✕</span>
+        </div>
+        <div id="search-results"><div class="search-empty">Type to search in current channel</div></div>
       </div>
     </div>
     <div id="chat-area" style="display:none"></div>
@@ -1499,7 +1539,7 @@ let networks=[], active=null;
 let buffers={}, unread=new Map(), queryBufs={};
 // Restore unread counts
 try{const ur=JSON.parse(localStorage.getItem('cryptirc_unread')||'{}');for(const[k,v] of Object.entries(ur))unread.set(k,v);}catch(e){}
-function saveUnread(){try{const o={};for(const[k,v] of unread)o[k]=v;localStorage.setItem('cryptirc_unread',JSON.stringify(o));}catch(e){}}
+function saveUnread(){try{const o={};for(const[k,v] of unread)o[k]=v;localStorage.setItem('cryptirc_unread',JSON.stringify(o));}catch(e){} savePrefsToServer();}
 // Persist open DM windows across refresh
 function saveQueryBufs(){
   try{
@@ -1508,7 +1548,7 @@ function saveQueryBufs(){
       obj[connId]=[...m.entries()];
     }
     localStorage.setItem('cryptirc_queries',JSON.stringify(obj));
-  }catch(e){}
+  }catch(e){} savePrefsToServer();
 }
 function loadQueryBufs(){
   try{
@@ -1524,7 +1564,7 @@ function loadLastActive(){
 loadQueryBufs();
 let inputHistory=[], historyIdx=-1;
 try{inputHistory=JSON.parse(localStorage.getItem('cryptirc_input_history')||'[]');}catch(e){}
-function saveInputHistory(){try{localStorage.setItem('cryptirc_input_history',JSON.stringify(inputHistory.slice(-100)));}catch(e){}}
+function saveInputHistory(){try{localStorage.setItem('cryptirc_input_history',JSON.stringify(inputHistory.slice(-100)));}catch(e){} savePrefsToServer();}
 let lagMap={};
 let pushSubscription=null;
 let swRegistration=null;
@@ -1736,7 +1776,7 @@ function connectWs() {
 // ─── Starfield (Ubiquiti-style) ───────────────────────────────────────────────
 let _starBurst=0,_txBytes=0,_rxBytes=0,_txCount=0,_rxCount=0;
 try{const sc=JSON.parse(localStorage.getItem('cryptirc_stats')||'{}');_txBytes=sc.tx||0;_rxBytes=sc.rx||0;_txCount=sc.tc||0;_rxCount=sc.rc||0;}catch(e){}
-function saveStats(){try{localStorage.setItem('cryptirc_stats',JSON.stringify({tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount}));}catch(e){}}
+function saveStats(){try{localStorage.setItem('cryptirc_stats',JSON.stringify({tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount}));}catch(e){} savePrefsToServer();}
 function flashLed(dir){
   _starBurst=dir==='tx'?1:2;
   setTimeout(()=>{_starBurst=0;},300);
@@ -1791,7 +1831,7 @@ function wsend(obj){if(ws&&ws.readyState===1){const s=JSON.stringify(obj);_txByt
 function handleEvent(ev) {
   switch(ev.type){
     case 'auth_required': wsend({type:'auth',token:sessionToken||''}); break;
-    case 'auth_ok': currentUser=ev.username; wsend({type:'load_appearance'}); break;
+    case 'auth_ok': currentUser=ev.username; wsend({type:'load_appearance'}); wsend({type:'load_preferences'}); break;
     case 'auth_failed': sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; break;
     case 'vault_unlocked': document.getElementById('vault-overlay').classList.remove('show'); renderSidebar(); if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key); break;
     case 'vault_error': document.getElementById('vault-err').textContent=ev.message; break;
@@ -2020,6 +2060,9 @@ function handleEvent(ev) {
         applyThemeCSS(cfg);
       }catch(e){}
       break;
+    case 'preferences':
+      try{ restorePreferences(JSON.parse(ev.prefs)); }catch(e){}
+      break;
     case 'account_deleted':
       alert('Your account has been deleted.');
       localStorage.clear();
@@ -2061,6 +2104,7 @@ function clearBufHistory(connId,target){
 }
 function prependLogs(conn_id,target,lines){
   const buf=getBuf(conn_id,target);
+  const wasEmpty=buf.length===0;
   const newMsgs=lines.map(l=>({ts:l.ts,from:l.from,text:l.text,kind:l.kind}));
   // Deduplicate: only add messages not already in buffer
   const existingTs=new Set(buf.map(m=>m.ts+'|'+m.from));
@@ -2070,12 +2114,14 @@ function prependLogs(conn_id,target,lines){
     buf.sort((a,b)=>a.ts-b.ts);
   }
   if(isActive(conn_id,target)){
-    // Preserve scroll position when prepending
     const area=document.getElementById('chat-area');
     const oldHeight=area?.scrollHeight||0;
     renderChat();
-    if(area&&unique.length>0){
-      // Keep scroll position relative to existing content
+    if(wasEmpty){
+      // Initial load — scroll to bottom to show latest messages
+      scrollForce();
+    } else if(area&&unique.length>0){
+      // Loading older messages — preserve scroll position
       const newHeight=area.scrollHeight;
       area.scrollTop=newHeight-oldHeight;
     }
@@ -2099,18 +2145,33 @@ function renderSidebar(){
         <button class="net-btn net-kebab" onclick="event.stopPropagation();toggleNetMenu('${id}','${esc(net.config.label||net.config.server)}')" title="Options">⋮</button>
       </span>
     </div>`;
-    for(const ch of (net.channels||[])){
+    // Sort channels by saved order
+    const order=net.config.channel_order||[];
+    const sorted=[...(net.channels||[])].sort((a,b)=>{
+      const ai=order.indexOf(a.name),bi=order.indexOf(b.name);
+      if(ai===-1&&bi===-1) return 0;
+      if(ai===-1) return 1;
+      if(bi===-1) return -1;
+      return ai-bi;
+    });
+    const chanContainer=document.createElement('div');
+    chanContainer.className='chan-list';
+    chanContainer.dataset.connId=id;
+    for(const ch of sorted){
       const k=bk(id,ch.name),isA=isActive(id,ch.name),uc=unread.get(k)||0;
       const fav=isFavorite(id,ch.name);
       const ci=document.createElement('div');
       ci.className=`chan-item${isA?' active':''}`;
       ci.dataset.target=ch.name;
+      ci.dataset.connId=id;
+      ci.draggable=true;
       ci.style.position='relative';
       const chMuted=isMuted(id+'/'+ch.name)||isMuted('net:'+id);
       ci.innerHTML=`${esc(ch.name)}<span class="chan-right">${uc&&!chMuted?`<span class="chan-unread-badge">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab" onclick="event.stopPropagation();toggleChanMenu(this,'${id}','${esc(ch.name)}','channel')">⋮</span></span>`;
       ci.onclick=()=>{setActive(id,ch.name);closeSidebar();};
-      g.appendChild(ci);
+      chanContainer.appendChild(ci);
     }
+    g.appendChild(chanContainer);
     // Render query/PM buffers (NickServ, private messages, etc.)
     if(queryBufs[id]){
       for(const [lc, display] of queryBufs[id]){
@@ -2177,7 +2238,7 @@ function setActive(conn_id,target){
   active={conn_id,target};
   unread.delete(bk(conn_id,target)); saveUnread();
   // Persist active view and open queries
-  try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){}
+  try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){} savePrefsToServer();
   saveQueryBufs();
   renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay();
   if(typeof updateE2EIndicator==='function') updateE2EIndicator(target);
@@ -3432,9 +3493,160 @@ document.addEventListener('click',e=>{
   });
 })();
 
+// ─── Slash command autocomplete ───────────────────────────────────────────────
+(function(){
+  const inp=document.getElementById('msg-input');
+  if(!inp)return;
+  const CMDS=[
+    {cmd:'join',desc:'Join a channel',usage:'/join #channel'},
+    {cmd:'part',desc:'Leave channel',usage:'/part [reason]'},
+    {cmd:'msg',desc:'Send private message',usage:'/msg nick text'},
+    {cmd:'me',desc:'Send action',usage:'/me does something'},
+    {cmd:'nick',desc:'Change nickname',usage:'/nick newnick'},
+    {cmd:'topic',desc:'View/set topic',usage:'/topic [text]'},
+    {cmd:'whois',desc:'Look up user',usage:'/whois nick'},
+    {cmd:'query',desc:'Open DM window',usage:'/query nick'},
+    {cmd:'kick',desc:'Kick user',usage:'/kick nick [reason]'},
+    {cmd:'ban',desc:'Ban user',usage:'/ban nick'},
+    {cmd:'kickban',desc:'Kick and ban',usage:'/kickban nick [reason]'},
+    {cmd:'unban',desc:'Remove ban',usage:'/unban mask'},
+    {cmd:'mode',desc:'Set channel mode',usage:'/mode +o nick'},
+    {cmd:'op',desc:'Give operator',usage:'/op nick'},
+    {cmd:'deop',desc:'Remove operator',usage:'/deop nick'},
+    {cmd:'voice',desc:'Give voice',usage:'/voice nick'},
+    {cmd:'devoice',desc:'Remove voice',usage:'/devoice nick'},
+    {cmd:'invite',desc:'Invite to channel',usage:'/invite nick'},
+    {cmd:'away',desc:'Set away status',usage:'/away [message]'},
+    {cmd:'back',desc:'Remove away',usage:'/back'},
+    {cmd:'notice',desc:'Send notice',usage:'/notice nick text'},
+    {cmd:'ignore',desc:'Ignore user',usage:'/ignore nick'},
+    {cmd:'unignore',desc:'Remove ignore',usage:'/unignore nick'},
+    {cmd:'clear',desc:'Clear chat',usage:'/clear'},
+    {cmd:'close',desc:'Close DM/channel',usage:'/close'},
+    {cmd:'encrypt',desc:'Toggle E2E encryption',usage:'/encrypt on|off'},
+    {cmd:'monitor',desc:'Monitor a nick',usage:'/monitor nick'},
+    {cmd:'unmonitor',desc:'Stop monitoring',usage:'/unmonitor nick'},
+    {cmd:'slap',desc:'Slap with a trout',usage:'/slap nick'},
+    {cmd:'say',desc:'Send raw text',usage:'/say text'},
+    {cmd:'list',desc:'List channels',usage:'/list'},
+    {cmd:'names',desc:'Refresh nick list',usage:'/names'},
+    {cmd:'who',desc:'List users',usage:'/who #channel'},
+    {cmd:'cycle',desc:'Part and rejoin',usage:'/cycle'},
+    {cmd:'ns',desc:'NickServ command',usage:'/ns identify pass'},
+    {cmd:'cs',desc:'ChanServ command',usage:'/cs op #chan nick'},
+    {cmd:'identify',desc:'Identify to NickServ',usage:'/identify password'},
+    {cmd:'quote',desc:'Send raw IRC',usage:'/quote COMMAND'},
+    {cmd:'help',desc:'Show help',usage:'/help [command]'},
+    {cmd:'ping',desc:'Ping a user',usage:'/ping nick'},
+    {cmd:'version',desc:'CTCP version',usage:'/version nick'},
+    {cmd:'banlist',desc:'View ban list',usage:'/banlist'},
+    {cmd:'unbanall',desc:'Remove all bans',usage:'/unbanall'},
+    {cmd:'opall',desc:'Op everyone',usage:'/opall'},
+    {cmd:'voiceall',desc:'Voice everyone',usage:'/voiceall'},
+    {cmd:'kickall',desc:'Kick everyone',usage:'/kickall'},
+    {cmd:'halfop',desc:'Give half-op',usage:'/halfop nick'},
+    {cmd:'owner',desc:'Give owner',usage:'/owner nick'},
+    {cmd:'tban',desc:'Temporary ban',usage:'/tban nick duration'},
+  ];
+  let slashEl=document.createElement('div');
+  slashEl.id='slash-autocomplete';
+  inp.closest('#input-inner').style.position='relative';
+  inp.closest('#input-wrap').appendChild(slashEl);
+  let slashIdx=-1;
+
+  function updateSlash(){
+    const v=inp.value;
+    if(!v.startsWith('/')||v.includes(' ')){slashEl.style.display='none';slashIdx=-1;return;}
+    const q=v.slice(1).toLowerCase();
+    const matches=q?CMDS.filter(c=>c.cmd.startsWith(q)):CMDS;
+    const show=matches.slice(0,12);
+    if(!show.length){slashEl.style.display='none';slashIdx=-1;return;}
+    slashEl.style.display='block'; slashIdx=0;
+    slashEl.innerHTML=show.map((c,i)=>`<div class="slash-ac-item${i===0?' active':''}" data-i="${i}"><span class="slash-ac-cmd">/${c.cmd}</span><span class="slash-ac-desc">${c.desc}</span></div>`).join('');
+    slashEl.querySelectorAll('.slash-ac-item').forEach(el=>{
+      el.onclick=()=>{completeSlash(show[+el.dataset.i]);};
+    });
+  }
+  function completeSlash(c){
+    inp.value='/'+c.cmd+' ';
+    inp.focus();
+    slashEl.style.display='none';slashIdx=-1;
+  }
+  inp.addEventListener('input',updateSlash);
+  inp.addEventListener('keydown',e=>{
+    if(slashEl.style.display==='none'||slashEl.style.display==='')return;
+    const items=slashEl.querySelectorAll('.slash-ac-item');
+    if(!items.length)return;
+    if(e.key==='ArrowDown'){e.preventDefault();slashIdx=Math.min(slashIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
+    else if(e.key==='ArrowUp'){e.preventDefault();slashIdx=Math.max(slashIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
+    else if(e.key==='Tab'){
+      e.preventDefault();
+      const v=inp.value;
+      const q=v.slice(1).toLowerCase();
+      const matches=q?CMDS.filter(c=>c.cmd.startsWith(q)):CMDS;
+      const show=matches.slice(0,12);
+      if(show[slashIdx])completeSlash(show[slashIdx]);
+    }
+    else if(e.key==='Escape'){slashEl.style.display='none';slashIdx=-1;}
+  });
+  // Close on click outside
+  document.addEventListener('click',e=>{if(!e.target.closest('#slash-autocomplete')&&!e.target.closest('#msg-input'))slashEl.style.display='none';});
+})();
+
+// ─── Server-side preferences sync ─────────────────────────────────────────────
+let _prefsSaveTimer=null;
+function gatherPreferences(){
+  return {
+    favorites: loadFavorites(),
+    muted: loadMuted(),
+    monitor: loadMonitor(),
+    monitorNotifs: localStorage.getItem('cryptirc_monitor_notifs')||'on',
+    monitorPush: localStorage.getItem('cryptirc_monitor_push')||'on',
+    unread: (()=>{const o={};for(const[k,v] of unread)o[k]=v;return o;})(),
+    mentions: mentionsList.slice(0,100),
+    inputHistory: inputHistory.slice(-100),
+    queries: (()=>{const o={};for(const[c,m] of Object.entries(queryBufs))o[c]=[...m.entries()];return o;})(),
+    lastActive: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_active'));}catch{return null;}})(),
+    stats: {tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount},
+    ignoreList: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_ignore')||'[]');}catch{return[];}})(),
+    highlightWords: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}})(),
+    favsOnly: localStorage.getItem('cryptirc_favs_only')==='true',
+  };
+}
+function savePrefsToServer(){
+  clearTimeout(_prefsSaveTimer);
+  _prefsSaveTimer=setTimeout(()=>{
+    try{
+      const prefs=JSON.stringify(gatherPreferences());
+      wsend({type:'save_preferences',prefs});
+    }catch(e){}
+  },2000);
+}
+function restorePreferences(p){
+  if(!p)return;
+  try{
+    if(p.favorites) localStorage.setItem('cryptirc_favs',JSON.stringify(p.favorites));
+    if(p.muted) localStorage.setItem('cryptirc_muted',JSON.stringify(p.muted));
+    if(p.monitor) localStorage.setItem('cryptirc_monitor',JSON.stringify(p.monitor));
+    if(p.monitorNotifs) localStorage.setItem('cryptirc_monitor_notifs',p.monitorNotifs);
+    if(p.monitorPush) localStorage.setItem('cryptirc_monitor_push',p.monitorPush);
+    if(p.unread){unread.clear();for(const[k,v] of Object.entries(p.unread))unread.set(k,+v);}
+    if(p.mentions) mentionsList=p.mentions;
+    if(p.inputHistory) inputHistory=p.inputHistory;
+    if(p.queries){for(const[c,entries] of Object.entries(p.queries))queryBufs[c]=new Map(entries);}
+    if(p.lastActive) localStorage.setItem('cryptirc_active',JSON.stringify(p.lastActive));
+    if(p.stats){_txBytes=p.stats.tx||0;_rxBytes=p.stats.rx||0;_txCount=p.stats.tc||0;_rxCount=p.stats.rc||0;}
+    if(p.ignoreList) localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));
+    if(p.highlightWords) localStorage.setItem('cryptirc_highlight_words',JSON.stringify(p.highlightWords));
+    if(p.favsOnly!=null) localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
+    // Re-apply UI state
+    renderSidebar(); updateMentionsBadge(); applyFavsOnly();
+  }catch(e){console.error('Restore prefs failed:',e);}
+}
+
 // ─── Favorites ────────────────────────────────────────────────────────────────
 function loadFavorites(){try{return JSON.parse(localStorage.getItem('cryptirc_favs')||'[]');}catch{return[];}}
-function saveFavorites(favs){try{localStorage.setItem('cryptirc_favs',JSON.stringify(favs));}catch(e){}}
+function saveFavorites(favs){try{localStorage.setItem('cryptirc_favs',JSON.stringify(favs));}catch(e){} savePrefsToServer();}
 function toggleFavorite(conn_id,target){
   let favs=loadFavorites();
   const key=`${conn_id}/${target}`;
@@ -3463,6 +3675,110 @@ function closeQuery(conn_id,lc){
   if(active&&active.conn_id===conn_id&&active.target.toLowerCase()===lc)setActive(conn_id,'status');
   renderSidebar();
 }
+// ─── Channel drag-and-drop reorder ────────────────────────────────────────────
+(function(){
+  let dragEl=null;
+  document.addEventListener('dragstart',e=>{
+    const ci=e.target.closest('.chan-item[draggable]');
+    if(!ci)return;
+    dragEl=ci;
+    ci.style.opacity='.4';
+    e.dataTransfer.effectAllowed='move';
+    e.dataTransfer.setData('text/plain',ci.dataset.target);
+  });
+  document.addEventListener('dragend',e=>{
+    if(dragEl){dragEl.style.opacity='';dragEl=null;}
+    document.querySelectorAll('.chan-item.drag-over').forEach(el=>el.classList.remove('drag-over'));
+  });
+  document.addEventListener('dragover',e=>{
+    const ci=e.target.closest('.chan-item[draggable]');
+    if(!ci||!dragEl||ci===dragEl)return;
+    if(ci.dataset.connId!==dragEl.dataset.connId)return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect='move';
+    document.querySelectorAll('.chan-item.drag-over').forEach(el=>el.classList.remove('drag-over'));
+    ci.classList.add('drag-over');
+  });
+  document.addEventListener('drop',e=>{
+    const ci=e.target.closest('.chan-item[draggable]');
+    if(!ci||!dragEl||ci===dragEl)return;
+    if(ci.dataset.connId!==dragEl.dataset.connId)return;
+    e.preventDefault();
+    const container=ci.closest('.chan-list');
+    if(!container)return;
+    const items=[...container.querySelectorAll('.chan-item[draggable]')];
+    const fromIdx=items.indexOf(dragEl);
+    const toIdx=items.indexOf(ci);
+    if(fromIdx<toIdx) ci.after(dragEl);
+    else ci.before(dragEl);
+    // Save new order
+    const newItems=[...container.querySelectorAll('.chan-item[draggable]')];
+    const order=newItems.map(el=>el.dataset.target);
+    const connId=dragEl.dataset.connId;
+    wsend({type:'save_channel_order',conn_id:connId,order});
+    // Update local state
+    const net=networks.find(n=>n.config.id===connId);
+    if(net) net.config.channel_order=order;
+    ci.classList.remove('drag-over');
+  });
+  // Touch drag support for mobile
+  let touchDragEl=null,touchClone=null,touchStartY=0;
+  document.addEventListener('touchstart',e=>{
+    const ci=e.target.closest('.chan-item[draggable]');
+    if(!ci||e.target.closest('.chan-kebab'))return;
+    touchDragEl=ci;
+    touchStartY=e.touches[0].clientY;
+  },{passive:true});
+  document.addEventListener('touchmove',e=>{
+    if(!touchDragEl)return;
+    const dy=Math.abs(e.touches[0].clientY-touchStartY);
+    if(dy<10)return;
+    if(!touchClone){
+      touchClone=touchDragEl.cloneNode(true);
+      touchClone.style.cssText='position:fixed;z-index:9999;opacity:.7;pointer-events:none;width:'+touchDragEl.offsetWidth+'px;background:var(--bg3);border-radius:4px;';
+      document.body.appendChild(touchClone);
+      touchDragEl.style.opacity='.3';
+    }
+    touchClone.style.left=touchDragEl.getBoundingClientRect().left+'px';
+    touchClone.style.top=(e.touches[0].clientY-20)+'px';
+    // Find element under touch
+    touchClone.style.display='none';
+    const under=document.elementFromPoint(e.touches[0].clientX,e.touches[0].clientY);
+    touchClone.style.display='';
+    document.querySelectorAll('.chan-item.drag-over').forEach(el=>el.classList.remove('drag-over'));
+    const target=under?.closest('.chan-item[draggable]');
+    if(target&&target!==touchDragEl&&target.dataset.connId===touchDragEl.dataset.connId){
+      target.classList.add('drag-over');
+    }
+  },{passive:true});
+  document.addEventListener('touchend',e=>{
+    if(!touchDragEl)return;
+    if(touchClone){
+      touchClone.remove();touchClone=null;
+      const overEl=document.querySelector('.chan-item.drag-over');
+      if(overEl&&overEl!==touchDragEl&&overEl.dataset.connId===touchDragEl.dataset.connId){
+        const container=overEl.closest('.chan-list');
+        if(container){
+          const items=[...container.querySelectorAll('.chan-item[draggable]')];
+          const fromIdx=items.indexOf(touchDragEl);
+          const toIdx=items.indexOf(overEl);
+          if(fromIdx<toIdx) overEl.after(touchDragEl);
+          else overEl.before(touchDragEl);
+          const newItems=[...container.querySelectorAll('.chan-item[draggable]')];
+          const order=newItems.map(el=>el.dataset.target);
+          const connId=touchDragEl.dataset.connId;
+          wsend({type:'save_channel_order',conn_id:connId,order});
+          const net=networks.find(n=>n.config.id===connId);
+          if(net) net.config.channel_order=order;
+        }
+      }
+      overEl?.classList.remove('drag-over');
+    }
+    touchDragEl.style.opacity='';
+    touchDragEl=null;
+  },{passive:true});
+})();
+
 function renderFavorites(){
   const el=document.getElementById('favorites-list');
   const favs=loadFavorites();
@@ -3485,6 +3801,7 @@ function renderFavorites(){
 function toggleFavsOnly(){
   const on=localStorage.getItem('cryptirc_favs_only')==='true';
   localStorage.setItem('cryptirc_favs_only',on?'false':'true');
+  savePrefsToServer();
   applyFavsOnly();
   renderSidebar();
 }
@@ -3553,7 +3870,7 @@ function filterChanList(){
 // ─── Remove network ───────────────────────────────────────────────────────────
 // ─── Mute system ──────────────────────────────────────────────────────────────
 function loadMuted(){try{return JSON.parse(localStorage.getItem('cryptirc_muted')||'{}');}catch{return {};}}
-function saveMuted(m){try{localStorage.setItem('cryptirc_muted',JSON.stringify(m));}catch(e){}}
+function saveMuted(m){try{localStorage.setItem('cryptirc_muted',JSON.stringify(m));}catch(e){} savePrefsToServer();}
 function isMuted(key){return !!loadMuted()[key];}
 function toggleMute(key){const m=loadMuted();if(m[key])delete m[key];else m[key]=true;saveMuted(m);renderSidebar();}
 
@@ -3826,8 +4143,7 @@ function saveHighlightWords(){
   const raw=document.getElementById('notif-highlight-words').value;
   const words=raw.split(',').map(w=>w.trim().toLowerCase()).filter(Boolean);
   localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));
-  // Also save to server with appearance
-  const cfg=loadAppearance();cfg._highlightWords=words;saveAppearance(cfg);
+  savePrefsToServer();
 }
 function closeNotifModal() { document.getElementById('notif-modal').classList.remove('open'); }
 
@@ -4084,10 +4400,12 @@ const banListAccum    = {}; // "conn_id/channel" → [mask, ...]
 function addIgnore(nick) {
   ignoreList.add(nick.toLowerCase());
   localStorage.setItem('cryptirc_ignore', JSON.stringify([...ignoreList]));
+  savePrefsToServer();
 }
 function removeIgnore(nick) {
   ignoreList.delete(nick.toLowerCase());
   localStorage.setItem('cryptirc_ignore', JSON.stringify([...ignoreList]));
+  savePrefsToServer();
 }
 function isIgnored(nick) {
   return ignoreList.has(nick.toLowerCase());
@@ -4276,7 +4594,7 @@ document.addEventListener('DOMContentLoaded',()=>{document.getElementById('chat-
 // ─── Mentions system ──────────────────────────────────────────────────────────
 let mentionsList=[];
 try{mentionsList=JSON.parse(localStorage.getItem('cryptirc_mentions')||'[]');}catch(e){}
-function saveMentions(){try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));}catch(e){}}
+function saveMentions(){try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));}catch(e){} savePrefsToServer();}
 function getHighlightWords(){try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}}
 function checkMention(conn_id,target,from,text,ts){
   if(!currentUser)return false;
@@ -4297,6 +4615,70 @@ function checkMention(conn_id,target,from,text,ts){
   return mentioned;
 }
 function updateMentionsBadge(){const el=document.getElementById('mentions-count');if(!el)return;if(mentionsList.length>0){el.style.display='';el.textContent=mentionsList.length>99?'99+':mentionsList.length;}else{el.style.display='none';}}
+// ─── Search ───────────────────────────────────────────────────────────────────
+function toggleSearchPanel(){
+  const p=document.getElementById('search-panel');
+  // Close mentions if open
+  document.getElementById('mentions-panel').classList.remove('show');
+  p.classList.toggle('show');
+  if(p.classList.contains('show')){
+    const inp=document.getElementById('search-input');
+    inp.value='';
+    inp.focus();
+    document.getElementById('search-results').innerHTML='<div class="search-empty">Type to search in current channel</div>';
+  }
+}
+function closeSearchPanel(){document.getElementById('search-panel').classList.remove('show');}
+
+function doSearch(query){
+  const el=document.getElementById('search-results');
+  if(!query||query.length<2){el.innerHTML='<div class="search-empty">Type at least 2 characters</div>';return;}
+  if(!active){el.innerHTML='<div class="search-empty">No channel selected</div>';return;}
+  const buf=getBuf(active.conn_id,active.target);
+  const q=query.toLowerCase();
+  const results=buf.filter(m=>m.text&&m.text.toLowerCase().includes(q)&&m.from!=='*').reverse().slice(0,50);
+  if(!results.length){el.innerHTML='<div class="search-empty">No results found</div>';return;}
+  el.innerHTML='';
+  for(const m of results){
+    const d=document.createElement('div');d.className='search-result';
+    const time=new Date(m.ts*1000).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+    const highlighted=esc(m.text).replace(new RegExp('('+esc(query).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark>$1</mark>');
+    d.innerHTML=`<div class="search-result-meta">${esc(m.from)} · ${time}</div><div class="search-result-text">${highlighted}</div>`;
+    d.onclick=()=>{
+      closeSearchPanel();
+      // Find and flash the message in chat
+      const rows=document.querySelectorAll('.msg-row');
+      for(const r of rows){
+        if(r.dataset.ts===String(m.ts)){
+          r.scrollIntoView({behavior:'smooth',block:'center'});
+          r.classList.add('flash');
+          setTimeout(()=>r.classList.remove('flash'),3000);
+          break;
+        }
+      }
+    };
+    el.appendChild(d);
+  }
+}
+
+// Search input listener
+document.addEventListener('DOMContentLoaded',()=>{
+  const sinp=document.getElementById('search-input');
+  if(sinp){
+    let searchTimer;
+    sinp.addEventListener('input',()=>{
+      clearTimeout(searchTimer);
+      searchTimer=setTimeout(()=>doSearch(sinp.value),200);
+    });
+    sinp.addEventListener('keydown',e=>{if(e.key==='Escape')closeSearchPanel();});
+  }
+});
+// Close search on outside click
+document.addEventListener('click',e=>{
+  if(!e.target.closest('#search-panel')&&!e.target.closest('#search-btn'))
+    document.getElementById('search-panel')?.classList.remove('show');
+});
+
 function toggleMentionsPanel(){
   const p=document.getElementById('mentions-panel');
   p.classList.toggle('show');
@@ -4378,7 +4760,7 @@ function getNick(conn_id){return networks.find(n=>n.config.id===conn_id)?.nick||
 
 // ─── Nick Monitor ─────────────────────────────────────────────────────────────
 function loadMonitor(){try{return JSON.parse(localStorage.getItem('cryptirc_monitor')||'{}');}catch{return {};}}
-function saveMonitor(m){try{localStorage.setItem('cryptirc_monitor',JSON.stringify(m));}catch(e){}}
+function saveMonitor(m){try{localStorage.setItem('cryptirc_monitor',JSON.stringify(m));}catch(e){} savePrefsToServer();}
 function monitorAdd(nick){
   const m=loadMonitor();
   const k=nick.toLowerCase();
@@ -4434,6 +4816,7 @@ function toggleMonitorNotifs(){
   const btn=document.getElementById('monitor-notif-toggle');
   const on=btn.classList.toggle('on');
   try{localStorage.setItem('cryptirc_monitor_notifs',on?'on':'off');}catch(e){}
+  savePrefsToServer();
 }
 function isMonitorPushOn(){
   try{return localStorage.getItem('cryptirc_monitor_push')!=='off';}catch{return true;}
@@ -4442,6 +4825,7 @@ function toggleMonitorPush(){
   const btn=document.getElementById('monitor-push-toggle');
   const on=btn.classList.toggle('on');
   try{localStorage.setItem('cryptirc_monitor_push',on?'on':'off');}catch(e){}
+  savePrefsToServer();
 }
 function monitorAlert(nick,status){
   if(!isMonitorNotifsOn())return;
@@ -4653,5 +5037,7 @@ function timeAgo(ts){
 .monitor-remove { color:#f87171; border-color:rgba(248,113,113,.3); }
 .monitor-remove:hover { background:rgba(248,113,113,.15); color:#f87171; }
 </style>
+<!-- Cover div prevents iOS keyboard from exposing raw source below the app -->
+<div style="position:fixed;inset:0;background:var(--bg0);z-index:-1;pointer-events:none"></div>
 </body>
 </html>

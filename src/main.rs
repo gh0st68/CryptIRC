@@ -142,10 +142,14 @@ pub enum ClientMessage {
     // Appearance
     SaveAppearance    { settings: String },
     LoadAppearance    {},
+    SavePreferences   { prefs: String },
+    LoadPreferences   {},
     // Account
     DeleteAccount     { password: String },
     // Monitor push
     MonitorPush       { nick: String, status: String },
+    // Channel order
+    SaveChannelOrder  { conn_id: String, order: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -203,6 +207,7 @@ pub enum ServerEvent {
     #[serde(rename = "e2e_x3dh_header")]
     E2EX3DHHeader    { from_nick: String, header: serde_json::Value },
     Appearance       { settings: String },
+    Preferences      { prefs: String },
     AccountDeleted   {},
     Error            { message: String },
 }
@@ -233,6 +238,8 @@ pub struct NetworkConfig {
     pub oper_login:            Option<String>,
     #[serde(default)]
     pub oper_pass:             Option<String>,
+    #[serde(default)]
+    pub channel_order:         Vec<String>,
 }
 
 impl Default for NetworkConfig {
@@ -246,6 +253,7 @@ impl Default for NetworkConfig {
             sasl_external: false, client_cert_id: None,
             auto_join: vec![], auto_reconnect: true,
             oper_login: None, oper_pass: None,
+            channel_order: vec![],
         }
     }
 }
@@ -1131,7 +1139,12 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '#' || *c == '&')
                 .take(64).collect::<String>();
             match state.e2e_store.store_channel_key(username, &safe_chan, &blob).await {
-                Ok(_)  => {}
+                Ok(_)  => {
+                    // Notify ALL sessions so other devices load the new key
+                    state.send_to_user(username, ServerEvent::E2EChannelKey {
+                        channel: safe_chan.clone(), blob,
+                    });
+                }
                 Err(e) => send(ServerEvent::Error { message: format!("E2E store channel key: {}", e) }),
             }
         }
@@ -1149,9 +1162,9 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '#' || *c == '&')
                 .take(64).collect::<String>();
             let _ = state.e2e_store.delete_channel_key(username, &safe_chan).await;
-            send(ServerEvent::State {
-                networks: state.user_network_states(username).await,
-                vault_unlocked: state.crypto.is_unlocked().await,
+            // Notify ALL sessions of this user so other devices update the lock icon
+            state.send_to_user(username, ServerEvent::E2EChannelList {
+                channels: state.e2e_store.list_channel_keys(username).await,
             });
         }
         ClientMessage::E2EListChannelKeys {} => {
@@ -1236,10 +1249,37 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 send(ServerEvent::Appearance { settings: data });
             }
         }
+        ClientMessage::SavePreferences { prefs } => {
+            if prefs.len() <= 65536 && serde_json::from_str::<serde_json::Value>(&prefs).is_ok() {
+                let dir = std::path::PathBuf::from(&state.data_dir)
+                    .join("users").join(username);
+                let _ = tokio::fs::create_dir_all(&dir).await;
+                let _ = tokio::fs::write(dir.join("preferences.json"), &prefs).await;
+            }
+        }
+        ClientMessage::LoadPreferences {} => {
+            let path = std::path::PathBuf::from(&state.data_dir)
+                .join("users").join(username).join("preferences.json");
+            if let Ok(data) = tokio::fs::read_to_string(&path).await {
+                send(ServerEvent::Preferences { prefs: data });
+            }
+        }
         ClientMessage::MonitorPush { nick, status } => {
             let safe_nick: String = nick.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '[' || *c == ']' || *c == '\\' || *c == '`' || *c == '^').take(32).collect();
             let safe_status = if status == "online" { "online" } else { "offline" };
             state.notifier.send_monitor_notification(username, &safe_nick, safe_status).await;
+        }
+        ClientMessage::SaveChannelOrder { conn_id, order } => {
+            if !state.owns_network(username, &conn_id).await { return; }
+            if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
+                cfg.channel_order = order;
+                let _ = state.save_network(&cfg, username).await;
+                // Broadcast updated state to all sessions
+                state.send_to_user(username, ServerEvent::State {
+                    networks: state.user_network_states(username).await,
+                    vault_unlocked: state.crypto.is_unlocked().await,
+                });
+            }
         }
         ClientMessage::DeleteAccount { password } => {
             // Verify password before deleting
