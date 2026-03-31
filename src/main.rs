@@ -166,7 +166,25 @@ pub enum ServerEvent {
     VaultUnlocked    { e2e_enc_key: String },
     VaultError       { message: String },
     IrcMessage       { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind },
+    /// Echo of user's own sent message — for multi-device sync
+    IrcEcho          { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind },
     IrcJoin          { conn_id: String, nick: String,  channel: String, ts: i64 },
+    /// IRCv3 extended-join: includes account and realname
+    IrcJoinEx        { conn_id: String, nick: String,  channel: String, account: String, realname: String, ts: i64 },
+    /// IRCv3 away-notify
+    IrcAway          { conn_id: String, nick: String,  away: bool, message: String, ts: i64 },
+    /// IRCv3 account-notify
+    IrcAccount       { conn_id: String, nick: String,  account: String, ts: i64 },
+    /// IRCv3 invite-notify
+    IrcInvite        { conn_id: String, from: String,  target: String, channel: String, ts: i64 },
+    /// IRCv3 setname
+    IrcSetname       { conn_id: String, nick: String,  realname: String, ts: i64 },
+    /// IRCv3 typing indicator
+    IrcTyping        { conn_id: String, nick: String,  target: String, state: String },
+    /// IRCv3 MONITOR online
+    IrcMonitorOnline { conn_id: String, nick: String,  ts: i64 },
+    /// IRCv3 MONITOR offline
+    IrcMonitorOffline{ conn_id: String, nick: String,  ts: i64 },
     IrcPart          { conn_id: String, nick: String,  channel: String, reason: String, ts: i64 },
     IrcQuit          { conn_id: String, nick: String,  reason: String,  ts: i64 },
     IrcNick          { conn_id: String, old: String,   new: String,     ts: i64 },
@@ -1045,10 +1063,55 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             if let Some(conn) = state.connections.get(&conn_id) {
                 let safe = strip_crlf(&raw);
                 if safe.is_empty() { return; }
+                // Skip TAGMSG from logging (typing indicators etc)
+                let is_tagmsg = safe.contains("TAGMSG");
                 info!("[{}] SEND ({}B): {}", conn_id, safe.len(), &safe[..safe.len().min(80)]);
                 let mut c = conn.lock().await;
+                let nick = c.nick.clone();
                 let _ = c.send_raw(&format!("{}\r\n", safe)).await;
                 drop(c);
+                // Broadcast PRIVMSG/NOTICE to all user sessions so other devices see them
+                if !is_tagmsg {
+                    let upper = safe.to_uppercase();
+                    let is_privmsg = upper.starts_with("PRIVMSG ");
+                    let is_notice_out = upper.starts_with("NOTICE ");
+                    let is_action = safe.contains("\x01ACTION ");
+                    if is_privmsg || is_notice_out {
+                        let parts: Vec<&str> = safe.splitn(3, ' ').collect();
+                        if parts.len() >= 3 {
+                            let target = parts[1].to_string();
+                            let mut text = parts[2].to_string();
+                            if text.starts_with(':') { text = text[1..].to_string(); }
+                            let ts = chrono::Utc::now().timestamp();
+                            let (kind, clean) = if is_action && text.starts_with("\x01ACTION ") && text.ends_with('\x01') {
+                                (MessageKind::Action, text[8..text.len()-1].to_string())
+                            } else if is_notice_out {
+                                (MessageKind::Notice, text)
+                            } else {
+                                (MessageKind::Privmsg, text)
+                            };
+                            let display_target = if target.starts_with('#') || target.starts_with('&') {
+                                target.clone()
+                            } else {
+                                target.clone()  // PM: target is the recipient nick
+                            };
+                            // Log our own sent messages so they appear in history
+                            state.logger.append(&conn_id, &display_target, ts, &nick, &clean, match &kind {
+                                MessageKind::Privmsg => "privmsg",
+                                MessageKind::Notice => "notice",
+                                MessageKind::Action => "action",
+                            }).await;
+                            state.send_to_user(username, ServerEvent::IrcEcho {
+                                conn_id: conn_id.clone(),
+                                from: nick.clone(),
+                                target: display_target,
+                                text: clean,
+                                ts,
+                                kind,
+                            });
+                        }
+                    }
+                }
                 // Persist JOIN/PART in auto_join
                 let upper = safe.to_uppercase();
                 if upper.starts_with("JOIN ") || upper.starts_with("PART ") {

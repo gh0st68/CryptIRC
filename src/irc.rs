@@ -247,20 +247,23 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
 
     let use_sasl        = sasl_method.is_some();
     let mut sasl_state  = SaslState::Idle;
+    // IRCv3 state
+    let mut available_caps: Vec<String> = Vec::new();
+    let mut echo_message_enabled = false;
     info!("[{}] SASL config: method={:?} use_sasl={}", conn_id, sasl_method.as_ref().map(|m| match m { SaslMethod::External => "EXTERNAL", SaslMethod::Plain{..} => "PLAIN" }), use_sasl);
     let mut last_pong   = Instant::now();
     let mut ping_out    = false;
     // S4: track nick collision count
     let mut nick_retries = 0u32;
 
-    // Registration
+    // Registration — always request CAP LS 302 to negotiate IRCv3 caps
     {
         let mut c = conn.lock().await;
         if let Some(ref pass) = cfg.password {
             c.send_raw(&format!("PASS {}\r\n", strip_crlf(pass))).await?;
         }
+        c.send_raw("CAP LS 302\r\n").await?;
         if use_sasl {
-            c.send_raw("CAP LS 302\r\n").await?;
             sasl_state = SaslState::CapLsSent;
         }
         c.send_raw(&format!("NICK {}\r\n", strip_crlf(&cfg.nick))).await?;
@@ -301,7 +304,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                 if line.is_empty() { continue; }
 
                 let p  = parse_irc(&line);
-                let ts = chrono::Utc::now().timestamp();
+                // Prefer IRCv3 server-time tag when available
+                let ts = p.tags.get("time")
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|dt| dt.timestamp())
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
                 match p.command.as_str() {
 
@@ -325,26 +332,65 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     // ── CAP / SASL ───────────────────────────────────────
                     "CAP" => {
                         let sub  = p.params.get(1).map(|s| s.as_str()).unwrap_or("");
-                        let caps = p.params.get(2).cloned().unwrap_or_default();
+                        // CAP LS 302 may split across multiple lines — last param has caps
+                        // For multiline: params = [nick, "LS", "*", caps] (more coming) or [nick, "LS", caps] (final)
+                        let is_multiline = p.params.get(2).map(|s| s.as_str()) == Some("*");
+                        let caps = if is_multiline {
+                            p.params.get(3).cloned().unwrap_or_default()
+                        } else {
+                            p.params.last().cloned().unwrap_or_default()
+                        };
                         match sub {
                             "LS" => {
-                                // Request chghost if available
-                                if caps.contains("chghost") {
-                                    conn.lock().await.send_raw("CAP REQ :chghost\r\n").await?;
+                                // Accumulate available caps across multiline responses
+                                for cap in caps.split_whitespace() {
+                                    let cap_name = cap.split('=').next().unwrap_or(cap);
+                                    available_caps.push(cap_name.to_string());
                                 }
-                                if sasl_state == SaslState::CapLsSent {
-                                    if caps.contains("sasl") {
-                                        conn.lock().await.send_raw("CAP REQ :sasl\r\n").await?;
-                                        sasl_state = SaslState::CapReqSent;
-                                    } else {
-                                        warn!("[{}] Server has no sasl cap", conn_id);
-                                        conn.lock().await.send_raw("CAP END\r\n").await?;
-                                        sasl_state = SaslState::Done;
-                                        send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: "Server does not support SASL".into() });
+                                // If multiline (*), wait for more LS lines
+                                if is_multiline { continue; }
+
+                                // All caps received — request the ones we want
+                                let wanted: &[&str] = &[
+                                    "away-notify", "account-notify", "extended-join",
+                                    "server-time", "multi-prefix", "cap-notify",
+                                    "message-tags", "batch", "echo-message",
+                                    "invite-notify", "setname", "account-tag",
+                                    "userhost-in-names", "chghost", "labeled-response",
+                                    "draft/typing", "typing",
+                                    "standard-replies",
+                                ];
+                                let mut req: Vec<&str> = Vec::new();
+                                for w in wanted {
+                                    if available_caps.iter().any(|c| c == w) {
+                                        req.push(w);
                                     }
                                 }
+                                // Track if server supports echo-message so we can deduplicate
+                                if req.contains(&"echo-message") {
+                                    echo_message_enabled = true;
+                                }
+                                // SASL handling
+                                if use_sasl && available_caps.iter().any(|c| c == "sasl") {
+                                    req.push("sasl");
+                                    sasl_state = SaslState::CapReqSent;
+                                } else if use_sasl {
+                                    warn!("[{}] Server has no sasl cap", conn_id);
+                                    sasl_state = SaslState::Done;
+                                    send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: "Server does not support SASL".into() });
+                                }
+
+                                if !req.is_empty() {
+                                    let req_str = req.join(" ");
+                                    info!("[{}] Requesting CAPs: {}", conn_id, req_str);
+                                    conn.lock().await.send_raw(&format!("CAP REQ :{}\r\n", req_str)).await?;
+                                } else if !use_sasl {
+                                    conn.lock().await.send_raw("CAP END\r\n").await?;
+                                }
+                                available_caps.clear();
                             }
                             "ACK" => {
+                                info!("[{}] CAP ACK: {}", conn_id, caps);
                                 if sasl_state == SaslState::CapReqSent && caps.contains("sasl") {
                                     let method = match &sasl_method {
                                         Some(SaslMethod::External)     => "EXTERNAL",
@@ -353,12 +399,47 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                     };
                                     conn.lock().await.send_raw(&format!("AUTHENTICATE {}\r\n", method)).await?;
                                     sasl_state = SaslState::AuthenticateSent;
+                                } else if !use_sasl || sasl_state == SaslState::Done || sasl_state == SaslState::Idle {
+                                    // No SASL needed, end CAP negotiation
+                                    conn.lock().await.send_raw("CAP END\r\n").await?;
                                 }
                             }
                             "NAK" => {
+                                warn!("[{}] CAP NAK: {}", conn_id, caps);
+                                if use_sasl && caps.contains("sasl") {
+                                    sasl_state = SaslState::Failed("CAP NAK".into());
+                                    send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: "SASL capability rejected".into() });
+                                }
                                 conn.lock().await.send_raw("CAP END\r\n").await?;
-                                sasl_state = SaslState::Failed("CAP NAK".into());
-                                send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: "SASL capability rejected".into() });
+                            }
+                            "NEW" => {
+                                // cap-notify: server advertises new caps
+                                info!("[{}] CAP NEW: {}", conn_id, caps);
+                                let wanted: &[&str] = &[
+                                    "away-notify", "account-notify", "extended-join",
+                                    "server-time", "multi-prefix", "cap-notify",
+                                    "message-tags", "batch", "echo-message",
+                                    "invite-notify", "setname", "account-tag",
+                                    "userhost-in-names", "chghost", "labeled-response",
+                                    "draft/typing", "typing", "standard-replies",
+                                ];
+                                let mut req: Vec<&str> = Vec::new();
+                                for cap in caps.split_whitespace() {
+                                    let cap_name = cap.split('=').next().unwrap_or(cap);
+                                    if wanted.contains(&cap_name) {
+                                        req.push(cap_name);
+                                    }
+                                }
+                                if !req.is_empty() {
+                                    let req_str = req.join(" ");
+                                    conn.lock().await.send_raw(&format!("CAP REQ :{}\r\n", req_str)).await?;
+                                }
+                            }
+                            "DEL" => {
+                                info!("[{}] CAP DEL: {}", conn_id, caps);
+                                if caps.contains("echo-message") {
+                                    echo_message_enabled = false;
+                                }
                             }
                             _ => {}
                         }
@@ -443,10 +524,13 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let from   = nick_from_prefix(&p.prefix);
                         let target = p.params.get(0).cloned().unwrap_or_default();
                         let text   = p.params.get(1).cloned().unwrap_or_default();
+                        let user_nick = { conn.lock().await.nick.clone() };
+                        // echo-message: skip our own echoed messages (we already displayed them client-side)
+                        if echo_message_enabled && from == user_nick { continue; }
                         // Reply to CTCP VERSION
                         if text == "\x01VERSION\x01" {
                             conn.lock().await.send_raw(&format!(
-                                "NOTICE {} :\x01VERSION CryptIRC v0.3 - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
+                                "NOTICE {} :\x01VERSION CryptIRC v0.6.5 - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
                                 from
                             )).await?;
                             continue;
@@ -459,7 +543,6 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         state.logger.append(conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind });
                         // Push notification for DMs and mentions
-                        let user_nick = { conn.lock().await.nick.clone() };
                         if from != user_nick {
                             state.notifier.maybe_notify(
                                 username, &user_nick, conn_id, &cfg.label, &display_target, &from, &clean
@@ -487,17 +570,26 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "JOIN" => {
                         let nick    = nick_from_prefix(&p.prefix);
                         let channel = p.params.get(0).cloned().unwrap_or_default();
+                        // IRCv3 extended-join: JOIN #channel account :realname
+                        let account  = p.params.get(1).cloned().unwrap_or_default();
+                        let realname = p.params.get(2).cloned().unwrap_or_default();
+                        // Also check account-tag
+                        let account = if account.is_empty() || account == "*" {
+                            p.tags.get("account").cloned().unwrap_or_default()
+                        } else if account == "*" { String::new() } else { account };
                         {
                             let mut c = conn.lock().await;
                             if nick == c.nick {
                                 c.channels.entry(channel.clone()).or_insert(ChannelState { topic: String::new(), names: vec![] });
                                 c.send_raw(&format!("NAMES {}\r\n", channel)).await?;
                             } else if let Some(ch) = c.channels.get_mut(&channel) {
-                                // Bound the in-memory names list
                                 if ch.names.len() < NAMES_BUF_MAX_PER_CHAN { ch.names.push(nick.clone()); }
                             }
                         }
-                        send(ServerEvent::IrcJoin { conn_id: conn_id.to_string(), nick, channel, ts });
+                        send(ServerEvent::IrcJoinEx {
+                            conn_id: conn_id.to_string(), nick, channel,
+                            account, realname, ts,
+                        });
                     }
                     "PART" => {
                         let nick    = nick_from_prefix(&p.prefix);
@@ -542,6 +634,132 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             });
                         }
                     }
+                    // ── IRCv3: away-notify ───────────────────────────
+                    "AWAY" => {
+                        let nick = nick_from_prefix(&p.prefix);
+                        let message = p.params.get(0).cloned().unwrap_or_default();
+                        let is_away = !message.is_empty();
+                        send(ServerEvent::IrcAway {
+                            conn_id: conn_id.to_string(), nick: nick.clone(),
+                            away: is_away, message: message.clone(), ts,
+                        });
+                    }
+                    // ── IRCv3: account-notify ────────────────────────
+                    "ACCOUNT" => {
+                        let nick = nick_from_prefix(&p.prefix);
+                        let account = p.params.get(0).cloned().unwrap_or_default();
+                        let logged_in = account != "*";
+                        send(ServerEvent::IrcAccount {
+                            conn_id: conn_id.to_string(), nick: nick.clone(),
+                            account: if logged_in { account.clone() } else { String::new() }, ts,
+                        });
+                    }
+                    // ── IRCv3: invite-notify ─────────────────────────
+                    "INVITE" => {
+                        let from = nick_from_prefix(&p.prefix);
+                        let target_nick = p.params.get(0).cloned().unwrap_or_default();
+                        let channel = p.params.get(1).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcInvite {
+                            conn_id: conn_id.to_string(), from: from.clone(),
+                            target: target_nick.clone(), channel: channel.clone(), ts,
+                        });
+                    }
+                    // ── IRCv3: setname ───────────────────────────────
+                    "SETNAME" => {
+                        let nick = nick_from_prefix(&p.prefix);
+                        let realname = p.params.get(0).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcSetname {
+                            conn_id: conn_id.to_string(), nick: nick.clone(),
+                            realname: realname.clone(), ts,
+                        });
+                    }
+                    // ── IRCv3: TAGMSG (typing indicators, reactions) ─
+                    "TAGMSG" => {
+                        let from = nick_from_prefix(&p.prefix);
+                        let target = p.params.get(0).cloned().unwrap_or_default();
+                        // Check for typing indicator (+typing or +draft/typing tag)
+                        if let Some(typing_state) = p.tags.get("+typing").or_else(|| p.tags.get("+draft/typing")) {
+                            let our_nick = conn.lock().await.nick.clone();
+                            if from != our_nick {
+                                let display_target = if target.starts_with(['#','&']) { target } else { from.clone() };
+                                send(ServerEvent::IrcTyping {
+                                    conn_id: conn_id.to_string(), nick: from,
+                                    target: display_target,
+                                    state: typing_state.clone(), // "active", "paused", or "done"
+                                });
+                            }
+                        }
+                    }
+                    // ── IRCv3: BATCH ─────────────────────────────────
+                    "BATCH" => {
+                        // +ref opens a batch, -ref closes it
+                        // For now, just log — individual messages within batches
+                        // are handled normally via their own handlers
+                        let ref_tag = p.params.get(0).cloned().unwrap_or_default();
+                        let batch_type = p.params.get(1).cloned().unwrap_or_default();
+                        if ref_tag.starts_with('+') {
+                            info!("[{}] BATCH opened: {} type={}", conn_id, ref_tag, batch_type);
+                        } else {
+                            info!("[{}] BATCH closed: {}", conn_id, ref_tag);
+                        }
+                    }
+                    // ── IRCv3: standard-replies (FAIL/WARN/NOTE) ─────
+                    "FAIL" | "WARN" | "NOTE" => {
+                        let command = p.params.get(0).cloned().unwrap_or_default();
+                        let code = p.params.get(1).cloned().unwrap_or_default();
+                        let context = p.params.get(2).cloned().unwrap_or_default();
+                        let description = p.params.last().cloned().unwrap_or_default();
+                        let level = p.command.as_str();
+                        let msg = format!("[{}] {} {} — {}: {}", level, command, code, context, description);
+                        send(ServerEvent::IrcMessage {
+                            conn_id: conn_id.to_string(), from: "*".into(),
+                            target: "status".into(), text: msg, ts,
+                            kind: MessageKind::Notice,
+                        });
+                    }
+                    // ── IRCv3: Monitor numerics ──────────────────────
+                    // 730 RPL_MONONLINE, 731 RPL_MONOFFLINE
+                    "730" => {
+                        let nicks_str = p.params.last().cloned().unwrap_or_default();
+                        for entry in nicks_str.split(',') {
+                            let nick = entry.split('!').next().unwrap_or(entry).trim().to_string();
+                            if !nick.is_empty() {
+                                send(ServerEvent::IrcMonitorOnline {
+                                    conn_id: conn_id.to_string(), nick, ts,
+                                });
+                            }
+                        }
+                    }
+                    "731" => {
+                        let nicks_str = p.params.last().cloned().unwrap_or_default();
+                        for entry in nicks_str.split(',') {
+                            let nick = entry.trim().to_string();
+                            if !nick.is_empty() {
+                                send(ServerEvent::IrcMonitorOffline {
+                                    conn_id: conn_id.to_string(), nick, ts,
+                                });
+                            }
+                        }
+                    }
+                    // 732 RPL_MONLIST, 733 RPL_ENDOFMONLIST — just pass through
+                    "732" | "733" => {
+                        let text = p.params[1..].join(" ");
+                        send(ServerEvent::IrcMessage {
+                            conn_id: conn_id.to_string(), from: "*".into(),
+                            target: "status".into(), text, ts,
+                            kind: MessageKind::Notice,
+                        });
+                    }
+                    // 734 ERR_MONLISTFULL
+                    "734" => {
+                        let text = p.params.last().cloned().unwrap_or("Monitor list full".into());
+                        send(ServerEvent::IrcMessage {
+                            conn_id: conn_id.to_string(), from: "*".into(),
+                            target: "status".into(), text, ts,
+                            kind: MessageKind::Notice,
+                        });
+                    }
+
                     "KICK" => {
                         let by      = nick_from_prefix(&p.prefix);
                         let channel = p.params.get(0).cloned().unwrap_or_default();
@@ -569,7 +787,13 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let channel = p.params.get(2).cloned().unwrap_or_default();
                         if names_buf.len() < NAMES_BUF_MAX_CHANNELS {
                             let names: Vec<String> = p.params.get(3).cloned().unwrap_or_default()
-                                .split_whitespace().map(|s| s.to_string()).collect();
+                                .split_whitespace()
+                                // userhost-in-names: strip !user@host from entries like @nick!user@host
+                                .map(|s| {
+                                    if let Some(bang) = s.find('!') { s[..bang].to_string() }
+                                    else { s.to_string() }
+                                })
+                                .collect();
                             let entry = names_buf.entry(channel).or_default();
                             for n in names {
                                 if entry.len() < NAMES_BUF_MAX_PER_CHAN { entry.push(n); }
@@ -718,10 +942,32 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
 
 // ─── IRC line parser ──────────────────────────────────────────────────────────
 
-struct IrcLine { prefix: Option<String>, command: String, params: Vec<String> }
+struct IrcLine {
+    prefix: Option<String>,
+    command: String,
+    params: Vec<String>,
+    tags: HashMap<String, String>,
+}
 
 fn parse_irc(line: &str) -> IrcLine {
-    let mut rest   = line;
+    let mut rest = line;
+    // IRCv3 message tags: @key=value;key2=value2
+    let mut tags = HashMap::new();
+    if rest.starts_with('@') {
+        let (tag_str, r) = rest[1..].split_once(' ').unwrap_or((&rest[1..], ""));
+        for pair in tag_str.split(';') {
+            if let Some((k, v)) = pair.split_once('=') {
+                // Unescape IRCv3 tag values: \: -> ; \s -> space \\ -> \ \r \n
+                let v = v.replace("\\:", ";").replace("\\s", " ")
+                         .replace("\\r", "\r").replace("\\n", "\n")
+                         .replace("\\\\", "\\");
+                tags.insert(k.to_string(), v);
+            } else if !pair.is_empty() {
+                tags.insert(pair.to_string(), String::new());
+            }
+        }
+        rest = r;
+    }
     let mut prefix = None;
     if rest.starts_with(':') {
         let (p, r) = rest[1..].split_once(' ').unwrap_or((&rest[1..], ""));
@@ -736,12 +982,13 @@ fn parse_irc(line: &str) -> IrcLine {
             None         => { params.push(remaining.to_string()); break; }
         }
     }
-    IrcLine { prefix, command: cmd_part.to_uppercase(), params }
+    IrcLine { prefix, command: cmd_part.to_uppercase(), params, tags }
 }
 
 fn nick_from_prefix(p: &Option<String>) -> String {
     p.as_deref().and_then(|s| s.split('!').next()).unwrap_or("*").to_string()
 }
+
 fn strip_pfx(n: &str) -> &str { let s = n.trim_start_matches(|c: char| "@+~&%".contains(c)); if s.is_empty() { n } else { s } }
 fn kind_str(k: &MessageKind) -> &'static str {
     match k { MessageKind::Privmsg => "privmsg", MessageKind::Notice => "notice", MessageKind::Action => "action" }
