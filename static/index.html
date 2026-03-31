@@ -72,7 +72,7 @@ body > style, body > script { display:none !important; }
 }
 .auth-logo {
   font-family:var(--sans); font-size:clamp(20px,6vw,26px); font-weight:800;
-  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  background:linear-gradient(135deg,var(--accent,#00d4aa),var(--accent2,#0099ff));
   -webkit-background-clip:text; -webkit-text-fill-color:transparent;
   background-clip:text; text-align:center; margin-bottom:6px;
 }
@@ -172,7 +172,7 @@ body > style, body > script { display:none !important; }
 }
 .logo {
   font-family:var(--sans); font-weight:800; font-size:16px;
-  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  background:linear-gradient(135deg,var(--accent,#00d4aa),var(--accent2,#0099ff));
   -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;
 }
 .lock-btn {
@@ -743,7 +743,7 @@ body > style, body > script { display:none !important; }
 
 /* ── WELCOME ───────────────────────────────────────────────────────────────── */
 #welcome { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--text3); padding:40px; text-align:center; }
-.welcome-logo { font-family:var(--sans); font-size:36px; font-weight:800; background:linear-gradient(135deg,var(--accent),var(--accent2)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+.welcome-logo { font-family:var(--sans); font-size:36px; font-weight:800; background:linear-gradient(135deg,var(--accent,#00d4aa),var(--accent2,#0099ff)); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
 .welcome-sub { font-size:12px; max-width:320px; line-height:1.7; color:var(--text3); }
 .feature-badges { display:flex; gap:6px; flex-wrap:wrap; justify-content:center; margin-top:4px; }
 .badge { background:var(--bg3); border:1px solid var(--border); border-radius:20px; padding:4px 10px; font-size:10px; color:var(--text2); }
@@ -1493,7 +1493,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()">📜 Certs</button>
           <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()">🔔 Notifications</button>
           <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()">🎨 Theme</button>
-          <button class="settings-menu-item" onclick="showMonitorPanel();closeSettingsMenu()">👁 Monitor</button>
+          <button class="settings-menu-item" onclick="closeSettingsMenu();setTimeout(showMonitorPanel,100)">👁 Monitor</button>
           <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b">🧹 Clear All Logs</button>
           <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()">👑 Admin</button>
           <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b">🗑 Delete Account</button>
@@ -3344,24 +3344,27 @@ function saveAppearance(cfg){
 }
 function applyAppearance(){
   const el=id=>document.getElementById(id);
+  // Only save if theme modal is populated (prevent saving corrupt zeros)
+  if(!el('a-chat-size')||!el('a-chat-size').value||+el('a-chat-size').value<8){return;}
+  const prev=loadAppearance();
   const cfg={
-    theme:      document.querySelector('.theme-card.active')?.dataset?.theme||'midnight',
-    chatSize:   +el('a-chat-size').value,
-    sidebarFont:+el('a-sidebar-font').value,
-    nickFont:   +el('a-nick-font').value,
-    sidebarW:   +el('a-sidebar-w').value,
-    nickW:      +el('a-nick-w').value,
-    nickPanelW: +el('a-nickpanel-w').value,
-    lineHeight: +el('a-line-height').value,
+    theme:      document.querySelector('.theme-card.active')?.dataset?.theme||prev.theme||'midnight',
+    chatSize:   +el('a-chat-size').value||prev.chatSize||13,
+    sidebarFont:+el('a-sidebar-font').value||prev.sidebarFont||12,
+    nickFont:   +el('a-nick-font').value||prev.nickFont||12,
+    sidebarW:   +el('a-sidebar-w').value||prev.sidebarW||220,
+    nickW:      +el('a-nick-w').value||prev.nickW||100,
+    nickPanelW: +el('a-nickpanel-w').value||prev.nickPanelW||160,
+    lineHeight: +el('a-line-height').value||prev.lineHeight||1.55,
     timestamps: el('a-timestamps').classList.contains('on'),
     joinpart:   el('a-joinpart').classList.contains('on'),
     compact:    el('a-compact').classList.contains('on'),
     coloredNicks: el('a-colorednicks').classList.contains('on'),
     nickList:   el('a-nicklist').classList.contains('on'),
     spellcheck: el('a-spellcheck').classList.contains('on'),
-    msgGap:     +el('a-msg-gap').value,
-    accent:     el('a-accent-color').value,
-    accent2:    el('a-accent2-color').value,
+    msgGap:     +el('a-msg-gap').value||prev.msgGap||4,
+    accent:     el('a-accent-color').value||prev.accent||'#00d4aa',
+    accent2:    el('a-accent2-color').value||prev.accent2||'#0099ff',
     brightness: +el('a-brightness').value,
     mobileChatSize: +el('a-mobile-chat-size').value,
     mobileNickW:    +el('a-mobile-nick-w').value,
@@ -4525,10 +4528,15 @@ async function reregisterPushSubscription(subJSON) {
 
 async function sendTestNotification() {
   if (!sessionToken) return;
+  if (!pushSubscription) {
+    showToast('No push subscription — enable notifications first');
+    return;
+  }
   try {
     const r = await fetch('/cryptirc/push/test', {method:'POST', headers:{'Authorization':'Bearer '+sessionToken}});
-    if (!r.ok) alert('Test failed — make sure you have an active push subscription.');
-  } catch(e) { alert('Test notification failed.'); }
+    if (r.ok) showToast('Test notification sent!');
+    else showToast('Test failed — try disabling and re-enabling notifications');
+  } catch(e) { showToast('Test notification failed'); }
 }
 
 function urlBase64ToUint8Array(base64String) {
