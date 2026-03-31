@@ -36,7 +36,7 @@
 *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
 /* A2: Android tap highlight */
 * { -webkit-tap-highlight-color: rgba(0,212,170,.12); }
-html { height:100%; height:-webkit-fill-available; overflow:hidden; touch-action:pan-x pan-y; }
+html { height:100%; height:-webkit-fill-available; overflow:hidden; }
 body {
   height:100%; height:-webkit-fill-available;
   background:var(--bg0); color:var(--text);
@@ -148,9 +148,7 @@ body > style, body > script { display:none !important; }
   /* M3: landscape safe area */
   padding-left:var(--sal);
   padding-right:var(--sar);
-  position:relative; z-index:1;
 }
-/* Prevent iOS keyboard from exposing content below #app */
 .upload-progress, #monitor-overlay, #help-overlay { z-index:1000; }
 
 /* ── SIDEBAR ───────────────────────────────────────────────────────────────── */
@@ -1606,17 +1604,6 @@ function initViewportFix() {
       setTimeout(() => { app.style.height = ''; window.scrollTo(0, 0); }, 150);
     });
   }
-
-  // Prevent body from scrolling on iOS — only allow scroll inside scrollable containers
-  document.addEventListener('touchmove', e => {
-    let el = e.target;
-    while (el && el !== document.body) {
-      const s = getComputedStyle(el);
-      if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) return;
-      el = el.parentElement;
-    }
-    e.preventDefault();
-  }, { passive: false });
 
   update();
 }
