@@ -40,17 +40,35 @@
 *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
 /* A2: Android tap highlight */
 * { -webkit-tap-highlight-color: rgba(0,212,170,.12); }
-html { height:100%; height:-webkit-fill-available; overflow:hidden; }
+html {
+  height:100%; height:-webkit-fill-available; overflow:hidden;
+  /* PWA standalone: use full screen */
+  height:100vh; height:100dvh; height:-webkit-fill-available;
+}
 body {
   height:100%; height:-webkit-fill-available;
-  background:var(--bg0); color:var(--text);
-  font-family:var(--mono); font-size:13px;
+  background:var(--bg0); color:var(--bg0);
+  font-family:var(--mono); font-size:0;
   overflow:hidden;
   -webkit-text-size-adjust:100%;
   text-size-adjust:100%;
+  /* Make body text invisible so raw HTML source can't show through */
 }
-/* Hide raw source text that iOS exposes when keyboard scrolls the page */
-body > style, body > script { display:none !important; }
+/* App restores normal text */
+#app, #auth-screen, #vault-overlay, .modal-overlay, #monitor-overlay, #help-overlay, #admin-overlay {
+  color:var(--text); font-size:13px;
+}
+/* Hide raw source elements */
+body > style, body > script, body > div:last-child { visibility:hidden; }
+body > #app, body > #auth-screen, body > .modal-overlay, body > .upload-progress,
+body > #monitor-overlay, body > #help-overlay, body > #admin-overlay,
+body > #rain-overlay { visibility:visible; }
+
+/* PWA standalone mode — ensure full screen */
+@media (display-mode: standalone) {
+  html, body { height:100vh !important; }
+  #app { height:100vh !important; height:100dvh !important; }
+}
 
 /* ── AUTH SCREEN ───────────────────────────────────────────────────────────── */
 #auth-screen {
@@ -148,10 +166,11 @@ body > style, body > script { display:none !important; }
 /* ── APP LAYOUT ────────────────────────────────────────────────────────────── */
 #app {
   display:flex;
-  height:100vh; height:100dvh;
+  height:100vh; height:100dvh; height:-webkit-fill-available;
   /* M3: landscape safe area */
   padding-left:var(--sal);
   padding-right:var(--sar);
+  overflow:hidden;
 }
 .upload-progress, #monitor-overlay, #help-overlay { z-index:1000; }
 
@@ -1622,29 +1641,52 @@ const VID_EXTS=/\.(mp4|webm|mov)(\?.*)?$/i;
 
 // ─── M2: iOS Visual Viewport keyboard fix ────────────────────────────────────
 function initViewportFix() {
-  if (!window.visualViewport) return;
   const app = document.getElementById('app');
+
+  // Prevent any body scrolling
+  document.body.addEventListener('touchmove', e => {
+    // Allow scrolling inside scrollable elements
+    let el = e.target;
+    while (el && el !== document.body) {
+      const ov = getComputedStyle(el).overflowY;
+      if ((ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight) return;
+      el = el.parentElement;
+    }
+    // Block body-level scroll (prevents code showing behind keyboard)
+    if (e.cancelable) e.preventDefault();
+  }, { passive: false });
+
+  if (!window.visualViewport) return;
 
   function update() {
     const vv = window.visualViewport;
     app.style.height = vv.height + 'px';
-    window.scrollTo(0, 0);
+    // Pin viewport to top
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
   }
 
   window.visualViewport.addEventListener('resize', update);
-  window.visualViewport.addEventListener('scroll', () => window.scrollTo(0, 0));
+  window.visualViewport.addEventListener('scroll', () => {
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  });
 
   const inp = document.getElementById('msg-input');
   if (inp) {
     inp.addEventListener('focus', () => {
-      [300, 600].forEach(ms => setTimeout(() => {
+      [200, 400, 700].forEach(ms => setTimeout(() => {
         update();
         const area = document.getElementById('chat-area');
         if (area) area.scrollTop = area.scrollHeight;
       }, ms));
     });
     inp.addEventListener('blur', () => {
-      setTimeout(() => { app.style.height = ''; window.scrollTo(0, 0); }, 150);
+      setTimeout(() => {
+        app.style.height = '';
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+      }, 150);
     });
   }
 
@@ -5456,6 +5498,6 @@ function timeAgo(ts){
 <!-- Rain overlay for forest theme -->
 <div id="rain-overlay"><canvas id="rain-canvas"></canvas></div>
 <!-- Cover div prevents iOS keyboard from exposing raw source below the app -->
-<div style="position:fixed;inset:0;background:var(--bg0);z-index:-1;pointer-events:none"></div>
+<div style="position:fixed;inset:-100px;background:var(--bg0,#0b0d0f);z-index:-1;pointer-events:none"></div>
 </body>
 </html>
