@@ -34,6 +34,8 @@ pub struct User {
     pub password_hash: String,
     pub verified:      bool,
     pub created_at:    i64,
+    #[serde(default)]
+    pub admin:         bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +153,7 @@ impl AuthManager {
             password_hash: hash,
             verified:      false,
             created_at:    Utc::now().timestamp(),
+            admin:         false,
         };
         let json = serde_json::to_string_pretty(&user)?;
 
@@ -396,8 +399,71 @@ impl AuthManager {
             .map(|s| s.key().clone())
             .collect();
         for k in expired { self.sessions.remove(&k); }
-        // Also sweep stale rate-limit buckets on the same timer
         self.sweep_rate_buckets();
+    }
+
+    // ── Admin helpers ─────────────────────────────────────────────────────────
+
+    pub async fn is_admin(&self, username: &str) -> bool {
+        let path = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", username.to_lowercase()));
+        if let Ok(json) = tokio::fs::read_to_string(&path).await {
+            if let Ok(user) = serde_json::from_str::<User>(&json) {
+                return user.admin;
+            }
+        }
+        false
+    }
+
+    pub async fn list_users(&self) -> Vec<serde_json::Value> {
+        let dir = PathBuf::from(&self.data_dir).join("users");
+        let mut users = vec![];
+        if let Ok(mut rd) = tokio::fs::read_dir(&dir).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(json) = tokio::fs::read_to_string(&path).await {
+                        if let Ok(user) = serde_json::from_str::<User>(&json) {
+                            // Count active sessions
+                            let session_count = self.sessions.iter()
+                                .filter(|s| s.username == user.username)
+                                .count();
+                            users.push(serde_json::json!({
+                                "username": user.username,
+                                "email": user.email,
+                                "verified": user.verified,
+                                "admin": user.admin,
+                                "created_at": user.created_at,
+                                "sessions": session_count,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+        users
+    }
+
+    pub async fn set_admin(&self, username: &str, is_admin: bool) -> Result<()> {
+        let path = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", username.to_lowercase()));
+        let json = tokio::fs::read_to_string(&path).await?;
+        let mut user: User = serde_json::from_str(&json)?;
+        user.admin = is_admin;
+        tokio::fs::write(&path, serde_json::to_string_pretty(&user)?).await?;
+        Ok(())
+    }
+
+    pub async fn disable_user(&self, username: &str) -> Result<()> {
+        let path = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", username.to_lowercase()));
+        let json = tokio::fs::read_to_string(&path).await?;
+        let mut user: User = serde_json::from_str(&json)?;
+        user.verified = false; // Disabling = unverify, can't log in
+        tokio::fs::write(&path, serde_json::to_string_pretty(&user)?).await?;
+        // Purge their sessions
+        let to_remove: Vec<String> = self.sessions.iter()
+            .filter(|s| s.username == username.to_lowercase())
+            .map(|s| s.key().clone()).collect();
+        for k in to_remove { self.sessions.remove(&k); }
+        Ok(())
     }
 }
 

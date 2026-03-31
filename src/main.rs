@@ -61,6 +61,8 @@ pub struct AppState {
     pub base_url:            String,
     pub from_email:          String,
     pub data_dir:            String,
+    pub registration_open:   Arc<tokio::sync::RwLock<bool>>,
+    pub registration_code:   Arc<tokio::sync::RwLock<String>>,
 }
 
 impl AppState {
@@ -280,7 +282,7 @@ pub struct LogLine { pub ts: i64, pub from: String, pub text: String, pub kind: 
 
 // ─── HTTP types ───────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)] struct RegisterBody      { username: String, email: String, password: String }
+#[derive(Deserialize)] struct RegisterBody      { username: String, email: String, password: String, #[serde(default)] code: String }
 #[derive(Deserialize)] struct LoginBody          { username: String, password: String }
 #[derive(Deserialize)] struct VerifyQuery        { token: String }
 #[derive(Deserialize)] struct ForgotBody         { email: String }
@@ -321,6 +323,7 @@ async fn main() -> Result<()> {
     let upload_dir = format!("{}/uploads", data_dir);
     let base_url    = std::env::var("CRYPTIRC_BASE_URL").unwrap_or_else(|_| "http://localhost:9000".into());
     let from_email  = std::env::var("CRYPTIRC_FROM_EMAIL").unwrap_or_else(|_| "noreply@cryptirc.local".into());
+    let registration_open = std::env::var("CRYPTIRC_REGISTRATION").unwrap_or_else(|_| "open".into()) != "closed";
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&upload_dir)?;
     std::fs::create_dir_all(format!("{}/certs", data_dir))?;
@@ -342,6 +345,10 @@ async fn main() -> Result<()> {
         user_events:         Arc::new(DashMap::new()),
         upload_dir, base_url, from_email,
         data_dir: data_dir.clone(),
+        registration_open: Arc::new(tokio::sync::RwLock::new(registration_open)),
+        registration_code: Arc::new(tokio::sync::RwLock::new(
+            std::env::var("CRYPTIRC_REG_CODE").unwrap_or_default()
+        )),
     };
 
     // Background: purge expired sessions hourly
@@ -360,6 +367,12 @@ async fn main() -> Result<()> {
         .route("/sw.js",                 get(serve_sw))
         .route("/icon.svg",              get(serve_icon))
         .route("/auth/register",         post(route_register).layer(DefaultBodyLimit::max(8_192)))
+        .route("/auth/status",           get(route_auth_status))
+        .route("/admin/users",           get(route_admin_users))
+        .route("/admin/user/:username",  axum::routing::delete(route_admin_delete_user))
+        .route("/admin/user/:username/disable", post(route_admin_disable_user))
+        .route("/admin/settings",        get(route_admin_get_settings).put(route_admin_put_settings))
+        .route("/admin/adduser",         post(route_admin_add_user).layer(DefaultBodyLimit::max(4_096)))
         .route("/auth/login",            post(route_login).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/logout",           post(route_logout))
         .route("/auth/verify",           get(route_verify))
@@ -457,7 +470,126 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
         .and_then(validate_uuid)
 }
 
+async fn route_auth_status(State(state): State<AppState>) -> impl IntoResponse {
+    let open = *state.registration_open.read().await;
+    let has_code = !state.registration_code.read().await.is_empty();
+    Json(serde_json::json!({ "registration_open": open, "requires_code": has_code }))
+}
+
+// ── Admin endpoints ──────────────────────────────────────────────────────────
+
+fn admin_check(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let token = bearer_token(headers)?;
+    state.auth.validate_session(&token)
+}
+
+async fn route_admin_users(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(user) = admin_check(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    Json(state.auth.list_users().await).into_response()
+}
+
+async fn route_admin_delete_user(State(state): State<AppState>, headers: HeaderMap, Path(target): Path<String>) -> impl IntoResponse {
+    let Some(user) = admin_check(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if target.to_lowercase() == user.to_lowercase() {
+        return (StatusCode::BAD_REQUEST, Json(Msg { message: "Cannot delete yourself.".into() })).into_response();
+    }
+    state.auth.delete_account(&target).await;
+    (StatusCode::OK, Json(Msg { message: format!("User '{}' deleted.", target) })).into_response()
+}
+
+async fn route_admin_disable_user(State(state): State<AppState>, headers: HeaderMap, Path(target): Path<String>) -> impl IntoResponse {
+    let Some(user) = admin_check(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match state.auth.disable_user(&target).await {
+        Ok(_) => (StatusCode::OK, Json(Msg { message: format!("User '{}' disabled.", target) })).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(Msg { message: e.to_string() })).into_response(),
+    }
+}
+
+async fn route_admin_get_settings(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(user) = admin_check(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let open = *state.registration_open.read().await;
+    let code = state.registration_code.read().await.clone();
+    Json(serde_json::json!({
+        "registration_open": open,
+        "registration_code": code,
+    })).into_response()
+}
+
+#[derive(Deserialize)]
+struct AdminSettings { registration_open: Option<bool>, registration_code: Option<String> }
+
+#[derive(Deserialize)]
+struct AdminAddUser { username: String, password: String, #[serde(default)] email: String }
+
+async fn route_admin_add_user(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<AdminAddUser>) -> impl IntoResponse {
+    let Some(user) = admin_check(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let email = if body.email.is_empty() { format!("{}@localhost", body.username) } else { body.email };
+    match state.auth.register(&body.username, &email, &body.password).await {
+        Ok(_token) => {
+            // Auto-verify (admin-created users don't need email verification)
+            let path = std::path::PathBuf::from(&state.data_dir)
+                .join("users").join(format!("{}.json", body.username.to_lowercase()));
+            if let Ok(json) = tokio::fs::read_to_string(&path).await {
+                if let Ok(mut u) = serde_json::from_str::<auth::User>(&json) {
+                    u.verified = true;
+                    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&u).unwrap_or_default()).await;
+                }
+            }
+            (StatusCode::OK, Json(Msg { message: format!("User '{}' created.", body.username) })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(Msg { message: e.to_string() })).into_response(),
+    }
+}
+
+async fn route_admin_put_settings(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<AdminSettings>) -> impl IntoResponse {
+    let Some(user) = admin_check(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if let Some(open) = body.registration_open {
+        *state.registration_open.write().await = open;
+    }
+    if let Some(code) = body.registration_code {
+        *state.registration_code.write().await = code;
+    }
+    (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
+}
+
 async fn route_register(State(state): State<AppState>, Json(body): Json<RegisterBody>) -> impl IntoResponse {
+    if !*state.registration_open.read().await {
+        return (StatusCode::FORBIDDEN, Json(Msg { message: "Registration is closed. Contact the server admin.".into() })).into_response();
+    }
+    let req_code = state.registration_code.read().await.clone();
+    if !req_code.is_empty() && body.code != req_code {
+        return (StatusCode::FORBIDDEN, Json(Msg { message: "Invalid registration code.".into() })).into_response();
+    }
     match state.auth.register(&body.username, &body.email, &body.password).await {
         Ok(token) => {
             let (email, uname, base, from) = (body.email.clone(), body.username.to_lowercase(), state.base_url.clone(), state.from_email.clone());

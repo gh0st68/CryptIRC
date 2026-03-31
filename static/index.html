@@ -621,6 +621,7 @@ body > style, body > script { display:none !important; }
 .row-error .msg-body { color:var(--error); font-size:12px; }
 .row-topic .msg-body { color:var(--accent); font-size:12px; }
 .row-nick .msg-body, .row-mode .msg-body, .row-kick .msg-body { color:var(--text3); font-size:12px; }
+.nc-self { color:var(--accent) !important; }
 .nc0,.nick-entry.nc0{color:#e05a5a} .nc1,.nick-entry.nc1{color:#e0935a} .nc2,.nick-entry.nc2{color:#d4c850} .nc3,.nick-entry.nc3{color:#5adb7a}
 .nc4,.nick-entry.nc4{color:#5ab8e0} .nc5,.nick-entry.nc5{color:#8a70e0} .nc6,.nick-entry.nc6{color:#e05ab0} .nc7,.nick-entry.nc7{color:#5ae0d4}
 .nc8,.nick-entry.nc8{color:#a0c878} .nc9,.nick-entry.nc9{color:#d47890}
@@ -927,6 +928,20 @@ body > style, body > script { display:none !important; }
 /* ── ANIMATIONS ────────────────────────────────────────────────────────────── */
 @keyframes pulse  { 0%,100%{opacity:1} 50%{opacity:.4} }
 @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+
+/* ── Forest rain theme ─────────────────────────────────────────────────────── */
+#rain-overlay {
+  display:none; position:fixed; inset:0; pointer-events:none; z-index:0; overflow:hidden;
+}
+#rain-overlay.active { display:block; }
+#rain-canvas { width:100%; height:100%; }
+@keyframes lightning {
+  0%,100% { opacity:0; }
+  5% { opacity:0.15; }
+  10% { opacity:0; }
+  12% { opacity:0.1; }
+  15% { opacity:0; }
+}
 .msg-row { animation:fadeIn .15s ease; }
 
 /* ── MOBILE SIDEBAR BACKDROP ───────────────────────────────────────────────── */
@@ -1046,6 +1061,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <input class="auth-input" type="password" id="r-pass"  placeholder="Min. 10 characters" autocomplete="new-password"></div>
       <div class="auth-field"><label class="auth-label">Confirm Password</label>
         <input class="auth-input" type="password" id="r-pass2" placeholder="Repeat password"    autocomplete="new-password"></div>
+      <div class="auth-field" id="reg-code-field" style="display:none"><label class="auth-label">Registration Code</label>
+        <input class="auth-input" type="text" id="r-code" placeholder="Enter invite code" autocomplete="off"></div>
       <div class="auth-err" id="reg-err"></div>
       <button class="auth-btn" id="reg-btn" onclick="doRegister()">Create Account</button>
     </div>
@@ -1093,7 +1110,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 <!-- ── NOTIFICATION SETTINGS MODAL ── -->
 <div class="modal-overlay" id="notif-modal">
   <div class="modal-box">
-    <div class="modal-title">🔔 Push Notifications</div>
+    <div class="modal-title">🔔 Notifications</div>
     <div id="notif-permission-banner" class="notif-permission-banner"></div>
     <div id="notif-status-badge" class="notif-status-badge">⬤ Checking…</div>
 
@@ -1117,6 +1134,35 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <option value="dms_only">Direct messages only</option>
           <option value="all_messages">All messages</option>
         </select>
+      </div>
+    </div>
+
+    <div class="notif-section">
+      <div class="notif-section-title">Desktop Notifications</div>
+      <div class="notif-row">
+        <div>
+          <div class="notif-label">🖥 Browser popups</div>
+          <div class="notif-sublabel">Show popup bubbles for DMs and mentions when the tab isn't focused</div>
+        </div>
+        <button class="appear-toggle" id="a-desktop-notif" onclick="this.classList.toggle('on');toggleDesktopNotif()"></button>
+      </div>
+    </div>
+
+    <div class="notif-section">
+      <div class="notif-section-title">In-App Sounds</div>
+      <div class="notif-row">
+        <div>
+          <div class="notif-label">🔊 PM sound</div>
+          <div class="notif-sublabel">Play a chirp when a DM arrives and you're not viewing it</div>
+        </div>
+        <button class="appear-toggle" id="a-sound-pm" onclick="this.classList.toggle('on');saveNotifSoundPrefs()"></button>
+      </div>
+      <div class="notif-row">
+        <div>
+          <div class="notif-label">🔊 Mention sound</div>
+          <div class="notif-sublabel">Play a ping when someone mentions you in a channel</div>
+        </div>
+        <button class="appear-toggle" id="a-sound-mention" onclick="this.classList.toggle('on');saveNotifSoundPrefs()"></button>
       </div>
     </div>
 
@@ -1237,14 +1283,6 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <div class="appear-row">
           <span class="appear-label">Spell check</span>
           <button class="appear-toggle" id="a-spellcheck" onclick="this.classList.toggle('on');applyAppearance()"></button>
-        </div>
-        <div class="appear-row">
-          <span class="appear-label">🔊 PM sound</span>
-          <button class="appear-toggle" id="a-sound-pm" onclick="this.classList.toggle('on');applyAppearance()"></button>
-        </div>
-        <div class="appear-row">
-          <span class="appear-label">🔊 Mention sound</span>
-          <button class="appear-toggle" id="a-sound-mention" onclick="this.classList.toggle('on');applyAppearance()"></button>
         </div>
       </div>
 
@@ -1453,6 +1491,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()">🎨 Theme</button>
           <button class="settings-menu-item" onclick="showMonitorPanel();closeSettingsMenu()">👁 Monitor</button>
           <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b">🧹 Clear All Logs</button>
+          <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()">👑 Admin</button>
           <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b">🗑 Delete Account</button>
           <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()">❓ Help</button>
         </div>
@@ -1494,7 +1533,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <input id="search-input" placeholder="Search messages…" autocomplete="off" spellcheck="false">
           <span onclick="closeSearchPanel()" style="cursor:pointer;color:var(--text3);font-size:16px;padding:4px">✕</span>
         </div>
-        <div id="search-results"><div class="search-empty">Type to search in current channel</div></div>
+        <div id="search-results"><div class="search-empty">Type to search current conversation</div></div>
       </div>
     </div>
     <div id="chat-area" style="display:none"></div>
@@ -1712,7 +1751,8 @@ async function doRegister() {
   const btn=document.getElementById('reg-btn');
   btn.disabled=true; btn.textContent='Creating…';
   try {
-    const r=await fetch('/cryptirc/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,email,password:pass})});
+    const code=document.getElementById('r-code')?.value?.trim()||'';
+    const r=await fetch('/cryptirc/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,email,password:pass,code})});
     const d=await r.json();
     if(!r.ok){setErr('reg-err',d.message||'Registration failed');return;}
     document.getElementById('register-form').style.display='none';
@@ -1733,6 +1773,21 @@ async function doLogout() {
 }
 function setErr(id,msg){document.getElementById(id).textContent=msg;}
 async function checkAuth() {
+  // Check if registration is open
+  try{
+    const sr=await fetch('/cryptirc/auth/status');
+    if(sr.ok){
+      const sd=await sr.json();
+      if(!sd.registration_open){
+        const regTab=document.querySelector('[onclick*="switchAuthTab(\'register\')"]');
+        if(regTab) regTab.style.display='none';
+      }
+      if(sd.requires_code){
+        const cf=document.getElementById('reg-code-field');
+        if(cf) cf.style.display='';
+      }
+    }
+  }catch(e){}
   const token=localStorage.getItem('cryptirc_token');
   if(!token){document.getElementById('auth-screen').style.display='flex';return;}
   try {
@@ -1748,6 +1803,7 @@ function showApp() {
   document.getElementById('auth-screen').style.display='none';
   document.getElementById('app').style.display='flex';
   connectWs();
+  checkAdmin();
   // Check for notification_click from SW
   const params=new URLSearchParams(location.search);
   const openTarget=params.get('open');
@@ -1826,7 +1882,20 @@ function wsend(obj){if(ws&&ws.readyState===1){const s=JSON.stringify(obj);_txByt
 function handleEvent(ev) {
   switch(ev.type){
     case 'auth_required': wsend({type:'auth',token:sessionToken||''}); break;
-    case 'auth_ok': currentUser=ev.username; wsend({type:'load_appearance'}); wsend({type:'load_preferences'}); break;
+    case 'auth_ok':
+      currentUser=ev.username;
+      wsend({type:'load_appearance'}); wsend({type:'load_preferences'});
+      // Re-check push subscription after auth
+      setTimeout(async()=>{
+        if(swRegistration && Notification?.permission==='granted'){
+          await loadNotifPrefs();
+          if(_notifPrefs?.enabled && !pushSubscription){
+            pushSubscription=await swRegistration.pushManager.getSubscription();
+            if(!pushSubscription) await subscribePush();
+          }
+        }
+      },2000);
+      break;
     case 'auth_failed': sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; break;
     case 'vault_unlocked': document.getElementById('vault-overlay').classList.remove('show'); renderSidebar(); if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key); break;
     case 'vault_error': document.getElementById('vault-err').textContent=ev.message; break;
@@ -2125,6 +2194,20 @@ function addMessage(conn_id,target,msg){
       const soundCfg=loadAppearance();
       if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
       else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
+      // Browser desktop notification (popup bubble) when tab not focused
+      if(!document.hasFocus() && soundCfg.desktopNotif!==false && (isDM || msg.mentioned)){
+        if(Notification?.permission==='granted'){
+          try{
+            const title=isDM?`DM from ${msg.from}`:`${msg.from} in ${target}`;
+            const body=msg.text?.slice(0,120)||'';
+            const n=new Notification(title,{body,icon:'/cryptirc/icon.svg',tag:conn_id+'/'+target,silent:true});
+            n.onclick=()=>{window.focus();setActive(conn_id,target);n.close();};
+            setTimeout(()=>n.close(),8000);
+          }catch(e){}
+        } else if(Notification?.permission==='default'){
+          Notification.requestPermission?.();
+        }
+      }
     }
   }
 }
@@ -2335,7 +2418,8 @@ function buildRow(msg){
   const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';
   const ts=`${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}`;
   const isChat=msg.kind==='privmsg'||msg.kind==='action';
-  const nc=isChat?`nc${nickHash(msg.from)}`:'';
+  const isSelf=isChat&&active&&msg.from===getNick(active.conn_id);
+  const nc=isChat?(isSelf?'nc-self':`nc${nickHash(msg.from)}`):'';
   const isSys=['system','error','join','part','quit','nick','mode','topic','kick','notice'].includes(msg.kind)||msg.from==='*';
   let nickHtml,bodyHtml;
   if(isSys){nickHtml=`<span class="msg-nick" style="color:var(--text3)">—</span>`;bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;}
@@ -3234,12 +3318,13 @@ const THEMES={
   sunset:   {label:'Sunset',  bg0:'#1a0f1e',bg1:'#241528',bg2:'#2e1b32',bg3:'#38213c',bg4:'#422746',border:'#3d2640',border2:'#5a3860',text:'#e8d0e8',text2:'#ff8866',text3:'#8a6080'},
   blumhouse:{label:'Blumhouse',bg0:'#0a0000',bg1:'#120000',bg2:'#1a0505',bg3:'#220808',bg4:'#2d0b0b',border:'#3a0a0a',border2:'#551111',text:'#d4b8b8',text2:'#cc0000',text3:'#663333'},
   scream:   {label:'Scream',  bg0:'#000000',bg1:'#08080a',bg2:'#0e0e12',bg3:'#14141a',bg4:'#1c1c24',border:'#222233',border2:'#333355',text:'#e8e8f0',text2:'#f0f0f0',text3:'#555566'},
+  forest:   {label:'🌧 Forest',bg0:'#0a120a',bg1:'#0d170d',bg2:'#111e11',bg3:'#162516',bg4:'#1b2d1b',border:'#1e3a1e',border2:'#2a4a2a',text:'#c8dcc8',text2:'#6abf6a',text3:'#4a7a4a',rain:true},
 };
 const APPEAR_DEFAULTS={
   theme:'midnight', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:160, lineHeight:1.55,
   timestamps:true, joinpart:true, compact:false, coloredNicks:true,
-  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, msgGap:4,
+  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, msgGap:4,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
 };
@@ -3270,8 +3355,6 @@ function applyAppearance(){
     coloredNicks: el('a-colorednicks').classList.contains('on'),
     nickList:   el('a-nicklist').classList.contains('on'),
     spellcheck: el('a-spellcheck').classList.contains('on'),
-    soundPM:    el('a-sound-pm').classList.contains('on'),
-    soundMention: el('a-sound-mention').classList.contains('on'),
     msgGap:     +el('a-msg-gap').value,
     accent:     el('a-accent-color').value,
     accent2:    el('a-accent2-color').value,
@@ -3333,7 +3416,7 @@ function applyThemeCSS(cfg){
     .nick-entry { font-size:${cfg.nickFont}px; }
     ${cfg.joinpart?'':'.row-join,.row-part,.row-quit{display:none;}'}
     ${cfg.compact?'.msg-row:hover{background:none;}':''}
-    ${cfg.coloredNicks===false?'.nc0,.nc1,.nc2,.nc3,.nc4,.nc5,.nc6,.nc7,.nc8,.nc9{color:var(--text2)!important;}':''}
+    ${cfg.coloredNicks===false?'.nc0,.nc1,.nc2,.nc3,.nc4,.nc5,.nc6,.nc7,.nc8,.nc9{color:var(--text2)!important;}.nc-self{color:var(--accent)!important;}':''}
     ${cfg.nickList===false?'#nick-panel{display:none!important;}':''}
   `;
   // Apply spellcheck setting to input
@@ -3343,7 +3426,80 @@ function applyThemeCSS(cfg){
     inp.setAttribute('spellcheck',sc?'true':'false');
     inp.setAttribute('autocorrect',sc?'on':'off');
   }
+  // Toggle rain overlay for forest theme
+  const rainEl=document.getElementById('rain-overlay');
+  if(rainEl){
+    if(t.rain){rainEl.classList.add('active');startRain();}
+    else{rainEl.classList.remove('active');stopRain();}
+  }
 }
+
+// ─── Rain + Lightning effect ──────────────────────────────────────────────────
+let _rainAnimId=null, _lightningTimer=null;
+function startRain(){
+  if(_rainAnimId)return;
+  const cv=document.getElementById('rain-canvas');
+  if(!cv)return;
+  const ctx=cv.getContext('2d');
+  const drops=[];
+  function resize(){cv.width=window.innerWidth;cv.height=window.innerHeight;}
+  resize(); window.addEventListener('resize',resize);
+  // Create raindrops
+  for(let i=0;i<150;i++){
+    drops.push({
+      x:Math.random()*cv.width,
+      y:Math.random()*cv.height,
+      len:Math.random()*15+8,
+      speed:Math.random()*4+6,
+      opacity:Math.random()*0.15+0.05,
+    });
+  }
+  function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    for(const d of drops){
+      ctx.beginPath();
+      ctx.moveTo(d.x,d.y);
+      ctx.lineTo(d.x+1,d.y+d.len);
+      ctx.strokeStyle=`rgba(180,200,220,${d.opacity})`;
+      ctx.lineWidth=0.8;
+      ctx.stroke();
+      d.y+=d.speed;
+      d.x+=0.3;
+      if(d.y>cv.height){d.y=-d.len;d.x=Math.random()*cv.width;}
+    }
+    _rainAnimId=requestAnimationFrame(draw);
+  }
+  draw();
+  // Lightning flashes
+  if(!_lightningTimer){
+    _lightningTimer=setInterval(()=>{
+      if(Math.random()<0.3){ // 30% chance every interval
+        const flash=document.createElement('div');
+        flash.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.06);z-index:0;pointer-events:none;transition:opacity 0.15s;';
+        document.body.appendChild(flash);
+        setTimeout(()=>{flash.style.opacity='0';},80);
+        setTimeout(()=>{
+          flash.remove();
+          // Second flash
+          if(Math.random()<0.5){
+            const f2=document.createElement('div');
+            f2.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.04);z-index:0;pointer-events:none;transition:opacity 0.2s;';
+            document.body.appendChild(f2);
+            setTimeout(()=>{f2.style.opacity='0';},60);
+            setTimeout(()=>f2.remove(),300);
+          }
+        },150);
+      }
+    },8000);
+  }
+}
+function stopRain(){
+  if(_rainAnimId){cancelAnimationFrame(_rainAnimId);_rainAnimId=null;}
+  if(_lightningTimer){clearInterval(_lightningTimer);_lightningTimer=null;}
+  const cv=document.getElementById('rain-canvas');
+  if(cv){const ctx=cv.getContext('2d');ctx?.clearRect(0,0,cv.width,cv.height);}
+}
+
 function populateAppearanceModal(cfg){
   const el=id=>document.getElementById(id);
   el('a-chat-size').value=cfg.chatSize;
@@ -3360,8 +3516,6 @@ function populateAppearanceModal(cfg){
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
   cfg.spellcheck!==false ? el('a-spellcheck').classList.add('on') : el('a-spellcheck').classList.remove('on');
-  cfg.soundPM!==false ? el('a-sound-pm').classList.add('on') : el('a-sound-pm').classList.remove('on');
-  cfg.soundMention!==false ? el('a-sound-mention').classList.add('on') : el('a-sound-mention').classList.remove('on');
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;
   el('a-accent-swatch').style.background=cfg.accent;
@@ -3594,8 +3748,9 @@ document.addEventListener('click',e=>{
   ];
   let slashEl=document.createElement('div');
   slashEl.id='slash-autocomplete';
-  inp.closest('#input-inner').style.position='relative';
-  inp.closest('#input-wrap').appendChild(slashEl);
+  const wrap=inp.closest('#input-wrap');
+  wrap.style.position='relative';
+  wrap.appendChild(slashEl);
   let slashIdx=-1;
 
   function updateSlash(){
@@ -4182,6 +4337,14 @@ async function showNotifModal() {
   renderNotifModal();
   renderNotifNetworkList();
   document.getElementById('notif-highlight-words').value=getHighlightWords().join(', ');
+  // Populate sound and desktop notification toggles
+  const cfg=loadAppearance();
+  const spm=document.getElementById('a-sound-pm');
+  const smn=document.getElementById('a-sound-mention');
+  const dnt=document.getElementById('a-desktop-notif');
+  if(spm){cfg.soundPM!==false?spm.classList.add('on'):spm.classList.remove('on');}
+  if(smn){cfg.soundMention!==false?smn.classList.add('on'):smn.classList.remove('on');}
+  if(dnt){cfg.desktopNotif!==false?dnt.classList.add('on'):dnt.classList.remove('on');}
 }
 function saveHighlightWords(){
   const raw=document.getElementById('notif-highlight-words').value;
@@ -4252,6 +4415,31 @@ function renderNotifNetworkList() {
   }
 }
 
+function saveNotifSoundPrefs(){
+  // Save sound/desktop notif settings without touching theme sliders
+  const cfg=loadAppearance();
+  const spm=document.getElementById('a-sound-pm');
+  const smn=document.getElementById('a-sound-mention');
+  const dnt=document.getElementById('a-desktop-notif');
+  if(spm) cfg.soundPM=spm.classList.contains('on');
+  if(smn) cfg.soundMention=smn.classList.contains('on');
+  if(dnt) cfg.desktopNotif=dnt.classList.contains('on');
+  saveAppearance(cfg);
+  applyThemeCSS(cfg);
+}
+
+async function toggleDesktopNotif() {
+  const on=document.getElementById('a-desktop-notif').classList.contains('on');
+  if(on && Notification?.permission!=='granted'){
+    const perm=await Notification.requestPermission?.();
+    if(perm!=='granted'){
+      document.getElementById('a-desktop-notif').classList.remove('on');
+      return;
+    }
+  }
+  saveNotifSoundPrefs();
+}
+
 async function onNotifToggle() {
   const checked = document.getElementById('notif-enabled').checked;
   if (checked) {
@@ -4287,8 +4475,8 @@ async function subscribePush() {
     // Get VAPID public key
     const r = await fetch('/cryptirc/push/vapid-public-key');
     if (!r.ok) return;
-    const { public_key } = await r.json();
-    const appServerKey = urlBase64ToUint8Array(public_key);
+    const vapidData = await r.json();
+    const appServerKey = urlBase64ToUint8Array(vapidData.publicKey || vapidData.public_key);
 
     pushSubscription = await swRegistration.pushManager.subscribe({
       userVisibleOnly: true,
@@ -4601,6 +4789,163 @@ function showHelpPanel(){
 }
 function closeHelpPanel(){document.getElementById('help-overlay').classList.remove('show');}
 
+// ─── Admin Panel ──────────────────────────────────────────────────────────────
+let _isAdmin=false;
+async function checkAdmin(){
+  if(!sessionToken)return;
+  try{
+    const r=await fetch('/cryptirc/admin/settings',{headers:{'Authorization':'Bearer '+sessionToken}});
+    if(r.ok){
+      _isAdmin=true;
+      const btn=document.getElementById('admin-menu-btn');
+      if(btn) btn.style.display='';
+    }
+  }catch(e){}
+}
+
+async function showAdminPanel(){
+  const body=document.getElementById('admin-body');
+  body.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">Loading...</div>';
+  document.getElementById('admin-overlay').classList.add('show');
+
+  try{
+    // Load settings
+    const sr=await fetch('/cryptirc/admin/settings',{headers:{'Authorization':'Bearer '+sessionToken}});
+    const settings=sr.ok?await sr.json():{registration_open:true,registration_code:''};
+
+    // Load users
+    const ur=await fetch('/cryptirc/admin/users',{headers:{'Authorization':'Bearer '+sessionToken}});
+    const users=ur.ok?await ur.json():[];
+
+    const onlineCount=users.filter(u=>u.sessions>0).length;
+
+    body.innerHTML='';
+
+    // Stats
+    const stats=document.createElement('div');
+    stats.style.cssText='display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;';
+    stats.innerHTML=`
+      <div style="flex:1;min-width:100px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:var(--accent)">${users.length}</div>
+        <div style="font-size:11px;color:var(--text3)">Total Users</div>
+      </div>
+      <div style="flex:1;min-width:100px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:var(--join)">${onlineCount}</div>
+        <div style="font-size:11px;color:var(--text3)">Online Now</div>
+      </div>
+    `;
+    body.appendChild(stats);
+
+    // Registration settings
+    const regSection=document.createElement('div');
+    regSection.style.cssText='margin-bottom:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;';
+    regSection.innerHTML=`
+      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Registration</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <span style="font-size:13px;color:var(--text)">Open Registration</span>
+        <button class="appear-toggle${settings.registration_open?' on':''}" id="admin-reg-open" onclick="this.classList.toggle('on');adminSaveSettings()"></button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+        <span style="font-size:13px;color:var(--text);flex-shrink:0">Invite Code</span>
+        <input id="admin-reg-code" value="${esc(settings.registration_code)}" placeholder="Leave empty for no code" style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none" onchange="adminSaveSettings()">
+      </div>
+      <div style="font-size:10px;color:var(--text3);margin-top:6px">If set, users must enter this code when registering.</div>
+    `;
+    body.appendChild(regSection);
+
+    // User list
+    const userSection=document.createElement('div');
+    userSection.innerHTML='<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Users</div>';
+    for(const u of users.sort((a,b)=>b.sessions-a.sessions)){
+      const row=document.createElement('div');
+      row.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);';
+      const online=u.sessions>0;
+      row.innerHTML=`
+        <span style="font-size:10px">${online?'🟢':'⚫'}</span>
+        <span style="flex:1;font-size:13px;color:var(--text);font-weight:${u.admin?'700':'400'}">${esc(u.username)}${u.admin?' 👑':''}</span>
+        <span style="font-size:10px;color:var(--text3)">${u.sessions} session${u.sessions!==1?'s':''}</span>
+        ${u.admin?'':`<button onclick="adminDisableUser('${esc(u.username)}')" style="background:none;border:1px solid var(--warn);color:var(--warn);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Disable</button>
+        <button onclick="adminDeleteUser('${esc(u.username)}')" style="background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Delete</button>`}
+      `;
+      userSection.appendChild(row);
+    }
+    body.appendChild(userSection);
+
+    // Add user form
+    const addSection=document.createElement('div');
+    addSection.style.cssText='margin-top:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;';
+    addSection.innerHTML=`
+      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Add User</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Username</label><input id="admin-add-user" placeholder="username" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none"></div>
+        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Password (min 10)</label><input id="admin-add-pass" type="password" placeholder="password" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none"></div>
+        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Email (optional)</label><input id="admin-add-email" placeholder="user@example.com" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none"></div>
+        <button onclick="adminAddUser()" style="background:var(--accent);border:none;border-radius:6px;color:#000;font-weight:700;padding:8px 16px;cursor:pointer;min-height:38px">Add</button>
+      </div>
+      <div id="admin-add-err" style="font-size:11px;color:var(--error);margin-top:6px"></div>
+    `;
+    body.appendChild(addSection);
+
+  }catch(e){
+    body.innerHTML='<div style="color:var(--error);padding:20px;text-align:center">Failed to load admin data</div>';
+  }
+}
+
+function closeAdminPanel(){document.getElementById('admin-overlay').classList.remove('show');}
+
+async function adminSaveSettings(){
+  const open=document.getElementById('admin-reg-open').classList.contains('on');
+  const code=document.getElementById('admin-reg-code').value;
+  try{
+    await fetch('/cryptirc/admin/settings',{
+      method:'PUT',
+      headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
+      body:JSON.stringify({registration_open:open,registration_code:code})
+    });
+    showToast('Admin settings saved');
+  }catch(e){}
+}
+
+async function adminDisableUser(username){
+  if(!confirm(`Disable user "${username}"? They won't be able to log in.`))return;
+  try{
+    await fetch(`/cryptirc/admin/user/${username}/disable`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
+    showToast(`${username} disabled`);
+    showAdminPanel();
+  }catch(e){}
+}
+
+async function adminAddUser(){
+  const username=document.getElementById('admin-add-user').value.trim();
+  const password=document.getElementById('admin-add-pass').value;
+  const email=document.getElementById('admin-add-email').value.trim();
+  const err=document.getElementById('admin-add-err');
+  if(!username||!password){err.textContent='Username and password required';return;}
+  if(password.length<10){err.textContent='Password must be at least 10 characters';return;}
+  err.textContent='';
+  try{
+    const r=await fetch('/cryptirc/admin/adduser',{
+      method:'POST',
+      headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
+      body:JSON.stringify({username,password,email})
+    });
+    const d=await r.json();
+    if(!r.ok){err.textContent=d.message||'Failed';return;}
+    showToast(`User ${username} created`);
+    showAdminPanel(); // refresh
+  }catch(e){err.textContent='Failed to add user';}
+}
+
+async function adminDeleteUser(username){
+  if(!confirm(`DELETE user "${username}"? This removes all their data permanently.`))return;
+  if(!confirm(`Are you SURE? This cannot be undone.`))return;
+  try{
+    await fetch(`/cryptirc/admin/user/${username}`,{method:'DELETE',headers:{'Authorization':'Bearer '+sessionToken}});
+    showToast(`${username} deleted`);
+    showAdminPanel();
+  }catch(e){}
+}
+
 function showHelp(conn_id, target, specific) {
   if (specific) {
     const key  = specific.toLowerCase().replace(/^\//, '');
@@ -4669,7 +5014,8 @@ function toggleSearchPanel(){
     const inp=document.getElementById('search-input');
     inp.value='';
     inp.focus();
-    document.getElementById('search-results').innerHTML='<div class="search-empty">Type to search in current channel</div>';
+    const searchLabel=active&&!active.target.startsWith('#')?'conversation':'channel';
+    document.getElementById('search-results').innerHTML=`<div class="search-empty">Type to search current ${searchLabel}</div>`;
   }
 }
 function closeSearchPanel(){document.getElementById('search-panel').classList.remove('show');}
@@ -5081,6 +5427,20 @@ function timeAgo(ts){
 .monitor-remove { color:#f87171; border-color:rgba(248,113,113,.3); }
 .monitor-remove:hover { background:rgba(248,113,113,.15); color:#f87171; }
 </style>
+<!-- Admin panel -->
+<div id="admin-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(600px,94vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <span style="font-family:var(--sans);font-weight:700;font-size:16px;color:#f0c040">👑 Admin Panel</span>
+      <span onclick="closeAdminPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+    </div>
+    <div id="admin-body" style="overflow-y:auto;flex:1;padding:16px 20px;-webkit-overflow-scrolling:touch"></div>
+  </div>
+</div>
+<style>#admin-overlay.show{display:flex !important;}</style>
+
+<!-- Rain overlay for forest theme -->
+<div id="rain-overlay"><canvas id="rain-canvas"></canvas></div>
 <!-- Cover div prevents iOS keyboard from exposing raw source below the app -->
 <div style="position:fixed;inset:0;background:var(--bg0);z-index:-1;pointer-events:none"></div>
 </body>

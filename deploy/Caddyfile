@@ -22,7 +22,7 @@
 cryptirc.yourdomain.com {
     # Reverse proxy everything to the CryptIRC Rust server
     # Caddy handles TLS; CryptIRC speaks plain HTTP internally
-    reverse_proxy localhost:9000 {
+    reverse_proxy localhost:9001 {
         # WebSocket upgrade support (transparent — Caddy handles it)
         header_up Host {host}
         header_up X-Real-IP {remote_host}
@@ -40,9 +40,9 @@ cryptirc.yourdomain.com {
 
     # Cache static assets aggressively
     @static {
-        path /icon.svg /manifest.json /sw.js
+        path /icon.svg /manifest.json
     }
-    header @static Cache-Control "public, max-age=3600, stale-while-revalidate=86400"
+    header @static Cache-Control "public, max-age=3600"
 
     # Service worker must not be cached (browsers enforce this,
     # but being explicit avoids issues with some CDN setups)
@@ -74,14 +74,6 @@ cryptirc.yourdomain.com {
         output file /var/log/caddy/cryptirc.log {
             roll_size 10mb
             roll_keep 5
-        }
-        format json
-        # Don't log query strings (could contain session tokens)
-        format filter {
-            wrap json
-            fields {
-                uri query replace
-            }
         }
     }
 }

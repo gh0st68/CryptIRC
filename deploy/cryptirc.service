@@ -8,7 +8,7 @@
 
 [Unit]
 Description=CryptIRC — Encrypted IRC Client
-Documentation=https://github.com/youruser/cryptirc
+Documentation=https://github.com/gh0st68/CryptIRC
 After=network-online.target
 Wants=network-online.target
 # Start after Caddy so it's behind the proxy when it comes up
@@ -37,7 +37,10 @@ StartLimitBurst=5
 # Environment
 Environment=CRYPTIRC_DATA=/var/lib/cryptirc
 Environment=CRYPTIRC_BASE_URL=https://cryptirc.yourdomain.com
+Environment=CRYPTIRC_BASE_PATH=/
+Environment=CRYPTIRC_PORT=9001
 Environment=CRYPTIRC_FROM_EMAIL=noreply@yourdomain.com
+Environment=CRYPTIRC_REGISTRATION=open
 Environment=RUST_LOG=info
 
 # ── Security hardening ─────────────────────────────────────────────────────────
@@ -70,7 +73,7 @@ RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 # Memory execution prevention
-MemoryDenyWriteExecute=true
+# MemoryDenyWriteExecute=true  # Disabled — OpenSSL may need W+X memory
 
 # Capability bounding — app needs no Linux capabilities
 CapabilityBoundingSet=
