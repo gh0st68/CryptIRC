@@ -457,7 +457,14 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         // Route PMs to sender's nick, not our own nick
                         let display_target = if target.starts_with(['#','&']) { target.clone() } else { from.clone() };
                         state.logger.append(conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from, target: display_target, text: clean, ts, kind });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind });
+                        // Push notification for DMs and mentions
+                        let user_nick = { conn.lock().await.nick.clone() };
+                        if from != user_nick {
+                            state.notifier.maybe_notify(
+                                username, &user_nick, conn_id, &cfg.label, &display_target, &from, &clean
+                            ).await;
+                        }
                     }
                     "NOTICE" => {
                         let from   = nick_from_prefix(&p.prefix);
@@ -576,9 +583,16 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         send(ServerEvent::IrcNames { conn_id: conn_id.to_string(), channel, names });
                     }
                     "MODE" => {
+                        let setter = nick_from_prefix(&p.prefix);
                         let target = p.params.get(0).cloned().unwrap_or_default();
                         let modes  = p.params[1..].join(" ");
-                        send(ServerEvent::IrcMode { conn_id: conn_id.to_string(), target, modes, ts });
+                        // Send raw modes for prefix parsing, include setter for display
+                        let display = if setter.is_empty() || setter.contains('.') {
+                            modes.clone()
+                        } else {
+                            format!("{}|{}", setter, modes)
+                        };
+                        send(ServerEvent::IrcMode { conn_id: conn_id.to_string(), target, modes: display, ts });
                     }
                     // 311-318 = WHOIS replies — route to nick's query buffer
                     "311" => { // RPL_WHOISUSER: nick user host * :realname

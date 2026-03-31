@@ -1240,6 +1240,14 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <span class="appear-label">Spell check</span>
           <button class="appear-toggle" id="a-spellcheck" onclick="this.classList.toggle('on');applyAppearance()"></button>
         </div>
+        <div class="appear-row">
+          <span class="appear-label">🔊 PM sound</span>
+          <button class="appear-toggle" id="a-sound-pm" onclick="this.classList.toggle('on');applyAppearance()"></button>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">🔊 Mention sound</span>
+          <button class="appear-toggle" id="a-sound-mention" onclick="this.classList.toggle('on');applyAppearance()"></button>
+        </div>
       </div>
 
       <div class="appear-section">
@@ -1983,13 +1991,21 @@ function handleEvent(ev) {
     case 'irc_names':  updateNames(ev.conn_id,ev.channel,ev.names); renderSidebar(); monitorRefreshOnline(); break;
     case 'irc_kick':   sysMsg(ev.conn_id,ev.channel,`✗ ${ev.kicked} kicked by ${ev.by}${ev.reason?' ('+ev.reason+')':''}`, 'error'); break;
     case 'irc_mode': {
-      sysMsg(ev.conn_id,ev.target,`MODE ${ev.modes}`,'mode');
+      // Parse setter|modes format (e.g. "gh0st|+v felon_1" or just "+v felon_1")
+      let modeSetter='', rawModes=ev.modes;
+      if(ev.modes.includes('|')){
+        const pipeIdx=ev.modes.indexOf('|');
+        modeSetter=ev.modes.slice(0,pipeIdx);
+        rawModes=ev.modes.slice(pipeIdx+1);
+      }
+      const modeDisplay=modeSetter?`${modeSetter} sets mode ${rawModes}`:`MODE ${rawModes}`;
+      sysMsg(ev.conn_id,ev.target,modeDisplay,'mode');
       // Update nick prefixes in names list when channel modes change
       const mNet=networks.find(n=>n.config.id===ev.conn_id);
       const mCh=mNet?.channels.find(c=>c.name===ev.target);
       if(mCh){
         const modeMap={o:'@',v:'+',h:'%',a:'&',q:'~'};
-        const parts=ev.modes.split(' ');
+        const parts=rawModes.split(' ');
         const modeStr=parts[0]||'';
         let argIdx=1,adding=true;
         for(const c of modeStr){
@@ -2076,17 +2092,54 @@ function handleEvent(ev) {
 // ─── Buffer helpers ────────────────────────────────────────────────────────────
 function bk(c,t){return `${c}/${t.toLowerCase()}`;}
 function getBuf(c,t){const k=bk(c,t);if(!buffers[k])buffers[k]=[];return buffers[k];}
+// ─── Notification sound ───────────────────────────────────────────────────────
+let _audioCtx=null;
+function playNotifSound(type){
+  try{
+    if(!_audioCtx) _audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    const osc=_audioCtx.createOscillator();
+    const gain=_audioCtx.createGain();
+    osc.connect(gain); gain.connect(_audioCtx.destination);
+    if(type==='pm'){
+      // PM: two-tone chirp
+      osc.frequency.setValueAtTime(880,_audioCtx.currentTime);
+      osc.frequency.setValueAtTime(1100,_audioCtx.currentTime+0.08);
+      gain.gain.setValueAtTime(0.15,_audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001,_audioCtx.currentTime+0.2);
+      osc.start(_audioCtx.currentTime);
+      osc.stop(_audioCtx.currentTime+0.2);
+    } else {
+      // Mention/highlight: single soft ping
+      osc.frequency.setValueAtTime(660,_audioCtx.currentTime);
+      gain.gain.setValueAtTime(0.1,_audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001,_audioCtx.currentTime+0.15);
+      osc.start(_audioCtx.currentTime);
+      osc.stop(_audioCtx.currentTime+0.15);
+    }
+  }catch(e){}
+}
+
 function addMessage(conn_id,target,msg){
   const buf=getBuf(conn_id,target); buf.push(msg);
   if(buf.length>2000)buf.splice(0,buf.length-2000);
-  // Track query/PM buffers that aren't channels or status
-  if(target!=='status'&&!target.startsWith('#')&&!target.startsWith('&')&&!target.startsWith('+')&&!target.startsWith('!')){
+  const isDM=target!=='status'&&!target.startsWith('#')&&!target.startsWith('&')&&!target.startsWith('+')&&!target.startsWith('!');
+  // Track query/PM buffers
+  if(isDM){
     if(!queryBufs[conn_id])queryBufs[conn_id]=new Map();
     queryBufs[conn_id].set(target.toLowerCase(), target);
     saveQueryBufs();
   }
   if(isActive(conn_id,target)){appendMsgRow(msg);scrollBottom();}
-  else{const uk=bk(conn_id,target);unread.set(uk,(unread.get(uk)||0)+1);saveUnread();renderSidebar();}
+  else{
+    const uk=bk(conn_id,target);unread.set(uk,(unread.get(uk)||0)+1);saveUnread();renderSidebar();
+    // Play sound for unread DMs and mentions
+    const isMutedChan=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
+    if(!isMutedChan && msg.from!=='*'){
+      const soundCfg=loadAppearance();
+      if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
+      else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
+    }
+  }
 }
 function sysMsg(c,t,text,kind='system'){addMessage(c,t,{ts:Date.now()/1000|0,from:'*',text,kind});}
 function clearCurrentHistory(){
@@ -2164,7 +2217,7 @@ function renderSidebar(){
       ci.className=`chan-item${isA?' active':''}`;
       ci.dataset.target=ch.name;
       ci.dataset.connId=id;
-      ci.draggable=true;
+      if(window.innerWidth>768) ci.draggable=true;
       ci.style.position='relative';
       const chMuted=isMuted(id+'/'+ch.name)||isMuted('net:'+id);
       ci.innerHTML=`${esc(ch.name)}<span class="chan-right">${uc&&!chMuted?`<span class="chan-unread-badge">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab" onclick="event.stopPropagation();toggleChanMenu(this,'${id}','${esc(ch.name)}','channel')">⋮</span></span>`;
@@ -3199,7 +3252,7 @@ const APPEAR_DEFAULTS={
   theme:'midnight', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:160, lineHeight:1.55,
   timestamps:true, joinpart:true, compact:false, coloredNicks:true,
-  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, msgGap:4,
+  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, msgGap:4,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
 };
@@ -3230,6 +3283,8 @@ function applyAppearance(){
     coloredNicks: el('a-colorednicks').classList.contains('on'),
     nickList:   el('a-nicklist').classList.contains('on'),
     spellcheck: el('a-spellcheck').classList.contains('on'),
+    soundPM:    el('a-sound-pm').classList.contains('on'),
+    soundMention: el('a-sound-mention').classList.contains('on'),
     msgGap:     +el('a-msg-gap').value,
     accent:     el('a-accent-color').value,
     accent2:    el('a-accent2-color').value,
@@ -3318,6 +3373,8 @@ function populateAppearanceModal(cfg){
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
   cfg.spellcheck!==false ? el('a-spellcheck').classList.add('on') : el('a-spellcheck').classList.remove('on');
+  cfg.soundPM!==false ? el('a-sound-pm').classList.add('on') : el('a-sound-pm').classList.remove('on');
+  cfg.soundMention!==false ? el('a-sound-mention').classList.add('on') : el('a-sound-mention').classList.remove('on');
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;
   el('a-accent-swatch').style.background=cfg.accent;
