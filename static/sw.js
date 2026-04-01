@@ -1,8 +1,8 @@
 // CryptIRC Service Worker v9
 // Handles: offline caching, push notifications, notification click actions
 
-const CACHE = 'cryptirc-v118';
-const STATIC = ['/cryptirc/', '/cryptirc/manifest.json', '/cryptirc/icon.svg'];
+const CACHE = 'cryptirc-v149';
+const STATIC = ['/cryptirc/manifest.json', '/cryptirc/icon.svg'];
 
 // ─── Install ──────────────────────────────────────────────────────────────────
 self.addEventListener('install', e => {
@@ -24,13 +24,25 @@ self.addEventListener('activate', e => {
   );
 });
 
-// ─── Fetch (cache-first for statics) ─────────────────────────────────────────
+// ─── Fetch (network-first for HTML, cache-first for static assets) ───────────
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  // Skip API calls
-  if (['/cryptirc/ws', '/cryptirc/auth', '/cryptirc/upload', '/cryptirc/files', '/cryptirc/push'].some(p =>
+  // Skip API calls entirely
+  if (['/cryptirc/ws', '/cryptirc/auth', '/cryptirc/upload', '/cryptirc/files', '/cryptirc/push', '/cryptirc/pub'].some(p =>
       url.pathname.startsWith(p))) return;
 
+  // Main HTML page — always network-first so deploys take effect immediately
+  if (url.pathname === '/cryptirc/' || url.pathname === '/cryptirc') {
+    e.respondWith(
+      fetch(e.request).then(res => {
+        if (res.ok) { const c = res.clone(); caches.open(CACHE).then(cache => cache.put(e.request, c)); }
+        return res;
+      }).catch(() => caches.match(e.request))
+    );
+    return;
+  }
+
+  // Other static assets — cache-first
   e.respondWith(
     caches.match(e.request).then(r => {
       if (r) return r;

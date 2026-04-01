@@ -33,7 +33,6 @@
   --sab: env(safe-area-inset-bottom, 0px);
   --sal: env(safe-area-inset-left,   0px);
   /* Dynamic viewport height — JS overrides this for iOS keyboard */
-  --app-h: 100dvh;
 }
 
 /* ── Reset ─────────────────────────────────────────────────────────────────── */
@@ -41,33 +40,30 @@
 /* A2: Android tap highlight */
 * { -webkit-tap-highlight-color: rgba(0,212,170,.12); }
 html {
-  height:100%; height:-webkit-fill-available; overflow:hidden;
-  /* PWA standalone: use full screen */
-  height:100vh; height:100dvh; height:-webkit-fill-available;
+  height:100%; overflow:hidden;
+  background:var(--bg0);
 }
 body {
-  height:100%; height:-webkit-fill-available;
+  height:100%;
   background:var(--bg0); color:var(--bg0);
   font-family:var(--mono); font-size:0;
-  overflow:hidden;
+  overflow:hidden; margin:0; padding:0;
   -webkit-text-size-adjust:100%;
   text-size-adjust:100%;
-  /* Make body text invisible so raw HTML source can't show through */
+  touch-action:none;
 }
 /* App restores normal text */
 #app, #auth-screen, #vault-overlay, .modal-overlay, #monitor-overlay, #help-overlay, #admin-overlay {
   color:var(--text); font-size:13px;
 }
 /* Hide raw source elements */
-body > style, body > script, body > div:last-child { visibility:hidden; }
-body > #app, body > #auth-screen, body > .modal-overlay, body > .upload-progress,
-body > #monitor-overlay, body > #help-overlay, body > #admin-overlay,
-body > #rain-overlay { visibility:visible; }
+/* Hide raw source elements that might show through on iOS */
+body > style, body > script { visibility:hidden; }
 
 /* PWA standalone mode — ensure full screen */
 @media (display-mode: standalone) {
-  html, body { height:100vh !important; }
-  #app { height:100vh !important; height:100dvh !important; }
+  html, body { height:100% !important; }
+  #app { height:100%; }
 }
 
 /* ── AUTH SCREEN ───────────────────────────────────────────────────────────── */
@@ -166,7 +162,7 @@ body > #rain-overlay { visibility:visible; }
 /* ── APP LAYOUT ────────────────────────────────────────────────────────────── */
 #app {
   display:flex;
-  height:100vh; height:100dvh; height:-webkit-fill-available;
+  height:100%;
   /* M3: landscape safe area */
   padding-left:var(--sal);
   padding-right:var(--sar);
@@ -306,7 +302,7 @@ body > #rain-overlay { visibility:visible; }
 #search-panel { display:none; position:absolute; top:36px; right:0; width:min(400px, 90vw); max-height:450px; background:var(--bg1); border:1px solid var(--border); border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.5); z-index:100; overflow:hidden; }
 #search-panel.show { display:flex; flex-direction:column; }
 #search-panel-hdr { padding:8px 10px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px; }
-#search-input { flex:1; background:var(--bg2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:14px; padding:8px 10px; outline:none; -webkit-appearance:none; }
+#search-input { flex:1; background:var(--bg2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:16px; padding:8px 10px; outline:none; -webkit-appearance:none; }
 #search-input:focus { border-color:var(--accent); }
 #search-results { overflow-y:auto; flex:1; max-height:380px; -webkit-overflow-scrolling:touch; }
 .search-empty { color:var(--text3); padding:20px; text-align:center; font-size:12px; }
@@ -377,7 +373,7 @@ body > #rain-overlay { visibility:visible; }
   padding:12px 16px; cursor:pointer; color:var(--text); display:flex; align-items:center; gap:8px;
   transition:background .1s; min-height:44px;
 }
-.nick-ctx-item:hover { background:var(--bg4); }
+.nick-ctx-item:hover, .nick-ctx-item:active { background:var(--bg4); }
 .nick-ctx-item:first-child { border-radius:8px 8px 0 0; }
 .nick-ctx-item:last-child { border-radius:0 0 8px 8px; }
 .nick-ctx-sep { height:1px; background:var(--border); margin:4px 0; pointer-events:none; }
@@ -578,13 +574,14 @@ body > #rain-overlay { visibility:visible; }
   align-items:center; justify-content:center;
 }
 #nick-toggle {
-  position:absolute; top:6px; right:4px; z-index:10;
-  background:var(--bg2,#1a1a2e); border:1px solid var(--border,#333);
+  background:none; border:none;
   color:var(--text2,#aaa); cursor:pointer; font-size:11px;
-  padding:3px 6px; border-radius:4px;
-  transition:background .15s,color .15s;
+  padding:3px 6px; border-radius:4px; flex-shrink:0;
+  transition:color .15s;
 }
-#nick-toggle:hover { background:var(--bg3,#252540); color:var(--text,#eee); }
+#nick-toggle:hover { color:var(--text,#eee); }
+#nick-toggle .toggle-icon { display:inline; }
+#nick-toggle .toggle-mobile { display:none; }
 #chan-title { font-weight:500; font-size:13px; white-space:nowrap; }
 #topic-menu {
   display:none; position:fixed; z-index:300;
@@ -665,39 +662,39 @@ body > #rain-overlay { visibility:visible; }
 
 /* ── INPUT BAR ─────────────────────────────────────────────────────────────── */
 #input-wrap {
-  padding:4px 6px calc(4px + var(--sab));
+  padding:0 0 var(--sab);
   background:var(--bg1); border-top:1px solid var(--border);
-  display:flex; gap:3px; align-items:center; flex-shrink:0;
+  display:flex; align-items:center; flex-shrink:0;
 }
-#input-nick {
-  color:var(--accent); font-size:11px; font-weight:600; white-space:nowrap; user-select:none;
-}
+#input-inner { background:var(--bg1) !important; }
+#input-wrap #send-btn, #input-wrap .upload-btn { background:var(--bg1); }
+#input-nick { display:none; }
 #input-inner {
   flex:1; display:flex; align-items:center; min-width:0;
-  background:var(--bg2); border:1px solid var(--border); border-radius:20px;
-  transition:border-color .2s;
+  background:none; border:none; border-radius:0;
+  transition:none;
 }
-#input-inner:focus-within { border-color:var(--accent); }
+#input-inner:focus-within { }
 #msg-input {
   flex:1; background:none; border:none;
   color:var(--text); font-family:var(--mono);
   font-size:16px;
-  padding:6px 0 6px 12px;
+  padding:10px 12px;
   outline:none; min-width:0;
   -webkit-appearance:none; appearance:none;
 }
 #msg-input::placeholder { color:var(--text3); }
 #send-btn {
-  background:none; border:none; color:var(--accent); cursor:pointer;
-  width:30px; height:30px; min-width:30px;
+  background:none; border:none; color:var(--text2); cursor:pointer;
+  width:36px; height:36px; min-width:36px;
   display:flex; align-items:center; justify-content:center;
-  font-size:15px; flex-shrink:0; border-radius:50%;
-  transition:background .12s;
+  font-size:16px; flex-shrink:0;
+  transition:color .12s;
   -webkit-appearance:none; appearance:none;
-  padding:4px; box-sizing:content-box;
+  padding:4px;
 }
-#send-btn:hover { background:rgba(0,212,170,.12); }
-#send-btn:active { background:rgba(0,212,170,.2); }
+#send-btn:hover { color:var(--accent); }
+#send-btn:active { color:var(--accent); }
 #emoji-picker {
   position:absolute; bottom:calc(var(--input-bar-h, 48px) + 4px); right:10px;
   width:min(320px, calc(100vw - 20px)); max-height:min(300px, 50vh); background:var(--bg1); border:1px solid var(--border);
@@ -740,8 +737,8 @@ body > #rain-overlay { visibility:visible; }
 .slash-ac-desc { color:var(--text3); font-size:12px; }
 .upload-btn {
   background:none; border:none;
-  color:var(--text3); cursor:pointer; font-size:15px;
-  padding:4px; min-width:28px; min-height:28px;
+  color:var(--text2); cursor:pointer; font-size:16px;
+  padding:6px; min-width:36px; min-height:36px;
   display:flex; align-items:center; justify-content:center;
   transition:color .15s; flex-shrink:0;
   -webkit-appearance:none; appearance:none;
@@ -763,11 +760,12 @@ body > #rain-overlay { visibility:visible; }
 #nick-panel.collapsed > * { display:none; }
 #nick-panel-hdr { padding:10px 10px 8px; font-size:10px; color:var(--text3); letter-spacing:.07em; border-bottom:1px solid var(--border); flex-shrink:0; text-transform:uppercase; }
 #nick-list { flex:1; overflow-y:auto; padding:4px 0; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
-.nick-entry { padding:1px 8px; font-size:12px; cursor:pointer; border-radius:3px; margin:0 3px; color:var(--text2); transition:background .1s; min-height:18px; display:flex; align-items:center; line-height:1.2; }
+.nick-entry { padding:2px 10px; font-size:14px; cursor:pointer; border-radius:3px; margin:0 4px; color:var(--text2); transition:background .1s; min-height:22px; line-height:22px; }
 .nick-entry:hover, .nick-entry:active { background:var(--bg3); color:var(--text); }
 .nick-pfx { color:var(--warn); }
 .nick-pfx.op { color:var(--accent); }
 .nick-away { opacity:0.5; }
+.nick-group-hdr { padding:8px 10px 3px; font-size:11px; font-weight:600; color:var(--text3); text-transform:capitalize; letter-spacing:.03em; }
 .away-dot { font-size:10px; margin-right:2px; }
 #typing-indicator { font-size:11px; color:var(--text2,#888); padding:0 12px; height:0; overflow:hidden; transition:height .15s,padding .15s; white-space:nowrap; text-overflow:ellipsis; }
 #typing-indicator.visible { height:18px; padding:2px 12px; }
@@ -987,14 +985,22 @@ body > #rain-overlay { visibility:visible; }
   :root { --nicks-w:0px; }
   #hamburger   { display:flex; }
   #sidebar-toggle-btn { display:none !important; }
-  #nick-toggle { position:fixed; top:auto; bottom:60px; right:8px; z-index:55; display:block; }
+  #nick-toggle {
+    position:static; display:flex; align-items:center; justify-content:center;
+    width:auto; height:auto; min-width:44px; min-height:44px;
+    border-radius:0; font-size:20px; padding:4px;
+    background:none; border:none; box-shadow:none;
+    color:var(--text2); flex-shrink:0;
+  }
+  #nick-toggle .toggle-icon { display:none; }
+  #nick-toggle .toggle-mobile { display:inline; }
   #lag-pill     { display:none !important; }
   #lag-mobile   { display:flex; }
   #mentions-btn { display:none; }
   #input-nick  { display:none; }
   #nick-panel  {
     display:flex; position:fixed; right:0; top:0; bottom:0; z-index:50;
-    width:min(240px, 70vw); transform:translateX(100%);
+    width:min(180px, 55vw); transform:translateX(100%);
     transition:transform .28s cubic-bezier(.4,0,.2,1);
     padding-top:var(--sat); padding-bottom:var(--sab); padding-right:var(--sar);
     border-left:1px solid var(--border);
@@ -1023,17 +1029,16 @@ body > #rain-overlay { visibility:visible; }
   }
   #mentions-panel { left:0; right:0; width:auto; max-width:92vw; }
   #scroll-bottom-btn { right:12px; }
-  .nick-entry { min-height:28px; display:flex; align-items:center; padding:1px 10px; }
+  .nick-entry { min-height:36px; padding:6px 10px; line-height:1.3; -webkit-tap-highlight-color:rgba(0,212,170,.15); touch-action:manipulation; display:flex; align-items:center; }
   .chan-kebab { display:inline-flex !important; align-items:center; opacity:.5; }
   .net-kebab { opacity:.6; }
 }
 @media(max-width:480px) {
-  .upload-btn { font-size:13px; padding:3px; }
+  .upload-btn { font-size:15px; padding:4px; }
   .sidebar-btn { font-size:11px; }
-  #input-wrap { padding:3px 4px calc(3px + var(--sab)); gap:2px; }
-  #input-inner { border-radius:16px; }
-  #msg-input { padding:5px 0 5px 10px; font-size:16px; }
-  #send-btn { width:26px; height:26px; min-width:26px; font-size:13px; padding:3px; }
+  #input-wrap { padding:0 0 var(--sab); }
+  #msg-input { padding:10px 8px; font-size:16px; }
+  #send-btn { width:36px; height:36px; min-width:36px; font-size:16px; }
 }
 @media(max-width:360px) {
   .auth-box { padding:16px; }
@@ -1139,7 +1144,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 <div id="drop-overlay">📎 Drop file to upload</div>
 
 <!-- ── SIDEBAR BACKDROP ──────── -->
-<div id="sidebar-backdrop" onclick="closeSidebar();document.getElementById('nick-panel').classList.remove('open')"></div>
+<div id="sidebar-backdrop" onclick="closeSidebar();document.getElementById('nick-panel').classList.remove('open');this.classList.remove('show')"></div>
 
 <!-- ── RECONNECT TOAST ────────── -->
 <div id="reconnect-toast"></div>
@@ -1538,7 +1543,6 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
   </div>
 
   <div id="main">
-    <button id="nick-toggle" onclick="toggleNickPanel()" title="Toggle user list">▶</button>
     <div id="topbar">
       <button id="sidebar-toggle-btn" onclick="toggleSidebarCollapse()" title="Toggle channel list">◀</button>
       <button id="hamburger" onclick="toggleSidebar()">☰</button>
@@ -1557,6 +1561,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <span id="led-tx" style="display:none"></span>
       <span id="led-rx" style="display:none"></span>
       <span id="usercount" style="display:none"></span>
+      <button id="nick-toggle" onclick="toggleNickPanel()" title="Toggle user list"><span class="toggle-icon">▶</span><span class="toggle-mobile">👥</span></button>
       <div id="topic-menu">
         <button class="topic-menu-item" onclick="viewFullTopic();closeTopicMenu()">👁 View full topic</button>
         <button class="topic-menu-item" onclick="editTopic();closeTopicMenu()">✏️ Edit topic</button>
@@ -1593,13 +1598,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     </div>
     <div id="typing-indicator"></div>
     <div id="input-wrap">
-      <span id="input-nick">—</span>
       <div id="input-inner">
-        <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" spellcheck="true" autocorrect="on" autocapitalize="off">
+        <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" spellcheck="true" autocorrect="on" autocapitalize="off" enterkeyhint="send">
         <button id="send-btn" onclick="doSend()" title="Send">➤</button>
+        <button class="upload-btn" title="Upload file" onclick="triggerUpload()">📎</button>
       </div>
-      <button class="upload-btn" title="Emoji" onclick="toggleEmojiPicker()" id="emoji-btn">😀</button>
-      <button class="upload-btn" title="Upload file" onclick="triggerUpload()">📎</button>
       <input type="file" id="file-input" multiple accept="*/*" onchange="handleFileSelect(this.files)">
     </div>
     <div id="emoji-picker" style="display:none">
@@ -1648,65 +1651,48 @@ function loadLastActive(){
 loadQueryBufs();
 let inputHistory=[], historyIdx=-1;
 try{inputHistory=JSON.parse(localStorage.getItem('cryptirc_input_history')||'[]');}catch(e){}
-function saveInputHistory(){try{localStorage.setItem('cryptirc_input_history',JSON.stringify(inputHistory.slice(-100)));}catch(e){} savePrefsToServer();}
+function saveInputHistory(){
+  // Filter out commands that may contain passwords before persisting
+  const SENSITIVE=/^\/(identify|nickserv|ns|oper|msg\s+nickserv|msg\s+chanserv|pass)/i;
+  const safe=inputHistory.filter(l=>!SENSITIVE.test(l)).slice(-100);
+  try{localStorage.setItem('cryptirc_input_history',JSON.stringify(safe));}catch(e){}
+  savePrefsToServer();
+}
 let lagMap={};
 let pushSubscription=null;
 let swRegistration=null;
 const IMG_EXTS=/\.(jpg|jpeg|png|gif|webp|avif)(\?.*)?$/i;
 const VID_EXTS=/\.(mp4|webm|mov)(\?.*)?$/i;
 
-// ─── M2: iOS Visual Viewport keyboard fix ────────────────────────────────────
+// ─── M2: iOS keyboard fix — Lounge-style (height:100% + touch-action:none) ───
 function initViewportFix() {
-  const app = document.getElementById('app');
-
-  // Prevent any body scrolling
+  // Prevent body-level scrolling (keeps page from scrolling behind keyboard)
   document.body.addEventListener('touchmove', e => {
-    // Allow scrolling inside scrollable elements
     let el = e.target;
     while (el && el !== document.body) {
       const ov = getComputedStyle(el).overflowY;
       if ((ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight) return;
       el = el.parentElement;
     }
-    // Block body-level scroll (prevents code showing behind keyboard)
     if (e.cancelable) e.preventDefault();
   }, { passive: false });
 
-  if (!window.visualViewport) return;
-
-  function update() {
-    const vv = window.visualViewport;
-    app.style.height = vv.height + 'px';
-    // Pin viewport to top
-    document.documentElement.scrollTop = 0;
-    document.body.scrollTop = 0;
-  }
-
-  window.visualViewport.addEventListener('resize', update);
-  window.visualViewport.addEventListener('scroll', () => {
-    document.documentElement.scrollTop = 0;
-    document.body.scrollTop = 0;
-  });
-
+  // Auto-scroll chat to bottom when keyboard opens
   const inp = document.getElementById('msg-input');
   if (inp) {
     inp.addEventListener('focus', () => {
-      [200, 400, 700].forEach(ms => setTimeout(() => {
-        update();
+      [200, 500, 1000].forEach(ms => setTimeout(() => {
         const area = document.getElementById('chat-area');
         if (area) area.scrollTop = area.scrollHeight;
+        window.scrollTo(0, 0);
       }, ms));
     });
     inp.addEventListener('blur', () => {
       setTimeout(() => {
-        app.style.height = '';
-        document.documentElement.scrollTop = 0;
-        document.body.scrollTop = 0;
+        window.scrollTo(0, 0);
       }, 150);
     });
   }
-
-  update();
 }
 
 // ─── M6: Swipe gesture for sidebar ───────────────────────────────────────────
@@ -1782,7 +1768,7 @@ async function doLogin() {
     sessionToken=d.token; currentUser=d.username;
     localStorage.setItem('cryptirc_token',sessionToken);
     localStorage.setItem('cryptirc_user',currentUser);
-    document.cookie=`cryptirc_token=${sessionToken};path=/cryptirc;max-age=31536000;SameSite=Strict`;
+    document.cookie=`cryptirc_token=${sessionToken};path=/cryptirc;max-age=31536000;SameSite=Strict${location.protocol==='https:'?';Secure':''}`;
     await new Promise(r=>setTimeout(r,1500));
     lights.classList.remove('active');
     showApp();
@@ -1857,7 +1843,7 @@ async function checkAuth() {
     if(!r.ok){localStorage.removeItem('cryptirc_token');document.getElementById('auth-screen').style.display='flex';return;}
     const d=await r.json();
     sessionToken=token; currentUser=d.username;
-    document.cookie=`cryptirc_token=${sessionToken};path=/cryptirc;max-age=31536000;SameSite=Strict`;
+    document.cookie=`cryptirc_token=${sessionToken};path=/cryptirc;max-age=31536000;SameSite=Strict${location.protocol==='https:'?';Secure':''}`;
     showApp();
   } catch(e){document.getElementById('auth-screen').style.display='flex';}
 }
@@ -1948,6 +1934,8 @@ function wsend(obj){
         const parts=obj.raw.split(/\s+/,3);
         if(parts.length>=3){
           let txt=obj.raw.slice(obj.raw.indexOf(':',obj.raw.indexOf(' '))+1);
+          // Strip CTCP ACTION wrapper so it matches the server's cleaned text
+          if(txt.startsWith('\x01ACTION ')&&txt.endsWith('\x01')) txt=txt.slice(8,-1);
           if(!window._sentMsgs) window._sentMsgs=[];
           window._sentMsgs.push({t:Date.now(),conn:obj.conn_id,target:parts[1],text:txt});
         }
@@ -1994,7 +1982,7 @@ function handleEvent(ev) {
               wsend({type:'get_logs',conn_id:saved.conn_id,target:saved.target,limit:200});
             const inp=document.getElementById('msg-input');
             inp.disabled=!net?.connected;
-            inp.placeholder=net?.connected?`Message ${saved.target}`:'Not connected';
+            inp.placeholder=net?.connected?`Write to ${saved.target}`:'Not connected';
           }
         }
       }
@@ -2340,7 +2328,7 @@ function handleEvent(ev) {
     case 'account_deleted':
       alert('Your account has been deleted.');
       localStorage.clear();
-      document.cookie='cryptirc_token=;max-age=0;path=/';
+      document.cookie='cryptirc_token=;max-age=0;path=/cryptirc';document.cookie='cryptirc_token=;max-age=0;path=/';
       location.reload();
       break;
     case 'error':      console.error(ev.message); break;
@@ -2527,7 +2515,7 @@ function setNetDot(conn_id,state){
 function updateNick(conn_id,nick){
   const net=networks.find(n=>n.config.id===conn_id);
   if(net)net.nick=nick;
-  if(active&&active.conn_id===conn_id)document.getElementById('input-nick').textContent=nick;
+  if(active&&active.conn_id===conn_id){const _in=document.getElementById('input-nick');if(_in)_in.textContent=nick;}
 }
 function updateNames(conn_id,channel,names){
   const net=networks.find(n=>n.config.id===conn_id);
@@ -2571,8 +2559,8 @@ function setActive(conn_id,target){
   const net=networks.find(n=>n.config.id===conn_id);
   const inp=document.getElementById('msg-input');
   inp.disabled=!net?.connected;
-  inp.placeholder=net?.connected?`Message ${target}`:'Not connected';
-  document.getElementById('input-nick').textContent=net?.nick||net?.config.nick||currentUser||'—';
+  inp.placeholder=net?.connected?`Write to ${target}`:'Not connected';
+  const inpNick=document.getElementById('input-nick');if(inpNick)inpNick.textContent=net?.nick||net?.config.nick||currentUser||'—';
   updateCertBtn();
 }
 
@@ -2643,24 +2631,66 @@ function buildRow(msg){
   if(msgBody){for(const url of extractMediaUrls(msg.text)){const el=buildMediaEl(url);if(el)msgBody.appendChild(el);}}
   return row;
 }
+// Delegated click handler for nick list — attached once, works for all nicks
+(function(){
+  const nl=document.getElementById('nick-list');
+  if(nl&&!nl._delegated){
+    nl._delegated=true;
+    nl.addEventListener('click',function(e){
+      const entry=e.target.closest('.nick-entry');
+      if(entry&&entry.dataset.nick){
+        e.stopPropagation();
+        showNickMenu(e,entry.dataset.nick);
+      }
+    });
+  }
+})();
 function renderNickPanel(names){
   const list=document.getElementById('nick-list');
   const cnt=document.getElementById('nick-panel-count');
   list.innerHTML=''; cnt.textContent=`(${names.length})`;
-  [...names].sort((a,b)=>{const pa=nickPri(a),pb=nickPri(b);return pa!==pb?pa-pb:stripPfx(a).localeCompare(stripPfx(b),undefined,{sensitivity:'base'});}).forEach(n=>{
+  const sorted=[...names].sort((a,b)=>{const pa=nickPri(a),pb=nickPri(b);return pa!==pb?pa-pb:stripPfx(a).localeCompare(stripPfx(b),undefined,{sensitivity:'base'});});
+  // Group by role
+  const groups={owners:[],admins:[],ops:[],halfops:[],voiced:[],users:[]};
+  for(const n of sorted){
     let pi=0;while(pi<n.length&&'~&@%+'.includes(n[pi]))pi++;
     const pfx=n.slice(0,pi);
-    const nick=n.slice(pi);
-    const el=document.createElement('div');
-    const awayKey=(active?active.conn_id:'')+'/'+nick;
-    const isAway=window._awayNicks&&window._awayNicks[awayKey];
-    el.className=`nick-entry nc${nickHash(nick)}${isAway?' nick-away':''}`;
-    const awayDot=isAway?'<span class="away-dot" title="'+esc(isAway)+'">💤</span> ':'';
-    el.innerHTML=pfx?`${awayDot}<span class="nick-pfx${pfx.includes('@')||pfx.includes('~')||pfx.includes('&')?' op':''}">${pfx}</span>${esc(nick)}`:awayDot+esc(nick);
-    el.onclick=(e)=>showNickMenu(e,nick);
-    el.style.cursor='pointer';
-    list.appendChild(el);
-  });
+    if(pfx.includes('~'))groups.owners.push(n);
+    else if(pfx.includes('&'))groups.admins.push(n);
+    else if(pfx.includes('@'))groups.ops.push(n);
+    else if(pfx.includes('%'))groups.halfops.push(n);
+    else if(pfx.includes('+'))groups.voiced.push(n);
+    else groups.users.push(n);
+  }
+  const sections=[
+    {label:'Owners',nicks:groups.owners},
+    {label:'Admins',nicks:groups.admins},
+    {label:'Operators',nicks:groups.ops},
+    {label:'Half-Ops',nicks:groups.halfops},
+    {label:'Voiced',nicks:groups.voiced},
+    {label:'Users',nicks:groups.users},
+  ];
+  for(const sec of sections){
+    if(!sec.nicks.length)continue;
+    const hdr=document.createElement('div');
+    hdr.className='nick-group-hdr';
+    hdr.textContent=sec.label;
+    list.appendChild(hdr);
+    for(const n of sec.nicks){
+      let pi=0;while(pi<n.length&&'~&@%+'.includes(n[pi]))pi++;
+      const pfx=n.slice(0,pi);
+      const nick=n.slice(pi);
+      const el=document.createElement('div');
+      const awayKey=(active?active.conn_id:'')+'/'+nick;
+      const isAway=window._awayNicks&&window._awayNicks[awayKey];
+      el.className=`nick-entry nc${nickHash(nick)}${isAway?' nick-away':''}`;
+      // Store nick in data attribute for click handler
+      el.dataset.nick=nick;
+      el.innerHTML=pfx?`<span class="nick-pfx${pfx.includes('@')||pfx.includes('~')||pfx.includes('&')?' op':''}">${pfx}</span>${esc(nick)}`:esc(nick);
+      el.style.cursor='pointer';
+      list.appendChild(el);
+    }
+  }
 }
 function updateTypingIndicator(){
   const el=document.getElementById('typing-indicator');
@@ -2693,7 +2723,7 @@ function updateTopbar(){
     const ch=net.channels.find(c=>c.name===active.target);
     const topic=ch?.topic||'';
     if(topic){
-      topicInline.innerHTML=parseMircColors(esc(topic));
+      topicInline.innerHTML=parseMircColors(topic);
       topicInline.title=topic;
       topicInline.style.display='';
       topicSep.style.display='';
@@ -2707,7 +2737,7 @@ function updateTopbar(){
     }
     document.getElementById('usercount').textContent=ch?`${ch.names.length} users`:'';
     renderNickPanel(ch?.names||[]);
-    document.getElementById('input-nick').textContent=net.nick||net.config.nick;
+    const _in2=document.getElementById('input-nick');if(_in2)_in2.textContent=net.nick||net.config.nick;
   } else {
     topicInline.style.display='none';
     topicSep.style.display='none';
@@ -4268,7 +4298,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     }
     if(localStorage.getItem('cryptirc_nick_collapsed')==='1'){
       document.getElementById('nick-panel')?.classList.add('collapsed');
-      const nb=document.getElementById('nick-toggle');if(nb)nb.textContent='◀';
+      const ni=document.querySelector('#nick-toggle .toggle-icon');if(ni)ni.textContent='◀';
     }
   }
 });
@@ -4417,17 +4447,20 @@ function getPowerLevel(pfx){
   return 0;
 }
 function showNickMenu(e,nick){
+  try{
   e.preventDefault(); e.stopPropagation();
   closeNickMenu();
+  const isMobile=window.innerWidth<=768;
   const menu=document.createElement('div');
   menu.className='nick-ctx';
   const isChan=active&&(active.target.startsWith('#')||active.target.startsWith('&'));
   const myPower=isChan?getPowerLevel(getMyPrefix(active.conn_id,active.target)):0;
   const sendRaw=(r)=>{if(active)wsend({type:'send',conn_id:active.conn_id,raw:r});};
   const ch=active?active.target:'';
+  const closeAfter=()=>{closeNickMenu();if(isMobile)closeNickPanelMobile();};
   const items=[
-    {label:'Whois',     action:()=>{if(active){if(!window._pendingWhois)window._pendingWhois={};window._pendingWhois[active.conn_id]=nick;wsend({type:'send',conn_id:active.conn_id,raw:`WHOIS ${nick}`});closeNickPanelMobile();}}},
-    {label:'Query',     action:()=>{if(active){setActive(active.conn_id,nick);closeSidebar();closeNickPanelMobile();}}},
+    {label:'Whois',     action:()=>{if(active){if(!window._pendingWhois)window._pendingWhois={};window._pendingWhois[active.conn_id]=nick;wsend({type:'send',conn_id:active.conn_id,raw:`WHOIS ${nick}`});closeAfter();}}},
+    {label:'Query',     action:()=>{if(active){closeAfter();setActive(active.conn_id,nick);closeSidebar();}}},
     {label:'Mention',   action:()=>insertNick(nick)},
     {label:'Slap',      action:async()=>{if(!active)return;const st=`slaps ${nick} around a bit with a large trout`;const sw=(window.E2E?.ready||window.E2E?.channelKeys?.[active.target])?await e2eEncryptOutgoing(active.target,`\x01ACTION ${st}\x01`):null;if(sw)wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :${sw}`});else wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :\x01ACTION ${st}\x01`});addMessage(active.conn_id,active.target,{ts:Date.now()/1000|0,from:getNick(active.conn_id),text:st,kind:'action'});}},
     {label:loadMonitor()[nick.toLowerCase()]?'Unmonitor':'Monitor', action:()=>{const k=nick.toLowerCase();if(loadMonitor()[k]){monitorRemove(nick);showToast(`Removed ${nick} from monitor`);}else{monitorAdd(nick);showToast(`Added ${nick} to monitor`);}}},
@@ -4462,22 +4495,44 @@ function showNickMenu(e,nick){
     const el=document.createElement('div');
     el.className='nick-ctx-item';
     if(it.label.startsWith('───')){el.className='nick-ctx-sep';el.textContent='';} else {el.textContent=it.label;}
-    el.onclick=()=>{if(!it.label.startsWith('───')){it.action();closeNickMenu();}};
+    el.addEventListener('click',()=>{if(!it.label.startsWith('───')){it.action();closeNickMenu();if(isMobile)closeNickPanelMobile();}});
     menu.appendChild(el);
   }
-  // position near click
-  let x=e.clientX,y=e.clientY;
-  document.body.appendChild(menu);
-  const r=menu.getBoundingClientRect();
-  if(x+r.width>window.innerWidth) x=window.innerWidth-r.width-8;
-  if(x<8) x=8;
-  if(y+r.height>window.innerHeight) y=window.innerHeight-r.height-8;
-  if(y<8) y=8;
-  menu.style.left=x+'px'; menu.style.top=y+'px';
-  nickCtx=menu;
-  setTimeout(()=>document.addEventListener('click',closeNickMenu,{once:true}),0);
+  if(isMobile){
+    // On mobile: show a full-screen overlay with the menu centered
+    const overlay=document.createElement('div');
+    overlay.className='nick-ctx-overlay';
+    overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:199;';
+    overlay.addEventListener('click',()=>{closeNickMenu();});
+    // Add nick name header
+    const hdr=document.createElement('div');
+    hdr.style.cssText='padding:10px 16px;font-weight:700;color:var(--accent);border-bottom:1px solid var(--border);font-size:14px;';
+    hdr.textContent=nick;
+    menu.insertBefore(hdr,menu.firstChild);
+    menu.style.cssText='position:fixed;z-index:200;background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:4px 0;min-width:200px;max-width:min(280px,85vw);max-height:70vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.6);font-size:14px;';
+    document.body.appendChild(overlay);
+    document.body.appendChild(menu);
+    // Center after DOM insertion
+    const mr=menu.getBoundingClientRect();
+    menu.style.left=Math.max(8,(window.innerWidth-mr.width)/2)+'px';
+    menu.style.top=Math.max(8,(window.innerHeight-mr.height)/2)+'px';
+    nickCtx=menu;
+    nickCtx._overlay=overlay;
+  } else {
+    document.body.appendChild(menu);
+    const r=menu.getBoundingClientRect();
+    let x=e.clientX,y=e.clientY;
+    if(x+r.width>window.innerWidth) x=window.innerWidth-r.width-8;
+    if(x<8) x=8;
+    if(y+r.height>window.innerHeight) y=window.innerHeight-r.height-8;
+    if(y<8) y=8;
+    menu.style.left=x+'px'; menu.style.top=y+'px';
+    nickCtx=menu;
+    setTimeout(()=>document.addEventListener('click',closeNickMenu,{once:true}),100);
+  }
+  }catch(err){console.error('showNickMenu error:',err);}
 }
-function closeNickMenu(){if(nickCtx){nickCtx.remove();nickCtx=null;}}
+function closeNickMenu(){if(nickCtx){if(nickCtx._overlay)nickCtx._overlay.remove();nickCtx.remove();nickCtx=null;}}
 function closeNickPanelMobile(){
   const np=document.getElementById('nick-panel');
   if(np&&np.classList.contains('open')){np.classList.remove('open');document.getElementById('sidebar-backdrop').classList.remove('show');}
@@ -4511,7 +4566,7 @@ function viewFullTopic(){
   }
   const box=document.createElement('div');
   box.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 20px;max-width:min(600px,90vw);max-height:60vh;overflow-y:auto;color:var(--text);font-size:14px;line-height:1.6;word-break:break-word;';
-  box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Topic — ${esc(active.target)}</div>${parseMircColors(esc(topic))}`;
+  box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Topic — ${esc(active.target)}</div>${parseMircColors(topic)}`;
   ov.innerHTML='';ov.appendChild(box);
 }
 function editTopic(){
@@ -4558,7 +4613,8 @@ function toggleNickPanel(){
   } else {
     np.classList.toggle('collapsed');
     const collapsed=np.classList.contains('collapsed');
-    if(btn) btn.textContent=collapsed?'◀':'▶';
+    const icon=btn?.querySelector('.toggle-icon');
+    if(icon) icon.textContent=collapsed?'◀':'▶';
     try{localStorage.setItem('cryptirc_nick_collapsed',collapsed?'1':'');}catch(e){}
   }
 }
@@ -5412,7 +5468,7 @@ function parseMircColors(s){
     if(bold)styles.push('font-weight:bold');
     if(underline)styles.push('text-decoration:underline');
     if(italic)styles.push('font-style:italic');
-    const ch=s[i]==='&'?'&amp;':s[i]==='<'?'&lt;':s[i]==='>'?'&gt;':s[i]==='"'?'&quot;':s[i];
+    const ch=s[i]==='&'?'&amp;':s[i]==='<'?'&lt;':s[i]==='>'?'&gt;':s[i]==='"'?'&quot;':s[i]==="'"?'&#39;':s[i];
     if(styles.length)out+=`<span style="${styles.join(';')}">${ch}</span>`;
     else out+=ch;
   }
@@ -5604,7 +5660,7 @@ function monitorViewMsg(nick){
   const box=document.createElement('div');
   box.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 20px;max-width:min(500px,90vw);max-height:60vh;overflow-y:auto;word-break:break-word;';
   box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Last message from ${esc(nick)}</div>
-    <div style="color:var(--text);font-size:14px;line-height:1.6">${parseMircColors(esc(e.lastMsg))}</div>
+    <div style="color:var(--text);font-size:14px;line-height:1.6">${parseMircColors(e.lastMsg||'')}</div>
     ${e.channel?`<div style="font-size:10px;color:var(--text3);margin-top:10px">${esc(e.network||'')} / ${esc(e.channel)} · ${e.lastSeen?new Date(e.lastSeen).toLocaleString():''}</div>`:''}`;
   ov.innerHTML='';ov.appendChild(box);
 }
@@ -5672,7 +5728,6 @@ function timeAgo(ts){
 .help-support-text { font-size:12px; color:var(--text2); line-height:1.6; }
 .help-support-server { color:var(--accent); font-weight:600; }
 .help-support-chan { color:var(--accent2); font-weight:600; }
-</style>
 #monitor-overlay.show{display:flex !important;}
 .monitor-card {
   border-bottom:1px solid var(--border); padding:14px 16px;

@@ -605,8 +605,16 @@ async fn route_register(State(state): State<AppState>, Json(body): Json<Register
         return (StatusCode::FORBIDDEN, Json(Msg { message: "Registration is closed. Contact the server admin.".into() })).into_response();
     }
     let req_code = state.registration_code.read().await.clone();
-    if !req_code.is_empty() && body.code != req_code {
-        return (StatusCode::FORBIDDEN, Json(Msg { message: "Invalid registration code.".into() })).into_response();
+    if !req_code.is_empty() {
+        // Timing-safe comparison to prevent oracle attacks on registration code
+        let a = req_code.as_bytes();
+        let b = body.code.as_bytes();
+        let mismatch = if a.len() != b.len() { 1u8 } else {
+            a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        };
+        if mismatch != 0 {
+            return (StatusCode::FORBIDDEN, Json(Msg { message: "Invalid registration code.".into() })).into_response();
+        }
     }
     match state.auth.register(&body.username, &body.email, &body.password).await {
         Ok(token) => {

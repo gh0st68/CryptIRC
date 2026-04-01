@@ -32,6 +32,8 @@ const MAX_NICK_RETRIES:  u32 = 5;
 const NAMES_BUF_MAX_CHANNELS: usize = 512;
 /// S3: maximum entries per channel in names_buf
 const NAMES_BUF_MAX_PER_CHAN: usize = 4096;
+/// S7: maximum IRC line length (prevent memory exhaustion from rogue server)
+const MAX_IRC_LINE_LEN: usize = 8192;
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -177,9 +179,15 @@ async fn do_connect(
             drop(tcp); // We'll create a fresh connection
             let mut ssl_builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())?;
             // Client cert path uses openssl directly for TLS 1.3 post-handshake auth.
-            // Server cert verification is handled by setting NONE — the native-tls
-            // path handles verification for connections without client certs.
-            ssl_builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
+            if cfg.tls_accept_invalid_certs {
+                ssl_builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
+            } else {
+                // Load system CA certs for proper server cert verification
+                if let Err(e) = ssl_builder.set_ca_file("/etc/ssl/certs/ca-certificates.crt") {
+                    warn!("[{}] Failed to load CA certs, falling back to default paths: {}", conn_id, e);
+                    let _ = ssl_builder.set_default_verify_paths();
+                }
+            }
             // Load client cert + key from PEM
             let cert_id = cfg.client_cert_id.as_ref().unwrap();
             let dir = std::path::PathBuf::from(&state.data_dir).join("certs").join(cert_id);
@@ -302,6 +310,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                 };
                 let line = line.trim_end_matches(['\r', '\n']).to_string();
                 if line.is_empty() { continue; }
+                // S7: reject extremely long lines to prevent memory exhaustion
+                if line.len() > MAX_IRC_LINE_LEN {
+                    warn!("[{}] Dropping oversized IRC line ({} bytes)", conn_id, line.len());
+                    continue;
+                }
 
                 let p  = parse_irc(&line);
                 // Prefer IRCv3 server-time tag when available
@@ -525,8 +538,18 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let target = p.params.get(0).cloned().unwrap_or_default();
                         let text   = p.params.get(1).cloned().unwrap_or_default();
                         let user_nick = { conn.lock().await.nick.clone() };
-                        // echo-message: skip our own echoed messages (we already displayed them client-side)
-                        if echo_message_enabled && from == user_nick { continue; }
+                        // echo-message: if server echoes our own PRIVMSG, skip it here —
+                        // the Send handler already broadcasts IrcEcho for multi-device sync
+                        if echo_message_enabled && from == user_nick {
+                            // Verify this is actually from us (check prefix has our user@host)
+                            // to avoid suppressing messages from different users with same nick
+                            if let Some(ref pfx) = p.prefix {
+                                if pfx.contains('!') {
+                                    // Has user@host — it's from the server echoing us
+                                    continue;
+                                }
+                            }
+                        }
                         // Reply to CTCP VERSION
                         if text == "\x01VERSION\x01" {
                             conn.lock().await.send_raw(&format!(
