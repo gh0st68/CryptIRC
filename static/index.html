@@ -42,6 +42,7 @@
 html {
   height:100%; overflow:hidden;
   background:var(--bg0);
+  overscroll-behavior:none;
 }
 body {
   height:100%;
@@ -50,7 +51,7 @@ body {
   overflow:hidden; margin:0; padding:0;
   -webkit-text-size-adjust:100%;
   text-size-adjust:100%;
-  touch-action:none;
+  overscroll-behavior:none;
 }
 /* App restores normal text */
 #app, #auth-screen, #vault-overlay, .modal-overlay, #monitor-overlay, #help-overlay, #admin-overlay {
@@ -1664,9 +1665,11 @@ let swRegistration=null;
 const IMG_EXTS=/\.(jpg|jpeg|png|gif|webp|avif)(\?.*)?$/i;
 const VID_EXTS=/\.(mp4|webm|mov)(\?.*)?$/i;
 
-// ─── M2: iOS keyboard fix — Lounge-style (height:100% + touch-action:none) ───
+// ─── M2: iOS keyboard fix ────────────────────────────────────────────────────
 function initViewportFix() {
-  // Prevent body-level scrolling (keeps page from scrolling behind keyboard)
+  const app = document.getElementById('app');
+
+  // Prevent body-level scrolling
   document.body.addEventListener('touchmove', e => {
     let el = e.target;
     while (el && el !== document.body) {
@@ -1676,6 +1679,17 @@ function initViewportFix() {
     }
     if (e.cancelable) e.preventDefault();
   }, { passive: false });
+
+  // Use visualViewport to resize app when keyboard opens (critical for iOS PWA)
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    function syncHeight() {
+      app.style.height = vv.height + 'px';
+      window.scrollTo(0, 0);
+    }
+    vv.addEventListener('resize', syncHeight);
+    vv.addEventListener('scroll', () => window.scrollTo(0, 0));
+  }
 
   // Auto-scroll chat to bottom when keyboard opens
   const inp = document.getElementById('msg-input');
@@ -1688,6 +1702,7 @@ function initViewportFix() {
       }, ms));
     });
     inp.addEventListener('blur', () => {
+      app.style.height = '';
       setTimeout(() => {
         window.scrollTo(0, 0);
       }, 150);
