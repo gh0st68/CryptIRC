@@ -833,13 +833,18 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let setter = nick_from_prefix(&p.prefix);
                         let target = p.params.get(0).cloned().unwrap_or_default();
                         let modes  = p.params[1..].join(" ");
-                        // Send raw modes for prefix parsing, include setter for display
+                        // Route non-channel modes (user modes) to status window
+                        let display_target = if target.starts_with(['#','&','+','!']) {
+                            target.clone()
+                        } else {
+                            "status".to_string()
+                        };
                         let display = if setter.is_empty() || setter.contains('.') {
                             modes.clone()
                         } else {
                             format!("{}|{}", setter, modes)
                         };
-                        send(ServerEvent::IrcMode { conn_id: conn_id.to_string(), target, modes: display, ts });
+                        send(ServerEvent::IrcMode { conn_id: conn_id.to_string(), target: display_target, modes: display, ts });
                     }
                     // 311-318 = WHOIS replies — route to nick's query buffer
                     "311" => { // RPL_WHOISUSER: nick user host * :realname
