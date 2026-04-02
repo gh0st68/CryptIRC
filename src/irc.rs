@@ -565,14 +565,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let display_target = if target.starts_with(['#','&']) { target.clone() } else { from.clone() };
                         state.logger.append(username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind });
-                        // Push notification for DMs and mentions — only when no clients are connected
+                        // Push notification for DMs and mentions
                         if from != user_nick {
-                            let active_sessions = state.user_tx(username).receiver_count();
-                            if active_sessions == 0 {
-                                state.notifier.maybe_notify(
-                                    username, &user_nick, conn_id, &cfg.label, &display_target, &from, &clean
-                                ).await;
-                            }
+                            state.notifier.maybe_notify(
+                                username, &user_nick, conn_id, &cfg.label, &display_target, &from, &clean
+                            ).await;
                         }
                     }
                     "NOTICE" => {

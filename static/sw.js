@@ -1,7 +1,7 @@
 // CryptIRC Service Worker v9
 // Handles: offline caching, push notifications, notification click actions
 
-const CACHE = 'cryptirc-v166';
+const CACHE = 'cryptirc-v167';
 const STATIC = ['/cryptirc/manifest.json', '/cryptirc/icon.svg', '/cryptirc/icon-192.png', '/cryptirc/icon-512.png'];
 
 // ─── Install ──────────────────────────────────────────────────────────────────
@@ -91,7 +91,13 @@ self.addEventListener('push', e => {
   };
 
   e.waitUntil(
-    self.registration.showNotification(title, options)
+    // Only show notification if no client window is focused
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
+      const focused = clients.some(c => c.visibilityState === 'visible');
+      if (!focused) {
+        return self.registration.showNotification(title, options);
+      }
+    })
   );
 });
 
