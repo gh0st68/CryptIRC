@@ -1,7 +1,4 @@
-/// logs.rs — Encrypted append-only log storage
-///
-/// Fixes applied:
-///   C3 — sanitize() now rejects path traversal ("..") components
+/// logs.rs — Encrypted append-only log storage (per-user encryption)
 
 use anyhow::Result;
 use std::{path::PathBuf, sync::Arc};
@@ -22,13 +19,13 @@ impl EncryptedLogger {
     pub fn data_dir(&self) -> &str { &self.data_dir }
 
     pub async fn append(
-        &self, conn_id: &str, target: &str,
+        &self, username: &str, conn_id: &str, target: &str,
         ts: i64, from: &str, text: &str, kind: &str,
     ) {
-        if !self.crypto.is_unlocked().await { return; }
+        if !self.crypto.is_unlocked(username).await { return; }
         let record    = serde_json::json!({ "ts": ts, "from": from, "text": text, "kind": kind });
         let plaintext = record.to_string();
-        match self.crypto.encrypt(plaintext.as_bytes()).await {
+        match self.crypto.encrypt(username, plaintext.as_bytes()).await {
             Ok(enc) => {
                 let path = self.log_path(conn_id, target, ts);
                 if let Some(parent) = path.parent() {
@@ -45,8 +42,8 @@ impl EncryptedLogger {
         }
     }
 
-    pub async fn read_logs(&self, conn_id: &str, target: &str, limit: usize) -> Result<Vec<LogLine>> {
-        if !self.crypto.is_unlocked().await { anyhow::bail!("Vault locked"); }
+    pub async fn read_logs(&self, username: &str, conn_id: &str, target: &str, limit: usize) -> Result<Vec<LogLine>> {
+        if !self.crypto.is_unlocked(username).await { anyhow::bail!("Vault locked"); }
         let safe_limit = limit.min(10000);
 
         let dir = PathBuf::from(&self.data_dir)
@@ -70,7 +67,7 @@ impl EncryptedLogger {
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
                 for enc_line in content.lines() {
                     if enc_line.is_empty() { continue; }
-                    match self.crypto.decrypt(enc_line).await {
+                    match self.crypto.decrypt(username, enc_line).await {
                         Ok(plain) => {
                             if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&plain) {
                                 lines.push(LogLine {
@@ -105,11 +102,8 @@ impl EncryptedLogger {
     }
 }
 
-/// C3: Reject any path component that is or contains "..".
-/// Returns an error if the component is unsafe, otherwise returns the sanitized string.
 fn sanitize_path_component(s: &str) -> Result<String> {
     let out = sanitize_lossy(s);
-    // After lossy sanitize, reject if it's empty, is ".", or starts with ".."
     if out.is_empty()        { anyhow::bail!("Empty path component"); }
     if out == ".."           { anyhow::bail!("Path traversal attempt"); }
     if out.contains("..") || out.starts_with('.') {
@@ -118,7 +112,6 @@ fn sanitize_path_component(s: &str) -> Result<String> {
     Ok(out)
 }
 
-/// Replace all non-safe characters with '_', no dot sequences allowed.
 fn sanitize_lossy(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut last_dot = false;
@@ -127,14 +120,12 @@ fn sanitize_lossy(s: &str) -> String {
             out.push(c);
             last_dot = false;
         } else if c == '.' && !last_dot {
-            // Allow single dots but never consecutive
-            out.push('_'); // Replace dots with underscores to be safe
+            out.push('_');
             last_dot = true;
         } else {
             out.push('_');
             last_dot = false;
         }
     }
-    // Trim leading/trailing underscores that could be problematic
     out.trim_matches('_').to_string()
 }

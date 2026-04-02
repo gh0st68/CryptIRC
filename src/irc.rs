@@ -167,7 +167,7 @@ async fn do_connect(
             let store = CertStore::new(&state.data_dir, state.crypto.clone());
             if store.exists(cert_id).await {
                 info!("[{}] Cert files found, loading identity...", conn_id);
-                match store.load_identity(cert_id).await {
+                match store.load_identity(username, cert_id).await {
                     Ok(id) => { info!("[{}] Client cert loaded successfully", conn_id); Some(id) }
                     Err(e) => { warn!("[{}] Client cert load FAILED: {}", conn_id, e); None }
                 }
@@ -193,7 +193,7 @@ async fn do_connect(
             let dir = std::path::PathBuf::from(&state.data_dir).join("certs").join(cert_id);
             let cert_pem = tokio::fs::read(dir.join("cert.pem")).await?;
             let key_enc = tokio::fs::read_to_string(dir.join("key.enc")).await?;
-            let key_pem = state.crypto.decrypt(key_enc.trim()).await?;
+            let key_pem = state.crypto.decrypt(username, key_enc.trim()).await?;
             let x509 = openssl::x509::X509::from_pem(&cert_pem)?;
             let pkey = openssl::pkey::PKey::private_key_from_pem(&key_pem)?;
             ssl_builder.set_certificate(&x509)?;
@@ -563,7 +563,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         } else { (MessageKind::Privmsg, text) };
                         // Route PMs to sender's nick, not our own nick
                         let display_target = if target.starts_with(['#','&']) { target.clone() } else { from.clone() };
-                        state.logger.append(conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
+                        state.logger.append(username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind });
                         // Push notification for DMs and mentions — only when no clients are connected
                         if from != user_nick {
@@ -589,7 +589,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         } else {
                             from.clone()
                         };
-                        state.logger.append(conn_id, &display_target, ts, &from, &text, "notice").await;
+                        state.logger.append(username, conn_id, &display_target, ts, &from, &text, "notice").await;
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from, target: display_target, text, ts, kind: MessageKind::Notice });
                     }
 

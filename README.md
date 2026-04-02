@@ -12,75 +12,93 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.4.0-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.7.0-brightgreen" alt="Version">
   <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
 </p>
 
 ---
 
-## Screenshots
-
-<p align="center">
-  <img src="screenshots/client.png" width="800" alt="CryptIRC — Main Client">
-</p>
-
-<p align="center">
-  <em>Multi-network IRC with encrypted logs, mIRC colors, nick list, and channel topic</em>
-</p>
-
-<br>
-
-<p align="center">
-  <img src="screenshots/login.png" width="400" alt="CryptIRC — Login">
-</p>
-
-<p align="center">
-  <em>Clean login with AES-256-GCM vault encryption and Argon2id key derivation</em>
-</p>
-
----
-
-CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Every message, log, and credential is encrypted before it ever touches disk. Connect to any IRC network through a clean, modern interface — no plugins, no Electron, no telemetry.
+CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Every message, log, and credential is encrypted before it ever touches disk. Connect to any IRC network through a clean, modern interface -- no plugins, no Electron, no telemetry.
 
 ## Features
 
 ### Encryption & Security
-- **AES-256-GCM** encrypted logs — every line encrypted at rest with a per-vault key derived via Argon2id
-- **Signal-protocol E2E** for direct messages — X3DH key agreement + Double Ratchet
-- **Channel encryption** — pre-shared AES-256-GCM keys for group channels
-- **Encrypted credential storage** — IRC passwords and SASL secrets are never stored in plaintext
-- **Vault system** — all data locked behind a passphrase; nothing is readable without it
-- **Client TLS certificates** — generate and manage certs for SASL EXTERNAL auth
-- **Zero-knowledge architecture** — the server cannot read your messages or credentials
-- **Cross-server E2E** — encrypted DMs work between users on different CryptIRC instances via IRC message splitting
+- **Per-user vaults** -- each user has their own passphrase and encryption key (Argon2id KDF + AES-256-GCM)
+- **Signal-protocol E2E** for direct messages -- X3DH key agreement + Double Ratchet
+- **Channel encryption** -- pre-shared AES-256-GCM keys for group channels
+- **Encrypted logs** -- every line encrypted at rest with the user's vault key
+- **Encrypted notepad** -- private encrypted notes stored server-side
+- **Encrypted credential storage** -- IRC passwords and SASL secrets never stored in plaintext
+- **Vault lock/unlock** -- locking the vault zeros the key from memory and disconnects IRC
+- **Client TLS certificates** -- generate and manage ECDSA P-256 certs for SASL EXTERNAL
+- **Zero-knowledge architecture** -- the server cannot read your messages or credentials
+- **Timing-safe comparisons** -- registration codes use constant-time comparison
+- **XSS protection** -- comprehensive HTML escaping on all user content
+- **CSP headers** -- Content-Security-Policy, X-Frame-Options, Referrer-Policy
 
-### IRC
-- Full IRC protocol support — channels, DMs, modes, kicks, bans, CTCP, the works
+### IRC & IRCv3
+- Full IRC protocol support -- channels, DMs, modes, kicks, bans, CTCP, the works
+- **IRCv3 capabilities**: away-notify, account-notify, extended-join, server-time, multi-prefix, cap-notify, message-tags, batch, echo-message, invite-notify, setname, account-tag, userhost-in-names, chghost, labeled-response, typing indicators, standard-replies, MONITOR
 - **SASL PLAIN & EXTERNAL** authentication
-- Multi-network support — connect to as many networks as you want simultaneously
-- Channel and user modes, `/op`, `/voice`, `/kick`, `/ban`, `/topic`, `/ignore`, and more
-- **Nick monitoring** — track when users come online/offline with push notifications
+- Multi-network support -- connect to as many networks as you want simultaneously
+- **Nick monitoring** -- track when users come online/offline with push notifications
+- **Multi-device sync** -- messages you send on one device appear on all your other devices
+- **Typing indicators** -- see when someone is typing (IRCv3 draft/typing)
+- **Server-time** -- accurate timestamps from the IRC server
 - Configurable join/part/quit message filtering
-- **Infinite scroll** — load older messages from encrypted server logs on demand
+- **Infinite scroll** -- load older messages from encrypted server logs on demand
 
 ### Interface
-- **Lounge-style message layout** — inline timestamp, nick, and message for maximum readability
-- **Mobile-first PWA** — installable on iOS/Android with swipe gestures and safe-area support
-- **20+ themes** — Midnight, Dracula, Monokai, Nord, Catppuccin, Tokyo Night, Cyberpunk, Matrix, Blumhouse, Scream, and more
-- **Separate mobile theme** — independent theme, accents, and font sizes for phone vs desktop
+- **Lounge-style layout** -- clean input bar, grouped nick list, collapsible panels
+- **Mobile-first PWA** -- installable on iOS/Android with swipe gestures and safe-area support
+- **iOS PWA keyboard handling** -- input bar works correctly with iOS keyboard accessory bar
+- **Collapsible panels** -- sidebar and nick list collapse on desktop with persistent state
+- **Nick list grouped by role** -- Owners, Admins, Operators, Half-Ops, Voiced, Users
+- **Nick context menu** -- whois, query, slap, monitor, kick/ban/voice/op based on your power level
+- **Inline media previews** -- images, videos (.mp4/.webm/.mov), and YouTube thumbnails
+- **Pastebin** -- share text snippets with optional password protection and expiration
+- **Encrypted notepad** -- private notes accessible from Settings, auto-saved and encrypted
 - **Topic bar** with mIRC color rendering and edit/copy/view menu
-- **Emoji picker** with colon autocomplete
-- Desktop & mobile push notifications with per-channel granularity
-- File uploads — share images and videos directly in channels (public URLs for non-CryptIRC users)
-- **Persistent state** — open DMs, unread counts, mentions, input history all survive page refresh
-- **Nick context menu** — whois, query, slap, monitor, and channel ops (kick/ban/voice/op) based on your power level
+- **Emoji picker** with colon autocomplete (`:wave:` style)
+- **Slash command autocomplete** -- type `/` to see available commands
+- **Search** -- search messages in current channel with highlighted results
+- **File uploads** -- drag-and-drop or paperclip button, link placed in input bar for you to send
+- **Desktop & mobile push notifications** -- works on iOS PWA, suppressed when app is open
+- **Persistent state** -- open DMs, unread counts, mentions, input history all sync server-side
+- **Channel drag-and-drop reorder** -- reorder channels in the sidebar
+
+### Themes (20+)
+| Theme | Description |
+|-------|-------------|
+| Midnight | Deep dark blue (default) |
+| Dracula | Classic purple-accented dark |
+| Monokai | Warm syntax-inspired dark |
+| Nord | Cool Arctic blue palette |
+| Catppuccin Mocha | Pastel dark with lavender accents |
+| Tokyo Night | Vibrant purple-blue cityscape |
+| Cyberpunk | Neon pink and cyan |
+| Matrix | Green-on-black terminal |
+| Blumhouse | Horror-inspired dark red |
+| Scream | Ghostface neon green |
+| Solarized Dark | Ethan Schoonover's classic |
+| Gruvbox Dark | Retro warm brown tones |
+| One Dark | Atom editor inspired |
+| Ayu Dark | Subtle warm dark |
+| Palenight | Material palenight |
+| Rosepine | Soft muted rose |
+| Kanagawa | Japanese wave blue |
+| Everforest | Natural green tones |
+| Forest Rain | Animated rain with lightning flashes |
+| Synthwave | Retro 80s purple gradient |
+| **Separate mobile theme** | Independent colors, accents, and font sizes for phone vs desktop |
 
 ### Deployment
-- **Single binary** — one `cargo build` and you're done
-- Automated deploy script for Debian/Ubuntu with Caddy, Postfix, and systemd
+- **Single binary** -- one `cargo build` and you're done
+- Interactive deploy script for Debian/Ubuntu with Caddy, Postfix, and systemd
 - Automatic HTTPS via Caddy + Let's Encrypt
-- Hardened systemd unit with full sandboxing (`ProtectSystem=strict`, `MemoryDenyWriteExecute`, etc.)
-- Hot-swap updates with under 1 second of downtime
+- Hardened systemd unit with full sandboxing
+- Registration modes: open, invite-code, or closed
+- Admin panel with user management
 
 ## Quick Start
 
@@ -93,59 +111,29 @@ cd CryptIRC
 sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
 ```
 
-That's it. Visit `https://yourdomain.com`, register an account, and connect.
+Visit `https://yourdomain.com`, register an account, unlock your vault, and connect.
 
-## User Registration & Email Verification
+## Install as a PWA
 
-CryptIRC uses email verification to authenticate new accounts. Here's how registration works:
+CryptIRC is a Progressive Web App -- install it and it runs like a native app with push notifications.
 
-1. A user visits the web UI and fills in a **username**, **email**, and **password** (minimum 10 characters)
-2. The server creates the account (with `verified: false`) and generates a unique verification token
-3. A verification email is sent to the user via **Postfix** running on `localhost:25`
-4. The email contains a link: `https://yourdomain.com/auth/verify?token=<uuid>`
-5. Clicking the link sets `verified: true` — the user can now log in
-6. Verification tokens expire after **24 hours**
-
-### Configuring the From Address
-
-The sender address for verification emails is controlled by the `CRYPTIRC_FROM_EMAIL` environment variable. Set it in your systemd unit or environment:
-
-```ini
-Environment=CRYPTIRC_FROM_EMAIL=noreply@yourdomain.com
-```
-
-If not set, it defaults to `noreply@cryptirc.local`. The deploy script automatically sets this to the admin email you provide.
-
-### Adding Users Manually (No Email Required)
-
-If you don't want to set up email at all, you can create pre-verified users from the command line:
-
-```bash
-sudo bash adduser.sh <username> <email> <password>
-```
-
-This creates the user with `verified: true` so they can log in immediately — no email sent, no verification needed.
-
-## Install as a PWA (Mobile & Desktop)
-
-CryptIRC is a Progressive Web App — install it to your home screen and it runs like a native app.
-
-- **iPhone/iPad**: Safari → Share → Add to Home Screen
-- **Android**: Chrome → Menu → Add to Home Screen
-- **Desktop**: Chrome/Edge → Install icon in address bar
+- **iPhone/iPad**: Safari > Share > Add to Home Screen
+- **Android**: Chrome > Menu > Add to Home Screen
+- **Desktop**: Chrome/Edge > Install icon in address bar
 
 ## Architecture
 
 ```
 Browser (PWA)
-  ├── E2E encryption (Signal protocol, Web Crypto API)
-  ├── Vault unlock (Argon2id KDF → AES-256-GCM)
-  └── WebSocket ──► CryptIRC Server (Rust/Axum)
-                      ├── IRC connections (TLS)
-                      ├── Encrypted log storage
-                      ├── Push notifications (Web Push / VAPID)
-                      ├── File uploads
-                      └── Email verification (Postfix)
+  |-- E2E encryption (Signal protocol, Web Crypto API)
+  |-- Per-user vault unlock (Argon2id KDF -> AES-256-GCM)
+  '-- WebSocket --> CryptIRC Server (Rust/Axum)
+                      |-- IRC connections (TLS + IRCv3)
+                      |-- Per-user encrypted log storage
+                      |-- Push notifications (Web Push / VAPID)
+                      |-- Pastebin with password protection
+                      |-- File uploads
+                      '-- Email verification (Postfix)
 ```
 
 ## Tech Stack
@@ -153,10 +141,11 @@ Browser (PWA)
 | Layer | Technology |
 |-------|-----------|
 | Backend | Rust, Tokio, Axum |
-| Encryption | AES-256-GCM, Argon2id, Signal Protocol (X3DH + Double Ratchet) |
-| TLS | OpenSSL, rcgen (client cert generation) |
-| Frontend | Vanilla JS, Web Crypto API, CSS custom properties |
-| Push | Web Push with VAPID (RFC 8292) |
+| Encryption | AES-256-GCM, Argon2id, HKDF-SHA256, Signal Protocol (X3DH + Double Ratchet) |
+| TLS | OpenSSL (client certs), native-tls (server connections) |
+| Frontend | Vanilla JS, Web Crypto API, SVG icons, CSS custom properties |
+| Push | Web Push with VAPID (RFC 8292), iOS PWA support |
+| IRC | IRCv3.2 with CAP negotiation (20+ capabilities) |
 | Reverse Proxy | Caddy or Nginx (automatic HTTPS) |
 | Mail | Postfix (local relay) |
 
@@ -169,6 +158,8 @@ Browser (PWA)
 | `CRYPTIRC_BASE_PATH` | `/cryptirc` | URL path prefix |
 | `CRYPTIRC_PORT` | `9001` | Port the server listens on |
 | `CRYPTIRC_FROM_EMAIL` | `noreply@cryptirc.local` | Sender address for emails |
+| `CRYPTIRC_REGISTRATION` | `open` | Registration mode: `open`, `closed` |
+| `CRYPTIRC_REG_CODE` | (none) | Invite code required for registration |
 | `RUST_LOG` | `info` | Log level |
 
 ## Requirements

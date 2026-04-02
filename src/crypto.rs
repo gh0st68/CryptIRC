@@ -1,8 +1,7 @@
-/// crypto.rs — Vault key management
+/// crypto.rs — Per-user vault key management
 ///
-/// Fixes applied:
-///   C5 — canary blob: vault shows "locked" if passphrase is wrong
-///   C6 — re_encrypt_logs(): all log files re-encrypted on passphrase change
+/// Each user has their own vault with their own passphrase, salt, and canary.
+/// Unlocking one user's vault does not affect any other user's vault.
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -13,38 +12,49 @@ use argon2::{Argon2, Params, Version};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use rand::RngCore;
-use std::{path::PathBuf, sync::Arc};
-use tokio::sync::RwLock;
+use std::path::PathBuf;
+use dashmap::DashMap;
 
 const NONCE_LEN: usize = 12;
 const KEY_LEN:   usize = 32;
 const SALT_LEN:  usize = 16;
-/// Known plaintext stored as encrypted canary to verify a passphrase is correct.
 const CANARY_PT: &[u8] = b"cryptirc-vault-canary-v1";
 
 pub struct CryptoManager {
-    salt_path:   PathBuf,
-    canary_path: PathBuf,
-    key: Arc<RwLock<Option<[u8; KEY_LEN]>>>,
+    data_dir: String,
+    /// Per-user derived keys. Only populated while user's vault is unlocked.
+    keys: DashMap<String, [u8; KEY_LEN]>,
 }
 
 impl CryptoManager {
     pub fn new(data_dir: &str) -> Result<Self> {
         Ok(Self {
-            salt_path:   PathBuf::from(data_dir).join("vault.salt"),
-            canary_path: PathBuf::from(data_dir).join("vault.canary"),
-            key: Arc::new(RwLock::new(None)),
+            data_dir: data_dir.to_string(),
+            keys: DashMap::new(),
         })
     }
 
-    /// Derive key from passphrase.  Verifies against stored canary if one exists.
-    pub async fn unlock(&self, passphrase: &str) -> Result<()> {
-        let salt = self.get_or_create_salt().await?;
+    // ─── Per-user vault paths ─────────────────────────────────────────────────
+
+    fn vault_dir(&self, username: &str) -> PathBuf {
+        PathBuf::from(&self.data_dir).join("vaults").join(sanitize_username(username))
+    }
+    fn salt_path(&self, username: &str) -> PathBuf {
+        self.vault_dir(username).join("vault.salt")
+    }
+    fn canary_path(&self, username: &str) -> PathBuf {
+        self.vault_dir(username).join("vault.canary")
+    }
+
+    // ─── Vault operations ─────────────────────────────────────────────────────
+
+    pub async fn unlock(&self, username: &str, passphrase: &str) -> Result<()> {
+        let salt = self.get_or_create_salt(username).await?;
         let key  = derive_key(passphrase, &salt)?;
 
-        if self.canary_path.exists() {
-            // Verify key is correct before accepting it
-            let enc = tokio::fs::read_to_string(&self.canary_path).await?;
+        let canary = self.canary_path(username);
+        if canary.exists() {
+            let enc = tokio::fs::read_to_string(&canary).await?;
             let plaintext = decrypt_with_key(&key, &enc)
                 .map_err(|_| anyhow::anyhow!("Incorrect passphrase"))?;
             if plaintext != CANARY_PT {
@@ -52,35 +62,34 @@ impl CryptoManager {
             }
         } else {
             // First unlock — write canary
+            let dir = self.vault_dir(username);
+            tokio::fs::create_dir_all(&dir).await?;
             let enc = encrypt_with_key(&key, CANARY_PT)?;
-            tokio::fs::write(&self.canary_path, &enc).await?;
+            tokio::fs::write(&canary, &enc).await?;
         }
 
-        let mut guard = self.key.write().await;
-        *guard = Some(key);
+        self.keys.insert(username.to_string(), key);
         Ok(())
     }
 
-    pub async fn lock(&self) {
-        let mut guard = self.key.write().await;
-        // Zero the key bytes before dropping
-        if let Some(ref mut k) = *guard {
-            for b in k.iter_mut() { *b = 0; }
+    pub async fn lock(&self, username: &str) {
+        if let Some(mut entry) = self.keys.get_mut(username) {
+            for b in entry.value_mut().iter_mut() { *b = 0; }
         }
-        *guard = None;
+        self.keys.remove(username);
     }
 
-    pub async fn is_unlocked(&self) -> bool {
-        self.key.read().await.is_some()
+    pub async fn is_unlocked(&self, username: &str) -> bool {
+        self.keys.contains_key(username)
     }
 
-    /// Change passphrase: verify old, re-encrypt all log files, update salt+canary.
-    pub async fn change_passphrase(&self, old: &str, new: &str, data_dir: &str) -> Result<()> {
-        // Verify old passphrase via canary
-        let salt    = self.get_or_create_salt().await?;
+    pub async fn change_passphrase(&self, username: &str, old: &str, new: &str) -> Result<()> {
+        let salt    = self.get_or_create_salt(username).await?;
         let old_key = derive_key(old, &salt)?;
-        if self.canary_path.exists() {
-            let enc = tokio::fs::read_to_string(&self.canary_path).await?;
+
+        let canary = self.canary_path(username);
+        if canary.exists() {
+            let enc = tokio::fs::read_to_string(&canary).await?;
             let pt  = decrypt_with_key(&old_key, &enc)
                 .map_err(|_| anyhow::anyhow!("Old passphrase incorrect"))?;
             if pt != CANARY_PT { bail!("Old passphrase incorrect"); }
@@ -91,60 +100,109 @@ impl CryptoManager {
         rand::thread_rng().fill_bytes(&mut new_salt);
         let new_key = derive_key(new, &new_salt)?;
 
-        // Re-encrypt all log files
-        let log_dir = PathBuf::from(data_dir).join("logs");
-        re_encrypt_tree(&log_dir, &old_key, &new_key).await?;
+        // Re-encrypt all log files for this user's connections
+        let log_dir = PathBuf::from(&self.data_dir).join("logs");
+        if log_dir.exists() {
+            re_encrypt_tree(&log_dir, &old_key, &new_key).await?;
+        }
+
+        // Re-encrypt network config passwords for this user
+        let net_dir = PathBuf::from(&self.data_dir).join("networks").join(sanitize_username(username));
+        if net_dir.exists() {
+            re_encrypt_network_configs(&net_dir, &old_key, &new_key).await?;
+        }
 
         // Persist new salt + canary
-        tokio::fs::write(&self.salt_path, &new_salt).await?;
+        let dir = self.vault_dir(username);
+        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::write(self.salt_path(username), &new_salt).await?;
         let new_canary = encrypt_with_key(&new_key, CANARY_PT)?;
-        tokio::fs::write(&self.canary_path, new_canary).await?;
+        tokio::fs::write(&canary, new_canary).await?;
 
-        let mut guard = self.key.write().await;
-        if let Some(ref mut k) = *guard { for b in k.iter_mut() { *b = 0; } }
-        *guard = Some(new_key);
+        // Update in-memory key
+        if let Some(mut entry) = self.keys.get_mut(username) {
+            for b in entry.value_mut().iter_mut() { *b = 0; }
+        }
+        self.keys.insert(username.to_string(), new_key);
         Ok(())
     }
 
-    pub async fn encrypt(&self, plaintext: &[u8]) -> Result<String> {
-        let guard     = self.key.read().await;
-        let key_bytes = guard.as_ref().ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
-        encrypt_with_key(key_bytes, plaintext)
+    pub async fn encrypt(&self, username: &str, plaintext: &[u8]) -> Result<String> {
+        let entry = self.keys.get(username)
+            .ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
+        encrypt_with_key(entry.value(), plaintext)
     }
 
-    pub async fn decrypt(&self, encoded: &str) -> Result<Vec<u8>> {
-        let guard     = self.key.read().await;
-        let key_bytes = guard.as_ref().ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
-        decrypt_with_key(key_bytes, encoded)
+    pub async fn decrypt(&self, username: &str, encoded: &str) -> Result<Vec<u8>> {
+        let entry = self.keys.get(username)
+            .ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
+        decrypt_with_key(entry.value(), encoded)
     }
 
-    /// Derive a sub-key for E2E client-side encryption.
-    /// The client uses this to encrypt/decrypt its private E2E key blobs.
-    /// This is derived from the vault master key via HKDF so it is distinct
-    /// from the log encryption key but equally protected by the passphrase.
-    pub async fn derive_e2e_enc_key(&self) -> Result<[u8; KEY_LEN]> {
-        let guard     = self.key.read().await;
-        let key_bytes = guard.as_ref().ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
-        Ok(derive_subkey(key_bytes, b"cryptirc-e2e-enc-v1"))
+    pub async fn derive_e2e_enc_key(&self, username: &str) -> Result<[u8; KEY_LEN]> {
+        let entry = self.keys.get(username)
+            .ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
+        Ok(derive_subkey(entry.value(), b"cryptirc-e2e-enc-v1"))
     }
 
-    async fn get_or_create_salt(&self) -> Result<[u8; SALT_LEN]> {
-        if self.salt_path.exists() {
-            let bytes = tokio::fs::read(&self.salt_path).await?;
+    async fn get_or_create_salt(&self, username: &str) -> Result<[u8; SALT_LEN]> {
+        let path = self.salt_path(username);
+        if path.exists() {
+            let bytes = tokio::fs::read(&path).await?;
             if bytes.len() != SALT_LEN { bail!("Corrupt salt file"); }
             let mut arr = [0u8; SALT_LEN];
             arr.copy_from_slice(&bytes);
             Ok(arr)
         } else {
+            let dir = self.vault_dir(username);
+            tokio::fs::create_dir_all(&dir).await?;
             let mut salt = [0u8; SALT_LEN];
             rand::thread_rng().fill_bytes(&mut salt);
-            tokio::fs::write(&self.salt_path, &salt).await?;
+            tokio::fs::write(&path, &salt).await?;
             Ok(salt)
         }
     }
+
+    /// Migrate legacy shared vault to per-user vaults.
+    /// Copies old vault.salt and vault.canary to each user's vault directory.
+    pub async fn migrate_legacy_vault(&self) -> Result<()> {
+        let old_salt = PathBuf::from(&self.data_dir).join("vault.salt");
+        let old_canary = PathBuf::from(&self.data_dir).join("vault.canary");
+        if !old_salt.exists() { return Ok(()); } // No legacy vault
+
+        tracing::info!("Migrating legacy shared vault to per-user vaults...");
+
+        let users_dir = PathBuf::from(&self.data_dir).join("users");
+        if let Ok(mut rd) = tokio::fs::read_dir(&users_dir).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Some(uname) = path.file_stem().and_then(|s| s.to_str()) {
+                        let user_vault = self.vault_dir(uname);
+                        let user_salt = self.salt_path(uname);
+                        let user_canary = self.canary_path(uname);
+                        if !user_salt.exists() {
+                            tokio::fs::create_dir_all(&user_vault).await?;
+                            tokio::fs::copy(&old_salt, &user_salt).await?;
+                            if old_canary.exists() {
+                                tokio::fs::copy(&old_canary, &user_canary).await?;
+                            }
+                            tracing::info!("  Migrated vault for user: {}", uname);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Rename old files so migration doesn't run again
+        let _ = tokio::fs::rename(&old_salt, PathBuf::from(&self.data_dir).join("vault.salt.migrated")).await;
+        let _ = tokio::fs::rename(&old_canary, PathBuf::from(&self.data_dir).join("vault.canary.migrated")).await;
+        tracing::info!("Legacy vault migration complete.");
+        Ok(())
+    }
 }
 
-// ─── Pure crypto helpers (no async, usable with raw key bytes) ────────────────
+// ─── Pure crypto helpers ──────────────────────────────────────────────────────
 
 pub fn encrypt_with_key(key_bytes: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<String> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
@@ -178,9 +236,6 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
     Ok(key)
 }
 
-/// Derive a distinct sub-key from the vault master key using HKDF-SHA256.
-/// Different `info` values produce independent keys — knowing one reveals nothing
-/// about the master key or any other derived key.
 pub fn derive_subkey(master: &[u8; KEY_LEN], info: &[u8]) -> [u8; KEY_LEN] {
     let hk = Hkdf::<Sha256>::new(None, master);
     let mut out = [0u8; KEY_LEN];
@@ -188,7 +243,10 @@ pub fn derive_subkey(master: &[u8; KEY_LEN], info: &[u8]) -> [u8; KEY_LEN] {
     out
 }
 
-/// Walk a directory tree and re-encrypt every .log file with a new key.
+fn sanitize_username(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect()
+}
+
 async fn re_encrypt_tree(dir: &PathBuf, old: &[u8; KEY_LEN], new: &[u8; KEY_LEN]) -> Result<()> {
     if !dir.exists() { return Ok(()); }
     let mut stack = vec![dir.clone()];
@@ -215,9 +273,59 @@ async fn re_encrypt_file(path: &PathBuf, old: &[u8; KEY_LEN], new: &[u8; KEY_LEN
         let enc = encrypt_with_key(new, &pt)?;
         new_lines.push(enc);
     }
-    // Atomic write: write to .tmp then rename
     let tmp_path = path.with_extension("log.tmp");
     tokio::fs::write(&tmp_path, new_lines.join("\n") + "\n").await?;
     tokio::fs::rename(&tmp_path, path).await?;
+    Ok(())
+}
+
+async fn re_encrypt_network_configs(dir: &PathBuf, old: &[u8; KEY_LEN], new: &[u8; KEY_LEN]) -> Result<()> {
+    if !dir.exists() { return Ok(()); }
+    let mut rd = tokio::fs::read_dir(dir).await?;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        if path.extension().map(|x| x == "json").unwrap_or(false) {
+            let content = tokio::fs::read_to_string(&path).await?;
+            let mut val: serde_json::Value = serde_json::from_str(&content)?;
+            let mut changed = false;
+            // Re-encrypt any "enc:..." string values
+            if let Some(obj) = val.as_object_mut() {
+                for (_k, v) in obj.iter_mut() {
+                    if let Some(s) = v.as_str() {
+                        if s.starts_with("enc:") {
+                            let enc_data = &s[4..];
+                            if let Ok(pt) = decrypt_with_key(old, enc_data) {
+                                if let Ok(new_enc) = encrypt_with_key(new, &pt) {
+                                    *v = serde_json::Value::String(format!("enc:{}", new_enc));
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    // Check nested objects (sasl_plain)
+                    if let Some(inner) = v.as_object_mut() {
+                        for (_ik, iv) in inner.iter_mut() {
+                            if let Some(s) = iv.as_str() {
+                                if s.starts_with("enc:") {
+                                    let enc_data = &s[4..];
+                                    if let Ok(pt) = decrypt_with_key(old, enc_data) {
+                                        if let Ok(new_enc) = encrypt_with_key(new, &pt) {
+                                            *iv = serde_json::Value::String(format!("enc:{}", new_enc));
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if changed {
+                let tmp = path.with_extension("json.tmp");
+                tokio::fs::write(&tmp, serde_json::to_string_pretty(&val)?).await?;
+                tokio::fs::rename(&tmp, &path).await?;
+            }
+        }
+    }
     Ok(())
 }

@@ -40,8 +40,8 @@ impl CertStore {
     /// Generate a new self-signed ECDSA P-256 certificate for a network connection.
     /// The cert is valid for 10 years and uses the nick as the Common Name.
     /// Returns CertInfo — call `load_identity` later to get the native_tls::Identity.
-    pub async fn generate(&self, cert_id: &str, nick: &str) -> Result<CertInfo> {
-        if !self.crypto.is_unlocked().await {
+    pub async fn generate(&self, username: &str, cert_id: &str, nick: &str) -> Result<CertInfo> {
+        if !self.crypto.is_unlocked(username).await {
             bail!("Vault must be unlocked to generate certificates");
         }
 
@@ -69,7 +69,7 @@ impl CertStore {
         tokio::fs::write(&cert_path, cert_pem.as_bytes()).await?;
 
         // Encrypt and write private key
-        let key_enc  = self.crypto.encrypt(key_pem.as_bytes()).await?;
+        let key_enc  = self.crypto.encrypt(username, key_pem.as_bytes()).await?;
         let key_path = dir.join("key.enc");
         tokio::fs::write(&key_path, key_enc).await?;
 
@@ -89,8 +89,8 @@ impl CertStore {
     }
 
     /// Load a native_tls::Identity (cert + decrypted private key) for TLS handshake.
-    pub async fn load_identity(&self, cert_id: &str) -> Result<native_tls::Identity> {
-        if !self.crypto.is_unlocked().await {
+    pub async fn load_identity(&self, username: &str, cert_id: &str) -> Result<native_tls::Identity> {
+        if !self.crypto.is_unlocked(username).await {
             bail!("Vault must be unlocked to use client certificates");
         }
         let dir      = self.cert_dir(cert_id);
@@ -98,7 +98,7 @@ impl CertStore {
             .map_err(|_| anyhow::anyhow!("Certificate not found"))?;
         let key_enc  = tokio::fs::read_to_string(dir.join("key.enc")).await
             .map_err(|_| anyhow::anyhow!("Encrypted key not found"))?;
-        let key_pem_bytes = self.crypto.decrypt(key_enc.trim()).await?;
+        let key_pem_bytes = self.crypto.decrypt(username, key_enc.trim()).await?;
         let key_pem = String::from_utf8(key_pem_bytes)?;
 
         // native-tls needs PKCS#12; we build it via openssl

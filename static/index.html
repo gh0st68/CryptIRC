@@ -640,6 +640,9 @@ body > style, body > script { visibility:hidden; }
 .msg-body a:hover { text-decoration:underline; }
 .msg-img { display:block; max-width:min(320px,90%); max-height:240px; border-radius:6px; margin-top:5px; cursor:pointer; border:1px solid var(--border); transition:opacity .2s; }
 .msg-img:hover { opacity:.9; }
+.msg-yt { position:relative; display:inline-block; margin-top:5px; text-decoration:none; }
+.yt-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:36px; color:#fff; text-shadow:0 2px 8px rgba(0,0,0,.7); pointer-events:none; opacity:.85; }
+.msg-yt:hover .yt-play { opacity:1; }
 .row-action .msg-body { color:var(--action); font-style:italic; }
 .row-action .msg-nick { color:var(--action); }
 .row-notice .msg-body { color:var(--notice); }
@@ -675,7 +678,7 @@ body > style, body > script { visibility:hidden; }
   background:none; border:none; border-radius:0;
   transition:none;
 }
-#input-inner:focus-within { }
+#input-inner:focus-within { background:var(--bg2); border-top:1px solid var(--accent); margin-top:-1px; box-shadow:0 -4px 12px rgba(0,212,170,.1); }
 #msg-input {
   flex:1; background:none; border:none;
   color:var(--text); font-family:var(--mono);
@@ -686,7 +689,7 @@ body > style, body > script { visibility:hidden; }
 }
 #msg-input::placeholder { color:var(--text3); }
 #send-btn {
-  background:none; border:none; color:var(--text2); cursor:pointer;
+  background:none; border:none; outline:none; color:var(--text2); cursor:pointer;
   width:32px; height:32px; min-width:32px;
   display:flex; align-items:center; justify-content:center;
   font-size:15px; flex-shrink:0;
@@ -694,6 +697,7 @@ body > style, body > script { visibility:hidden; }
   -webkit-appearance:none; appearance:none;
   padding:2px; box-sizing:border-box;
 }
+#send-btn:focus { outline:none; }
 #send-btn:hover { color:var(--accent); }
 #send-btn:active { color:var(--accent); }
 #emoji-picker {
@@ -737,14 +741,14 @@ body > style, body > script { visibility:hidden; }
 .slash-ac-cmd { color:var(--accent); font-weight:600; font-size:13px; min-width:90px; flex-shrink:0; }
 .slash-ac-desc { color:var(--text3); font-size:12px; }
 .upload-btn {
-  background:none; border:none;
+  background:none; border:none; outline:none;
   color:var(--text2); cursor:pointer; font-size:16px;
   padding:4px; min-width:32px; min-height:32px;
   display:flex; align-items:center; justify-content:center;
   transition:color .15s; flex-shrink:0; box-sizing:border-box;
   -webkit-appearance:none; appearance:none;
-  box-sizing:content-box;
 }
+.upload-btn:focus { outline:none; }
 .upload-btn:hover, .upload-btn:active { color:var(--text); }
 #file-input { display:none; }
 .upload-progress {
@@ -1038,7 +1042,7 @@ body > style, body > script { visibility:hidden; }
   .upload-btn { font-size:15px; padding:4px; }
   .sidebar-btn { font-size:11px; }
   #input-wrap { padding:0 0 var(--sab); }
-  #msg-input { padding:6px 8px; font-size:16px; line-height:1; }
+  #msg-input { padding:4px 8px; font-size:16px; line-height:1; }
   #send-btn { width:26px; height:26px; min-width:26px; font-size:13px; padding:1px; }
   #input-wrap .upload-btn { font-size:13px; padding:1px; min-width:26px; min-height:26px; }
 }
@@ -1517,7 +1521,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     <div id="sidebar-header">
       <span class="logo">CryptIRC</span>
       <button class="lock-btn" id="favs-toggle" title="Toggle favorites only" onclick="toggleFavsOnly()" style="font-size:12px">☆</button>
-      <button class="lock-btn" title="Lock vault" onclick="lockVault()">🔒</button>
+      <button class="lock-btn" id="vault-lock-btn" title="Lock vault" onclick="lockVault()">🔒</button>
     </div>
     <div id="favorites-list"></div>
     <div id="network-list"></div>
@@ -1534,6 +1538,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()">🔔 Notifications</button>
           <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()">🎨 Theme</button>
           <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)">👁 Monitor</button>
+          <button class="settings-menu-item" onclick="showNotepad();closeSettingsMenu()">📝 Notepad</button>
           <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b">🧹 Clear All Logs</button>
           <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()">👑 Admin</button>
           <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b">🗑 Delete Account</button>
@@ -1602,8 +1607,15 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     <div id="input-wrap">
       <div id="input-inner">
         <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" spellcheck="true" autocorrect="on" autocapitalize="off" enterkeyhint="send">
-        <button id="send-btn" onclick="doSend()" title="Send">➤</button>
-        <button class="upload-btn" title="Upload file" onclick="triggerUpload()">📎</button>
+        <button id="send-btn" onclick="doSend()" title="Send">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+        <button class="upload-btn" title="Upload file" onclick="triggerUpload()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+        </button>
+        <button class="upload-btn" title="Paste snippet" onclick="showPasteModal()">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        </button>
       </div>
       <input type="file" id="file-input" multiple accept="*/*" onchange="handleFileSelect(this.files)">
     </div>
@@ -1986,6 +1998,7 @@ function handleEvent(ev) {
     case 'auth_failed': sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; break;
     case 'vault_unlocked':
       document.getElementById('vault-overlay').classList.remove('show'); renderSidebar();
+      {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
       if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key);
       // Load logs for current channel now that vault is unlocked
       if(active&&getBuf(active.conn_id,active.target).length===0&&active.target!=='status')
@@ -1995,7 +2008,7 @@ function handleEvent(ev) {
     case 'state':
       networks=ev.networks||[];
       if(!ev.vault_unlocked) document.getElementById('vault-overlay').classList.add('show');
-      else document.getElementById('vault-overlay').classList.remove('show');
+      else { document.getElementById('vault-overlay').classList.remove('show'); const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';} }
       renderSidebar();
       // Restore last active view after page refresh
       if(!active){
@@ -2362,6 +2375,11 @@ function handleEvent(ev) {
     case 'preferences':
       try{ restorePreferences(JSON.parse(ev.prefs)); }catch(e){}
       break;
+    case 'notepad': {
+      const ta=document.getElementById('notepad-area');
+      if(ta) ta.value=ev.content||'';
+      break;
+    }
     case 'account_deleted':
       alert('Your account has been deleted.');
       localStorage.clear();
@@ -2795,14 +2813,30 @@ function appendFileToken(url){
 }
 function buildMediaEl(url){
   const authedUrl=appendFileToken(url);
+  // Images
   if(IMG_EXTS.test(url)||url.includes('/files/')){
     const img=document.createElement('img');img.className='msg-img';img.src=authedUrl;img.alt='image';img.loading='lazy';
     img.onclick=e=>{e.stopPropagation();openLightbox(authedUrl);};
     img.onerror=()=>img.style.display='none';
     return img;
   }
+  // Videos
   if(VID_EXTS.test(url)){const vid=document.createElement('video');vid.className='msg-img';vid.src=authedUrl;vid.controls=true;vid.preload='metadata';return vid;}
+  // YouTube — show thumbnail, click opens in new tab (no iframe for security)
+  const ytId=extractYouTubeId(url);
+  if(ytId){
+    const wrap=document.createElement('a');
+    wrap.href=url;wrap.target='_blank';wrap.rel='noopener noreferrer';
+    wrap.className='msg-yt';wrap.title='Open on YouTube';
+    wrap.innerHTML=`<img src="https://img.youtube.com/vi/${ytId}/mqdefault.jpg" alt="YouTube" loading="lazy" class="msg-img"><span class="yt-play">▶</span>`;
+    wrap.querySelector('img').onerror=()=>wrap.style.display='none';
+    return wrap;
+  }
   return null;
+}
+function extractYouTubeId(url){
+  const m=url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
+  return m?m[1]:null;
 }
 function openLightbox(src){document.getElementById('lightbox-img').src=src;document.getElementById('lightbox').classList.add('show');}
 function closeLightbox(){document.getElementById('lightbox').classList.remove('show');}
@@ -3294,6 +3328,109 @@ function insertNick(nick){const inp=document.getElementById('msg-input');if(!inp
 
 // ─── Upload ───────────────────────────────────────────────────────────────────
 function triggerUpload(){if(!active){alert('Select a channel first');return;}document.getElementById('file-input').click();}
+
+// ─── Encrypted Notepad ───────────────────────────────────────────────────────
+let _notepadSaveTimer=null;
+function showNotepad(){
+  wsend({type:'load_notepad'});
+  const ov=document.createElement('div');ov.id='notepad-overlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:16px;';
+  const box=document.createElement('div');
+  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(600px,94vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
+  box.innerHTML=`
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <span style="font-weight:700;font-size:14px;color:var(--text)">📝 Encrypted Notepad</span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span id="notepad-status" style="font-size:10px;color:var(--text3)"></span>
+        <span onclick="closeNotepad()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+      </div>
+    </div>
+    <textarea id="notepad-area" placeholder="Your private encrypted notes..." style="flex:1;min-height:300px;background:var(--bg2);color:var(--text);font-family:var(--mono);font-size:14px;padding:16px;border:none;outline:none;resize:none;-webkit-overflow-scrolling:touch"></textarea>`;
+  ov.appendChild(box);
+  ov.onclick=e=>{if(e.target===ov)closeNotepad();};
+  document.body.appendChild(ov);
+  const ta=document.getElementById('notepad-area');
+  ta.addEventListener('input',()=>{
+    clearTimeout(_notepadSaveTimer);
+    document.getElementById('notepad-status').textContent='Saving...';
+    _notepadSaveTimer=setTimeout(()=>{
+      wsend({type:'save_notepad',content:ta.value});
+      document.getElementById('notepad-status').textContent='Saved ✓';
+      setTimeout(()=>{const s=document.getElementById('notepad-status');if(s)s.textContent='';},2000);
+    },1000);
+  });
+}
+function closeNotepad(){const ov=document.getElementById('notepad-overlay');if(ov){
+  // Save before closing
+  const ta=document.getElementById('notepad-area');
+  if(ta&&ta.value)wsend({type:'save_notepad',content:ta.value});
+  ov.remove();
+}}
+function showPasteModal(){
+  if(!active){alert('Select a channel first');return;}
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:16px;';
+  const box=document.createElement('div');
+  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(500px,94vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
+  box.innerHTML=`
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <span style="font-weight:700;font-size:14px;color:var(--text)">📋 New Paste</span>
+      <span onclick="this.closest('[style*=fixed]').remove()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+    </div>
+    <div style="padding:16px 20px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:10px">
+      <textarea id="paste-content" placeholder="Paste your text here..." style="width:100%;min-height:200px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:10px;resize:vertical;outline:none;box-sizing:border-box"></textarea>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <select id="paste-lang" style="flex:1;padding:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px">
+          <option value="text">Plain Text</option>
+          <option value="javascript">JavaScript</option>
+          <option value="python">Python</option>
+          <option value="rust">Rust</option>
+          <option value="html">HTML</option>
+          <option value="css">CSS</option>
+          <option value="bash">Bash</option>
+          <option value="json">JSON</option>
+          <option value="sql">SQL</option>
+          <option value="c">C/C++</option>
+          <option value="go">Go</option>
+          <option value="php">PHP</option>
+          <option value="ruby">Ruby</option>
+          <option value="yaml">YAML</option>
+          <option value="xml">XML</option>
+          <option value="markdown">Markdown</option>
+        </select>
+        <select id="paste-expire" style="flex:1;padding:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px">
+          <option value="0">No Expiration</option>
+          <option value="600">10 Minutes</option>
+          <option value="3600">1 Hour</option>
+          <option value="86400">1 Day</option>
+          <option value="604800">1 Week</option>
+          <option value="2592000">30 Days</option>
+        </select>
+      </div>
+      <input id="paste-password" type="password" placeholder="Password (optional)" style="padding:6px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:14px;outline:none">
+      <button onclick="submitPaste(this)" style="padding:10px;background:var(--accent,#00d4aa);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:14px">Create Paste</button>
+    </div>`;
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+  ov.onclick=e=>{if(e.target===ov)ov.remove();};
+  document.getElementById('paste-content')?.focus();
+}
+async function submitPaste(btn){
+  const content=document.getElementById('paste-content')?.value;
+  if(!content?.trim()){alert('Paste cannot be empty');return;}
+  const lang=document.getElementById('paste-lang')?.value||'text';
+  const expire=parseInt(document.getElementById('paste-expire')?.value||'0');
+  const pw=document.getElementById('paste-password')?.value||'';
+  btn.disabled=true;btn.textContent='Creating...';
+  try{
+    const r=await fetch('/cryptirc/paste',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({content,language:lang,expires_in:expire||null,password:pw||null})});
+    const d=await r.json();
+    if(!r.ok){alert(d.error||'Failed');return;}
+    const inp=document.getElementById('msg-input');
+    if(inp){inp.value=inp.value?(inp.value+' '+d.url):d.url;inp.focus();}
+    btn.closest('[style*=fixed]').remove();
+  }catch(e){alert('Error: '+e.message);}finally{btn.disabled=false;btn.textContent='Create Paste';}
+}
 function handleFileSelect(files){if(!active)return;Array.from(files).forEach(uploadFile);}
 async function uploadFile(file){
   if(!sessionToken){alert('Not authenticated');return;}
@@ -3307,11 +3444,12 @@ async function uploadFile(file){
     const pubUrl=d.url.replace('/files/','/pub/');
     const shareUrl=`${location.origin}${pubUrl}`;
     const text=d.is_image?shareUrl:`${d.original_name}: ${shareUrl}`;
-    const{conn_id,target}=active;
-    // Encrypt file URL if E2E active
-    const wire=(window.E2E?.channelKeys?.[target]||window.E2E?.dmSessions?.[target])?await e2eEncryptOutgoing(target,text):null;
-    wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||text}`});
-    addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text,kind:'privmsg',encrypted:!!wire});
+    // Put the link in the input bar instead of sending immediately
+    const inp=document.getElementById('msg-input');
+    if(inp){
+      inp.value=inp.value?(inp.value+' '+text):text;
+      inp.focus();
+    }
     prog.textContent=`✓ Uploaded ${d.original_name}`;
     setTimeout(()=>prog.classList.remove('show'),2500);
   } catch(e){prog.textContent=`❌ Upload failed`;setTimeout(()=>prog.classList.remove('show'),3000);}
@@ -3346,14 +3484,18 @@ function doUnlock(){
   document.getElementById('vault-err').textContent='';
   wsend({type:'unlock_vault',passphrase:p});
 }
-function lockVault(){if(!confirm('Lock the vault?'))return;for(const n of networks)wsend({type:'disconnect',id:n.config.id});document.getElementById('vault-overlay').classList.add('show');}
+function lockVault(){if(!confirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.'))return;wsend({type:'lock_vault'});for(const n of networks)wsend({type:'disconnect',id:n.config.id});document.getElementById('vault-overlay').classList.add('show');const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔒';vb.title='Lock vault';}}
 function showChangePass(){const old=prompt('Current passphrase:');if(!old)return;const nw=prompt('New passphrase:');if(!nw)return;if(nw!==prompt('Confirm new passphrase:')){alert('Passphrases do not match');return;}wsend({type:'change_passphrase',old,new:nw});}
 function clearAllLogs(){
-  if(!confirm('Clear all chat history and logs? This clears local buffers only.'))return;
+  if(!confirm('Clear ALL data? This will delete:\n• Chat history & logs (server + local)\n• Your notepad\n• Your paste posts\n\nThis cannot be undone.'))return;
+  // Clear local buffers
   buffers={};
   unread.clear();
   renderChat();
   renderSidebar();
+  // Tell server to clear logs, notepad, and pastes
+  wsend({type:'clear_all_data'});
+  showToast('All data cleared');
 }
 function showDeleteAccount(){
   const pw=prompt('To delete your account permanently, enter your password:');

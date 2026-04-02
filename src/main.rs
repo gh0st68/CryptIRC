@@ -30,6 +30,7 @@ mod email;
 mod irc;
 mod logs;
 mod notifications;
+mod paste;
 mod upload;
 
 use auth::{validate_uuid, AuthManager};
@@ -55,6 +56,7 @@ pub struct AppState {
     pub auth:                Arc<AuthManager>,
     pub notifier:            Arc<NotificationManager>,
     pub e2e_store:           Arc<E2EStore>,
+    pub paste_store:         Arc<paste::PasteStore>,
     pub global_tx:           broadcast::Sender<ServerEvent>,
     pub user_events:         UserEventMap,
     pub upload_dir:          String,
@@ -93,6 +95,7 @@ impl AppState {
 pub enum ClientMessage {
     Auth             { token: String },
     UnlockVault      { passphrase: String },
+    LockVault        {},
     ChangePassphrase { old: String, new: String },
     AddNetwork       { network: NetworkConfig },
     UpdateNetwork    { network: NetworkConfig },
@@ -150,6 +153,11 @@ pub enum ClientMessage {
     DeleteAccount     { password: String },
     // Monitor push
     MonitorPush       { nick: String, status: String },
+    // Notepad (encrypted per-user)
+    SaveNotepad       { content: String },
+    LoadNotepad       {},
+    // Clear all user data (logs, notepad, pastes)
+    ClearAllData      {},
     // Channel order
     SaveChannelOrder  { conn_id: String, order: Vec<String> },
 }
@@ -228,6 +236,7 @@ pub enum ServerEvent {
     E2EX3DHHeader    { from_nick: String, header: serde_json::Value },
     Appearance       { settings: String },
     Preferences      { prefs: String },
+    Notepad          { content: String },
     AccountDeleted   {},
     Error            { message: String },
 }
@@ -347,19 +356,23 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(format!("{}/certs", data_dir))?;
 
     let crypto   = Arc::new(CryptoManager::new(&data_dir)?);
+    // Migrate legacy shared vault to per-user vaults if needed
+    crypto.migrate_legacy_vault().await?;
+    std::fs::create_dir_all(format!("{}/vaults", data_dir))?;
     let certs    = Arc::new(CertStore::new(&data_dir, crypto.clone()));
     let logger   = Arc::new(EncryptedLogger::new(&data_dir, crypto.clone()));
     let auth     = Arc::new(AuthManager::new(&data_dir)?);
     let vapid    = notifications::load_or_generate_vapid(&data_dir)?;
     let notifier = Arc::new(NotificationManager::new(&data_dir, vapid));
     let e2e_store = Arc::new(E2EStore::new(&data_dir));
+    let paste_store = Arc::new(paste::PasteStore::new(&data_dir));
     let (global_tx, _) = broadcast::channel(64);
 
     let state = AppState {
         connections:         Arc::new(DashMap::new()),
         conn_owners:         Arc::new(DashMap::new()),
         disconnect_requests: Arc::new(DashSet::new()),
-        crypto, certs, logger, auth, notifier, e2e_store, global_tx,
+        crypto, certs, logger, auth, notifier, e2e_store, paste_store, global_tx,
         user_events:         Arc::new(DashMap::new()),
         upload_dir, base_url, from_email,
         data_dir: data_dir.clone(),
@@ -403,6 +416,9 @@ async fn main() -> Result<()> {
         .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(26_214_400)))
         .route("/files/:name",           get(serve_file))
         .route("/pub/:name",            get(serve_file_public))
+        .route("/paste",                post(route_paste_create).layer(DefaultBodyLimit::max(524_288)))
+        .route("/paste/:id",            get(route_paste_view))
+        .route("/paste/:id/raw",        get(route_paste_raw))
         .route("/push/vapid-public-key", get(route_push_vapid_key))
         .route("/push/subscribe",        post(route_push_subscribe).layer(DefaultBodyLimit::max(4_096)))
         .route("/push/subscribe",        axum::routing::delete(route_push_unsubscribe).layer(DefaultBodyLimit::max(2_048)))
@@ -786,6 +802,98 @@ async fn route_e2e_get_bundle(
     }
 }
 
+// ─── Paste routes ────────────────────────────────────────────────────────────
+
+async fn route_paste_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<paste::CreatePasteRequest>,
+) -> impl IntoResponse {
+    let token = headers.get("authorization").and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer ")).unwrap_or("");
+    let user = match state.auth.validate_session(token) {
+        Some(u) => u, None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response(),
+    };
+    match state.paste_store.create(&body, &user).await {
+        Ok(paste) => {
+            let url = format!("{}/paste/{}", state.base_url, paste.id);
+            Json(serde_json::json!({
+                "id": paste.id,
+                "url": url,
+                "has_password": paste.password_hash.is_some(),
+                "expires_at": paste.expires_at,
+            })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn route_paste_view(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    match state.paste_store.get(&id).await {
+        Ok(Some(paste)) => {
+            if paste.password_hash.is_some() {
+                let pw = params.get("password").map(|s| s.as_str()).unwrap_or("");
+                if !paste::PasteStore::verify_password(&paste, pw) {
+                    return (StatusCode::FORBIDDEN, Html(format!(
+                        "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>CryptIRC Paste</title>\
+                         <style>body{{background:#0b0d0f;color:#e0e0e0;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}\
+                         .box{{background:#141620;padding:24px;border-radius:12px;border:1px solid #2a2e3e;max-width:300px;width:90%}}\
+                         input{{width:100%;padding:8px;margin:8px 0;background:#1a1e2e;border:1px solid #2a2e3e;color:#e0e0e0;border-radius:6px;font-size:16px}}\
+                         button{{width:100%;padding:8px;background:#00d4aa;color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700}}</style></head>\
+                         <body><div class=\"box\"><h3>🔒 Password Required</h3>\
+                         <form method=\"get\"><input type=\"password\" name=\"password\" placeholder=\"Enter password\" autofocus>\
+                         <button type=\"submit\">Unlock</button></form></div></body></html>"
+                    ))).into_response();
+                }
+            }
+            let escaped = html_escape(&paste.content);
+            let lang = html_escape(&paste.language);
+            let created = chrono::DateTime::from_timestamp(paste.created_at, 0)
+                .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+            let expires = paste.expires_at.and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+                .map(|d| format!("Expires: {}", d.format("%Y-%m-%d %H:%M UTC"))).unwrap_or_else(|| "No expiration".into());
+            Html(format!(
+                "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>CryptIRC Paste — {}</title>\
+                 <style>body{{background:#0b0d0f;color:#e0e0e0;font-family:monospace;margin:0;padding:16px}}\
+                 .hdr{{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2a2e3e;margin-bottom:12px;flex-wrap:wrap;gap:8px}}\
+                 .meta{{font-size:12px;color:#888}}\
+                 pre{{background:#141620;padding:16px;border-radius:8px;overflow-x:auto;border:1px solid #2a2e3e;white-space:pre-wrap;word-break:break-word;line-height:1.5}}\
+                 a{{color:#00d4aa}}</style></head>\
+                 <body><div class=\"hdr\"><span><a href=\"/cryptirc/\">CryptIRC</a> Paste</span>\
+                 <span class=\"meta\">{} · {} · by {} · {} · <a href=\"/cryptirc/paste/{}/raw\">raw</a></span></div>\
+                 <pre>{}</pre></body></html>",
+                id, lang, created, html_escape(&paste.author), expires, id, escaped
+            )).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, Html("Paste not found or expired.".to_string())).into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Html("Error loading paste.".to_string())).into_response(),
+    }
+}
+
+async fn route_paste_raw(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    match state.paste_store.get(&id).await {
+        Ok(Some(paste)) => {
+            if paste.password_hash.is_some() {
+                let pw = params.get("password").map(|s| s.as_str()).unwrap_or("");
+                if !paste::PasteStore::verify_password(&paste, pw) {
+                    return (StatusCode::FORBIDDEN, "Password required").into_response();
+                }
+            }
+            ([(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], paste.content).into_response()
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response(),
+    }
+}
+
 // ─── Push notification routes ─────────────────────────────────────────────────
 
 async fn route_push_vapid_key(State(state): State<AppState>) -> impl IntoResponse {
@@ -882,14 +990,14 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 
     info!("WS authenticated: {}", username);
     let _ = sender.send(Message::Text(serde_json::to_string(&ServerEvent::AuthOk { username: username.clone() }).unwrap())).await;
-    let vault_unlocked = state.crypto.is_unlocked().await;
+    let vault_unlocked = state.crypto.is_unlocked(&username).await;
     let _ = sender.send(Message::Text(serde_json::to_string(&ServerEvent::State {
         networks: state.user_network_states(&username).await,
         vault_unlocked,
     }).unwrap())).await;
     // If vault is already unlocked, send the e2e key so the frontend can init E2E
     if vault_unlocked {
-        if let Ok(k) = state.crypto.derive_e2e_enc_key().await {
+        if let Ok(k) = state.crypto.derive_e2e_enc_key(&username).await {
             let e2e_enc_key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, k);
             let _ = sender.send(Message::Text(serde_json::to_string(&ServerEvent::VaultUnlocked { e2e_enc_key }).unwrap())).await;
         }
@@ -936,23 +1044,29 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
         ClientMessage::Auth { .. } => {}
 
         ClientMessage::UnlockVault { passphrase } => {
-            match state.crypto.unlock(&passphrase).await {
+            match state.crypto.unlock(username, &passphrase).await {
                 Ok(_)  => {
                     // Derive E2E sub-key and send to client
-                    let e2e_enc_key = match state.crypto.derive_e2e_enc_key().await {
+                    let e2e_enc_key = match state.crypto.derive_e2e_enc_key(username).await {
                         Ok(k)  => base64::Engine::encode(&base64::engine::general_purpose::STANDARD, k),
                         Err(_) => String::new(),
                     };
                     send(ServerEvent::VaultUnlocked { e2e_enc_key });
+                    // Per-user vault: only connect THIS user's networks
                     state.reconnect_for_user(username).await;
                 }
                 Err(_) => send(ServerEvent::VaultError { message: "Incorrect passphrase".into() }),
             }
         }
+        ClientMessage::LockVault {} => {
+            info!("Vault locked for {}", username);
+            state.crypto.lock(username).await;
+            send(ServerEvent::VaultLocked {});
+        }
         ClientMessage::ChangePassphrase { old, new } => {
-            match state.crypto.change_passphrase(&old, &new, &state.data_dir).await {
+            match state.crypto.change_passphrase(username, &old, &new).await {
                 Ok(_)  => {
-                    let e2e_enc_key = match state.crypto.derive_e2e_enc_key().await {
+                    let e2e_enc_key = match state.crypto.derive_e2e_enc_key(username).await {
                         Ok(k)  => base64::Engine::encode(&base64::engine::general_purpose::STANDARD, k),
                         Err(_) => String::new(),
                     };
@@ -969,11 +1083,11 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 send(ServerEvent::Error { message: e.to_string() }); return;
             }
             // Auto-generate client cert if SASL EXTERNAL is enabled
-            if network.sasl_external && state.crypto.is_unlocked().await {
+            if network.sasl_external && state.crypto.is_unlocked(username).await {
                 let has_cert = state.certs.load_info(&network.id).await.is_ok();
                 if !has_cert {
                     let nick = network.nick.clone();
-                    if let Ok(info) = state.certs.generate(&network.id, &nick).await {
+                    if let Ok(info) = state.certs.generate(username, &network.id, &nick).await {
                         let mut cfg = network.clone();
                         cfg.client_cert_id = Some(network.id.clone());
                         let _ = state.save_network(&cfg, username).await;
@@ -987,7 +1101,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             }
             send(ServerEvent::State {
                 networks: state.user_network_states(username).await,
-                vault_unlocked: state.crypto.is_unlocked().await,
+                vault_unlocked: state.crypto.is_unlocked(username).await,
             });
         }
         ClientMessage::UpdateNetwork { mut network } => {
@@ -1002,11 +1116,11 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 send(ServerEvent::Error { message: e.to_string() }); return;
             }
             // Auto-generate client cert if SASL EXTERNAL is enabled and no cert exists
-            if network.sasl_external && state.crypto.is_unlocked().await {
+            if network.sasl_external && state.crypto.is_unlocked(username).await {
                 let has_cert = state.certs.load_info(&network.id).await.is_ok();
                 if !has_cert {
                     let nick = network.nick.clone();
-                    if let Ok(info) = state.certs.generate(&network.id, &nick).await {
+                    if let Ok(info) = state.certs.generate(username, &network.id, &nick).await {
                         let mut cfg = network.clone();
                         cfg.client_cert_id = Some(network.id.clone());
                         let _ = state.save_network(&cfg, username).await;
@@ -1020,7 +1134,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             }
             send(ServerEvent::State {
                 networks: state.user_network_states(username).await,
-                vault_unlocked: state.crypto.is_unlocked().await,
+                vault_unlocked: state.crypto.is_unlocked(username).await,
             });
         }
         ClientMessage::RemoveNetwork { id } => {
@@ -1035,7 +1149,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             state.remove_network(&id, username).await;
             send(ServerEvent::State {
                 networks: state.user_network_states(username).await,
-                vault_unlocked: state.crypto.is_unlocked().await,
+                vault_unlocked: state.crypto.is_unlocked(username).await,
             });
         }
         ClientMessage::Connect { id } => {
@@ -1108,7 +1222,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                                 target.clone()  // PM: target is the recipient nick
                             };
                             // Log our own sent messages so they appear in history
-                            state.logger.append(&conn_id, &display_target, ts, &nick, &clean, match &kind {
+                            state.logger.append(username, &conn_id, &display_target, ts, &nick, &clean, match &kind {
                                 MessageKind::Privmsg => "privmsg",
                                 MessageKind::Notice => "notice",
                                 MessageKind::Action => "action",
@@ -1188,7 +1302,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             if !state.owns_network(username, &conn_id).await { return; }
             let lim = limit.unwrap_or(200).min(500);
             // Read all logs (up to internal cap), then filter and slice
-            let all_lines = state.logger.read_logs(&conn_id, &target, 10000).await.unwrap_or_default();
+            let all_lines = state.logger.read_logs(username, &conn_id, &target, 10000).await.unwrap_or_default();
             let filtered: Vec<LogLine> = if let Some(ts) = before {
                 all_lines.into_iter().filter(|l| l.ts < ts).collect()
             } else {
@@ -1201,21 +1315,21 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
         ClientMessage::GetState {} => {
             send(ServerEvent::State {
                 networks: state.user_network_states(username).await,
-                vault_unlocked: state.crypto.is_unlocked().await,
+                vault_unlocked: state.crypto.is_unlocked(username).await,
             });
         }
 
         // ── Certificate management ────────────────────────────────────────
         ClientMessage::GenerateCert { conn_id } => {
             if !state.owns_network(username, &conn_id).await { return; }
-            if !state.crypto.is_unlocked().await {
+            if !state.crypto.is_unlocked(username).await {
                 send(ServerEvent::Error { message: "Vault must be unlocked to generate certificates".into() }); return;
             }
             // Use network nick as CN, fall back to username
             let nick = state.get_network_config(&conn_id, username).await
                 .map(|c| c.nick)
                 .unwrap_or_else(|| username.to_string());
-            match state.certs.generate(&conn_id, &nick).await {
+            match state.certs.generate(username, &conn_id, &nick).await {
                 Ok(info) => {
                     // Set client_cert_id on the network config so it's used on next connect
                     if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
@@ -1234,7 +1348,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             match state.certs.delete(&conn_id).await {
                 Ok(_) => send(ServerEvent::State {
                     networks: state.user_network_states(username).await,
-                    vault_unlocked: state.crypto.is_unlocked().await,
+                    vault_unlocked: state.crypto.is_unlocked(username).await,
                 }),
                 Err(e) => send(ServerEvent::Error { message: format!("Cert delete failed: {}", e) }),
             }
@@ -1471,6 +1585,60 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 send(ServerEvent::Preferences { prefs: data });
             }
         }
+        ClientMessage::SaveNotepad { content } => {
+            if content.len() > 1_000_000 { send(ServerEvent::Error { message: "Notepad too large (max 1MB)".into() }); }
+            else if state.crypto.is_unlocked(username).await {
+                match state.crypto.encrypt(username, content.as_bytes()).await {
+                    Ok(enc) => {
+                        let dir = std::path::PathBuf::from(&state.data_dir).join("users").join(username);
+                        let _ = tokio::fs::create_dir_all(&dir).await;
+                        let _ = tokio::fs::write(dir.join("notepad.enc"), &enc).await;
+                    }
+                    Err(e) => send(ServerEvent::Error { message: format!("Save failed: {}", e) }),
+                }
+            } else { send(ServerEvent::Error { message: "Vault locked".into() }); }
+        }
+        ClientMessage::LoadNotepad {} => {
+            if state.crypto.is_unlocked(username).await {
+                let path = std::path::PathBuf::from(&state.data_dir).join("users").join(username).join("notepad.enc");
+                if let Ok(enc) = tokio::fs::read_to_string(&path).await {
+                    match state.crypto.decrypt(username, enc.trim()).await {
+                        Ok(pt) => send(ServerEvent::Notepad { content: String::from_utf8_lossy(&pt).to_string() }),
+                        Err(_) => send(ServerEvent::Notepad { content: String::new() }),
+                    }
+                } else {
+                    send(ServerEvent::Notepad { content: String::new() });
+                }
+            } else { send(ServerEvent::Error { message: "Vault locked".into() }); }
+        }
+        ClientMessage::ClearAllData {} => {
+            info!("Clearing all data for user: {}", username);
+            // Delete logs for all this user's connections
+            for cfg in state.load_user_configs(username).await {
+                let log_dir = std::path::PathBuf::from(&state.data_dir)
+                    .join("logs").join(&cfg.id);
+                let _ = tokio::fs::remove_dir_all(&log_dir).await;
+            }
+            // Delete notepad
+            let notepad_path = std::path::PathBuf::from(&state.data_dir)
+                .join("users").join(username).join("notepad.enc");
+            let _ = tokio::fs::remove_file(&notepad_path).await;
+            // Delete pastes by this user
+            let paste_dir = std::path::PathBuf::from(&state.data_dir).join("pastes");
+            if let Ok(mut rd) = tokio::fs::read_dir(&paste_dir).await {
+                while let Ok(Some(entry)) = rd.next_entry().await {
+                    let path = entry.path();
+                    if let Ok(json) = tokio::fs::read_to_string(&path).await {
+                        if let Ok(paste) = serde_json::from_str::<serde_json::Value>(&json) {
+                            if paste.get("author").and_then(|a| a.as_str()) == Some(username) {
+                                let _ = tokio::fs::remove_file(&path).await;
+                            }
+                        }
+                    }
+                }
+            }
+            info!("All data cleared for user: {}", username);
+        }
         ClientMessage::MonitorPush { nick, status } => {
             let safe_nick: String = nick.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '[' || *c == ']' || *c == '\\' || *c == '`' || *c == '^').take(32).collect();
             let safe_status = if status == "online" { "online" } else { "offline" };
@@ -1484,7 +1652,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 // Broadcast updated state to all sessions
                 state.send_to_user(username, ServerEvent::State {
                     networks: state.user_network_states(username).await,
-                    vault_unlocked: state.crypto.is_unlocked().await,
+                    vault_unlocked: state.crypto.is_unlocked(username).await,
                 });
             }
         }
@@ -1609,13 +1777,13 @@ impl AppState {
         // We store an encrypted variant so server-password and SASL credentials
         // are never written to disk in plaintext.
         let mut persisted = cfg.clone();
-        if self.crypto.is_unlocked().await {
+        if self.crypto.is_unlocked(username).await {
             if let Some(ref p) = cfg.password {
-                let enc = self.crypto.encrypt(p.as_bytes()).await?;
+                let enc = self.crypto.encrypt(username, p.as_bytes()).await?;
                 persisted.password = Some(format!("enc:{}", enc));
             }
             if let Some(ref sc) = cfg.sasl_plain {
-                let enc = self.crypto.encrypt(sc.password.as_bytes()).await?;
+                let enc = self.crypto.encrypt(username, sc.password.as_bytes()).await?;
                 persisted.sasl_plain = Some(crate::SaslConfig {
                     account:  sc.account.clone(),
                     password: format!("enc:{}", enc),
@@ -1623,7 +1791,7 @@ impl AppState {
             }
             if let Some(ref p) = cfg.oper_pass {
                 if !p.is_empty() {
-                    let enc = self.crypto.encrypt(p.as_bytes()).await?;
+                    let enc = self.crypto.encrypt(username, p.as_bytes()).await?;
                     persisted.oper_pass = Some(format!("enc:{}", enc));
                 }
             }
@@ -1649,17 +1817,17 @@ impl AppState {
         let mut cfg: NetworkConfig = serde_json::from_str(&json).ok()?;
 
         // S2: decrypt encrypted fields if vault is unlocked
-        if self.crypto.is_unlocked().await {
+        if self.crypto.is_unlocked(username).await {
             if let Some(ref p) = cfg.password.clone() {
                 if let Some(enc) = p.strip_prefix("enc:") {
-                    if let Ok(plain) = self.crypto.decrypt(enc).await {
+                    if let Ok(plain) = self.crypto.decrypt(username, enc).await {
                         cfg.password = Some(String::from_utf8_lossy(&plain).into_owned());
                     }
                 }
             }
             if let Some(ref sc) = cfg.sasl_plain.clone() {
                 if let Some(enc) = sc.password.strip_prefix("enc:") {
-                    if let Ok(plain) = self.crypto.decrypt(enc).await {
+                    if let Ok(plain) = self.crypto.decrypt(username, enc).await {
                         cfg.sasl_plain = Some(crate::SaslConfig {
                             account:  sc.account.clone(),
                             password: String::from_utf8_lossy(&plain).into_owned(),
@@ -1669,7 +1837,7 @@ impl AppState {
             }
             if let Some(ref p) = cfg.oper_pass.clone() {
                 if let Some(enc) = p.strip_prefix("enc:") {
-                    if let Ok(plain) = self.crypto.decrypt(enc).await {
+                    if let Ok(plain) = self.crypto.decrypt(username, enc).await {
                         cfg.oper_pass = Some(String::from_utf8_lossy(&plain).into_owned());
                     }
                 }
