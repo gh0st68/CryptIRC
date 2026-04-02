@@ -13,7 +13,8 @@
 <link rel="apple-touch-icon" href="/cryptirc/icon.svg">
 <title>CryptIRC</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&family=Fira+Code:wght@400;500;700&family=Source+Code+Pro:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;700&family=Roboto+Mono:wght@400;500;700&family=Ubuntu+Mono:wght@400;700&family=Inconsolata:wght@400;500;700&family=Space+Mono:wght@400;700&family=Courier+Prime:wght@400;700&family=DM+Mono:wght@400;500&family=Anonymous+Pro:wght@400;700&family=PT+Mono&family=Overpass+Mono:wght@400;500;700&family=Noto+Sans+Mono:wght@400;500;700&family=Victor+Mono:wght@400;500;700&family=Red+Hat+Mono:wght@400;500;700&family=Inter:wght@400;500;700&family=Outfit:wght@400;500;700&family=Nunito:wght@400;600;700&family=Poppins:wght@400;500;700&family=Open+Sans:wght@400;600;700&family=Lato:wght@400;700&family=Rubik:wght@400;500;700&family=Lexend:wght@400;500;700&family=Sora:wght@400;500;700&family=Merriweather:wght@400;700&family=Comic+Neue:wght@400;700&display=swap" rel="stylesheet">
 <script src="/cryptirc/e2e.js" defer></script>
 <style>
 /* ── CSS custom properties ─────────────────────────────────────────────────── */
@@ -900,9 +901,9 @@ body > style, body > script { visibility:hidden; }
   background:var(--bg2); border:1px solid var(--warn); border-radius:8px;
   padding:8px 16px; font-size:11px; color:var(--warn);
   box-shadow:0 8px 24px rgba(0,0,0,.5); display:none; z-index:50;
-  max-width:90vw; text-align:center; overflow:hidden; text-overflow:ellipsis;
+  max-width:90vw; align-items:center; gap:6px;
 }
-#reconnect-toast.show { display:block; }
+#reconnect-toast.show { display:flex; }
 
 /* ── PUSH NOTIFICATION SETTINGS ────────────────────────────────────────────── */
 .notif-section { margin-bottom:18px; }
@@ -1256,6 +1257,50 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div class="appear-section">
         <div class="appear-section-title">Theme</div>
         <div class="theme-grid" id="theme-grid"></div>
+      </div>
+
+      <div class="appear-section">
+        <div class="appear-section-title">Font</div>
+        <div class="appear-row">
+          <span class="appear-label">Chat font</span>
+          <select id="a-font" style="flex:1;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px" onchange="applyAppearance()">
+            <option value="'JetBrains Mono',monospace">JetBrains Mono (default)</option>
+            <option value="'Fira Code',monospace">Fira Code</option>
+            <option value="'Source Code Pro',monospace">Source Code Pro</option>
+            <option value="'IBM Plex Mono',monospace">IBM Plex Mono</option>
+            <option value="'Roboto Mono',monospace">Roboto Mono</option>
+            <option value="'Ubuntu Mono',monospace">Ubuntu Mono</option>
+            <option value="'Inconsolata',monospace">Inconsolata</option>
+            <option value="'Space Mono',monospace">Space Mono</option>
+            <option value="'Courier Prime',monospace">Courier Prime</option>
+            <option value="'DM Mono',monospace">DM Mono</option>
+            <option value="'Hack',monospace">Hack</option>
+            <option value="'Anonymous Pro',monospace">Anonymous Pro</option>
+            <option value="'PT Mono',monospace">PT Mono</option>
+            <option value="'Overpass Mono',monospace">Overpass Mono</option>
+            <option value="'Noto Sans Mono',monospace">Noto Sans Mono</option>
+            <option value="'Victor Mono',monospace">Victor Mono</option>
+            <option value="'Cascadia Code',monospace">Cascadia Code</option>
+            <option value="'Iosevka',monospace">Iosevka</option>
+            <option value="'Monaspace Neon',monospace">Monaspace Neon</option>
+            <option value="'Red Hat Mono',monospace">Red Hat Mono</option>
+            <option value="monospace">System Monospace</option>
+            <option value="'Inter',sans-serif">Inter</option>
+            <option value="'Outfit',sans-serif">Outfit</option>
+            <option value="'Nunito',sans-serif">Nunito</option>
+            <option value="'Poppins',sans-serif">Poppins</option>
+            <option value="'Open Sans',sans-serif">Open Sans</option>
+            <option value="'Lato',sans-serif">Lato</option>
+            <option value="'Rubik',sans-serif">Rubik</option>
+            <option value="'Lexend',sans-serif">Lexend</option>
+            <option value="'Sora',sans-serif">Sora</option>
+            <option value="sans-serif">System Sans-Serif</option>
+            <option value="'Georgia',serif">Georgia</option>
+            <option value="'Merriweather',serif">Merriweather</option>
+            <option value="serif">System Serif</option>
+            <option value="'Comic Neue',cursive">Comic Neue</option>
+          </select>
+        </div>
       </div>
 
       <div class="appear-section">
@@ -2042,7 +2087,8 @@ function handleEvent(ev) {
     case 'disconnected': sysMsg(ev.conn_id,'status',`Disconnected: ${ev.reason}`,'error'); setNetDot(ev.conn_id,'offline'); lagMap[ev.conn_id]=null; if(active&&active.conn_id===ev.conn_id) updateLagDisplay(); break;
     case 'reconnecting': {
       const t=document.getElementById('reconnect-toast');
-      t.textContent=`↻ Reconnecting to ${ev.conn_id} (attempt ${ev.attempt}) in ${ev.delay_secs}s`;
+      const netLabel=networks.find(n=>n.config.id===ev.conn_id)?.config.label||ev.conn_id.slice(0,8);
+      t.innerHTML=`<span>↻ Reconnecting to ${esc(netLabel)} (attempt ${ev.attempt}) in ${ev.delay_secs}s</span><span onclick="document.getElementById('reconnect-toast').classList.remove('show');clearTimeout(window._rtTimer)" style="cursor:pointer;margin-left:10px;opacity:.6;font-size:14px">✕</span>`;
       t.classList.add('show');
       clearTimeout(window._rtTimer);
       window._rtTimer=setTimeout(()=>t.classList.remove('show'),(ev.delay_secs*1000)+4000);
@@ -3651,8 +3697,33 @@ function showEncryptPanel(){
   } else if(target!=='status') {
     // DM
     title.textContent=`Encryption — ${target}`;
+    const hasPSK=window.E2E?.channelKeys?.[target];
     const hasSession=window.E2E?.dmSessions?.[target];
-    if(hasSession){
+    if(hasPSK){
+      body.innerHTML=`
+        <div class="encrypt-status on">
+          <span class="encrypt-status-icon">🔐</span>
+          <div><strong>PSK Encrypted</strong><br><span style="font-size:11px;color:var(--text2)">Using a shared key — works with any IRC client</span></div>
+        </div>
+        <div class="encrypt-actions">
+          <button class="encrypt-btn" onclick="encryptAction('share')">
+            <span class="encrypt-btn-icon">👁</span>
+            <div class="encrypt-btn-text">Show Key<div class="encrypt-btn-sub">Display the 32-word key</div></div>
+          </button>
+          <button class="encrypt-btn" onclick="copyChannelKey()">
+            <span class="encrypt-btn-icon">📋</span>
+            <div class="encrypt-btn-text">Copy Key<div class="encrypt-btn-sub">Copy the 32-word key to clipboard</div></div>
+          </button>
+          <button class="encrypt-btn" onclick="encryptAction('rotate')">
+            <span class="encrypt-btn-icon">🔄</span>
+            <div class="encrypt-btn-text">Rotate Key<div class="encrypt-btn-sub">Generate a new key</div></div>
+          </button>
+          <button class="encrypt-btn danger" onclick="encryptAction('off')">
+            <span class="encrypt-btn-icon">🔓</span>
+            <div class="encrypt-btn-text">Disable Encryption<div class="encrypt-btn-sub">Send messages in plaintext</div></div>
+          </button>
+        </div>`;
+    } else if(hasSession){
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
@@ -3679,9 +3750,17 @@ function showEncryptPanel(){
           <div><strong>Not Encrypted</strong><br><span style="font-size:11px;color:var(--text3)">Messages are sent in plaintext</span></div>
         </div>
         <div class="encrypt-actions">
+          <button class="encrypt-btn" onclick="encryptAction('keygen')">
+            <span class="encrypt-btn-icon">🔑</span>
+            <div class="encrypt-btn-text">Shared Key (PSK)<div class="encrypt-btn-sub">Generate a key — share it with ${esc(target)} to encrypt DMs</div></div>
+          </button>
+          <button class="encrypt-btn" onclick="showImportKeyUI()">
+            <span class="encrypt-btn-icon">📥</span>
+            <div class="encrypt-btn-text">Import Key<div class="encrypt-btn-sub">Enter a 32-word key from ${esc(target)}</div></div>
+          </button>
           <button class="encrypt-btn" onclick="encryptAction('on','${esc(target)}')">
             <span class="encrypt-btn-icon">🔐</span>
-            <div class="encrypt-btn-text">Start E2E Encryption<div class="encrypt-btn-sub">Requires ${esc(target)} to also use CryptIRC</div></div>
+            <div class="encrypt-btn-text">Signal E2E<div class="encrypt-btn-sub">Auto key exchange — requires ${esc(target)} on this CryptIRC server</div></div>
           </button>
         </div>`;
     }
@@ -3778,6 +3857,7 @@ const APPEAR_DEFAULTS={
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
   timestamps:true, joinpart:true, compact:false, coloredNicks:true,
   accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, msgGap:4,
+  font:"'JetBrains Mono',monospace",
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
 };
@@ -3821,6 +3901,7 @@ function applyAppearance(){
     mobileTheme:    el('a-mobile-theme').value||'',
     mobileAccent:   el('a-mobile-accent-color').value||'',
     mobileAccent2:  el('a-mobile-accent2-color').value||'',
+    font:           el('a-font').value||prev.font||"'JetBrains Mono',monospace",
   };
   applyThemeCSS(cfg);
   saveAppearance(cfg);
@@ -3863,6 +3944,7 @@ function applyThemeCSS(cfg){
   const showTs=mob?(cfg.mobileTimestamps!==undefined?cfg.mobileTimestamps:false):cfg.timestamps;
   ss.textContent=`
     body { font-size:${fontSize}px; ${cfg.brightness&&cfg.brightness!==100?`filter:brightness(${cfg.brightness/100});`:''} }
+    :root { --mono:${cfg.font||"'JetBrains Mono',monospace"}; }
     .msg-row { line-height:${cfg.lineHeight}; ${cfg.compact?'padding:1px 12px;':''} gap:${cfg.msgGap||4}px; }
     .msg-ts { ${showTs?'':'display:none;'} font-size:${Math.max(fontSize-3,8)}px; }
     .msg-nick { width:${nickW}px; font-size:${fontSize}px; }
@@ -3958,6 +4040,7 @@ function stopRain(){
 
 function populateAppearanceModal(cfg){
   const el=id=>document.getElementById(id);
+  el('a-font').value=cfg.font||"'JetBrains Mono',monospace";
   el('a-chat-size').value=cfg.chatSize;
   el('a-sidebar-font').value=cfg.sidebarFont;
   el('a-nick-font').value=cfg.nickFont;

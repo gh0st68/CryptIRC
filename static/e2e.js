@@ -823,28 +823,25 @@ async function e2eReplenishOTPKs() {
 async function e2eEncryptOutgoing(target, plaintext) {
   const isDM = !target.startsWith('#') && !target.startsWith('&');
 
-  // DM encryption requires full E2E ready (identity keys)
-  if (isDM && !E2E.ready) return null;
+  // Pre-shared key encryption works for both channels AND DMs
+  if (E2E.channelKeys[target]) {
+    try { return await channelEncrypt(target, plaintext); }
+    catch(e) { console.error('[E2E] PSK encrypt failed:', e); return null; }
+  }
 
-  if (isDM && E2E.dmSessions[target]) {
+  // Signal-protocol DM encryption (same-server only)
+  if (isDM && E2E.ready && E2E.dmSessions[target]) {
     try {
       const envelope = await ratchetEncrypt(target, plaintext);
       const x3dhHeader = E2E._pendingX3DH?.[target];
       if (x3dhHeader) {
         delete E2E._pendingX3DH[target];
-        // Send x3dh header as separate IRC message before the encrypted body
         const headerPayload = '[e2ex3dh]' + btoa(JSON.stringify(x3dhHeader));
-        // Get conn_id from active context
         const cid = active?.conn_id;
         if (cid) wsend({type:'send', conn_id:cid, raw:`PRIVMSG ${target} :${headerPayload}`});
       }
       return E2E_DM_PREFIX + btoa(JSON.stringify(envelope));
     } catch(e) { console.error('[E2E] DM encrypt failed:', e); return null; }
-  }
-
-  if (!isDM && E2E.channelKeys[target]) {
-    try { return await channelEncrypt(target, plaintext); }
-    catch(e) { console.error('[E2E] Channel encrypt failed:', e); return null; }
   }
 
   return null;
@@ -853,9 +850,17 @@ async function e2eEncryptOutgoing(target, plaintext) {
 async function e2eDecryptIncoming(from, target, text) {
   const isDM = !target.startsWith('#') && !target.startsWith('&');
 
-  if (!isDM && text.startsWith(E2E_CHAN_PREFIX)) {
-    const pt = await channelDecrypt(target, text);
+  // Pre-shared key decryption — works for both channels and DMs
+  if (text.startsWith(E2E_CHAN_PREFIX)) {
+    // For DMs, the PSK is stored under the sender's nick
+    const pskTarget = isDM ? from : target;
+    const pt = await channelDecrypt(pskTarget, text);
     if (pt !== null) return { plaintext:pt, encrypted:true };
+    // Try the target too (in case we sent it)
+    if (isDM) {
+      const pt2 = await channelDecrypt(target, text);
+      if (pt2 !== null) return { plaintext:pt2, encrypted:true };
+    }
     return { plaintext:'🔐 [encrypted — wrong or missing key]', encrypted:true };
   }
 
