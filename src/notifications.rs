@@ -292,8 +292,13 @@ impl NotificationManager {
         let message = builder.build()?;
 
         let client = WebPushClient::new()?;
-        client.send(message).await?;
-        Ok(())
+        match client.send(message).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let endpoint = &sub.endpoint;
+                anyhow::bail!("Push to {} failed: {:?}", &endpoint[..endpoint.len().min(60)], e)
+            }
+        }
     }
 
     fn subs_path(&self, username: &str) -> PathBuf {

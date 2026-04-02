@@ -30,7 +30,7 @@ sha2 = "0.10"
 openssl = { version = "0.10", features = ["v102", "v110"] }
 openssl-sys = "0.9"
 tokio-openssl = "0.6"
-web-push = "0.9"
+web-push = { version = "0.9", default-features = false, features = ["hyper-client"] }
 serde_urlencoded = "0.7"
 hkdf = "0.12"
 hmac = "0.12"
