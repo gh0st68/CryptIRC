@@ -384,6 +384,8 @@ async fn main() -> Result<()> {
         .route("/manifest.json",         get(serve_manifest))
         .route("/sw.js",                 get(serve_sw))
         .route("/icon.svg",              get(serve_icon))
+        .route("/icon-192.png",          get(serve_icon_192))
+        .route("/icon-512.png",          get(serve_icon_512))
         .route("/auth/register",         post(route_register).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/status",           get(route_auth_status))
         .route("/admin/users",           get(route_admin_users))
@@ -430,6 +432,8 @@ async fn serve_index()    -> Html<&'static str> { Html(include_str!("../static/i
 async fn serve_manifest() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/manifest+json")], include_str!("../static/manifest.json")) }
 async fn serve_sw()       -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/sw.js")) }
 async fn serve_icon()     -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/svg+xml")], include_str!("../static/icon.svg")) }
+async fn serve_icon_192() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-192.png").as_slice()) }
+async fn serve_icon_512() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-512.png").as_slice()) }
 async fn serve_e2e_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/e2e.js")) }
 
 async fn serve_file_public(Path(name): Path<String>, State(state): State<AppState>) -> impl IntoResponse {

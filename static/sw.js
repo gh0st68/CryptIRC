@@ -1,8 +1,8 @@
 // CryptIRC Service Worker v9
 // Handles: offline caching, push notifications, notification click actions
 
-const CACHE = 'cryptirc-v150';
-const STATIC = ['/cryptirc/manifest.json', '/cryptirc/icon.svg'];
+const CACHE = 'cryptirc-v157';
+const STATIC = ['/cryptirc/manifest.json', '/cryptirc/icon.svg', '/cryptirc/icon-192.png', '/cryptirc/icon-512.png'];
 
 // ─── Install ──────────────────────────────────────────────────────────────────
 self.addEventListener('install', e => {
@@ -71,8 +71,8 @@ self.addEventListener('push', e => {
   const title   = payload.title  || 'CryptIRC';
   const options = {
     body:              payload.body  || '',
-    icon:              '/cryptirc/icon.svg',
-    badge:             '/cryptirc/icon.svg',
+    icon:              '/cryptirc/icon-192.png',
+    badge:             '/cryptirc/icon-192.png',
     tag:               payload.tag   || 'cryptirc-default',
     renotify:          true,
     vibrate:           [150, 50, 150],

@@ -680,19 +680,19 @@ body > style, body > script { visibility:hidden; }
   flex:1; background:none; border:none;
   color:var(--text); font-family:var(--mono);
   font-size:16px;
-  padding:10px 12px;
+  padding:6px 10px;
   outline:none; min-width:0;
   -webkit-appearance:none; appearance:none;
 }
 #msg-input::placeholder { color:var(--text3); }
 #send-btn {
   background:none; border:none; color:var(--text2); cursor:pointer;
-  width:36px; height:36px; min-width:36px;
+  width:32px; height:32px; min-width:32px;
   display:flex; align-items:center; justify-content:center;
-  font-size:16px; flex-shrink:0;
+  font-size:15px; flex-shrink:0;
   transition:color .12s;
   -webkit-appearance:none; appearance:none;
-  padding:4px;
+  padding:2px; box-sizing:border-box;
 }
 #send-btn:hover { color:var(--accent); }
 #send-btn:active { color:var(--accent); }
@@ -739,9 +739,9 @@ body > style, body > script { visibility:hidden; }
 .upload-btn {
   background:none; border:none;
   color:var(--text2); cursor:pointer; font-size:16px;
-  padding:6px; min-width:36px; min-height:36px;
+  padding:4px; min-width:32px; min-height:32px;
   display:flex; align-items:center; justify-content:center;
-  transition:color .15s; flex-shrink:0;
+  transition:color .15s; flex-shrink:0; box-sizing:border-box;
   -webkit-appearance:none; appearance:none;
   box-sizing:content-box;
 }
@@ -1038,8 +1038,9 @@ body > style, body > script { visibility:hidden; }
   .upload-btn { font-size:15px; padding:4px; }
   .sidebar-btn { font-size:11px; }
   #input-wrap { padding:0 0 var(--sab); }
-  #msg-input { padding:10px 8px; font-size:16px; }
-  #send-btn { width:36px; height:36px; min-width:36px; font-size:16px; }
+  #msg-input { padding:6px 8px; font-size:16px; line-height:1; }
+  #send-btn { width:26px; height:26px; min-width:26px; font-size:13px; padding:1px; }
+  #input-wrap .upload-btn { font-size:13px; padding:1px; min-width:26px; min-height:26px; }
 }
 @media(max-width:360px) {
   .auth-box { padding:16px; }
@@ -1681,6 +1682,7 @@ function initViewportFix() {
   }, { passive: false });
 
   // Use visualViewport to resize app when keyboard opens (critical for iOS PWA)
+  const iw = document.getElementById('input-wrap');
   if (window.visualViewport) {
     const vv = window.visualViewport;
     function syncHeight() {
@@ -1691,10 +1693,12 @@ function initViewportFix() {
     vv.addEventListener('scroll', () => window.scrollTo(0, 0));
   }
 
-  // Auto-scroll chat to bottom when keyboard opens
+  // Auto-scroll chat to bottom when keyboard opens, remove safe-area padding
   const inp = document.getElementById('msg-input');
   if (inp) {
     inp.addEventListener('focus', () => {
+      // Remove safe-area bottom padding when keyboard is open (home bar is hidden)
+      if(iw) iw.style.paddingBottom = '0';
       [200, 500, 1000].forEach(ms => setTimeout(() => {
         const area = document.getElementById('chat-area');
         if (area) area.scrollTop = area.scrollHeight;
@@ -1702,6 +1706,8 @@ function initViewportFix() {
       }, ms));
     });
     inp.addEventListener('blur', () => {
+      // Restore safe-area padding when keyboard closes
+      if(iw) iw.style.paddingBottom = '';
       app.style.height = '';
       setTimeout(() => {
         window.scrollTo(0, 0);
@@ -1978,14 +1984,20 @@ function handleEvent(ev) {
       },2000);
       break;
     case 'auth_failed': sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; break;
-    case 'vault_unlocked': document.getElementById('vault-overlay').classList.remove('show'); renderSidebar(); if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key); break;
+    case 'vault_unlocked':
+      document.getElementById('vault-overlay').classList.remove('show'); renderSidebar();
+      if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key);
+      // Load logs for current channel now that vault is unlocked
+      if(active&&getBuf(active.conn_id,active.target).length===0&&active.target!=='status')
+        wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
+      break;
     case 'vault_error': document.getElementById('vault-err').textContent=ev.message; break;
     case 'state':
       networks=ev.networks||[];
       if(!ev.vault_unlocked) document.getElementById('vault-overlay').classList.add('show');
       else document.getElementById('vault-overlay').classList.remove('show');
       renderSidebar();
-      // Restore last active view after page refresh (don't clear unread)
+      // Restore last active view after page refresh
       if(!active){
         const saved=loadLastActive();
         if(saved&&saved.conn_id&&saved.target){
@@ -1993,13 +2005,23 @@ function handleEvent(ev) {
           if(net){
             active={conn_id:saved.conn_id,target:saved.target};
             renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay();
-            if(getBuf(saved.conn_id,saved.target).length===0&&saved.target!=='status')
-              wsend({type:'get_logs',conn_id:saved.conn_id,target:saved.target,limit:200});
             const inp=document.getElementById('msg-input');
             inp.disabled=!net?.connected;
             inp.placeholder=net?.connected?`Write to ${saved.target}`:'Not connected';
           }
         }
+      }
+      // Load logs for active channel and all joined channels if vault is unlocked
+      if(ev.vault_unlocked){
+        for(const net of networks){
+          for(const ch of net.channels||[]){
+            if(getBuf(net.config.id,ch.name).length===0&&ch.name!=='status')
+              wsend({type:'get_logs',conn_id:net.config.id,target:ch.name,limit:200});
+          }
+        }
+        // Also load for active if it's a PM (not in channels list)
+        if(active&&getBuf(active.conn_id,active.target).length===0&&active.target!=='status')
+          wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
       }
       break;
     case 'connecting':   sysMsg(ev.conn_id,'status',`Connecting to ${ev.server}…`,'system'); setNetDot(ev.conn_id,'connecting'); break;
@@ -2568,7 +2590,7 @@ function setActive(conn_id,target){
   // Persist active view and open queries
   try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){} savePrefsToServer();
   saveQueryBufs();
-  renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay();
+  renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay(); scrollForce();
   if(typeof updateE2EIndicator==='function') updateE2EIndicator(target);
   if(getBuf(conn_id,target).length===0&&target!=='status')wsend({type:'get_logs',conn_id,target,limit:200});
   const net=networks.find(n=>n.config.id===conn_id);
@@ -2694,14 +2716,15 @@ function renderNickPanel(names){
     for(const n of sec.nicks){
       let pi=0;while(pi<n.length&&'~&@%+'.includes(n[pi]))pi++;
       const pfx=n.slice(0,pi);
+      // Show only highest-ranking prefix (multi-prefix sends all)
+      const topPfx=pfx?pfx[0]:'';
       const nick=n.slice(pi);
       const el=document.createElement('div');
       const awayKey=(active?active.conn_id:'')+'/'+nick;
       const isAway=window._awayNicks&&window._awayNicks[awayKey];
       el.className=`nick-entry nc${nickHash(nick)}${isAway?' nick-away':''}`;
-      // Store nick in data attribute for click handler
       el.dataset.nick=nick;
-      el.innerHTML=pfx?`<span class="nick-pfx${pfx.includes('@')||pfx.includes('~')||pfx.includes('&')?' op':''}">${pfx}</span>${esc(nick)}`:esc(nick);
+      el.innerHTML=topPfx?`<span class="nick-pfx${'~&@'.includes(topPfx)?' op':''}">${topPfx}</span>${esc(nick)}`:esc(nick);
       el.style.cursor='pointer';
       list.appendChild(el);
     }

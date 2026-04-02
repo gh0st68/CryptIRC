@@ -288,6 +288,7 @@ impl NotificationManager {
         let mut builder = WebPushMessageBuilder::new(&subscription_info)?;
         builder.set_payload(ContentEncoding::Aes128Gcm, payload.as_bytes());
         builder.set_vapid_signature(signature);
+        builder.set_ttl(86400); // 24 hours — push service will retry delivery
         let message = builder.build()?;
 
         let client = WebPushClient::new()?;
