@@ -639,10 +639,10 @@ body > style, body > script { visibility:hidden; }
 .msg-body { flex:1; min-width:0; word-break:break-word; overflow-wrap:anywhere; }
 .msg-body a { color:var(--accent2); text-decoration:none; }
 .msg-body a:hover { text-decoration:underline; }
-.msg-media { display:block; margin-top:6px; max-width:min(400px,95%); border-radius:8px; overflow:hidden; border:1px solid var(--border); background:var(--bg2); }
-.msg-img { display:block; max-width:100%; max-height:300px; cursor:pointer; transition:opacity .2s; border-radius:8px; }
-.msg-img:hover { opacity:.85; }
-.msg-media video { display:block; max-width:100%; max-height:300px; border-radius:8px; }
+.msg-media { display:block; margin-top:4px; max-width:min(360px,80%); }
+.msg-img { display:block; max-width:100%; max-height:280px; cursor:pointer; transition:opacity .15s; border-radius:4px; border:none; }
+.msg-img:hover { opacity:.8; }
+.msg-media video { display:block; max-width:100%; max-height:280px; border-radius:4px; }
 .msg-yt { display:block; margin-top:6px; max-width:min(400px,95%); text-decoration:none; border-radius:8px; overflow:hidden; border:1px solid var(--border); background:var(--bg2); transition:border-color .15s; }
 .msg-yt:hover { border-color:var(--accent); }
 .msg-yt-thumb { position:relative; }
@@ -2304,18 +2304,12 @@ function handleEvent(ev) {
     }
     // ── IRCv3: away-notify ──────────────────────────────
     case 'irc_away': {
-      // Update nick list with away indicator
+      // Send away/back notices to status only (not every channel)
       const aNet=networks.find(n=>n.config.id===ev.conn_id);
-      if(aNet){
-        for(const ch of aNet.channels){
-          if(ch.names.some(n=>stripPfx(n)===ev.nick)){
-            if(ev.away){
-              sysMsg(ev.conn_id,ch.name,`💤 ${ev.nick} is now away: ${ev.message}`,'system');
-            } else {
-              sysMsg(ev.conn_id,ch.name,`✦ ${ev.nick} is back`,'system');
-            }
-          }
-        }
+      if(ev.away){
+        addMessage(ev.conn_id,'status',{ts:ev.ts,from:'*',text:`${ev.nick} is away: ${ev.message}`,kind:'part',noUnread:true});
+      } else {
+        addMessage(ev.conn_id,'status',{ts:ev.ts,from:'*',text:`${ev.nick} is back`,kind:'part',noUnread:true});
       }
       // Track away state for nick panel
       if(!window._awayNicks) window._awayNicks={};
@@ -2499,9 +2493,9 @@ function addMessage(conn_id,target,msg){
     queryBufs[conn_id].set(target.toLowerCase(), target);
     saveQueryBufs();
   }
-  if(isActive(conn_id,target)){appendMsgRow(msg);scrollBottom();}
+  if(isActive(conn_id,target)){appendMsgRow(msg);const isOwn=msg.from&&msg.from===getNick(conn_id);if(isOwn)scrollForce();else scrollBottom();}
   else{
-    const uk=bk(conn_id,target);unread.set(uk,(unread.get(uk)||0)+1);saveUnread();renderSidebar();
+    if(!msg.noUnread){const uk=bk(conn_id,target);unread.set(uk,(unread.get(uk)||0)+1);saveUnread();renderSidebar();}
     // Play sound for unread DMs and mentions
     const isMutedChan=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
     if(!isMutedChan && msg.from!=='*'){
@@ -2911,7 +2905,14 @@ function buildMediaEl(url){
       const titleEl=document.getElementById('yt-t-'+ytId);
       const metaEl=document.getElementById('yt-m-'+ytId);
       if(titleEl&&d.title) titleEl.textContent=d.title;
-      if(metaEl&&d.author_name) metaEl.innerHTML=`<span>${esc(d.author_name)}</span><span>YouTube</span>`;
+      if(metaEl){
+        const parts=[];
+        if(d.author_name) parts.push(esc(d.author_name));
+        parts.push('YouTube');
+        metaEl.innerHTML=parts.map(p=>`<span>${p}</span>`).join('');
+      }
+      // Update link title for tooltip
+      if(d.title) wrap.title=d.title+(d.author_name?' — '+d.author_name:'');
     }).catch(()=>{
       const titleEl=document.getElementById('yt-t-'+ytId);
       if(titleEl) titleEl.textContent='YouTube Video';
