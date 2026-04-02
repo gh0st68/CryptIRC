@@ -282,7 +282,7 @@ impl NotificationManager {
             std::io::Cursor::new(pem_from_raw_key(&priv_key_bytes)?),
             &subscription_info,
         )?;
-        sig_builder.add_claim("sub", "mailto:cryptirc@localhost");
+        sig_builder.add_claim("sub", "https://github.com/gh0st68/CryptIRC");
         let signature = sig_builder.build()?;
 
         let mut builder = WebPushMessageBuilder::new(&subscription_info)?;
