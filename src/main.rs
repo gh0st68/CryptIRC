@@ -336,7 +336,7 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
         "default-src 'self'; script-src 'self' 'unsafe-inline'; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          font-src https://fonts.gstatic.com; img-src 'self' data: https:; \
-         connect-src 'self' wss: ws:; frame-ancestors 'none';"
+         connect-src 'self' wss: ws: https://noembed.com; frame-ancestors 'none';"
     ));
     response
 }

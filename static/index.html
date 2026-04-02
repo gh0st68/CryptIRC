@@ -639,11 +639,20 @@ body > style, body > script { visibility:hidden; }
 .msg-body { flex:1; min-width:0; word-break:break-word; overflow-wrap:anywhere; }
 .msg-body a { color:var(--accent2); text-decoration:none; }
 .msg-body a:hover { text-decoration:underline; }
-.msg-img { display:block; max-width:min(320px,90%); max-height:240px; border-radius:6px; margin-top:5px; cursor:pointer; border:1px solid var(--border); transition:opacity .2s; }
-.msg-img:hover { opacity:.9; }
-.msg-yt { position:relative; display:inline-block; margin-top:5px; text-decoration:none; }
-.yt-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); font-size:36px; color:#fff; text-shadow:0 2px 8px rgba(0,0,0,.7); pointer-events:none; opacity:.85; }
-.msg-yt:hover .yt-play { opacity:1; }
+.msg-media { display:block; margin-top:6px; max-width:min(400px,95%); border-radius:8px; overflow:hidden; border:1px solid var(--border); background:var(--bg2); }
+.msg-img { display:block; max-width:100%; max-height:300px; cursor:pointer; transition:opacity .2s; border-radius:8px; }
+.msg-img:hover { opacity:.85; }
+.msg-media video { display:block; max-width:100%; max-height:300px; border-radius:8px; }
+.msg-yt { display:block; margin-top:6px; max-width:min(400px,95%); text-decoration:none; border-radius:8px; overflow:hidden; border:1px solid var(--border); background:var(--bg2); transition:border-color .15s; }
+.msg-yt:hover { border-color:var(--accent); }
+.msg-yt-thumb { position:relative; }
+.msg-yt-thumb img { display:block; width:100%; aspect-ratio:16/9; object-fit:cover; }
+.yt-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:48px; height:34px; background:rgba(0,0,0,.7); border-radius:8px; display:flex; align-items:center; justify-content:center; pointer-events:none; }
+.yt-play::after { content:''; border-style:solid; border-width:8px 0 8px 14px; border-color:transparent transparent transparent #fff; }
+.msg-yt:hover .yt-play { background:rgba(255,0,0,.9); }
+.msg-yt-info { padding:8px 10px; }
+.msg-yt-title { font-size:12px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.msg-yt-meta { font-size:10px; color:var(--text3); margin-top:3px; display:flex; gap:8px; }
 .row-action .msg-body { color:var(--action); font-style:italic; }
 .row-action .msg-nick { color:var(--action); }
 .row-notice .msg-body { color:var(--notice); }
@@ -1002,7 +1011,7 @@ body > style, body > script { visibility:hidden; }
   #nick-toggle .toggle-mobile { display:inline; }
   #lag-pill     { display:none !important; }
   #lag-mobile   { display:flex; }
-  #mentions-btn { display:none; }
+  #mentions-btn { display:flex; font-size:16px; }
   #input-nick  { display:none; }
   #nick-panel  {
     display:flex; position:fixed; right:0; top:0; bottom:0; z-index:50;
@@ -1950,6 +1959,20 @@ function connectWs() {
   ws.onclose=()=>setTimeout(connectWs,3000);
   ws.onerror=()=>ws.close();
 }
+// Reconnect + reload history when app comes back from background (iOS PWA minimize)
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden && sessionToken){
+    // Check if WS is dead
+    if(!ws || ws.readyState !== 1){
+      connectWs();
+    } else {
+      // WS is alive — reload logs for active channel to catch up on missed messages
+      if(active && active.target !== 'status'){
+        wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
+      }
+    }
+  }
+});
 // ─── Starfield (Ubiquiti-style) ───────────────────────────────────────────────
 let _starBurst=0,_txBytes=0,_rxBytes=0,_txCount=0,_rxCount=0;
 try{const sc=JSON.parse(localStorage.getItem('cryptirc_stats')||'{}');_txBytes=sc.tx||0;_rxBytes=sc.rx||0;_txCount=sc.tc||0;_rxCount=sc.rc||0;}catch(e){}
@@ -2861,21 +2884,38 @@ function buildMediaEl(url){
   const authedUrl=appendFileToken(url);
   // Images
   if(IMG_EXTS.test(url)||url.includes('/files/')){
+    const wrap=document.createElement('div');wrap.className='msg-media';
     const img=document.createElement('img');img.className='msg-img';img.src=authedUrl;img.alt='image';img.loading='lazy';
     img.onclick=e=>{e.stopPropagation();openLightbox(authedUrl);};
-    img.onerror=()=>img.style.display='none';
-    return img;
+    img.onerror=()=>wrap.style.display='none';
+    wrap.appendChild(img);
+    return wrap;
   }
   // Videos
-  if(VID_EXTS.test(url)){const vid=document.createElement('video');vid.className='msg-img';vid.src=authedUrl;vid.controls=true;vid.preload='metadata';return vid;}
-  // YouTube — show thumbnail, click opens in new tab (no iframe for security)
+  if(VID_EXTS.test(url)){
+    const wrap=document.createElement('div');wrap.className='msg-media';
+    const vid=document.createElement('video');vid.src=authedUrl;vid.controls=true;vid.preload='metadata';
+    wrap.appendChild(vid);
+    return wrap;
+  }
+  // YouTube — rich card with thumbnail + info
   const ytId=extractYouTubeId(url);
   if(ytId){
     const wrap=document.createElement('a');
     wrap.href=url;wrap.target='_blank';wrap.rel='noopener noreferrer';
-    wrap.className='msg-yt';wrap.title='Open on YouTube';
-    wrap.innerHTML=`<img src="https://img.youtube.com/vi/${ytId}/mqdefault.jpg" alt="YouTube" loading="lazy" class="msg-img"><span class="yt-play">▶</span>`;
+    wrap.className='msg-yt';
+    wrap.innerHTML=`<div class="msg-yt-thumb"><img src="https://img.youtube.com/vi/${ytId}/hqdefault.jpg" alt="YouTube" loading="lazy"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${ytId}">Loading...</div><div class="msg-yt-meta" id="yt-m-${ytId}"><span>YouTube</span></div></div>`;
     wrap.querySelector('img').onerror=()=>wrap.style.display='none';
+    // Fetch video info via noembed (no API key needed, privacy-friendly)
+    fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${ytId}`).then(r=>r.json()).then(d=>{
+      const titleEl=document.getElementById('yt-t-'+ytId);
+      const metaEl=document.getElementById('yt-m-'+ytId);
+      if(titleEl&&d.title) titleEl.textContent=d.title;
+      if(metaEl&&d.author_name) metaEl.innerHTML=`<span>${esc(d.author_name)}</span><span>YouTube</span>`;
+    }).catch(()=>{
+      const titleEl=document.getElementById('yt-t-'+ytId);
+      if(titleEl) titleEl.textContent='YouTube Video';
+    });
     return wrap;
   }
   return null;
@@ -5574,8 +5614,8 @@ function showHelp(conn_id, target, specific) {
 }
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
-function scrollBottom(){const a=document.getElementById('chat-area');if(!a)return;const nearBottom=a.scrollHeight-a.scrollTop-a.clientHeight<200;if(nearBottom)requestAnimationFrame(()=>a.scrollTop=a.scrollHeight);updateScrollBtn();}
-function scrollForce(){const a=document.getElementById('chat-area');if(a)requestAnimationFrame(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();});}
+function scrollBottom(){const a=document.getElementById('chat-area');if(!a)return;const nearBottom=a.scrollHeight-a.scrollTop-a.clientHeight<200;if(nearBottom){a.scrollTop=a.scrollHeight;requestAnimationFrame(()=>a.scrollTop=a.scrollHeight);}updateScrollBtn();}
+function scrollForce(){const a=document.getElementById('chat-area');if(!a)return;a.scrollTop=a.scrollHeight;requestAnimationFrame(()=>a.scrollTop=a.scrollHeight);[50,150,300,600].forEach(ms=>setTimeout(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();},ms));}
 function updateScrollBtn(){const a=document.getElementById('chat-area'),b=document.getElementById('scroll-bottom-btn');if(!a||!b)return;const far=a.scrollHeight-a.scrollTop-a.clientHeight>200;b.classList.toggle('show',far);}
 // Attach scroll listener once DOM ready
 document.addEventListener('DOMContentLoaded',()=>{document.getElementById('chat-area')?.addEventListener('scroll',updateScrollBtn);});
