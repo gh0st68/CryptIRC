@@ -793,7 +793,7 @@ body > style, body > script { visibility:hidden; }
 .nick-away { opacity:0.5; }
 .nick-group-hdr { padding:8px 10px 3px; font-size:11px; font-weight:600; color:var(--text3); text-transform:capitalize; letter-spacing:.03em; }
 .away-dot { font-size:10px; margin-right:2px; }
-#typing-indicator { position:absolute; bottom:100%; left:0; right:0; font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; z-index:2; pointer-events:none; text-align:right; }
+#typing-indicator { position:absolute; bottom:100%; left:0; right:0; font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; z-index:2; pointer-events:none; text-align:left; }
 #typing-indicator.visible { height:14px; border-top-color:var(--border); }
 
 /* ── WELCOME ───────────────────────────────────────────────────────────────── */
@@ -1996,7 +1996,8 @@ document.addEventListener('visibilitychange',()=>{
     if(!ws || ws.readyState !== 1){
       connectWs(); // WS dead — reconnect (logs will load via state handler)
     }
-    // If WS is alive, no action needed — messages were received in real-time
+    // Always scroll to latest messages when coming back
+    scrollForce();
   }
 });
 window.addEventListener('pageshow',e=>{
@@ -2169,7 +2170,10 @@ function handleEvent(ev) {
         window._sentMsgs.splice(idx,1);
         break;
       }
-      // From another device — display it
+      // From another device — check buffer for duplicates before adding
+      const echoBuf=getBuf(ev.conn_id,ev.target);
+      const echoKey=ev.ts+'|'+ev.from+'|'+(ev.text||'').slice(0,50);
+      if(echoBuf.some(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)===echoKey)) break;
       addMessage(ev.conn_id, ev.target, {
         ts:ev.ts, from:ev.from, text:ev.text,
         kind:ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg',
@@ -2492,6 +2496,13 @@ function handleEvent(ev) {
       if(ta) ta.value=ev.content||'';
       break;
     }
+    case 'data_cleared':
+      buffers={};
+      unread.clear();
+      mentionUnread.clear();
+      renderChat();
+      renderSidebar();
+      break;
     case 'account_deleted':
       alert('Your account has been deleted.');
       localStorage.clear();
@@ -3491,6 +3502,34 @@ async function handleInput(raw){
       }
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
+      case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'TABLEFLIP': { const t='(╯°□°)╯︵ ┻━┻'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'UNFLIP': case 'UNFLIPTABLE': { const t='┬─┬ノ( º _ ºノ)'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'LENNY': { const t='( ͡° ͜ʖ ͡°)'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'DISAPPROVE': case 'LOOK': { const t='ಠ_ಠ'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'RAGE': { const t='(ノಠ益ಠ)ノ彡┻━┻'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'BEAR': { const t='ʕ•ᴥ•ʔ'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'SPARKLE': case 'SPARKLES': { const t='✧･ﾟ: *✧･ﾟ:* '+(args.length?args.join(' '):'')+'*:･ﾟ✧*:･ﾟ✧';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'FINGER': case 'MIDDLEFINGER': { const t='╭∩╮(︶︿︶)╭∩╮'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'DANCE': { const t='♪┏(・o・)┛♪┗(・o・)┓♪'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'RIP': { const t='⚰️ R.I.P. '+(args.length?args.join(' '):'')+'⚰️';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'HUG': { const n=args[0]||'everyone';const t=`(づ｡◕‿‿◕｡)づ ${n}`;wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'PRISM': case 'RAINBOW': {
+        const text=args.join(' ');
+        if(!text){sysMsg(conn_id,target,'Usage: /prism <message>','error');break;}
+        const rainbowColors=[4,7,8,3,12,2,6]; // red,orange,yellow,green,cyan,blue,purple
+        let colored='';
+        let ci=0;
+        for(const ch of text){
+          if(ch===' '){colored+=ch;}
+          else{colored+='\x03'+String(rainbowColors[ci%rainbowColors.length]).padStart(2,'0')+ch;ci++;}
+        }
+        colored+='\x0F'; // reset at end
+        const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,colored):null;
+        wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||colored}`});
+        addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:colored,kind:'privmsg',encrypted:!!wire});
+        break;
+      }
       case 'ENCRYPT': case 'E2E':
         await handleEncryptCommand(args, conn_id, target); break;
       default:
@@ -5639,7 +5678,7 @@ function showIgnorePanel(){
     <div style="padding:12px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch">
       <div style="display:flex;gap:6px;margin-bottom:12px">
         <input id="ignore-add-input" placeholder="Add nick to ignore..." style="flex:1;padding:6px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none">
-        <button onclick="const inp=document.getElementById('ignore-add-input');if(inp.value.trim()){addIgnore(inp.value.trim());inp.value='';document.getElementById('ignore-panel-list').innerHTML=renderIgnoreList();}" style="padding:6px 12px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px">Add</button>
+        <button onclick="const inp=document.getElementById('ignore-add-input');if(inp.value.trim()){addIgnore(inp.value.trim());inp.value='';this.closest('[style*=fixed]').remove();showIgnorePanel();}" style="padding:6px 12px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px">Add</button>
       </div>`;
     if(!list.length){
       html+=`<div style="color:var(--text3);text-align:center;padding:20px 0;font-size:13px">No ignored users</div>`;
@@ -6124,10 +6163,10 @@ function doSearch(query){
       // Find and flash the message in chat
       const rows=document.querySelectorAll('.msg-row');
       for(const r of rows){
-        if(r.dataset.ts===String(m.ts)){
+        if(r.dataset.ts===String(m.ts)&&(r.dataset.from===m.from||!m.from)){
           r.scrollIntoView({behavior:'smooth',block:'center'});
-          r.classList.add('flash');
-          setTimeout(()=>r.classList.remove('flash'),3000);
+          r.style.background='rgba(0,212,170,.15)';
+          setTimeout(()=>r.style.background='',3000);
           break;
         }
       }
@@ -6174,18 +6213,20 @@ function renderMentionsList(){
     d.onclick=()=>{
       document.getElementById('mentions-panel').classList.remove('show');
       setActive(m.conn_id,m.target);
-      // Find and flash the message
+      // Find and flash the message — delay to let chat render + logs load
       setTimeout(()=>{
         const rows=document.querySelectorAll('.msg-row');
         for(const r of rows){
-          if(r.dataset.ts===String(m.ts)&&r.querySelector('.msg-nick')?.textContent?.trim()===m.from){
+          const nickEl=r.querySelector('.msg-nick');
+          const nickText=nickEl?stripPfx(nickEl.textContent.trim().replace(/^\* /,'')):''
+          if(r.dataset.ts===String(m.ts)&&(nickText===m.from||r.dataset.from===m.from)){
             r.scrollIntoView({behavior:'smooth',block:'center'});
-            r.classList.add('flash');
-            setTimeout(()=>r.classList.remove('flash'),3000);
+            r.style.background='rgba(0,212,170,.15)';
+            setTimeout(()=>r.style.background='',3000);
             break;
           }
         }
-      },300);
+      },600);
     };
     el.appendChild(d);
   }

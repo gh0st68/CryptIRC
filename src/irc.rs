@@ -924,6 +924,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let text = p.params.get(2).cloned().unwrap_or_default();
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice });
                     }
+                    "275" | "276" => { // RPL_WHOISCERTFP — TLS certificate fingerprint
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let text = p.params.get(2).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Certificate: {}", text), ts, kind: MessageKind::Notice });
+                    }
                     // 367 = RPL_BANLIST — one entry in the ban list
                     "367" => {
                         let channel = p.params.get(1).cloned().unwrap_or_default();

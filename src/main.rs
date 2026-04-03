@@ -240,6 +240,7 @@ pub enum ServerEvent {
     Preferences      { prefs: String },
     Notepad          { content: String },
     AccountDeleted   {},
+    DataCleared      {},
     Error            { message: String },
 }
 
@@ -1718,6 +1719,8 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 }
             }
             info!("All data cleared for user: {}", username);
+            // Broadcast to all user's sessions so other devices clear too
+            state.send_to_user(username, ServerEvent::DataCleared {});
         }
         ClientMessage::MonitorPush { nick, status } => {
             let safe_nick: String = nick.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '[' || *c == ']' || *c == '\\' || *c == '`' || *c == '^').take(32).collect();
