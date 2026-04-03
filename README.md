@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="static/icon.svg" width="120" height="120" alt="CryptIRC">
+  <img src="static/icon.svg" width="80" height="80" alt="CryptIRC">
 </p>
 
 <h1 align="center">CryptIRC</h1>
@@ -12,8 +12,12 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.8.0-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.8.4-brightgreen" alt="Version">
   <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
+</p>
+
+<p align="center">
+  <img src="screenshots/client.png" width="900" alt="CryptIRC — Desktop Client">
 </p>
 
 ---
