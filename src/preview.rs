@@ -232,9 +232,27 @@ fn is_private_ip(ip: IpAddr) -> bool {
         IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_private() || v4.is_link_local()
                 || v4.octets()[0] == 0
-                || v4.octets()[0] == 100 && v4.octets()[1] >= 64 && v4.octets()[1] <= 127 // CGNAT
+                || (v4.octets()[0] == 100 && v4.octets()[1] >= 64 && v4.octets()[1] <= 127) // CGNAT
                 || v4.is_broadcast()
         }
-        IpAddr::V6(v6) => v6.is_loopback(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                // IPv4-mapped IPv6 (::ffff:x.x.x.x)
+                || { let seg = v6.segments(); seg[0..5] == [0,0,0,0,0] && seg[5] == 0xffff && {
+                    let v4 = std::net::Ipv4Addr::new(
+                        (seg[6] >> 8) as u8, seg[6] as u8,
+                        (seg[7] >> 8) as u8, seg[7] as u8,
+                    );
+                    is_private_ip(IpAddr::V4(v4))
+                }}
+                // Link-local (fe80::/10)
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // Unique local (fc00::/7)
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // Deprecated site-local (fec0::/10)
+                || (v6.segments()[0] & 0xffc0) == 0xfec0
+                // Unspecified
+                || v6.segments() == [0; 8]
+        }
     }
 }

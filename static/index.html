@@ -1992,18 +1992,21 @@ function connectWs() {
   ws.onerror=()=>ws.close();
 }
 // Reconnect + reload history when app comes back from background (iOS PWA minimize)
+// Reconnect + catch up when app comes back from background (iOS PWA)
+// Reconnect when app comes back from background — only reload logs if WS was dead
 document.addEventListener('visibilitychange',()=>{
   if(!document.hidden && sessionToken){
-    // Check if WS is dead
     if(!ws || ws.readyState !== 1){
-      connectWs();
-    } else {
-      // WS is alive — reload logs for active channel to catch up on missed messages
-      if(active && active.target !== 'status'){
-        wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
-      }
+      connectWs(); // WS dead — reconnect (logs will load via state handler)
     }
+    // If WS is alive, no action needed — messages were received in real-time
   }
+});
+window.addEventListener('pageshow',e=>{
+  if(e.persisted && sessionToken && (!ws || ws.readyState !== 1)) connectWs();
+});
+window.addEventListener('focus',()=>{
+  if(sessionToken && (!ws || ws.readyState !== 1)) connectWs();
 });
 // ─── Starfield (Ubiquiti-style) ───────────────────────────────────────────────
 let _starBurst=0,_txBytes=0,_rxBytes=0,_txCount=0,_rxCount=0;
@@ -2590,9 +2593,9 @@ function prependLogs(conn_id,target,lines){
   const buf=getBuf(conn_id,target);
   const wasEmpty=buf.length===0;
   const newMsgs=lines.map(l=>({ts:l.ts,from:l.from,text:l.text,kind:l.kind}));
-  // Deduplicate: only add messages not already in buffer
-  const existingTs=new Set(buf.map(m=>m.ts+'|'+m.from));
-  const unique=newMsgs.filter(m=>!existingTs.has(m.ts+'|'+m.from));
+  // Deduplicate: only add messages not already in buffer (ts+from+text)
+  const existingKeys=new Set(buf.map(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)));
+  const unique=newMsgs.filter(m=>!existingKeys.has(m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)));
   if(unique.length>0){
     buf.unshift(...unique);
     buf.sort((a,b)=>a.ts-b.ts);
@@ -4610,22 +4613,45 @@ function gatherPreferences(){
 }
 function savePrefsToServer(){
   clearTimeout(_prefsSaveTimer);
-  _prefsSaveTimer=setTimeout(()=>{
-    try{
-      const prefs=JSON.stringify(gatherPreferences());
-      wsend({type:'save_preferences',prefs});
-    }catch(e){}
-  },2000);
+  _prefsSaveTimer=setTimeout(flushPrefsToServer,2000);
 }
+function flushPrefsToServer(){
+  clearTimeout(_prefsSaveTimer);
+  try{
+    const prefs=JSON.stringify(gatherPreferences());
+    wsend({type:'save_preferences',prefs});
+  }catch(e){}
+}
+// Flush preferences immediately before page unload to prevent data loss
+window.addEventListener('beforeunload',flushPrefsToServer);
 function restorePreferences(p){
   if(!p)return;
   try{
-    if(p.favorites) localStorage.setItem('cryptirc_favs',JSON.stringify(p.favorites));
-    if(p.muted) localStorage.setItem('cryptirc_muted',JSON.stringify(p.muted));
+    if(p.favorites){
+      // Merge server favorites with local — keep local additions that haven't synced yet
+      const local=loadFavorites();
+      const merged=[...p.favorites];
+      for(const lf of local){
+        if(!merged.some(f=>f.key===lf.key)) merged.push(lf);
+      }
+      localStorage.setItem('cryptirc_favs',JSON.stringify(merged));
+    }
+    if(p.muted){
+      const localMuted=loadMuted();
+      const merged=[...new Set([...p.muted,...localMuted])];
+      localStorage.setItem('cryptirc_muted',JSON.stringify(merged));
+    }
     if(p.monitor) localStorage.setItem('cryptirc_monitor',JSON.stringify(p.monitor));
     if(p.monitorNotifs) localStorage.setItem('cryptirc_monitor_notifs',p.monitorNotifs);
     if(p.monitorPush) localStorage.setItem('cryptirc_monitor_push',p.monitorPush);
-    if(p.unread){unread.clear();for(const[k,v] of Object.entries(p.unread))unread.set(k,+v);}
+    if(p.unread){
+      // Merge server unread — only set if server has MORE unread than local
+      // Don't overwrite zeros (channels we already marked as read)
+      for(const[k,v] of Object.entries(p.unread)){
+        const local=unread.get(k)||0;
+        if(+v>local) unread.set(k,+v);
+      }
+    }
     if(p.mentions) mentionsList=p.mentions;
     if(p.inputHistory) inputHistory=p.inputHistory;
     if(p.queries){for(const[c,entries] of Object.entries(p.queries))queryBufs[c]=new Map(entries);}
@@ -4790,12 +4816,16 @@ function closeQuery(conn_id,lc){
 function renderFavorites(){
   const el=document.getElementById('favorites-list');
   let favs=loadFavorites();
-  // Clean stale favorites — remove channels we're not in anymore
+  // Clean stale favorites — only if network is connected and has channels loaded
   const before=favs.length;
   favs=favs.filter(f=>{
     const net=networks.find(n=>n.config.id===f.conn_id);
-    if(!net)return false;
-    if(f.target.startsWith('#')||f.target.startsWith('&')) return net.channels.some(c=>c.name===f.target);
+    if(!net) return true; // Keep if network not loaded yet
+    if(!net.connected) return true; // Keep if not connected yet
+    if(f.target.startsWith('#')||f.target.startsWith('&')){
+      if(!net.channels||!net.channels.length) return true; // Keep if channels not loaded yet
+      return net.channels.some(c=>c.name===f.target);
+    }
     return true; // Keep PM favorites
   });
   if(favs.length!==before) saveFavorites(favs);

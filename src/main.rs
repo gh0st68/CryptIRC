@@ -633,13 +633,14 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     if let Some(code) = body.registration_code {
         *state.registration_code.write().await = code;
     }
-    // Persist admin settings to disk so they survive reboots
-    let settings = serde_json::json!({
-        "registration_open": *state.registration_open.read().await,
-        "registration_code": *state.registration_code.read().await,
-    });
+    // Persist admin settings to disk — merge with existing to preserve link preview settings
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
-    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&settings).unwrap_or_default()).await;
+    let mut existing: serde_json::Value = if let Ok(json) = tokio::fs::read_to_string(&path).await {
+        serde_json::from_str(&json).unwrap_or_default()
+    } else { serde_json::json!({}) };
+    existing["registration_open"] = serde_json::json!(*state.registration_open.read().await);
+    existing["registration_code"] = serde_json::json!(*state.registration_code.read().await);
+    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
     (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
 }
 
