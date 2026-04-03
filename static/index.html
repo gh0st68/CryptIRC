@@ -793,8 +793,8 @@ body > style, body > script { visibility:hidden; }
 .nick-away { opacity:0.5; }
 .nick-group-hdr { padding:8px 10px 3px; font-size:11px; font-weight:600; color:var(--text3); text-transform:capitalize; letter-spacing:.03em; }
 .away-dot { font-size:10px; margin-right:2px; }
-#typing-indicator { font-size:11px; color:var(--text2,#888); padding:0 12px; height:0; overflow:hidden; transition:height .15s,padding .15s; white-space:nowrap; text-overflow:ellipsis; }
-#typing-indicator.visible { height:18px; padding:2px 12px; }
+#typing-indicator { position:absolute; bottom:100%; left:0; right:0; font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; z-index:2; pointer-events:none; }
+#typing-indicator.visible { height:14px; border-top-color:var(--border); }
 
 /* ── WELCOME ───────────────────────────────────────────────────────────────── */
 #welcome { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--text3); padding:40px; text-align:center; }
@@ -1637,31 +1637,27 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 
   <div id="main">
     <div id="topbar">
-      <button id="sidebar-toggle-btn" onclick="toggleSidebarCollapse()" title="Toggle channel list">◀</button>
-      <button id="hamburger" onclick="toggleSidebar()">☰</button>
+      <button id="sidebar-toggle-btn" onclick="toggleSidebarCollapse()" title="Toggle channel list"><svg id="sidebar-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button id="hamburger" onclick="toggleSidebar()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
       <span id="chan-title" style="color:var(--text3)">—</span>
       <span id="lag-mobile" style="display:none;align-items:center;gap:2px;font-size:9px;color:var(--text3);flex-shrink:0;opacity:.7">
         <span class="lag-dot" id="lag-mobile-dot"></span>
         <span id="lag-mobile-val"></span>
       </span>
-      <span id="e2e-lock" title="Enable channel encryption" style="font-size:14px;flex-shrink:0;cursor:pointer" onclick="showEncryptPanel()">🔓</span>
+      <span id="e2e-lock" title="Enable channel encryption" style="flex-shrink:0;cursor:pointer;padding:2px;color:var(--text2)" onclick="showEncryptPanel()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></span>
       <span id="mentions-btn" onclick="toggleMentionsPanel()" title="Mentions"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.2L4 17.2V4h16v12z"/><circle cx="8" cy="10" r="1.5"/><circle cx="12" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg><span class="mentions-count" id="mentions-count"></span></span>
-      <span id="search-btn" onclick="toggleSearchPanel()" title="Search" style="cursor:pointer;font-size:14px;padding:4px;color:var(--text2);flex-shrink:0">🔍</span>
+      <span id="search-btn" onclick="toggleSearchPanel()" title="Search" style="cursor:pointer;padding:4px;color:var(--text2);flex-shrink:0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
       <span id="topic-sep" style="display:none;color:var(--border);font-size:14px;flex-shrink:0">│</span>
       <span id="topic-inline" style="display:none;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3);font-size:11px;cursor:pointer" onclick="showTopicMenu(event)"></span>
-      <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px;padding:4px;flex-shrink:0" onclick="showTopicMenu(event)" title="Topic options">⋮</button>
+      <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text2);cursor:pointer;padding:4px;flex-shrink:0;outline:none" onclick="showTopicMenu(event)" title="Options"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
       <span style="flex:1" id="topbar-spacer"></span>
       <span id="led-tx" style="display:none"></span>
       <span id="led-rx" style="display:none"></span>
       <span id="usercount" style="display:none"></span>
       <button id="nick-toggle" onclick="toggleNickPanel()" title="Toggle user list"><span class="toggle-icon">▶</span><span class="toggle-mobile">👥</span></button>
-      <div id="topic-menu">
-        <button class="topic-menu-item" onclick="viewFullTopic();closeTopicMenu()">👁 View full topic</button>
-        <button class="topic-menu-item" onclick="editTopic();closeTopicMenu()">✏️ Edit topic</button>
-        <button class="topic-menu-item" onclick="copyTopic();closeTopicMenu()">📋 Copy topic</button>
-      </div>
+      <div id="topic-menu"></div>
       <div id="mentions-panel">
-        <div id="mentions-panel-hdr">Mentions <span style="cursor:pointer;font-size:10px;color:var(--text3)" onclick="clearMentions()">Clear</span></div>
+        <div id="mentions-panel-hdr">Mentions <div style="display:flex;gap:8px;align-items:center"><span style="cursor:pointer;font-size:10px;color:var(--text3)" onclick="clearMentions()">Clear</span><span style="cursor:pointer;font-size:16px;color:var(--text3);padding:2px 4px" onclick="toggleMentionsPanel()">✕</span></div></div>
         <div id="mentions-list"><div class="mention-empty">No mentions yet</div></div>
       </div>
       <div id="search-panel">
@@ -1689,8 +1685,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <span class="lag-dot" id="lag-pill-dot"></span>
       <span id="lag-pill-val"></span>
     </div>
-    <div id="typing-indicator"></div>
-    <div id="input-wrap">
+    <div id="input-wrap" style="position:relative">
+      <div id="typing-indicator"></div>
       <div id="input-inner">
         <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" spellcheck="true" autocorrect="on" autocapitalize="off" enterkeyhint="send">
         <button id="send-btn" onclick="doSend()" title="Send">
@@ -2181,7 +2177,8 @@ function handleEvent(ev) {
     }
     case 'irc_message':
       // Suppress noisy 401 "No such nick/channel" errors
-      if(ev.target==='status'&&ev.text&&(ev.text.includes('No such nick/channel')||ev.text.includes('Command disabled'))) break;
+      // Suppress noisy server errors (typing on unsupported networks, offline nicks, etc)
+      if(ev.text&&(ev.text.includes('No such nick/channel')||ev.text.includes('Command disabled')||ev.text.includes('Unknown command')||ev.text.includes('@+typing'))) break;
       // Intercept links data for /links overlay
       if(ev.from==='links'&&window._linksData!=null){
         if(ev.text==='End of /LINKS'){renderLinksOverlay();}
@@ -2787,11 +2784,19 @@ function buildRow(msg){
   const isSelf=isChat&&active&&msg.from===getNick(active.conn_id);
   const nc=isChat?(isSelf?'nc-self':`nc${nickHash(msg.from)}`):'';
   const isSys=['system','error','join','part','quit','nick','mode','topic','kick','notice'].includes(msg.kind)||msg.from==='*';
+  // Get user's channel prefix (@, +, ~, &, %) for display
+  let userPfx='';
+  if(isChat&&active&&(active.target.startsWith('#')||active.target.startsWith('&'))){
+    const _net=networks.find(n=>n.config.id===active.conn_id);
+    const _ch=_net?.channels?.find(c=>c.name===active.target);
+    if(_ch){const entry=(_ch.names||[]).find(n=>stripPfx(n)===msg.from);if(entry){let pi=0;while(pi<entry.length&&'~&@%+'.includes(entry[pi]))pi++;if(pi>0)userPfx=entry[0];}}
+  }
+  const pfxHtml=userPfx?`<span class="nick-pfx${'~&@'.includes(userPfx)?' op':''}">${userPfx}</span>`:'';
   let nickHtml,bodyHtml;
   if(isSys){nickHtml=`<span class="msg-nick" style="color:var(--text3)">—</span>`;bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;}
-  else if(msg.kind==='action'){nickHtml=`<span class="msg-nick ${nc}">* ${esc(msg.from)}</span>`;bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;}
+  else if(msg.kind==='action'){nickHtml=`<span class="msg-nick ${nc}">* ${pfxHtml}${esc(msg.from)}</span>`;bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;}
   else{
-    nickHtml=`<span class="msg-nick ${nc}" onclick="showNickMenu(event,'${esc(msg.from)}')" style="cursor:pointer">${esc(msg.from)}</span>`;
+    nickHtml=`<span class="msg-nick ${nc}" onclick="showNickMenu(event,'${esc(msg.from)}')" style="cursor:pointer">${pfxHtml}${esc(msg.from)}</span>`;
     bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;
   }
   row.innerHTML=`<span class="msg-ts">${ts}</span>${nickHtml}${bodyHtml}`;
@@ -2799,9 +2804,9 @@ function buildRow(msg){
   const msgBody=row.querySelector('.msg-body');
   if (msg.encrypted && msgBody) {
     const lock = document.createElement('span');
-    lock.textContent = '🔐';
+    lock.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2"/></svg>';
     lock.title = 'E2E encrypted';
-    lock.style.cssText = 'font-size:10px;opacity:.6;margin-left:4px;flex-shrink:0;';
+    lock.style.cssText = 'opacity:.5;margin-left:4px;flex-shrink:0;color:var(--accent);';
     msgBody.appendChild(lock);
   }
   if(msgBody){for(const url of extractMediaUrls(msg.text)){const el=buildMediaEl(url);if(el)msgBody.appendChild(el);}}
@@ -2899,17 +2904,16 @@ function updateTopbar(){
   if(net){
     const ch=net.channels.find(c=>c.name===active.target);
     const topic=ch?.topic||'';
+    topicMenuBtn.style.display='';
     if(topic){
       topicInline.innerHTML=parseMircColors(topic);
       topicInline.title=topic;
       topicInline.style.display='';
       topicSep.style.display='';
-      topicMenuBtn.style.display='';
       topbarSpacer.style.display='none';
     } else {
       topicInline.style.display='none';
       topicSep.style.display='none';
-      topicMenuBtn.style.display='none';
       topbarSpacer.style.display='';
     }
     document.getElementById('usercount').textContent=ch?`${ch.names.length} users`:'';
@@ -2918,7 +2922,7 @@ function updateTopbar(){
   } else {
     topicInline.style.display='none';
     topicSep.style.display='none';
-    topicMenuBtn.style.display='none';
+    topicMenuBtn.style.display=active&&active.target!=='status'?'':'none';
     topbarSpacer.style.display='';
   }
 }
@@ -4638,7 +4642,7 @@ function restorePreferences(p){
     }
     if(p.muted){
       const localMuted=loadMuted();
-      const merged=[...new Set([...p.muted,...localMuted])];
+      const merged={...p.muted,...localMuted};
       localStorage.setItem('cryptirc_muted',JSON.stringify(merged));
     }
     if(p.monitor) localStorage.setItem('cryptirc_monitor',JSON.stringify(p.monitor));
@@ -4670,8 +4674,9 @@ function restorePreferences(p){
       const np=document.getElementById('nick-panel');
       const sbBtn=document.getElementById('sidebar-toggle-btn');
       const nkIcon=document.querySelector('#nick-toggle .toggle-icon');
-      if(p.sidebarCollapsed){sb?.classList.add('collapsed');if(sbBtn)sbBtn.textContent='▶';}
-      else{sb?.classList.remove('collapsed');if(sbBtn)sbBtn.textContent='◀';}
+      const sIcon=document.getElementById('sidebar-toggle-icon');
+      if(p.sidebarCollapsed){sb?.classList.add('collapsed');if(sIcon)sIcon.style.transform='rotate(180deg)';}
+      else{sb?.classList.remove('collapsed');if(sIcon)sIcon.style.transform='';}
       if(p.nickCollapsed){np?.classList.add('collapsed');if(nkIcon)nkIcon.textContent='◀';}
       else{np?.classList.remove('collapsed');if(nkIcon)nkIcon.textContent='▶';}
     }
@@ -4867,7 +4872,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   if(window.innerWidth>768){
     if(localStorage.getItem('cryptirc_sidebar_collapsed')==='1'){
       document.getElementById('sidebar')?.classList.add('collapsed');
-      const btn=document.getElementById('sidebar-toggle-btn');if(btn)btn.textContent='▶';
+      const si=document.getElementById('sidebar-toggle-icon');if(si)si.style.transform='rotate(180deg)';
     }
     if(localStorage.getItem('cryptirc_nick_collapsed')==='1'){
       document.getElementById('nick-panel')?.classList.add('collapsed');
@@ -5140,6 +5145,33 @@ function showTopicMenu(e){
   if(e) e.stopPropagation();
   const m=document.getElementById('topic-menu');
   if(m.classList.contains('open')){m.classList.remove('open');return;}
+  if(!active){return;}
+  const{conn_id,target}=active;
+  const isChan=target.startsWith('#')||target.startsWith('&');
+  const isPM=!isChan&&target!=='status';
+  // Build menu dynamically
+  m.innerHTML='';
+  if(isChan){
+    m.innerHTML+=`<button class="topic-menu-item" onclick="viewFullTopic();closeTopicMenu()">👁 View topic</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="editTopic();closeTopicMenu()">✏️ Edit topic</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="copyTopic();closeTopicMenu()">📋 Copy topic</button>`;
+    const fav=isFavorite(conn_id,target);
+    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleFavorite('${conn_id}','${esc(target)}');closeTopicMenu()">${fav?'★ Unfavorite':'☆ Favorite'}</button>`;
+    const muteKey=conn_id+'/'+target;
+    const muted=isMuted(muteKey);
+    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleMute('${esc(muteKey)}');closeTopicMenu()">${muted?'🔔 Unmute':'🔇 Mute'}</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">🚪 Leave channel</button>`;
+  } else if(isPM){
+    m.innerHTML+=`<button class="topic-menu-item" onclick="wsend({type:'send',conn_id:'${conn_id}',raw:'WHOIS ${esc(target)}'});closeTopicMenu()">🔍 Whois</button>`;
+    const ignored=isIgnored(target);
+    m.innerHTML+=`<button class="topic-menu-item" onclick="${ignored?'removeIgnore':'addIgnore'}('${esc(target)}');closeTopicMenu()">${ignored?'👂 Unignore':'🚫 Ignore user'}</button>`;
+    const muteKey=conn_id+'/'+target;
+    const muted=isMuted(muteKey);
+    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleMute('${esc(muteKey)}');closeTopicMenu()">${muted?'🔔 Unmute':'🔇 Mute conversation'}</button>`;
+    const fav=isFavorite(conn_id,target);
+    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleFavorite('${conn_id}','${esc(target)}');closeTopicMenu()">${fav?'★ Unfavorite':'☆ Favorite'}</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">✕ Close PM</button>`;
+  }
   const btn=document.getElementById('topic-menu-btn');
   const r=btn.getBoundingClientRect();
   m.style.top=(r.bottom+4)+'px';
@@ -5149,6 +5181,18 @@ function showTopicMenu(e){
 }
 function closeTopicMenu(){
   document.getElementById('topic-menu').classList.remove('open');
+}
+function leaveCurrentChannel(){
+  if(!active)return;
+  const{conn_id,target}=active;
+  const isChan=target.startsWith('#')||target.startsWith('&');
+  if(isChan){
+    if(!confirm(`Leave ${target}?`))return;
+    wsend({type:'part_channel',conn_id,channel:target});
+  } else if(target!=='status'){
+    // Close PM
+    closeQuery(conn_id,target);
+  }
 }
 function viewFullTopic(){
   if(!active)return;
@@ -5219,10 +5263,10 @@ function toggleNickPanel(){
 }
 function toggleSidebarCollapse(){
   const sb=document.getElementById('sidebar');
-  const btn=document.getElementById('sidebar-toggle-btn');
+  const icon=document.getElementById('sidebar-toggle-icon');
   sb.classList.toggle('collapsed');
   const collapsed=sb.classList.contains('collapsed');
-  btn.textContent=collapsed?'▶':'◀';
+  if(icon) icon.style.transform=collapsed?'rotate(180deg)':'';
   try{localStorage.setItem('cryptirc_sidebar_collapsed',collapsed?'1':'');}catch(e){}
 }
 

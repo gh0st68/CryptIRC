@@ -155,7 +155,7 @@ impl PreviewService {
             url: url.to_string(),
             domain,
             title,
-            description: description.map(|d| if d.len() > 200 { format!("{}…", &d[..197]) } else { d }),
+            description: description.map(|d| if d.chars().count() > 200 { format!("{}…", d.chars().take(197).collect::<String>()) } else { d }),
             image,
             site_name,
         })
