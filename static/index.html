@@ -793,7 +793,7 @@ body > style, body > script { visibility:hidden; }
 .nick-away { opacity:0.5; }
 .nick-group-hdr { padding:8px 10px 3px; font-size:11px; font-weight:600; color:var(--text3); text-transform:capitalize; letter-spacing:.03em; }
 .away-dot { font-size:10px; margin-right:2px; }
-#typing-indicator { position:absolute; bottom:100%; left:0; right:0; font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; z-index:2; pointer-events:none; }
+#typing-indicator { position:absolute; bottom:100%; left:0; right:0; font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; z-index:2; pointer-events:none; text-align:right; }
 #typing-indicator.visible { height:14px; border-top-color:var(--border); }
 
 /* ── WELCOME ───────────────────────────────────────────────────────────────── */
@@ -1624,6 +1624,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)">👁 Monitor</button>
           <button class="settings-menu-item" onclick="showNotepad();closeSettingsMenu()">📝 Notepad</button>
           <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()">📜 Certs</button>
+          <button class="settings-menu-item" onclick="showIgnorePanel();closeSettingsMenu()">🚫 Ignored Users</button>
           <button class="settings-menu-item" onclick="showChangePass();closeSettingsMenu()">🔑 Vault Password</button>
           <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()">❓ Help</button>
           <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()">👑 Admin</button>
@@ -1640,7 +1641,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <button id="sidebar-toggle-btn" onclick="toggleSidebarCollapse()" title="Toggle channel list"><svg id="sidebar-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
       <button id="hamburger" onclick="toggleSidebar()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
       <span id="chan-title" style="color:var(--text3)">—</span>
-      <span id="lag-mobile" style="display:none;align-items:center;gap:2px;font-size:9px;color:var(--text3);flex-shrink:0;opacity:.7">
+      <span id="lag-mobile" style="align-items:center;gap:2px;font-size:9px;color:var(--text3);flex-shrink:0;opacity:.7">
         <span class="lag-dot" id="lag-mobile-dot"></span>
         <span id="lag-mobile-val"></span>
       </span>
@@ -1649,12 +1650,12 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <span id="search-btn" onclick="toggleSearchPanel()" title="Search" style="cursor:pointer;padding:4px;color:var(--text2);flex-shrink:0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
       <span id="topic-sep" style="display:none;color:var(--border);font-size:14px;flex-shrink:0">│</span>
       <span id="topic-inline" style="display:none;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3);font-size:11px;cursor:pointer" onclick="showTopicMenu(event)"></span>
-      <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text2);cursor:pointer;padding:4px;flex-shrink:0;outline:none" onclick="showTopicMenu(event)" title="Options"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
       <span style="flex:1" id="topbar-spacer"></span>
       <span id="led-tx" style="display:none"></span>
       <span id="led-rx" style="display:none"></span>
       <span id="usercount" style="display:none"></span>
-      <button id="nick-toggle" onclick="toggleNickPanel()" title="Toggle user list"><span class="toggle-icon">▶</span><span class="toggle-mobile">👥</span></button>
+      <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text2);cursor:pointer;padding:4px;flex-shrink:0;outline:none" onclick="showTopicMenu(event)" title="Options"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
+      <button id="nick-toggle" onclick="toggleNickPanel()" title="Toggle user list"><span class="toggle-icon"><svg id="nick-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></span><span class="toggle-mobile"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span></button>
       <div id="topic-menu"></div>
       <div id="mentions-panel">
         <div id="mentions-panel-hdr">Mentions <div style="display:flex;gap:8px;align-items:center"><span style="cursor:pointer;font-size:10px;color:var(--text3)" onclick="clearMentions()">Clear</span><span style="cursor:pointer;font-size:16px;color:var(--text3);padding:2px 4px" onclick="toggleMentionsPanel()">✕</span></div></div>
@@ -3107,8 +3108,11 @@ async function handleInput(raw){
     const parts=raw.slice(1).split(' ');const cmd=parts[0].toUpperCase();const args=parts.slice(1);
     switch(cmd){
       // ── Navigation ──────────────────────────────────────────────────
-      case 'JOIN':
-        wsend({type:'join_channel',conn_id,channel:args[0],key:args[1]||null}); break;
+      case 'JOIN': {
+        let ch=args[0]||'';
+        if(ch&&!ch.startsWith('#')&&!ch.startsWith('&')&&!ch.startsWith('+')&&!ch.startsWith('!')) ch='#'+ch;
+        wsend({type:'join_channel',conn_id,channel:ch,key:args[1]||null}); break;
+      }
       case 'PART': case 'LEAVE':
         wsend({type:'part_channel',conn_id,channel:args[0]||target}); break;
       case 'CYCLE': case 'REJOIN': {
@@ -4677,8 +4681,9 @@ function restorePreferences(p){
       const sIcon=document.getElementById('sidebar-toggle-icon');
       if(p.sidebarCollapsed){sb?.classList.add('collapsed');if(sIcon)sIcon.style.transform='rotate(180deg)';}
       else{sb?.classList.remove('collapsed');if(sIcon)sIcon.style.transform='';}
-      if(p.nickCollapsed){np?.classList.add('collapsed');if(nkIcon)nkIcon.textContent='◀';}
-      else{np?.classList.remove('collapsed');if(nkIcon)nkIcon.textContent='▶';}
+      const niIcon=document.getElementById('nick-toggle-icon');
+      if(p.nickCollapsed){np?.classList.add('collapsed');if(niIcon)niIcon.style.transform='rotate(180deg)';}
+      else{np?.classList.remove('collapsed');if(niIcon)niIcon.style.transform='';}
     }
   }catch(e){console.error('Restore prefs failed:',e);}
 }
@@ -4876,7 +4881,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     }
     if(localStorage.getItem('cryptirc_nick_collapsed')==='1'){
       document.getElementById('nick-panel')?.classList.add('collapsed');
-      const ni=document.querySelector('#nick-toggle .toggle-icon');if(ni)ni.textContent='◀';
+      const niI=document.getElementById('nick-toggle-icon');if(niI)niI.style.transform='rotate(180deg)';
     }
   }
 });
@@ -5068,6 +5073,7 @@ function showNickMenu(e,nick){
     {label:'Mention',   action:()=>insertNick(nick)},
     {label:'Slap',      action:async()=>{if(!active)return;const st=`slaps ${nick} around a bit with a large trout`;const sw=(window.E2E?.ready||window.E2E?.channelKeys?.[active.target])?await e2eEncryptOutgoing(active.target,`\x01ACTION ${st}\x01`):null;if(sw)wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :${sw}`});else wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :\x01ACTION ${st}\x01`});addMessage(active.conn_id,active.target,{ts:Date.now()/1000|0,from:getNick(active.conn_id),text:st,kind:'action'});}},
     {label:loadMonitor()[nick.toLowerCase()]?'Unmonitor':'Monitor', action:()=>{const k=nick.toLowerCase();if(loadMonitor()[k]){monitorRemove(nick);showToast(`Removed ${nick} from monitor`);}else{monitorAdd(nick);showToast(`Added ${nick} to monitor`);}}},
+    {label:isIgnored(nick)?'Unignore':'Ignore', action:()=>{if(isIgnored(nick)){removeIgnore(nick);showToast(`Unignored ${nick}`);}else{addIgnore(nick);showToast(`Ignoring ${nick}`);}}},
   ];
   // Channel power options — only show if we have sufficient power and in a channel
   if(isChan&&myPower>=2){
@@ -5256,8 +5262,8 @@ function toggleNickPanel(){
   } else {
     np.classList.toggle('collapsed');
     const collapsed=np.classList.contains('collapsed');
-    const icon=btn?.querySelector('.toggle-icon');
-    if(icon) icon.textContent=collapsed?'◀':'▶';
+    const nIcon=document.getElementById('nick-toggle-icon');
+    if(nIcon) nIcon.style.transform=collapsed?'rotate(180deg)':'';
     try{localStorage.setItem('cryptirc_nick_collapsed',collapsed?'1':'');}catch(e){}
   }
 }
@@ -5618,6 +5624,54 @@ function removeIgnore(nick) {
   ignoreList.delete(nick.toLowerCase());
   localStorage.setItem('cryptirc_ignore', JSON.stringify([...ignoreList]));
   savePrefsToServer();
+}
+function showIgnorePanel(){
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:16px;';
+  const box=document.createElement('div');
+  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(400px,94vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
+  function render(){
+    const list=[...ignoreList].sort();
+    let html=`<div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <span style="font-weight:700;font-size:14px;color:var(--text)">🚫 Ignored Users</span>
+      <span onclick="this.closest('[style*=fixed]').remove()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+    </div>
+    <div style="padding:12px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch">
+      <div style="display:flex;gap:6px;margin-bottom:12px">
+        <input id="ignore-add-input" placeholder="Add nick to ignore..." style="flex:1;padding:6px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none">
+        <button onclick="const inp=document.getElementById('ignore-add-input');if(inp.value.trim()){addIgnore(inp.value.trim());inp.value='';document.getElementById('ignore-panel-list').innerHTML=renderIgnoreList();}" style="padding:6px 12px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px">Add</button>
+      </div>`;
+    if(!list.length){
+      html+=`<div style="color:var(--text3);text-align:center;padding:20px 0;font-size:13px">No ignored users</div>`;
+    } else {
+      html+=`<div id="ignore-panel-list">`;
+      for(const nick of list){
+        html+=`<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+          <span style="font-size:13px;color:var(--text);font-family:var(--mono)">${esc(nick)}</span>
+          <button onclick="removeIgnore('${esc(nick)}');this.closest('div[style*=flex]').remove();if(!document.querySelectorAll('#ignore-panel-list>div').length)document.getElementById('ignore-panel-list').innerHTML='<div style=\\'color:var(--text3);text-align:center;padding:20px 0;font-size:13px\\'>No ignored users</div>'" style="padding:3px 10px;background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;cursor:pointer;font-size:11px">Remove</button>
+        </div>`;
+      }
+      html+=`</div>`;
+    }
+    html+=`</div>`;
+    box.innerHTML=html;
+  }
+  render();
+  ov.appendChild(box);
+  ov.onclick=e=>{if(e.target===ov)ov.remove();};
+  document.body.appendChild(ov);
+  // Handle Enter key in add input
+  setTimeout(()=>{
+    const inp=document.getElementById('ignore-add-input');
+    if(inp){
+      inp.focus();
+      inp.addEventListener('keydown',e=>{
+        if(e.key==='Enter'&&inp.value.trim()){
+          addIgnore(inp.value.trim());inp.value='';render();
+        }
+      });
+    }
+  },100);
 }
 function isIgnored(nick) {
   return ignoreList.has(nick.toLowerCase());

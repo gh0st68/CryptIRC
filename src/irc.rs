@@ -898,6 +898,32 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "Using secure connection (TLS)".into(), ts, kind: MessageKind::Notice });
                     }
+                    // Additional WHOIS numerics — route to nick's query buffer
+                    "301" => { // RPL_AWAY
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let msg = p.params.get(2).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Away: {}", msg), ts, kind: MessageKind::Notice });
+                    }
+                    "307" => { // RPL_WHOISREGNICK
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let text = p.params.get(2).cloned().unwrap_or("is a registered nick".into());
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice });
+                    }
+                    "378" => { // RPL_WHOISHOST (connecting from)
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let text = p.params.get(2).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice });
+                    }
+                    "379" => { // RPL_WHOISMODES
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let text = p.params.get(2).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice });
+                    }
+                    "320" => { // RPL_WHOISSPECIAL (identified, bot, etc)
+                        let nick = p.params.get(1).cloned().unwrap_or_default();
+                        let text = p.params.get(2).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice });
+                    }
                     // 367 = RPL_BANLIST — one entry in the ban list
                     "367" => {
                         let channel = p.params.get(1).cloned().unwrap_or_default();
