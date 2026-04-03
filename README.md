@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.7.0-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.8.0-brightgreen" alt="Version">
   <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
 </p>
 
@@ -51,21 +51,30 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 ### Interface
 - **Lounge-style layout** -- clean input bar, grouped nick list, collapsible panels
 - **Mobile-first PWA** -- installable on iOS/Android with swipe gestures and safe-area support
-- **iOS PWA keyboard handling** -- input bar works correctly with iOS keyboard accessory bar
+- **iOS PWA keyboard handling** -- works perfectly with iOS keyboard accessory bar
 - **Collapsible panels** -- sidebar and nick list collapse on desktop with persistent state
 - **Nick list grouped by role** -- Owners, Admins, Operators, Half-Ops, Voiced, Users
-- **Nick context menu** -- whois, query, slap, monitor, kick/ban/voice/op based on your power level
-- **Inline media previews** -- images, videos (.mp4/.webm/.mov), and YouTube thumbnails
-- **Pastebin** -- share text snippets with optional password protection and expiration
-- **Encrypted notepad** -- private notes accessible from Settings, auto-saved and encrypted
+- **Nick context menu** -- whois, query, slap, monitor, kick/ban/voice/op based on power level
+- **Clickable nicks in messages** -- nick mentions in chat text are colored and clickable
+- **@nick autocomplete** -- type `@` to search and insert channel nicks
+- **Inline media previews** -- images, videos (.mp4/.webm/.mov), YouTube rich cards with title/author
+- **Link previews** -- server-side metadata fetcher with admin whitelist (SSRF protected)
+- **Pastebin** -- share text snippets with password protection and expiration
+- **Encrypted notepad** -- private auto-saving notes, encrypted with vault key
+- **mIRC color formatting** -- Ctrl+K color picker, Ctrl+B/U/I/O for bold/underline/italic/reset
 - **Topic bar** with mIRC color rendering and edit/copy/view menu
 - **Emoji picker** with colon autocomplete (`:wave:` style)
 - **Slash command autocomplete** -- type `/` to see available commands
 - **Search** -- search messages in current channel with highlighted results
-- **File uploads** -- drag-and-drop or paperclip button, link placed in input bar for you to send
-- **Desktop & mobile push notifications** -- works on iOS PWA, suppressed when app is open
-- **Persistent state** -- open DMs, unread counts, mentions, input history all sync server-side
+- **File uploads** -- drag-and-drop or paperclip, link placed in input bar for you to send
+- **Desktop & mobile push notifications** -- iOS PWA support, suppressed when app is focused
+- **Smart unread badges** -- gray for regular messages, red for mentions and DMs
+- **Mentions panel** -- chat bubble icon with red dot badge for unseen mentions
+- **Persistent state** -- everything syncs server-side (themes, favorites, unread, mentions, etc.)
 - **Channel drag-and-drop reorder** -- reorder channels in the sidebar
+- **Mobile lag indicator** -- ping time shown next to channel name in topbar
+- **34 fonts** -- choose from 21 monospace, 10 sans-serif, 2 serif, and 1 cursive font
+- **Clear all data** -- one-click deletion of logs, notepad, and pastes with confirmation
 
 ### Themes (20+)
 | Theme | Description |
@@ -92,13 +101,18 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 | Synthwave | Retro 80s purple gradient |
 | **Separate mobile theme** | Independent colors, accents, and font sizes for phone vs desktop |
 
+### Admin
+- **Admin panel** -- user management, stats, registration settings
+- **Link preview whitelist** -- admin controls which domains get metadata fetched
+- **Registration modes** -- open, invite-code, or closed (persists across reboots)
+- **User management** -- disable, delete, promote to admin
+- **All admin settings persist** to disk (survives server restarts)
+
 ### Deployment
 - **Single binary** -- one `cargo build` and you're done
 - Interactive deploy script for Debian/Ubuntu with Caddy, Postfix, and systemd
 - Automatic HTTPS via Caddy + Let's Encrypt
 - Hardened systemd unit with full sandboxing
-- Registration modes: open, invite-code, or closed
-- Admin panel with user management
 
 ## Quick Start
 
