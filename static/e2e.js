@@ -741,7 +741,8 @@ async function e2eHandleEvent(ev) {
     case 'e2e_channel_key':
       await loadChannelKeyFromBlob(ev.channel, ev.blob);
       updateE2EIndicator(ev.channel);
-      e2eSysMsg(ev.channel, '🔐 Channel encryption active for ' + ev.channel);
+      const chLabel = ev.channel.startsWith('#') || ev.channel.startsWith('&') ? 'Channel' : 'DM';
+      e2eSysMsg(ev.channel, `🔐 ${chLabel} encryption active for ${ev.channel}`);
       break;
 
     case 'e2e_channel_list':
@@ -1000,15 +1001,13 @@ async function handleEncryptCommand(args, conn_id, target) {
       break;
     }
     case 'keygen': {
-      if (!target.startsWith('#') && !target.startsWith('&')) {
-        e2eSysMsg(target,'Usage: /encrypt keygen  (run inside a channel)'); return;
-      }
       if (!E2E.e2eEncKey) { e2eSysMsg(target,'🔐 Vault not unlocked — unlock vault first'); return; }
       const { keyWords, keyB64, key } = await generateChannelKey();
       await storeChannelKey(target, key, keyB64);
-      e2eSysMsg(target,`🔐 Channel key generated for ${target}:`);
+      const label = target.startsWith('#') || target.startsWith('&') ? 'Channel' : 'DM';
+      e2eSysMsg(target,`🔐 ${label} key generated for ${target}:`);
       e2eSysMsg(target,`🔑 ${keyWords}`);
-      e2eSysMsg(target,`Share these 32 words out-of-band. Do NOT send them in this channel.`);
+      e2eSysMsg(target,`Share these 32 words privately with ${target.startsWith('#')?'channel members':target}.`);
       updateE2EIndicator(target);
       break;
     }
@@ -1019,7 +1018,7 @@ async function handleEncryptCommand(args, conn_id, target) {
       try {
         const { key, keyB64 } = await importChannelKeyFromWords(words.join(' '));
         await storeChannelKey(target, key, keyB64);
-        e2eSysMsg(target,`🔐 Channel key added — messages now encrypted`);
+        e2eSysMsg(target,`🔐 Key added — messages now encrypted`);
         updateE2EIndicator(target);
       } catch(e) { e2eSysMsg(target,`❌ ${e.message}`); }
       break;
@@ -1034,14 +1033,11 @@ async function handleEncryptCommand(args, conn_id, target) {
       break;
     }
     case 'rotate': {
-      if (!target.startsWith('#') && !target.startsWith('&')) {
-        e2eSysMsg(target,'Usage: /encrypt rotate  (run inside a channel)'); return;
-      }
       const { keyWords, keyB64, key } = await generateChannelKey();
       await storeChannelKey(target, key, keyB64);
-      e2eSysMsg(target,`🔐 Channel key rotated.`);
+      e2eSysMsg(target,`🔐 Key rotated for ${target}.`);
       e2eSysMsg(target,`🔑 New key: ${keyWords}`);
-      e2eSysMsg(target,`Re-share with trusted members. Old key holders cannot read future messages.`);
+      e2eSysMsg(target,`Re-share with ${target.startsWith('#')?'trusted members':'the other person'}. Old key holders cannot read future messages.`);
       updateE2EIndicator(target);
       break;
     }
@@ -1052,10 +1048,21 @@ async function handleEncryptCommand(args, conn_id, target) {
         updateE2EIndicator(target);
       } else {
         const nick = args[1] || target;
-        delete E2E.dmSessions[nick];
-        delete E2E._encryptLock[nick];
-        wsend({ type:'e2e_delete_session', partner:nick });
-        e2eSysMsg(target,`🔓 E2E session with ${nick} closed`);
+        // Remove PSK key if exists
+        if (E2E.channelKeys[nick]) {
+          await removeChannelKey(nick);
+          e2eSysMsg(target,`🔓 Encryption disabled for ${nick}`);
+        }
+        // Remove Signal session if exists
+        if (E2E.dmSessions[nick]) {
+          delete E2E.dmSessions[nick];
+          delete E2E._encryptLock[nick];
+          wsend({ type:'e2e_delete_session', partner:nick });
+          e2eSysMsg(target,`🔓 E2E session with ${nick} closed`);
+        }
+        if (!E2E.channelKeys[nick] && !E2E.dmSessions[nick]) {
+          e2eSysMsg(target,`🔓 No encryption active for ${nick}`);
+        }
         updateE2EIndicator(nick);
       }
       break;
@@ -1133,7 +1140,7 @@ function updateE2EIndicator(target) {
   if (lock && active) {
     const t = active.target;
     const isDMActive = !t.startsWith('#') && !t.startsWith('&');
-    const encActive = isDMActive ? !!E2E.dmSessions[t] : !!E2E.channelKeys[t];
+    const encActive = !!E2E.channelKeys[t] || (isDMActive && !!E2E.dmSessions[t]);
     const trust = E2E.trustStore[t];
     lock.textContent = encActive
       ? (trust?.keyChanged ? '⚠🔐' : trust?.verified ? '✓🔐' : '🔐')

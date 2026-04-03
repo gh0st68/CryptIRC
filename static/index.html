@@ -192,6 +192,10 @@ body > style, body > script { visibility:hidden; }
   padding:calc(12px + var(--sat)) 14px 10px;
   border-bottom:1px solid var(--border);
   display:flex; align-items:center; gap:8px; flex-shrink:0;
+  position:relative; overflow:hidden;
+}
+#sidebar-header canvas {
+  position:absolute; inset:0; width:100%; height:100%; opacity:.4; pointer-events:none;
 }
 .logo {
   font-family:var(--sans); font-weight:800; font-size:16px;
@@ -207,13 +211,12 @@ body > style, body > script { visibility:hidden; }
   transition:color .2s;
 }
 .lock-btn:hover { color:var(--text); }
-#network-list {
-  flex:1; overflow-y:auto; padding:4px 0;
-  /* M4: iOS momentum scroll */
+#sidebar-scroll {
+  flex:1; overflow-y:auto; padding:0;
   -webkit-overflow-scrolling:touch;
-  /* M5: contain overscroll */
   overscroll-behavior:contain;
 }
+#network-list { padding:4px 0; }
 .net-group { margin-bottom:2px; }
 .net-label {
   display:flex; align-items:center; gap:6px;
@@ -264,7 +267,8 @@ body > style, body > script { visibility:hidden; }
 .chan-item.drag-over { border-top:2px solid var(--accent); margin-top:-2px; }
 .chan-item.active { background:var(--bg4); color:var(--accent); }
 .chan-unread-dot { display:none; }
-.chan-unread-badge { margin-left:auto; flex-shrink:0; background:#e53e3e; color:#fff; font-size:10px; font-weight:700; min-width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; padding:0 5px; }
+.chan-unread-badge { margin-left:auto; flex-shrink:0; background:var(--bg3); color:var(--text2); font-size:10px; font-weight:700; min-width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; padding:0 5px; }
+.chan-unread-badge.highlight { background:#e53e3e; color:#fff; }
 .chan-kebab {
   display:none; cursor:pointer; font-size:15px; font-weight:700; flex-shrink:0;
   color:var(--text3); padding:0 4px; border-radius:3px; line-height:1;
@@ -282,7 +286,7 @@ body > style, body > script { visibility:hidden; }
   border:none; background:none; text-align:left; white-space:nowrap; display:block; width:100%;
 }
 .chan-dropdown-item:hover { background:var(--bg3); color:var(--text); }
-#favorites-list { padding:0; overflow-y:auto; }
+#favorites-list { padding:0; }
 #favorites-list:empty { display:none; }
 .fav-header { font-size:10px; color:var(--text3); letter-spacing:.07em; text-transform:uppercase; padding:8px 10px 4px; }
 .fav-star { font-size:10px; cursor:pointer; opacity:0; transition:opacity .15s; flex-shrink:0; padding:2px 4px; }
@@ -334,11 +338,10 @@ body > style, body > script { visibility:hidden; }
 .fav-star:hover { opacity:1!important; }
 .fav-star.active { opacity:1; color:var(--warn); }
 #sidebar-footer {
-  padding:10px 6px calc(10px + var(--sab));
+  padding:6px 6px calc(6px + var(--sab));
   border-top:1px solid var(--border);
-  display:grid; grid-template-columns:1fr 1fr 1fr; gap:6px; flex-shrink:0;
+  display:grid; grid-template-columns:1fr 1fr 1fr; gap:4px; flex-shrink:0;
   overflow:visible; box-sizing:border-box;
-  margin-top:auto;
 }
 .sidebar-btn {
   background:var(--bg3); border:1px solid var(--border); border-radius:8px;
@@ -639,30 +642,38 @@ body > style, body > script { visibility:hidden; }
 .msg-body { flex:1; min-width:0; word-break:break-word; overflow-wrap:anywhere; }
 .msg-body a { color:var(--accent2); text-decoration:none; }
 .msg-body a:hover { text-decoration:underline; }
-.msg-media { display:block; margin-top:4px; max-width:min(360px,80%); }
-.msg-img { display:block; max-width:100%; max-height:280px; cursor:pointer; transition:opacity .15s; border-radius:4px; border:none; }
-.msg-img:hover { opacity:.8; }
-.msg-media video { display:block; max-width:100%; max-height:280px; border-radius:4px; }
-.msg-yt { display:block; margin-top:6px; max-width:min(400px,95%); text-decoration:none; border-radius:8px; overflow:hidden; border:1px solid var(--border); background:var(--bg2); transition:border-color .15s; }
+.msg-media { display:inline-block; margin-top:3px; max-width:min(220px,60%); }
+.msg-img { display:block; max-width:100%; max-height:160px; cursor:pointer; transition:all .15s; border-radius:4px; border:none; }
+.msg-img:hover { opacity:.85; transform:scale(1.02); }
+.msg-media video { display:block; max-width:100%; max-height:160px; border-radius:4px; }
+.msg-yt { display:inline-block; margin-top:3px; max-width:min(240px,65%); text-decoration:none; border-radius:6px; overflow:hidden; border:1px solid var(--border); background:var(--bg2); transition:border-color .15s; }
 .msg-yt:hover { border-color:var(--accent); }
 .msg-yt-thumb { position:relative; }
 .msg-yt-thumb img { display:block; width:100%; aspect-ratio:16/9; object-fit:cover; }
-.yt-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:48px; height:34px; background:rgba(0,0,0,.7); border-radius:8px; display:flex; align-items:center; justify-content:center; pointer-events:none; }
-.yt-play::after { content:''; border-style:solid; border-width:8px 0 8px 14px; border-color:transparent transparent transparent #fff; }
+.yt-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:36px; height:26px; background:rgba(0,0,0,.7); border-radius:6px; display:flex; align-items:center; justify-content:center; pointer-events:none; }
+.yt-play::after { content:''; border-style:solid; border-width:6px 0 6px 10px; border-color:transparent transparent transparent #fff; }
 .msg-yt:hover .yt-play { background:rgba(255,0,0,.9); }
-.msg-yt-info { padding:8px 10px; }
-.msg-yt-title { font-size:12px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.msg-yt-meta { font-size:10px; color:var(--text3); margin-top:3px; display:flex; gap:8px; }
+.msg-yt-info { padding:5px 8px; }
+.msg-yt-title { font-size:11px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; }
+.msg-yt-meta { font-size:9px; color:var(--text3); margin-top:2px; display:flex; gap:6px; }
+.msg-link-preview { display:inline-block; margin-top:3px; max-width:min(280px,70%); border-left:3px solid var(--accent); background:var(--bg2); border-radius:0 4px 4px 0; padding:6px 8px; font-size:11px; text-decoration:none; color:var(--text); transition:border-color .15s; }
+.msg-link-preview:hover { border-color:var(--accent2); }
+.msg-link-preview-domain { font-size:9px; color:var(--text3); margin-bottom:2px; }
+.msg-link-preview-title { font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.msg-link-preview-desc { font-size:10px; color:var(--text2); margin-top:2px; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.msg-link-preview-img { margin-top:4px; max-width:100%; max-height:80px; border-radius:3px; display:block; }
 .row-action .msg-body { color:var(--action); font-style:italic; }
 .row-action .msg-nick { color:var(--action); }
 .row-notice .msg-body { color:var(--notice); }
-.row-join .msg-body { color:#44aa77; font-size:12px; }
-.row-part .msg-body, .row-quit .msg-body { color:#aa5533; font-size:12px; }
-.row-system .msg-body { color:var(--warn); font-size:12px; }
-.row-error .msg-body { color:var(--error); font-size:12px; }
-.row-topic .msg-body { color:var(--accent); font-size:12px; }
-.row-nick .msg-body, .row-mode .msg-body, .row-kick .msg-body { color:var(--text3); font-size:12px; }
+.row-join .msg-body { color:#44aa77; }
+.row-part .msg-body, .row-quit .msg-body { color:#aa5533; }
+.row-system .msg-body { color:var(--warn); }
+.row-error .msg-body { color:var(--error); }
+.row-topic .msg-body { color:var(--accent); }
+.row-nick .msg-body, .row-mode .msg-body, .row-kick .msg-body { color:var(--text3); }
 .nc-self { color:var(--accent) !important; }
+.nick-mention { border-radius:2px; padding:0 2px; }
+.nick-mention:hover { text-decoration:underline; }
 .nc0,.nick-entry.nc0{color:#e05a5a} .nc1,.nick-entry.nc1{color:#e0935a} .nc2,.nick-entry.nc2{color:#d4c850} .nc3,.nick-entry.nc3{color:#5adb7a}
 .nc4,.nick-entry.nc4{color:#5ab8e0} .nc5,.nick-entry.nc5{color:#8a70e0} .nc6,.nick-entry.nc6{color:#e05ab0} .nc7,.nick-entry.nc7{color:#5ae0d4}
 .nc8,.nick-entry.nc8{color:#a0c878} .nc9,.nick-entry.nc9{color:#d47890}
@@ -1025,7 +1036,7 @@ body > style, body > script { visibility:hidden; }
     position:fixed; left:0; top:0; bottom:0; z-index:50;
     width:min(280px, 80vw);
     transform:translateX(-100%);
-    padding-top:var(--sat); padding-bottom:var(--sab); padding-left:var(--sal);
+    padding-left:var(--sal);
   }
   #sidebar.open { transform:translateX(0); }
   #sidebar-backdrop.show { display:block; }
@@ -1050,7 +1061,8 @@ body > style, body > script { visibility:hidden; }
 }
 @media(max-width:480px) {
   .upload-btn { font-size:15px; padding:4px; }
-  .sidebar-btn { font-size:11px; }
+  .sidebar-btn { font-size:10px; min-height:36px; padding:5px 3px; }
+  #sidebar-footer { padding:4px 4px calc(4px + var(--sab)); gap:3px; }
   #input-wrap { padding:0 0 var(--sab); }
   #msg-input { padding:4px 8px; font-size:16px; line-height:1; }
   #send-btn { width:26px; height:26px; min-width:26px; font-size:13px; padding:1px; }
@@ -1173,19 +1185,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     <div id="notif-status-badge" class="notif-status-badge">⬤ Checking…</div>
 
     <div class="notif-section">
-      <div class="notif-section-title">Global</div>
+      <div class="notif-section-title">Trigger</div>
       <div class="notif-row">
-        <div>
-          <div class="notif-label">Enable Notifications</div>
-          <div class="notif-sublabel">Receive push alerts when the app is in the background</div>
-        </div>
-        <label class="toggle toggle-wrap">
-          <input type="checkbox" id="notif-enabled" onchange="onNotifToggle()">
-          <span class="toggle-track"><span class="toggle-thumb"></span></span>
-        </label>
-      </div>
-      <div class="notif-row">
-        <div class="notif-label" style="flex:1">Trigger</div>
+        <div class="notif-label" style="flex:1">Notify me for</div>
         <select class="form-select" id="notif-trigger" style="flex:none;width:auto;min-width:180px" onchange="saveNotifPrefs()">
           <option value="mentions_and_dms">Mentions &amp; DMs</option>
           <option value="mentions_only">Mentions only</option>
@@ -1196,29 +1198,43 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     </div>
 
     <div class="notif-section">
-      <div class="notif-section-title">Desktop Notifications</div>
+      <div class="notif-section-title">Push Notifications</div>
       <div class="notif-row">
         <div>
-          <div class="notif-label">🖥 Browser popups</div>
-          <div class="notif-sublabel">Show popup bubbles for DMs and mentions when the tab isn't focused</div>
+          <div class="notif-label">📱 Push alerts</div>
+          <div class="notif-sublabel">Receive push notifications on your phone/device when the app is closed</div>
+        </div>
+        <label class="toggle toggle-wrap">
+          <input type="checkbox" id="notif-enabled" onchange="onNotifToggle()">
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="notif-section">
+      <div class="notif-section-title">Browser Notifications</div>
+      <div class="notif-row">
+        <div>
+          <div class="notif-label">🖥 Desktop popups</div>
+          <div class="notif-sublabel">Show popup bubbles when the tab isn't focused</div>
         </div>
         <button class="appear-toggle" id="a-desktop-notif" onclick="this.classList.toggle('on');toggleDesktopNotif()"></button>
       </div>
     </div>
 
     <div class="notif-section">
-      <div class="notif-section-title">In-App Sounds</div>
+      <div class="notif-section-title">Sounds</div>
       <div class="notif-row">
         <div>
           <div class="notif-label">🔊 PM sound</div>
-          <div class="notif-sublabel">Play a chirp when a DM arrives and you're not viewing it</div>
+          <div class="notif-sublabel">Chirp when a DM arrives</div>
         </div>
         <button class="appear-toggle" id="a-sound-pm" onclick="this.classList.toggle('on');saveNotifSoundPrefs()"></button>
       </div>
       <div class="notif-row">
         <div>
           <div class="notif-label">🔊 Mention sound</div>
-          <div class="notif-sublabel">Play a ping when someone mentions you in a channel</div>
+          <div class="notif-sublabel">Ping when someone mentions you</div>
         </div>
         <button class="appear-toggle" id="a-sound-mention" onclick="this.classList.toggle('on');saveNotifSoundPrefs()"></button>
       </div>
@@ -1385,6 +1401,10 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <div class="appear-row">
           <span class="appear-label">Spell check</span>
           <button class="appear-toggle" id="a-spellcheck" onclick="this.classList.toggle('on');applyAppearance()"></button>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Link previews</span>
+          <button class="appear-toggle" id="a-linkpreviews" onclick="this.classList.toggle('on');applyAppearance()"></button>
         </div>
       </div>
 
@@ -1569,34 +1589,45 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
   </div>
 </div>
 
+<div id="links-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:600;align-items:center;justify-content:center">
+  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(550px,94vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+      <span style="font-weight:600;color:var(--text)">Server Links</span>
+      <span id="links-count" style="font-size:11px;color:var(--text3)"></span>
+      <span onclick="closeLinksOverlay()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+    </div>
+    <div id="links-body" style="overflow-y:auto;flex:1;padding:4px 0;-webkit-overflow-scrolling:touch"></div>
+  </div>
+</div>
+
 <!-- ── MAIN APP ───────────────── -->
 <div id="app">
   <div id="sidebar">
     <div id="sidebar-header">
+      <canvas id="starfield" width="300" height="50"></canvas>
       <span class="logo">CryptIRC</span>
       <button class="lock-btn" id="favs-toggle" title="Toggle favorites only" onclick="toggleFavsOnly()" style="font-size:12px">☆</button>
       <button class="lock-btn" id="vault-lock-btn" title="Lock vault" onclick="lockVault()">🔒</button>
     </div>
-    <div id="favorites-list"></div>
-    <div id="network-list"></div>
-    <div id="sidebar-starfield" style="padding:6px 10px 2px;opacity:.4;margin-top:auto;flex-shrink:0;">
-      <canvas id="starfield" width="200" height="30" style="width:100%;height:30px;display:block;"></canvas>
+    <div id="sidebar-scroll">
+      <div id="favorites-list"></div>
+      <div id="network-list"></div>
     </div>
     <div id="sidebar-footer">
       <button class="sidebar-btn" onclick="showAddNetwork()">+ Server</button>
       <div style="position:relative">
         <button class="sidebar-btn" onclick="toggleSettingsMenu()" id="settings-gear-btn">⚙ Settings</button>
         <div id="settings-menu" class="settings-menu">
-          <button class="settings-menu-item" onclick="showChangePass();closeSettingsMenu()">🔑 Passkey</button>
-          <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()">📜 Certs</button>
           <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()">🔔 Notifications</button>
           <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()">🎨 Theme</button>
           <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)">👁 Monitor</button>
           <button class="settings-menu-item" onclick="showNotepad();closeSettingsMenu()">📝 Notepad</button>
-          <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b">🧹 Clear All Logs</button>
-          <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()">👑 Admin</button>
-          <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b">🗑 Delete Account</button>
+          <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()">📜 Certs</button>
+          <button class="settings-menu-item" onclick="showChangePass();closeSettingsMenu()">🔑 Vault Password</button>
           <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()">❓ Help</button>
+          <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()">👑 Admin</button>
+          <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b">🧹 Clear All Data</button>
+          <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b">🗑 Delete Account</button>
         </div>
       </div>
       <button class="sidebar-btn" onclick="doLogout()">Logout</button>
@@ -1613,7 +1644,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <span id="lag-mobile-val"></span>
       </span>
       <span id="e2e-lock" title="Enable channel encryption" style="font-size:14px;flex-shrink:0;cursor:pointer" onclick="showEncryptPanel()">🔓</span>
-      <span id="mentions-btn" onclick="toggleMentionsPanel()" title="Mentions">@<span class="mentions-count" id="mentions-count"></span></span>
+      <span id="mentions-btn" onclick="toggleMentionsPanel()" title="Mentions"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.2L4 17.2V4h16v12z"/><circle cx="8" cy="10" r="1.5"/><circle cx="12" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg><span class="mentions-count" id="mentions-count"></span></span>
       <span id="search-btn" onclick="toggleSearchPanel()" title="Search" style="cursor:pointer;font-size:14px;padding:4px;color:var(--text2);flex-shrink:0">🔍</span>
       <span id="topic-sep" style="display:none;color:var(--border);font-size:14px;flex-shrink:0">│</span>
       <span id="topic-inline" style="display:none;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3);font-size:11px;cursor:pointer" onclick="showTopicMenu(event)"></span>
@@ -1691,7 +1722,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 // ─── State ────────────────────────────────────────────────────────────────────
 let ws=null, sessionToken=null, currentUser=null;
 let networks=[], active=null;
-let buffers={}, unread=new Map(), queryBufs={};
+let buffers={}, unread=new Map(), mentionUnread=new Map(), queryBufs={};
 // Restore unread counts
 try{const ur=JSON.parse(localStorage.getItem('cryptirc_unread')||'{}');for(const[k,v] of Object.entries(ur))unread.set(k,v);}catch(e){}
 function saveUnread(){try{const o={};for(const[k,v] of unread)o[k]=v;localStorage.setItem('cryptirc_unread',JSON.stringify(o));}catch(e){} savePrefsToServer();}
@@ -2092,16 +2123,19 @@ function handleEvent(ev) {
           }
         }
       }
-      // Load logs for active channel and all joined channels if vault is unlocked
+      // Load logs for all channels + status when vault is unlocked
       if(ev.vault_unlocked){
         for(const net of networks){
+          // Load status logs
+          if(getBuf(net.config.id,'status').length===0)
+            wsend({type:'get_logs',conn_id:net.config.id,target:'status',limit:200});
           for(const ch of net.channels||[]){
-            if(getBuf(net.config.id,ch.name).length===0&&ch.name!=='status')
+            if(getBuf(net.config.id,ch.name).length===0)
               wsend({type:'get_logs',conn_id:net.config.id,target:ch.name,limit:200});
           }
         }
         // Also load for active if it's a PM (not in channels list)
-        if(active&&getBuf(active.conn_id,active.target).length===0&&active.target!=='status')
+        if(active&&getBuf(active.conn_id,active.target).length===0)
           wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
       }
       break;
@@ -2142,6 +2176,14 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_message':
+      // Suppress noisy 401 "No such nick/channel" errors
+      if(ev.target==='status'&&ev.text&&(ev.text.includes('No such nick/channel')||ev.text.includes('Command disabled'))) break;
+      // Intercept links data for /links overlay
+      if(ev.from==='links'&&window._linksData!=null){
+        if(ev.text==='End of /LINKS'){renderLinksOverlay();}
+        else{addLinkEntry(ev.text);}
+        break;
+      }
       // Serialize E2E decrypt to prevent race between x3dh header and encrypted message
       if(!window._e2eQueue) window._e2eQueue=Promise.resolve();
       window._e2eQueue=window._e2eQueue.then(async()=>{
@@ -2204,6 +2246,11 @@ function handleEvent(ev) {
         if(pNet) pNet.channels=pNet.channels.filter(c=>c.name!==ev.channel);
         delete buffers[bk(ev.conn_id,ev.channel)];
         unread.delete(bk(ev.conn_id,ev.channel));
+        mentionUnread.delete(bk(ev.conn_id,ev.channel));
+        // Remove from favorites if favorited
+        const favs=loadFavorites();
+        const newFavs=favs.filter(f=>!(f.conn_id===ev.conn_id&&f.target===ev.channel));
+        if(newFavs.length!==favs.length) saveFavorites(newFavs);
         if(isActive(ev.conn_id,ev.channel)){
           const altCh=pNet?.channels.find(c=>c.name!==ev.channel);
           setActive(ev.conn_id,altCh?altCh.name:'status');
@@ -2495,7 +2542,12 @@ function addMessage(conn_id,target,msg){
   }
   if(isActive(conn_id,target)){appendMsgRow(msg);const isOwn=msg.from&&msg.from===getNick(conn_id);if(isOwn)scrollForce();else scrollBottom();}
   else{
-    if(!msg.noUnread){const uk=bk(conn_id,target);unread.set(uk,(unread.get(uk)||0)+1);saveUnread();renderSidebar();}
+    if(!msg.noUnread){
+      const uk=bk(conn_id,target);
+      unread.set(uk,(unread.get(uk)||0)+1);
+      if(msg.mentioned||isDM) mentionUnread.set(uk,(mentionUnread.get(uk)||0)+1);
+      saveUnread();renderSidebar();
+    }
     // Play sound for unread DMs and mentions
     const isMutedChan=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
     if(!isMutedChan && msg.from!=='*'){
@@ -2568,10 +2620,11 @@ function renderSidebar(){
     const id=net.config.id;
     const g=document.createElement('div'); g.className='net-group';
     const sk=bk(id,'status'),sa=isActive(id,'status'),sc=unread.get(sk)||0;
+    const netMuted=isMuted('net:'+id)||isMuted(id+'/status');
     g.innerHTML=`<div class="net-label${sa?' active':''}" onclick="setActive('${id}','status');closeSidebar();" style="${sa?'background:var(--bg4);':''}">
       <span class="net-dot ${net.connected?'online':''}" id="dot-${id}"></span>
       <span class="net-name">${esc(net.config.label||net.config.server)}</span>
-      ${sc?`<span class="chan-unread-badge">${sc>99?'99+':sc}</span>`:''}
+      ${sc&&!netMuted?`<span class="chan-unread-badge${mentionUnread.get(sk)?` highlight`:''}">${sc>99?'99+':sc}</span>`:''}
       <span class="net-actions">
         <button class="net-btn net-kebab" onclick="event.stopPropagation();toggleNetMenu('${id}','${esc(net.config.label||net.config.server)}')" title="Options">⋮</button>
       </span>
@@ -2598,7 +2651,8 @@ function renderSidebar(){
       if(window.innerWidth>768) ci.draggable=true;
       ci.style.position='relative';
       const chMuted=isMuted(id+'/'+ch.name)||isMuted('net:'+id);
-      ci.innerHTML=`${esc(ch.name)}<span class="chan-right">${uc&&!chMuted?`<span class="chan-unread-badge">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab" onclick="event.stopPropagation();toggleChanMenu(this,'${id}','${esc(ch.name)}','channel')">⋮</span></span>`;
+      const mc=mentionUnread.get(k)||0;
+      ci.innerHTML=`${esc(ch.name)}<span class="chan-right">${uc&&!chMuted?`<span class="chan-unread-badge${mc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab" onclick="event.stopPropagation();toggleChanMenu(this,'${id}','${esc(ch.name)}','channel')">⋮</span></span>`;
       ci.onclick=()=>{setActive(id,ch.name);closeSidebar();};
       chanContainer.appendChild(ci);
     }
@@ -2614,7 +2668,7 @@ function renderSidebar(){
         qi.style.fontStyle='italic';
         qi.style.position='relative';
         const pmMuted=isMuted(id+'/'+lc)||isMuted('net:'+id);
-        qi.innerHTML=`${esc(display)}<span class="chan-right">${uc&&!pmMuted?`<span class="chan-unread-badge">${uc>99?'99+':uc}</span>`:''}${pmMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab" onclick="event.stopPropagation();toggleChanMenu(this,'${id}','${esc(lc)}','pm')">⋮</span></span>`;
+        qi.innerHTML=`${esc(display)}<span class="chan-right">${uc&&!pmMuted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${pmMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab" onclick="event.stopPropagation();toggleChanMenu(this,'${id}','${esc(lc)}','pm')">⋮</span></span>`;
         qi.onclick=()=>{setActive(id,display);closeSidebar();};
         g.appendChild(qi);
       }
@@ -2667,13 +2721,13 @@ function updateLagDisplay(){
 }
 function setActive(conn_id,target){
   active={conn_id,target};
-  unread.delete(bk(conn_id,target)); saveUnread();
+  unread.delete(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
   // Persist active view and open queries
   try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){} savePrefsToServer();
   saveQueryBufs();
   renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay(); scrollForce();
   if(typeof updateE2EIndicator==='function') updateE2EIndicator(target);
-  if(getBuf(conn_id,target).length===0&&target!=='status')wsend({type:'get_logs',conn_id,target,limit:200});
+  if(getBuf(conn_id,target).length===0)wsend({type:'get_logs',conn_id,target,limit:200});
   const net=networks.find(n=>n.config.id===conn_id);
   const inp=document.getElementById('msg-input');
   inp.disabled=!net?.connected;
@@ -2919,6 +2973,28 @@ function buildMediaEl(url){
     });
     return wrap;
   }
+  // Link preview — fetch metadata from server for non-media HTTPS links
+  if(url.startsWith('https://') && loadAppearance().linkPreviews!==false){
+    const previewId='lp-'+Math.random().toString(36).slice(2,10);
+    const card=document.createElement('a');
+    card.href=url;card.target='_blank';card.rel='noopener noreferrer';
+    card.className='msg-link-preview';card.id=previewId;
+    card.style.display='none'; // Hidden until metadata loads
+    // Fetch preview asynchronously
+    fetch(`/cryptirc/preview?url=${encodeURIComponent(url)}`,{headers:{'Authorization':'Bearer '+sessionToken}})
+      .then(r=>r.ok?r.json():null).then(d=>{
+        if(!d||!d.title){card.remove();return;}
+        const el=document.getElementById(previewId);
+        if(!el)return;
+        let html=`<div class="msg-link-preview-domain">${esc(d.site_name||d.domain)}</div>`;
+        html+=`<div class="msg-link-preview-title">${esc(d.title)}</div>`;
+        if(d.description) html+=`<div class="msg-link-preview-desc">${esc(d.description)}</div>`;
+        if(d.image&&d.image.startsWith('https://')) html+=`<img class="msg-link-preview-img" src="${esc(d.image)}" loading="lazy" onerror="this.remove()">`;
+        el.innerHTML=html;
+        el.style.display='';
+      }).catch(()=>card.remove());
+    return card;
+  }
   return null;
 }
 function extractYouTubeId(url){
@@ -2947,6 +3023,12 @@ document.addEventListener('DOMContentLoaded',()=>{
     else if(e.key==='ArrowUp')   {if(historyIdx<inputHistory.length-1){historyIdx++;inp.value=inputHistory[inputHistory.length-1-historyIdx];}e.preventDefault();}
     else if(e.key==='ArrowDown') {if(historyIdx>0){historyIdx--;inp.value=inputHistory[inputHistory.length-1-historyIdx];}else{historyIdx=-1;inp.value='';}e.preventDefault();}
     else if(e.key==='Tab')       {e.preventDefault();tabComplete(inp);}
+    // mIRC formatting shortcuts
+    else if(e.ctrlKey&&e.key==='b'){e.preventDefault();insertAtCursor(inp,'\x02');}       // Bold
+    else if(e.ctrlKey&&e.key==='u'){e.preventDefault();insertAtCursor(inp,'\x1F');}       // Underline
+    else if(e.ctrlKey&&e.key==='i'){e.preventDefault();insertAtCursor(inp,'\x1D');}       // Italic
+    else if(e.ctrlKey&&e.key==='o'){e.preventDefault();insertAtCursor(inp,'\x0F');}       // Reset
+    else if(e.ctrlKey&&e.key==='k'){e.preventDefault();showMircColorPicker(inp);}         // Color
     else { sendTypingActive(); }
   });
   ['l-user','l-pass'].forEach(id=>document.getElementById(id)?.addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();}));
@@ -2982,10 +3064,12 @@ let _lastTypingSent=0;
 function sendTypingActive(){
   if(!active||!ws||ws.readyState!==1) return;
   const now=Date.now();
-  if(now-_lastTypingSent<3000) return; // throttle to every 3s
+  if(now-_lastTypingSent<3000) return;
   _lastTypingSent=now;
   const target=active.target;
   if(!target) return;
+  // Only send typing to channels (not PMs — avoids 401 errors for offline nicks)
+  if(!target.startsWith('#')&&!target.startsWith('&')) return;
   ws.send(JSON.stringify({type:'send',conn_id:active.conn_id,raw:`@+typing=active TAGMSG ${target}`}));
 }
 function sendTypingDone(){
@@ -2993,6 +3077,7 @@ function sendTypingDone(){
   _lastTypingSent=0;
   const target=active.target;
   if(!target) return;
+  if(!target.startsWith('#')&&!target.startsWith('&')) return;
   ws.send(JSON.stringify({type:'send',conn_id:active.conn_id,raw:`@+typing=done TAGMSG ${target}`}));
 }
 
@@ -3035,7 +3120,7 @@ async function handleInput(raw){
         if(args.slice(1).length) {
           const qtext = args.slice(1).join(' ');
           // L2: route through E2E if session exists
-          const qwire = window.E2E?.ready ? await e2eEncryptOutgoing(qnick, qtext) : null;
+          const qwire = (window.E2E?.ready || window.E2E?.channelKeys?.[qnick]) ? await e2eEncryptOutgoing(qnick, qtext) : null;
           if (qwire) {
             wsend({type:'send',conn_id,raw:`PRIVMSG ${qnick} :${qwire}`});
             addMessage(conn_id,qnick,{ts:Date.now()/1000|0,from:getNick(conn_id),text:qtext,kind:'privmsg',encrypted:true});
@@ -3052,6 +3137,19 @@ async function handleInput(raw){
         document.getElementById('chanlist-search').value='';
         document.getElementById('chanlist-overlay').classList.add('show');
         wsend({type:'send',conn_id,raw:args[0]?`LIST ${args[0]}`:'LIST'}); break;
+
+      case 'LINKS': {
+        window._linksData=[];window._linksConnId=conn_id;
+        showLinksOverlay();
+        wsend({type:'send',conn_id,raw:args[0]?`LINKS ${args[0]}`:'LINKS'});
+        // Auto-close with "no data" after 5 seconds if no response
+        setTimeout(()=>{
+          if(window._linksData&&window._linksData.length===0){
+            document.getElementById('links-body').innerHTML='<div style="color:var(--text3);padding:20px;text-align:center">No links data received. The server may not support /links or it requires operator privileges.</div>';
+          }
+        },5000);
+        break;
+      }
 
       // ── Identity ────────────────────────────────────────────────────
       case 'NICK':
@@ -3100,7 +3198,7 @@ async function handleInput(raw){
           saveQueryBufs();
         }
         // L4: encrypt if E2E session exists for the destination
-        const msgWire = window.E2E?.ready ? await e2eEncryptOutgoing(to, t) : null;
+        const msgWire = (window.E2E?.ready || window.E2E?.channelKeys?.[to]) ? await e2eEncryptOutgoing(to, t) : null;
         wsend({type:'send',conn_id,raw:`PRIVMSG ${to} :${msgWire||t}`});
         addMessage(conn_id,to,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg',encrypted:!!msgWire});
         setActive(conn_id,to);
@@ -3401,6 +3499,63 @@ async function handleInput(raw){
     }
   }
 }
+function insertAtCursor(inp,text){
+  const pos=inp.selectionStart;
+  inp.value=inp.value.slice(0,pos)+text+inp.value.slice(inp.selectionEnd);
+  inp.selectionStart=inp.selectionEnd=pos+text.length;
+  inp.focus();
+}
+function showMircColorPicker(inp){
+  // Remove existing picker
+  document.getElementById('mirc-color-picker')?.remove();
+  const colors=['#fff','#000','#00007f','#009300','#ff0000','#7f0000','#9c009c','#fc7f00','#ffff00','#00fc00','#009393','#00ffff','#0000fc','#ff00ff','#7f7f7f','#d2d2d2'];
+  const picker=document.createElement('div');
+  picker.id='mirc-color-picker';
+  picker.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:8px;z-index:102;';
+  picker.innerHTML=`
+    <div style="font-size:10px;color:var(--text3);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">
+      <span>mIRC Colors — Ctrl+K</span>
+      <span onclick="document.getElementById('mirc-color-picker').remove()" style="cursor:pointer;padding:2px 6px">✕</span>
+    </div>
+    <div style="display:flex;gap:2px;flex-wrap:wrap;margin-bottom:6px">
+      <span style="font-size:9px;color:var(--text3);width:100%">Foreground:</span>
+      ${colors.map((c,i)=>`<div onclick="pickMircColor(${i},'fg')" style="width:22px;height:22px;background:${c};border-radius:3px;cursor:pointer;border:1px solid var(--border)" title="${i}"></div>`).join('')}
+    </div>
+    <div style="display:flex;gap:2px;flex-wrap:wrap">
+      <span style="font-size:9px;color:var(--text3);width:100%">Background (optional):</span>
+      ${colors.map((c,i)=>`<div onclick="pickMircColor(${i},'bg')" style="width:22px;height:22px;background:${c};border-radius:3px;cursor:pointer;border:1px solid var(--border)" title="${i}"></div>`).join('')}
+      <div onclick="pickMircColor(-1,'bg')" style="width:22px;height:22px;background:var(--bg2);border-radius:3px;cursor:pointer;border:1px solid var(--border);font-size:9px;display:flex;align-items:center;justify-content:center;color:var(--text3)" title="No background">✕</div>
+    </div>
+    <div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap">
+      <button onclick="insertAtCursor(document.getElementById('msg-input'),'\\x02');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-weight:bold;font-size:12px">B</button>
+      <button onclick="insertAtCursor(document.getElementById('msg-input'),'\\x1D');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-style:italic;font-size:12px">I</button>
+      <button onclick="insertAtCursor(document.getElementById('msg-input'),'\\x1F');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;text-decoration:underline;font-size:12px">U</button>
+      <button onclick="insertAtCursor(document.getElementById('msg-input'),'\\x0F');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text3);border-radius:4px;cursor:pointer;font-size:10px">Reset</button>
+    </div>`;
+  inp.parentNode.appendChild(picker);
+  // Close on outside click
+  setTimeout(()=>document.addEventListener('click',function closer(e){
+    if(!e.target.closest('#mirc-color-picker')){document.getElementById('mirc-color-picker')?.remove();document.removeEventListener('click',closer);}
+  }),100);
+}
+window._mircFg=null;
+function pickMircColor(num,type){
+  const inp=document.getElementById('msg-input');
+  if(type==='fg'){
+    window._mircFg=num;
+    // Insert color code — user picks bg next or it auto-inserts fg only
+    return;
+  }
+  // Background picked (or no-bg)
+  const fg=window._mircFg;
+  if(fg==null) return;
+  let code='\x03'+String(fg).padStart(2,'0');
+  if(num>=0) code+=','+String(num).padStart(2,'0');
+  insertAtCursor(inp,code);
+  window._mircFg=null;
+  document.getElementById('mirc-color-picker')?.remove();
+}
+
 function tabComplete(inp){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
@@ -3898,7 +4053,7 @@ const APPEAR_DEFAULTS={
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
   timestamps:true, joinpart:true, compact:false, coloredNicks:true,
   accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, msgGap:4,
-  font:"'JetBrains Mono',monospace",
+  font:"'JetBrains Mono',monospace", linkPreviews:true,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
 };
@@ -3932,6 +4087,7 @@ function applyAppearance(){
     coloredNicks: el('a-colorednicks').classList.contains('on'),
     nickList:   el('a-nicklist').classList.contains('on'),
     spellcheck: el('a-spellcheck').classList.contains('on'),
+    linkPreviews: el('a-linkpreviews').classList.contains('on'),
     msgGap:     +el('a-msg-gap').value||prev.msgGap||4,
     accent:     el('a-accent-color').value||prev.accent||'#00d4aa',
     accent2:    el('a-accent2-color').value||prev.accent2||'#0099ff',
@@ -4096,6 +4252,7 @@ function populateAppearanceModal(cfg){
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
   cfg.spellcheck!==false ? el('a-spellcheck').classList.add('on') : el('a-spellcheck').classList.remove('on');
+  cfg.linkPreviews!==false ? el('a-linkpreviews').classList.add('on') : el('a-linkpreviews').classList.remove('on');
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;
   el('a-accent-swatch').style.background=cfg.accent;
@@ -4271,6 +4428,62 @@ document.addEventListener('click',e=>{
   });
 })();
 
+// ─── @ Nick autocomplete ─────────────────────────────────────────────────────
+(function(){
+  const inp=document.getElementById('msg-input');
+  if(!inp)return;
+  let nacEl=document.createElement('div');
+  nacEl.id='nick-autocomplete';
+  nacEl.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:102;';
+  inp.parentNode.appendChild(nacEl);
+  let nacIdx=-1;
+  function getChannelNicks(){
+    if(!active)return [];
+    const net=networks.find(n=>n.config.id===active.conn_id);
+    const ch=net?.channels?.find(c=>c.name===active.target);
+    return (ch?.names||[]).map(n=>stripPfx(n));
+  }
+  inp.addEventListener('input',()=>{
+    const v=inp.value, pos=inp.selectionStart;
+    const before=v.slice(0,pos);
+    const m=before.match(/@([a-zA-Z0-9_\-\[\]\\`^]{0,20})$/);
+    if(!m){nacEl.style.display='none';nacIdx=-1;return;}
+    const q=m[1].toLowerCase();
+    const nicks=getChannelNicks().filter(n=>n.toLowerCase().startsWith(q)).slice(0,10);
+    if(!nicks.length){nacEl.style.display='none';nacIdx=-1;return;}
+    nacEl.style.display='block'; nacIdx=0;
+    nacEl.innerHTML=nicks.map((n,i)=>`<div class="emoji-ac-item${i===0?' active':''}" data-i="${i}" style="font-size:13px"><span class="nc${nickHash(n)}">${esc(n)}</span></div>`).join('');
+    nacEl.querySelectorAll('.emoji-ac-item').forEach(el=>{
+      el.onclick=()=>{completeNick(nicks[+el.dataset.i]);};
+    });
+  });
+  function completeNick(nick){
+    const v=inp.value, pos=inp.selectionStart;
+    const before=v.slice(0,pos);
+    const idx=before.lastIndexOf('@');
+    inp.value=before.slice(0,idx)+nick+' '+v.slice(pos);
+    inp.focus();
+    nacEl.style.display='none';nacIdx=-1;
+  }
+  inp.addEventListener('keydown',e=>{
+    if(nacEl.style.display==='none')return;
+    const items=nacEl.querySelectorAll('.emoji-ac-item');
+    if(!items.length)return;
+    if(e.key==='ArrowDown'){e.preventDefault();nacIdx=Math.min(nacIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===nacIdx));}
+    else if(e.key==='ArrowUp'){e.preventDefault();nacIdx=Math.max(nacIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===nacIdx));}
+    else if(e.key==='Tab'||e.key==='Enter'){
+      if(nacIdx>=0&&nacIdx<items.length){
+        e.preventDefault();
+        const nicks=getChannelNicks().filter(n=>n.toLowerCase().startsWith(
+          (inp.value.slice(0,inp.selectionStart).match(/@([a-zA-Z0-9_\-\[\]\\`^]{0,20})$/)||[])[1]?.toLowerCase()||''
+        )).slice(0,10);
+        if(nicks[nacIdx])completeNick(nicks[nacIdx]);
+      }
+    }
+    else if(e.key==='Escape'){nacEl.style.display='none';nacIdx=-1;}
+  });
+})();
+
 // ─── Slash command autocomplete ───────────────────────────────────────────────
 (function(){
   const inp=document.getElementById('msg-input');
@@ -4390,6 +4603,8 @@ function gatherPreferences(){
     ignoreList: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_ignore')||'[]');}catch{return[];}})(),
     highlightWords: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}})(),
     favsOnly: localStorage.getItem('cryptirc_favs_only')==='true',
+    sidebarCollapsed: localStorage.getItem('cryptirc_sidebar_collapsed')==='1',
+    nickCollapsed: localStorage.getItem('cryptirc_nick_collapsed')==='1',
   };
 }
 function savePrefsToServer(){
@@ -4418,8 +4633,21 @@ function restorePreferences(p){
     if(p.ignoreList) localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));
     if(p.highlightWords) localStorage.setItem('cryptirc_highlight_words',JSON.stringify(p.highlightWords));
     if(p.favsOnly!=null) localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
+    if(p.sidebarCollapsed!=null) localStorage.setItem('cryptirc_sidebar_collapsed',p.sidebarCollapsed?'1':'');
+    if(p.nickCollapsed!=null) localStorage.setItem('cryptirc_nick_collapsed',p.nickCollapsed?'1':'');
     // Re-apply UI state
     renderSidebar(); updateMentionsBadge(); applyFavsOnly();
+    // Apply panel collapse states
+    if(window.innerWidth>768){
+      const sb=document.getElementById('sidebar');
+      const np=document.getElementById('nick-panel');
+      const sbBtn=document.getElementById('sidebar-toggle-btn');
+      const nkIcon=document.querySelector('#nick-toggle .toggle-icon');
+      if(p.sidebarCollapsed){sb?.classList.add('collapsed');if(sbBtn)sbBtn.textContent='▶';}
+      else{sb?.classList.remove('collapsed');if(sbBtn)sbBtn.textContent='◀';}
+      if(p.nickCollapsed){np?.classList.add('collapsed');if(nkIcon)nkIcon.textContent='◀';}
+      else{np?.classList.remove('collapsed');if(nkIcon)nkIcon.textContent='▶';}
+    }
   }catch(e){console.error('Restore prefs failed:',e);}
 }
 
@@ -4560,7 +4788,16 @@ function closeQuery(conn_id,lc){
 
 function renderFavorites(){
   const el=document.getElementById('favorites-list');
-  const favs=loadFavorites();
+  let favs=loadFavorites();
+  // Clean stale favorites — remove channels we're not in anymore
+  const before=favs.length;
+  favs=favs.filter(f=>{
+    const net=networks.find(n=>n.config.id===f.conn_id);
+    if(!net)return false;
+    if(f.target.startsWith('#')||f.target.startsWith('&')) return net.channels.some(c=>c.name===f.target);
+    return true; // Keep PM favorites
+  });
+  if(favs.length!==before) saveFavorites(favs);
   el.innerHTML='';
   if(!favs.length)return;
   const hdr=document.createElement('div');hdr.className='fav-header';hdr.textContent='Favorites';
@@ -4571,7 +4808,8 @@ function renderFavorites(){
     const ci=document.createElement('div');
     ci.className=`chan-item${isA?' active':''}`;
     const netLabel=net?esc(net.config.label||net.config.server):'?';
-    ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span>${uc?`<span class="chan-unread-badge">${uc>99?'99+':uc}</span>`:''}`;
+    const fmc=mentionUnread.get(k)||0;
+    ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span>${uc?`<span class="chan-unread-badge${fmc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}`;
     ci.onclick=()=>{setActive(f.conn_id,f.target);closeSidebar();};
     el.appendChild(ci);
   }
@@ -4621,6 +4859,32 @@ function openChanList(){
   wsend({type:'send',conn_id:chanListConnId,raw:'LIST'});
 }
 function closeChanList(){document.getElementById('chanlist-overlay').classList.remove('show');chanListData=[];}
+
+// ─── Links overlay ───────────────────────────────────────────────────────────
+function showLinksOverlay(){
+  document.getElementById('links-body').innerHTML='<div style="color:var(--text3);padding:20px;text-align:center">Waiting for server response...</div>';
+  document.getElementById('links-count').textContent='';
+  document.getElementById('links-overlay').style.display='flex';
+  window._linksData=[];
+}
+function closeLinksOverlay(){document.getElementById('links-overlay').style.display='none';window._linksData=[];}
+function addLinkEntry(text){
+  if(!window._linksData) return;
+  window._linksData.push(text);
+}
+function renderLinksOverlay(){
+  const body=document.getElementById('links-body');
+  const data=window._linksData||[];
+  document.getElementById('links-count').textContent=data.length+' servers';
+  if(!data.length){body.innerHTML='<div style="color:var(--text3);padding:20px;text-align:center">No links data.</div>';return;}
+  body.innerHTML='';
+  for(const text of data){
+    const row=document.createElement('div');
+    row.style.cssText='padding:8px 16px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text);font-family:var(--mono);';
+    row.innerHTML=parseMircColors(text);
+    body.appendChild(row);
+  }
+}
 function handleListEntry(ev){
   chanListData.push({channel:ev.channel,users:ev.users,topic:ev.topic});
   // Live count update
@@ -5494,6 +5758,30 @@ async function showAdminPanel(){
     `;
     body.appendChild(regSection);
 
+    // Link preview settings
+    const lpR=await fetch('/cryptirc/admin/link-preview',{headers:{'Authorization':'Bearer '+sessionToken}});
+    const lpSettings=lpR.ok?await lpR.json():{mode:'whitelist',whitelist:[]};
+    const lpSection=document.createElement('div');
+    lpSection.style.cssText='margin-bottom:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;';
+    lpSection.innerHTML=`
+      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Link Previews</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:13px;color:var(--text);flex-shrink:0">Mode</span>
+        <select id="admin-lp-mode" style="flex:1;padding:6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px" onchange="adminSaveLinkPreview()">
+          <option value="off"${lpSettings.mode==='off'?' selected':''}>Off — No previews</option>
+          <option value="whitelist"${lpSettings.mode==='whitelist'?' selected':''}>Whitelist — Approved domains only</option>
+          <option value="all"${lpSettings.mode==='all'?' selected':''}>All — Preview any HTTPS link</option>
+        </select>
+      </div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:8px">Whitelist mode only fetches metadata from approved domains. "All" mode fetches any HTTPS link (blocks private IPs).</div>
+      <div style="margin-bottom:6px">
+        <span style="font-size:11px;color:var(--text2);font-weight:600">Whitelist</span>
+        <span style="font-size:10px;color:var(--text3);margin-left:4px">(one domain per line)</span>
+      </div>
+      <textarea id="admin-lp-whitelist" style="width:100%;min-height:120px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:12px;padding:8px;outline:none;resize:vertical;box-sizing:border-box" onchange="adminSaveLinkPreview()">${lpSettings.whitelist.join('\n')}</textarea>
+    `;
+    body.appendChild(lpSection);
+
     // User list
     const userSection=document.createElement('div');
     userSection.innerHTML='<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Users</div>';
@@ -5544,6 +5832,19 @@ async function adminSaveSettings(){
       body:JSON.stringify({registration_open:open,registration_code:code})
     });
     showToast('Admin settings saved');
+  }catch(e){}
+}
+async function adminSaveLinkPreview(){
+  const mode=document.getElementById('admin-lp-mode').value;
+  const whitelist=document.getElementById('admin-lp-whitelist').value
+    .split('\n').map(s=>s.trim().toLowerCase()).filter(s=>s.length>0);
+  try{
+    await fetch('/cryptirc/admin/link-preview',{
+      method:'PUT',
+      headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
+      body:JSON.stringify({mode,whitelist})
+    });
+    showToast('Link preview settings saved');
   }catch(e){}
 }
 
@@ -5640,11 +5941,25 @@ function checkMention(conn_id,target,from,text,ts){
     const net=networks.find(x=>x.config.id===conn_id);
     mentionsList.unshift({conn_id,target,from,text,ts,network:net?.config.label||net?.config.server||conn_id});
     if(mentionsList.length>100)mentionsList.length=100;
+    _unseenMentions++;
     saveMentions(); updateMentionsBadge();
   }
   return mentioned;
 }
-function updateMentionsBadge(){const el=document.getElementById('mentions-count');if(!el)return;if(mentionsList.length>0){el.style.display='';el.textContent=mentionsList.length>99?'99+':mentionsList.length;}else{el.style.display='none';}}
+let _unseenMentions=0;
+function updateMentionsBadge(){
+  const el=document.getElementById('mentions-count');
+  const btn=document.getElementById('mentions-btn');
+  if(!el)return;
+  if(_unseenMentions>0){
+    el.style.display='';
+    el.textContent=_unseenMentions>99?'99+':_unseenMentions;
+    if(btn)btn.style.color='var(--accent)';
+  } else {
+    el.style.display='none';
+    if(btn)btn.style.color='';
+  }
+}
 // ─── Search ───────────────────────────────────────────────────────────────────
 function toggleSearchPanel(){
   const p=document.getElementById('search-panel');
@@ -5713,7 +6028,11 @@ document.addEventListener('click',e=>{
 function toggleMentionsPanel(){
   const p=document.getElementById('mentions-panel');
   p.classList.toggle('show');
-  if(p.classList.contains('show'))renderMentionsList();
+  if(p.classList.contains('show')){
+    _unseenMentions=0;
+    updateMentionsBadge();
+    renderMentionsList();
+  }
 }
 function renderMentionsList(){
   const el=document.getElementById('mentions-list');
@@ -5742,7 +6061,7 @@ function renderMentionsList(){
     el.appendChild(d);
   }
 }
-function clearMentions(){mentionsList=[];saveMentions();updateMentionsBadge();renderMentionsList();}
+function clearMentions(){mentionsList=[];_unseenMentions=0;saveMentions();updateMentionsBadge();renderMentionsList();}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\\/g,'&#92;');}
 const MIRC_COLORS=['#fff','#000','#00007f','#009300','#ff0000','#7f0000','#9c009c','#fc7f00','#ffff00','#00fc00','#009393','#00ffff','#0000fc','#ff00ff','#7f7f7f','#d2d2d2'];
 function parseMircColors(s){
@@ -5778,7 +6097,23 @@ function parseMircColors(s){
   }
   return out;
 }
-function renderText(s){return linkify(parseMircColors(s));}
+function renderText(s){return highlightNicks(linkify(parseMircColors(s)));}
+function highlightNicks(html){
+  if(!active)return html;
+  const net=networks.find(n=>n.config.id===active.conn_id);
+  const ch=net?.channels?.find(c=>c.name===active.target);
+  if(!ch||!ch.names||!ch.names.length)return html;
+  const nicks=ch.names.map(n=>stripPfx(n)).filter(n=>n.length>1);
+  if(!nicks.length)return html;
+  // Build regex matching any nick as a whole word, skip inside HTML tags
+  const escaped=nicks.map(n=>n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+  const re=new RegExp('(?<![\\w])('+ escaped.join('|') +')(?![\\w])','g');
+  // Split by HTML tags to avoid replacing inside <a href> etc
+  return html.replace(/(<[^>]+>)|([^<]+)/g,(m,tag,text)=>{
+    if(tag)return tag;
+    return text.replace(re,(match)=>`<span class="nick-mention nc${nickHash(match)}" onclick="showNickMenu(event,'${match.replace(/'/g,"\\'")}')" style="cursor:pointer;font-weight:600">${match}</span>`);
+  });
+}
 function renderTopicHtml(s){return linkify(parseMircColors(s));}
 function linkify(s){return s.replace(/(https?:\/\/[^\s<>"]+)/g,(m,url)=>{
   const href=url.includes('/files/')?appendFileToken(url):url;

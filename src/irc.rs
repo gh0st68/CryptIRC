@@ -383,28 +383,30 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                 if req.contains(&"echo-message") {
                                     echo_message_enabled = true;
                                 }
-                                // SASL handling
+                                // Request IRCv3 caps first (without sasl)
+                                if !req.is_empty() {
+                                    let req_str = req.join(" ");
+                                    info!("[{}] Requesting CAPs: {}", conn_id, req_str);
+                                    conn.lock().await.send_raw(&format!("CAP REQ :{}\r\n", req_str)).await?;
+                                }
+                                // SASL — request separately to avoid batch rejection
                                 if use_sasl && available_caps.iter().any(|c| c == "sasl") {
-                                    req.push("sasl");
+                                    conn.lock().await.send_raw("CAP REQ :sasl\r\n").await?;
                                     sasl_state = SaslState::CapReqSent;
                                 } else if use_sasl {
                                     warn!("[{}] Server has no sasl cap", conn_id);
                                     sasl_state = SaslState::Done;
                                     send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: "Server does not support SASL".into() });
-                                }
-
-                                if !req.is_empty() {
-                                    let req_str = req.join(" ");
-                                    info!("[{}] Requesting CAPs: {}", conn_id, req_str);
-                                    conn.lock().await.send_raw(&format!("CAP REQ :{}\r\n", req_str)).await?;
-                                } else if !use_sasl {
+                                    if req.is_empty() { conn.lock().await.send_raw("CAP END\r\n").await?; }
+                                } else if req.is_empty() {
                                     conn.lock().await.send_raw("CAP END\r\n").await?;
                                 }
                                 available_caps.clear();
                             }
                             "ACK" => {
                                 info!("[{}] CAP ACK: {}", conn_id, caps);
-                                if sasl_state == SaslState::CapReqSent && caps.contains("sasl") {
+                                if caps.contains("sasl") && sasl_state == SaslState::CapReqSent {
+                                    // SASL cap accepted — start authentication
                                     let method = match &sasl_method {
                                         Some(SaslMethod::External)     => "EXTERNAL",
                                         Some(SaslMethod::Plain { .. }) => "PLAIN",
@@ -412,10 +414,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                     };
                                     conn.lock().await.send_raw(&format!("AUTHENTICATE {}\r\n", method)).await?;
                                     sasl_state = SaslState::AuthenticateSent;
-                                } else if !use_sasl || sasl_state == SaslState::Done || sasl_state == SaslState::Idle {
-                                    // No SASL needed, end CAP negotiation
+                                } else if !caps.contains("sasl") && !use_sasl {
+                                    // Non-SASL caps ACKed and no SASL needed
                                     conn.lock().await.send_raw("CAP END\r\n").await?;
                                 }
+                                // If SASL is pending (CapReqSent/AuthenticateSent), don't send CAP END yet
                             }
                             "NAK" => {
                                 warn!("[{}] CAP NAK: {}", conn_id, caps);
@@ -924,6 +927,27 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "323" => {
                         send(ServerEvent::IrcListEnd { conn_id: conn_id.to_string() });
                     }
+                    // 364 = RPL_LINKS
+                    "364" => {
+                        let server = p.params.get(1).cloned().unwrap_or_default();
+                        let hub = p.params.get(2).cloned().unwrap_or_default();
+                        let info = p.params.get(3).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcMessage {
+                            conn_id: conn_id.to_string(), from: "links".into(),
+                            target: "status".into(),
+                            text: format!("\x02{}\x02 → {} ({})", server, hub, info),
+                            ts, kind: MessageKind::Notice,
+                        });
+                    }
+                    // 365 = RPL_ENDOFLINKS
+                    "365" => {
+                        send(ServerEvent::IrcMessage {
+                            conn_id: conn_id.to_string(), from: "links".into(),
+                            target: "status".into(),
+                            text: "End of /LINKS".into(),
+                            ts, kind: MessageKind::Notice,
+                        });
+                    }
                     // Forward unhandled numerics (whois, lusers, motd, etc.) as status messages
                     cmd if cmd.chars().all(|c| c.is_ascii_digit()) => {
                         let text = if p.params.len() > 1 {
@@ -932,6 +956,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             p.params.join(" ")
                         };
                         if !text.is_empty() {
+                            state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await;
                             send(ServerEvent::IrcMessage {
                                 conn_id: conn_id.to_string(),
                                 from: "*".to_string(),

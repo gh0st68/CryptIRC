@@ -31,6 +31,7 @@ mod irc;
 mod logs;
 mod notifications;
 mod paste;
+mod preview;
 mod upload;
 
 use auth::{validate_uuid, AuthManager};
@@ -57,6 +58,7 @@ pub struct AppState {
     pub notifier:            Arc<NotificationManager>,
     pub e2e_store:           Arc<E2EStore>,
     pub paste_store:         Arc<paste::PasteStore>,
+    pub preview_service:     Arc<preview::PreviewService>,
     pub global_tx:           broadcast::Sender<ServerEvent>,
     pub user_events:         UserEventMap,
     pub upload_dir:          String,
@@ -350,7 +352,20 @@ async fn main() -> Result<()> {
     let upload_dir = format!("{}/uploads", data_dir);
     let base_url    = std::env::var("CRYPTIRC_BASE_URL").unwrap_or_else(|_| "http://localhost:9000".into());
     let from_email  = std::env::var("CRYPTIRC_FROM_EMAIL").unwrap_or_else(|_| "noreply@cryptirc.local".into());
-    let registration_open = std::env::var("CRYPTIRC_REGISTRATION").unwrap_or_else(|_| "open".into()) != "closed";
+    // Load admin settings from disk (persisted), fall back to env vars
+    let admin_settings_path = std::path::PathBuf::from(&data_dir).join("admin_settings.json");
+    let (registration_open, reg_code) = if admin_settings_path.exists() {
+        let json = std::fs::read_to_string(&admin_settings_path).unwrap_or_default();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+        let open = v.get("registration_open").and_then(|v| v.as_bool()).unwrap_or(true);
+        let code = v.get("registration_code").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        info!("Loaded admin settings from disk (registration_open={}, has_code={})", open, !code.is_empty());
+        (open, code)
+    } else {
+        let open = std::env::var("CRYPTIRC_REGISTRATION").unwrap_or_else(|_| "open".into()) != "closed";
+        let code = std::env::var("CRYPTIRC_REG_CODE").unwrap_or_default();
+        (open, code)
+    };
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&upload_dir)?;
     std::fs::create_dir_all(format!("{}/certs", data_dir))?;
@@ -366,20 +381,19 @@ async fn main() -> Result<()> {
     let notifier = Arc::new(NotificationManager::new(&data_dir, vapid));
     let e2e_store = Arc::new(E2EStore::new(&data_dir));
     let paste_store = Arc::new(paste::PasteStore::new(&data_dir));
+    let preview_service = Arc::new(preview::PreviewService::new(&data_dir));
     let (global_tx, _) = broadcast::channel(64);
 
     let state = AppState {
         connections:         Arc::new(DashMap::new()),
         conn_owners:         Arc::new(DashMap::new()),
         disconnect_requests: Arc::new(DashSet::new()),
-        crypto, certs, logger, auth, notifier, e2e_store, paste_store, global_tx,
+        crypto, certs, logger, auth, notifier, e2e_store, paste_store, preview_service, global_tx,
         user_events:         Arc::new(DashMap::new()),
         upload_dir, base_url, from_email,
         data_dir: data_dir.clone(),
         registration_open: Arc::new(tokio::sync::RwLock::new(registration_open)),
-        registration_code: Arc::new(tokio::sync::RwLock::new(
-            std::env::var("CRYPTIRC_REG_CODE").unwrap_or_default()
-        )),
+        registration_code: Arc::new(tokio::sync::RwLock::new(reg_code)),
     };
 
     // Background: purge expired sessions hourly
@@ -419,6 +433,8 @@ async fn main() -> Result<()> {
         .route("/paste",                post(route_paste_create).layer(DefaultBodyLimit::max(524_288)))
         .route("/paste/:id",            get(route_paste_view))
         .route("/paste/:id/raw",        get(route_paste_raw))
+        .route("/preview",              get(route_link_preview))
+        .route("/admin/link-preview",   get(route_admin_get_preview_settings).put(route_admin_put_preview_settings))
         .route("/push/vapid-public-key", get(route_push_vapid_key))
         .route("/push/subscribe",        post(route_push_subscribe).layer(DefaultBodyLimit::max(4_096)))
         .route("/push/subscribe",        axum::routing::delete(route_push_unsubscribe).layer(DefaultBodyLimit::max(2_048)))
@@ -617,6 +633,13 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     if let Some(code) = body.registration_code {
         *state.registration_code.write().await = code;
     }
+    // Persist admin settings to disk so they survive reboots
+    let settings = serde_json::json!({
+        "registration_open": *state.registration_open.read().await,
+        "registration_code": *state.registration_code.read().await,
+    });
+    let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
+    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&settings).unwrap_or_default()).await;
     (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
 }
 
@@ -892,6 +915,62 @@ async fn route_paste_raw(
         Ok(None) => (StatusCode::NOT_FOUND, "Not found").into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response(),
     }
+}
+
+// ─── Link preview routes ─────────────────────────────────────────────────────
+
+async fn route_link_preview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    // Require auth
+    let token = headers.get("authorization").and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer ")).unwrap_or("");
+    if state.auth.validate_session(token).is_none() {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response();
+    }
+    let url = match params.get("url") {
+        Some(u) => u.clone(),
+        None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Missing url parameter"}))).into_response(),
+    };
+    match state.preview_service.fetch_preview(&url).await {
+        Ok(preview) => Json(serde_json::json!(preview)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn route_admin_get_preview_settings(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(user) = admin_check(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let settings = state.preview_service.load_settings().await;
+    Json(serde_json::json!(settings)).into_response()
+}
+
+async fn route_admin_put_preview_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<preview::PreviewSettings>,
+) -> impl IntoResponse {
+    let Some(user) = admin_check(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    // Load existing admin settings and merge preview settings
+    let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
+    let mut existing: serde_json::Value = if let Ok(json) = tokio::fs::read_to_string(&path).await {
+        serde_json::from_str(&json).unwrap_or_default()
+    } else { serde_json::json!({}) };
+    existing["link_preview_mode"] = serde_json::json!(body.mode);
+    existing["link_preview_whitelist"] = serde_json::json!(body.whitelist);
+    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
+    Json(serde_json::json!({"message":"Settings saved"})).into_response()
 }
 
 // ─── Push notification routes ─────────────────────────────────────────────────
