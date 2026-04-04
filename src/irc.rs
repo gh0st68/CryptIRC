@@ -1023,6 +1023,46 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             prefix: None,
                         });
                     }
+                    // 324 RPL_CHANNELMODEIS — route to channel, not status
+                    "324" => {
+                        let chan = p.params.get(1).cloned().unwrap_or_default();
+                        let modes = p.params[2..].join(" ");
+                        let text = format!("{} {}", chan, modes);
+                        let display_target = if chan.starts_with(['#','&','+','!']) { chan } else { "status".to_string() };
+                        send(ServerEvent::IrcMessage {
+                            conn_id: conn_id.to_string(), from: "*".into(),
+                            target: display_target, text, ts,
+                            kind: MessageKind::Notice, msg_id: 0, prefix: None,
+                        });
+                    }
+                    // 329 RPL_CREATIONTIME — route to channel
+                    "329" => {
+                        let chan = p.params.get(1).cloned().unwrap_or_default();
+                        let raw_ts = p.params.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+                        let text = if raw_ts > 0 {
+                            let dt = chrono::DateTime::from_timestamp(raw_ts, 0)
+                                .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                                .unwrap_or_else(|| raw_ts.to_string());
+                            format!("Channel created: {}", dt)
+                        } else { raw_ts.to_string() };
+                        let display_target = if chan.starts_with(['#','&','+','!']) { chan } else { "status".to_string() };
+                        send(ServerEvent::IrcMessage {
+                            conn_id: conn_id.to_string(), from: "*".into(),
+                            target: display_target, text, ts,
+                            kind: MessageKind::Notice, msg_id: 0, prefix: None,
+                        });
+                    }
+                    // 403 ERR_NOSUCHCHANNEL — route to channel if it looks like one
+                    "403" => {
+                        let chan = p.params.get(1).cloned().unwrap_or_default();
+                        let reason = p.params.get(2).cloned().unwrap_or("No such channel".into());
+                        let display_target = if chan.starts_with(['#','&','+','!']) { chan } else { "status".to_string() };
+                        send(ServerEvent::IrcMessage {
+                            conn_id: conn_id.to_string(), from: "*".into(),
+                            target: display_target, text: reason, ts,
+                            kind: MessageKind::Notice, msg_id: 0, prefix: None,
+                        });
+                    }
                     // Forward unhandled numerics (whois, lusers, motd, etc.) as status messages
                     cmd if cmd.chars().all(|c| c.is_ascii_digit()) => {
                         let text = if p.params.len() > 1 {
