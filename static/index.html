@@ -14,7 +14,7 @@
 <title>CryptIRC</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&family=Fira+Code:wght@400;500;700&family=Source+Code+Pro:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;700&family=Roboto+Mono:wght@400;500;700&family=Ubuntu+Mono:wght@400;700&family=Inconsolata:wght@400;500;700&family=Space+Mono:wght@400;700&family=Courier+Prime:wght@400;700&family=DM+Mono:wght@400;500&family=Anonymous+Pro:wght@400;700&family=PT+Mono&family=Overpass+Mono:wght@400;500;700&family=Noto+Sans+Mono:wght@400;500;700&family=Victor+Mono:wght@400;500;700&family=Red+Hat+Mono:wght@400;500;700&family=Inter:wght@400;500;700&family=Outfit:wght@400;500;700&family=Nunito:wght@400;600;700&family=Poppins:wght@400;500;700&family=Open+Sans:wght@400;600;700&family=Lato:wght@400;700&family=Rubik:wght@400;500;700&family=Lexend:wght@400;500;700&family=Sora:wght@400;500;700&family=Merriweather:wght@400;700&family=Comic+Neue:wght@400;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&family=Fira+Code:wght@400;500;700&family=Source+Code+Pro:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;700&family=Roboto+Mono:wght@400;500;700&family=Ubuntu+Mono:wght@400;700&family=Inconsolata:wght@400;500;700&family=Space+Mono:wght@400;700&family=Courier+Prime:wght@400;700&family=DM+Mono:wght@400;500&family=Anonymous+Pro:wght@400;700&family=PT+Mono&family=Overpass+Mono:wght@400;500;700&family=Noto+Sans+Mono:wght@400;500;700&family=Victor+Mono:wght@400;500;700&family=Red+Hat+Mono:wght@400;500;700&family=Inter:wght@400;500;700&family=Outfit:wght@400;500;700&family=Nunito:wght@400;600;700&family=Poppins:wght@400;500;700&family=Open+Sans:wght@400;600;700&family=Lato:wght@400;700&family=Rubik:wght@400;500;700&family=Lexend:wght@400;500;700&family=Sora:wght@400;500;700&family=Merriweather:wght@400;700&family=Comic+Neue:wght@400;700&family=Martian+Mono:wght@400;700&family=Oxygen+Mono&family=Share+Tech+Mono&family=Azeret+Mono:wght@400;500;700&family=Spline+Sans+Mono:wght@400;500;700&family=Major+Mono+Display&family=Xanh+Mono&family=Cutive+Mono&family=B612+Mono:wght@400;700&family=Nova+Mono&family=Syne+Mono&family=Nanum+Gothic+Coding&family=Cousine:wght@400;700&family=Chivo+Mono:wght@400;700&family=Fira+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;700&family=DM+Sans:wght@400;500;700&family=Manrope:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&family=Raleway:wght@400;500;700&family=Josefin+Sans:wght@400;600;700&family=Quicksand:wght@400;500;700&family=Montserrat:wght@400;500;700&family=Work+Sans:wght@400;500;700&family=Barlow:wght@400;500;700&family=Mulish:wght@400;500;700&family=Karla:wght@400;500;700&family=Urbanist:wght@400;500;700&family=Albert+Sans:wght@400;500;700&family=Figtree:wght@400;500;700&family=Playfair+Display:wght@400;700&family=Lora:wght@400;700&family=Crimson+Text:wght@400;700&family=Bitter:wght@400;500;700&family=Source+Serif+4:wght@400;500;700&family=DM+Serif+Display&family=Libre+Baskerville:wght@400;700&family=Cormorant+Garamond:wght@400;500;700&family=Orbitron:wght@400;500;700&family=Russo+One&family=Press+Start+2P&family=Silkscreen:wght@400;700&family=Bungee&family=Righteous&family=Audiowide&family=Caveat:wght@400;700&family=Kalam:wght@400;700&family=Patrick+Hand&family=Architects+Daughter&family=Shadows+Into+Light&display=swap" rel="stylesheet">
 <script src="/cryptirc/e2e.js" defer></script>
 <style>
 /* ── CSS custom properties ─────────────────────────────────────────────────── */
@@ -999,12 +999,12 @@ body > style, body > script { visibility:hidden; }
 @keyframes pulse  { 0%,100%{opacity:1} 50%{opacity:.4} }
 @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
 
-/* ── Forest rain theme ─────────────────────────────────────────────────────── */
-#rain-overlay {
+/* ── Animation overlay ─────────────────────────────────────────────────────── */
+#anim-overlay {
   display:none; position:fixed; inset:0; pointer-events:none; z-index:0; overflow:hidden;
 }
-#rain-overlay.active { display:block; }
-#rain-canvas { width:100%; height:100%; }
+#anim-overlay.active { display:block; }
+#anim-canvas { width:100%; height:100%; }
 @keyframes lightning {
   0%,100% { opacity:0; }
   5% { opacity:0.15; }
@@ -1336,6 +1336,56 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
             <option value="'Merriweather',serif">Merriweather</option>
             <option value="serif">System Serif</option>
             <option value="'Comic Neue',cursive">Comic Neue</option>
+            <option value="'Martian Mono',monospace">Martian Mono</option>
+            <option value="'Oxygen Mono',monospace">Oxygen Mono</option>
+            <option value="'Share Tech Mono',monospace">Share Tech Mono</option>
+            <option value="'Azeret Mono',monospace">Azeret Mono</option>
+            <option value="'Spline Sans Mono',monospace">Spline Sans Mono</option>
+            <option value="'Major Mono Display',monospace">Major Mono Display</option>
+            <option value="'Xanh Mono',monospace">Xanh Mono</option>
+            <option value="'Cutive Mono',monospace">Cutive Mono</option>
+            <option value="'B612 Mono',monospace">B612 Mono</option>
+            <option value="'Nova Mono',monospace">Nova Mono</option>
+            <option value="'Syne Mono',monospace">Syne Mono</option>
+            <option value="'Nanum Gothic Coding',monospace">Nanum Gothic Coding</option>
+            <option value="'Cousine',monospace">Cousine</option>
+            <option value="'Chivo Mono',monospace">Chivo Mono</option>
+            <option value="'Fira Mono',monospace">Fira Mono</option>
+            <option value="'Plus Jakarta Sans',sans-serif">Plus Jakarta Sans</option>
+            <option value="'DM Sans',sans-serif">DM Sans</option>
+            <option value="'Manrope',sans-serif">Manrope</option>
+            <option value="'Space Grotesk',sans-serif">Space Grotesk</option>
+            <option value="'Raleway',sans-serif">Raleway</option>
+            <option value="'Josefin Sans',sans-serif">Josefin Sans</option>
+            <option value="'Quicksand',sans-serif">Quicksand</option>
+            <option value="'Montserrat',sans-serif">Montserrat</option>
+            <option value="'Work Sans',sans-serif">Work Sans</option>
+            <option value="'Barlow',sans-serif">Barlow</option>
+            <option value="'Mulish',sans-serif">Mulish</option>
+            <option value="'Karla',sans-serif">Karla</option>
+            <option value="'Urbanist',sans-serif">Urbanist</option>
+            <option value="'Albert Sans',sans-serif">Albert Sans</option>
+            <option value="'Figtree',sans-serif">Figtree</option>
+            <option value="'Playfair Display',serif">Playfair Display</option>
+            <option value="'Lora',serif">Lora</option>
+            <option value="'Crimson Text',serif">Crimson Text</option>
+            <option value="'Bitter',serif">Bitter</option>
+            <option value="'Source Serif 4',serif">Source Serif 4</option>
+            <option value="'DM Serif Display',serif">DM Serif Display</option>
+            <option value="'Libre Baskerville',serif">Libre Baskerville</option>
+            <option value="'Cormorant Garamond',serif">Cormorant Garamond</option>
+            <option value="'Orbitron',sans-serif">Orbitron</option>
+            <option value="'Russo One',sans-serif">Russo One</option>
+            <option value="'Press Start 2P',monospace">Press Start 2P</option>
+            <option value="'Silkscreen',sans-serif">Silkscreen</option>
+            <option value="'Bungee',sans-serif">Bungee</option>
+            <option value="'Righteous',sans-serif">Righteous</option>
+            <option value="'Audiowide',sans-serif">Audiowide</option>
+            <option value="'Caveat',cursive">Caveat</option>
+            <option value="'Kalam',cursive">Kalam</option>
+            <option value="'Patrick Hand',cursive">Patrick Hand</option>
+            <option value="'Architects Daughter',cursive">Architects Daughter</option>
+            <option value="'Shadows Into Light',cursive">Shadows Into Light</option>
           </select>
         </div>
       </div>
@@ -4202,7 +4252,57 @@ const THEMES={
   sunset:   {label:'Sunset',  bg0:'#1a0f1e',bg1:'#241528',bg2:'#2e1b32',bg3:'#38213c',bg4:'#422746',border:'#3d2640',border2:'#5a3860',text:'#e8d0e8',text2:'#ff8866',text3:'#8a6080'},
   blumhouse:{label:'Blumhouse',bg0:'#0a0000',bg1:'#120000',bg2:'#1a0505',bg3:'#220808',bg4:'#2d0b0b',border:'#3a0a0a',border2:'#551111',text:'#d4b8b8',text2:'#cc0000',text3:'#663333'},
   scream:   {label:'Scream',  bg0:'#000000',bg1:'#08080a',bg2:'#0e0e12',bg3:'#14141a',bg4:'#1c1c24',border:'#222233',border2:'#333355',text:'#e8e8f0',text2:'#f0f0f0',text3:'#555566'},
-  forest:   {label:'🌧 Forest',bg0:'#0a120a',bg1:'#0d170d',bg2:'#111e11',bg3:'#162516',bg4:'#1b2d1b',border:'#1e3a1e',border2:'#2a4a2a',text:'#c8dcc8',text2:'#6abf6a',text3:'#4a7a4a',rain:true},
+  forest:   {label:'🌧 Forest',bg0:'#0a120a',bg1:'#0d170d',bg2:'#111e11',bg3:'#162516',bg4:'#1b2d1b',border:'#1e3a1e',border2:'#2a4a2a',text:'#c8dcc8',text2:'#6abf6a',text3:'#4a7a4a',animation:'rain'},
+  deepspace:    {label:'✦ Deep Space',bg0:'#050510',bg1:'#080818',bg2:'#0c0c22',bg3:'#10102c',bg4:'#161638',border:'#1a1a44',border2:'#2a2a66',text:'#c8d0e8',text2:'#6688cc',text3:'#3a4a70',animation:'deepspace'},
+  snowfall:     {label:'❄ Snowfall',bg0:'#0a1018',bg1:'#0e1520',bg2:'#131c2a',bg3:'#182434',bg4:'#1e2c3e',border:'#243448',border2:'#344860',text:'#e0e8f4',text2:'#88a8cc',text3:'#506880',animation:'snowfall'},
+  fireflies:    {label:'✧ Fireflies',bg0:'#080c06',bg1:'#0c1208',bg2:'#10180c',bg3:'#141e10',bg4:'#1a2616',border:'#1e3018',border2:'#2a4428',text:'#c8d8b8',text2:'#b8cc44',text3:'#5a6a3a',animation:'fireflies'},
+  aurora:       {label:'◌ Aurora',bg0:'#060812',bg1:'#0a0e18',bg2:'#0e1420',bg3:'#121a2a',bg4:'#182234',border:'#1a2844',border2:'#2a3a5a',text:'#d0e0e8',text2:'#44ccaa',text3:'#3a6060',animation:'aurora'},
+  digitalrain:  {label:'⟩ Digital Rain',bg0:'#020604',bg1:'#040a06',bg2:'#061008',bg3:'#08160a',bg4:'#0a1c0e',border:'#0e2812',border2:'#143818',text:'#44dd44',text2:'#22aa22',text3:'#116611',animation:'digitalrain'},
+  neongrid:     {label:'⊞ Neon Grid',bg0:'#08060e',bg1:'#0c0a16',bg2:'#120e1e',bg3:'#181228',bg4:'#1e1832',border:'#281e44',border2:'#382866',text:'#e0d8f0',text2:'#00ccff',text3:'#6644aa',animation:'neongrid'},
+  underwater:   {label:'◎ Underwater',bg0:'#04101a',bg1:'#061620',bg2:'#081c28',bg3:'#0a2430',bg4:'#0e2c3a',border:'#103848',border2:'#1a4c60',text:'#b8d8e8',text2:'#44aabb',text3:'#2a6678',animation:'underwater'},
+  cherryblossom:{label:'✿ Blossom',bg0:'#100a0e',bg1:'#161012',bg2:'#1c1618',bg3:'#241c20',bg4:'#2c2228',border:'#382a30',border2:'#4a3a44',text:'#e8d8dc',text2:'#e888a0',text3:'#886068',animation:'cherryblossom'},
+  starwarp:     {label:'⋆ Starfield',bg0:'#000004',bg1:'#04040c',bg2:'#080814',bg3:'#0c0c1e',bg4:'#121228',border:'#1a1a38',border2:'#2a2a50',text:'#d0d0e8',text2:'#8888cc',text3:'#4a4a78',animation:'starwarp'},
+  ember:        {label:'⊙ Ember',bg0:'#100804',bg1:'#180e06',bg2:'#201408',bg3:'#281a0c',bg4:'#322010',border:'#3a2814',border2:'#503820',text:'#e8d0b8',text2:'#ee8833',text3:'#886030',animation:'ember'},
+  nebula:       {label:'☁ Nebula',bg0:'#0a0610',bg1:'#0e0a18',bg2:'#140e22',bg3:'#1a122c',bg4:'#201838',border:'#281e48',border2:'#382a60',text:'#d8c8e8',text2:'#aa66ee',text3:'#6644aa',animation:'nebula'},
+  confetti:     {label:'◈ Confetti',bg0:'#0e0e12',bg1:'#14141a',bg2:'#1a1a22',bg3:'#20202c',bg4:'#282836',border:'#303044',border2:'#404060',text:'#e8e8f0',text2:'#ff8844',text3:'#666680',animation:'confetti'},
+  campfire:     {label:'♨ Campfire',bg0:'#0e0804',bg1:'#140c06',bg2:'#1a1208',bg3:'#22180c',bg4:'#2a1e10',border:'#342816',border2:'#483820',text:'#e0d0b0',text2:'#ee9944',text3:'#806830',animation:'campfire'},
+  oceanwaves:   {label:'≈ Ocean Waves',bg0:'#04101c',bg1:'#061624',bg2:'#081e2e',bg3:'#0c2638',bg4:'#102e42',border:'#163a50',border2:'#204c66',text:'#c0d8e8',text2:'#3399cc',text3:'#2a6688',animation:'oceanwaves'},
+  plasma:       {label:'◉ Plasma',bg0:'#0a0810',bg1:'#100c18',bg2:'#161020',bg3:'#1c142a',bg4:'#241a34',border:'#2c2040',border2:'#3c2c58',text:'#d8d0e8',text2:'#cc66ff',text3:'#7744aa',animation:'plasma'},
+  oceandeep:    {label:'Ocean Deep',bg0:'#040e16',bg1:'#061420',bg2:'#081a2a',bg3:'#0c2234',bg4:'#102a3e',border:'#143650',border2:'#1e4a68',text:'#b0d0e4',text2:'#2288bb',text3:'#1a5a7a'},
+  neontokyo:    {label:'Neon Tokyo',bg0:'#0c0814',bg1:'#120c1c',bg2:'#181024',bg3:'#1e142e',bg4:'#261a38',border:'#302044',border2:'#442e60',text:'#e0d0f0',text2:'#ff3388',text3:'#8844aa'},
+  vaporwave:    {label:'Vaporwave',bg0:'#1a0e24',bg1:'#221434',bg2:'#2a1a40',bg3:'#32204c',bg4:'#3a2658',border:'#442e66',border2:'#5a3e80',text:'#e8d0ff',text2:'#ff71ce',text3:'#8a58aa'},
+  bloodmoon:    {label:'Blood Moon',bg0:'#100404',bg1:'#180606',bg2:'#200a0a',bg3:'#2a0e0e',bg4:'#341212',border:'#401818',border2:'#582424',text:'#e0b8b8',text2:'#dd2222',text3:'#883030'},
+  arctic:       {label:'Arctic',bg0:'#0c1218',bg1:'#101820',bg2:'#141e28',bg3:'#1a2632',bg4:'#202e3c',border:'#283a4c',border2:'#384e64',text:'#e4eef4',text2:'#66bbdd',text3:'#4a7a90'},
+  goldenhour:   {label:'Golden Hour',bg0:'#141008',bg1:'#1a1610',bg2:'#221c14',bg3:'#2a2218',bg4:'#342a1e',border:'#3e3424',border2:'#584a34',text:'#e8dcc0',text2:'#ddaa44',text3:'#887040'},
+  midnightpurple:{label:'Midnight Purple',bg0:'#0a0612',bg1:'#0e0a1a',bg2:'#140e24',bg3:'#1a1230',bg4:'#20183c',border:'#281e4c',border2:'#382a66',text:'#d0c0e8',text2:'#9966ff',text3:'#5a3aaa'},
+  termgreen:    {label:'Terminal Green',bg0:'#040804',bg1:'#060c06',bg2:'#081208',bg3:'#0c180c',bg4:'#0e1e0e',border:'#142814',border2:'#1e381e',text:'#88ee88',text2:'#44bb44',text3:'#227722'},
+  neonmint:     {label:'Neon Mint',bg0:'#060e0e',bg1:'#0a1414',bg2:'#0e1a1a',bg3:'#122222',bg4:'#182a2a',border:'#1e3636',border2:'#2a4a4a',text:'#c8f0e8',text2:'#00eebb',text3:'#337766'},
+  stealth:      {label:'Stealth',bg0:'#0e0e0e',bg1:'#141414',bg2:'#1a1a1a',bg3:'#222222',bg4:'#2a2a2a',border:'#333333',border2:'#444444',text:'#aaaaaa',text2:'#777777',text3:'#505050'},
+  lava:         {label:'Lava',bg0:'#120400',bg1:'#1a0800',bg2:'#220c00',bg3:'#2c1000',bg4:'#361400',border:'#441a00',border2:'#602800',text:'#e8c8a0',text2:'#ff6600',text3:'#884400'},
+  frost:        {label:'Frost',bg0:'#0a1020',bg1:'#0e1628',bg2:'#121c32',bg3:'#18243c',bg4:'#1e2c48',border:'#243658',border2:'#304870',text:'#d8e8f8',text2:'#88ccff',text3:'#4a7aaa'},
+  cyberdeck:    {label:'Cyberdeck',bg0:'#0a0a10',bg1:'#0e0e18',bg2:'#141420',bg3:'#1a1a2a',bg4:'#222234',border:'#2a2a44',border2:'#3a3a5c',text:'#c8c8e0',text2:'#00ff88',text3:'#4a4a6a'},
+  phantom:      {label:'Phantom',bg0:'#08080c',bg1:'#0e0e14',bg2:'#14141c',bg3:'#1a1a26',bg4:'#222230',border:'#2a2a3c',border2:'#3c3c52',text:'#c0c0d0',text2:'#8888aa',text3:'#505068'},
+  hacker:       {label:'Hacker',bg0:'#000000',bg1:'#060606',bg2:'#0c0c0c',bg3:'#141414',bg4:'#1c1c1c',border:'#262626',border2:'#383838',text:'#33ff33',text2:'#22cc22',text3:'#0f7a0f'},
+  coffee:       {label:'Coffee',bg0:'#120e08',bg1:'#181410',bg2:'#1e1a14',bg3:'#262018',bg4:'#2e281e',border:'#383026',border2:'#4a4234',text:'#d8ccb0',text2:'#b8884a',text3:'#7a6040'},
+  emerald:      {label:'Emerald',bg0:'#040e08',bg1:'#061410',bg2:'#081a14',bg3:'#0c221a',bg4:'#102a20',border:'#143628',border2:'#1e4a3a',text:'#b8e8cc',text2:'#22cc66',text3:'#1a7a44'},
+  ruby:         {label:'Ruby',bg0:'#100408',bg1:'#18060c',bg2:'#200a12',bg3:'#280e18',bg4:'#32121e',border:'#3e1a28',border2:'#582438',text:'#e8c0cc',text2:'#dd2255',text3:'#883050'},
+  sapphire:     {label:'Sapphire',bg0:'#040810',bg1:'#060e18',bg2:'#081420',bg3:'#0c1a2a',bg4:'#102034',border:'#142a44',border2:'#1e3a5c',text:'#c0d0e8',text2:'#2266ee',text3:'#1a4a8a'},
+  amethyst:     {label:'Amethyst',bg0:'#0c0610',bg1:'#120a18',bg2:'#180e22',bg3:'#1e122c',bg4:'#261838',border:'#301e48',border2:'#442a60',text:'#d8c0e8',text2:'#8833dd',text3:'#5a2a88'},
+  coral:        {label:'Coral',bg0:'#120808',bg1:'#1a0e0e',bg2:'#221414',bg3:'#2a1a1a',bg4:'#342222',border:'#3e2a2a',border2:'#543c3c',text:'#e8d0c8',text2:'#ff6655',text3:'#885050'},
+  obsidian:     {label:'Obsidian',bg0:'#080808',bg1:'#0e0e10',bg2:'#141418',bg3:'#1a1a20',bg4:'#22222a',border:'#2a2a34',border2:'#3a3a48',text:'#b8b8c8',text2:'#6666aa',text3:'#444466'},
+  rosegold:     {label:'Rose Gold',bg0:'#120c0c',bg1:'#1a1212',bg2:'#221818',bg3:'#2a1e1e',bg4:'#342626',border:'#3e2e2e',border2:'#544040',text:'#e8d4cc',text2:'#dd8877',text3:'#886058'},
+  retroterminal:{label:'Retro Terminal',bg0:'#001000',bg1:'#001800',bg2:'#002200',bg3:'#002c00',bg4:'#003600',border:'#004400',border2:'#005e00',text:'#33ff00',text2:'#28cc00',text3:'#167700'},
+  bladerunner:  {label:'Blade Runner',bg0:'#0a0810',bg1:'#100c18',bg2:'#161020',bg3:'#1c1428',bg4:'#241a32',border:'#2c2040',border2:'#3c2c58',text:'#d8c8d4',text2:'#ee6644',text3:'#7a5060'},
+  outrun:       {label:'Outrun',bg0:'#0c0418',bg1:'#120620',bg2:'#1a082c',bg3:'#220a38',bg4:'#2a0e44',border:'#341258',border2:'#441a70',text:'#e0c0ff',text2:'#ff2299',text3:'#8844aa'},
+  hotlinemiami: {label:'Hotline Miami',bg0:'#1a0c14',bg1:'#22101c',bg2:'#2a1424',bg3:'#34182e',bg4:'#3e1c38',border:'#4a2444',border2:'#603060',text:'#f0d0e0',text2:'#ff4488',text3:'#aa4480'},
+  lofi:         {label:'Lo-fi',bg0:'#14120e',bg1:'#1c1a14',bg2:'#24221a',bg3:'#2c2a22',bg4:'#363228',border:'#403a30',border2:'#584e44',text:'#d8d0c0',text2:'#aaaa66',text3:'#706a50'},
+  darkwave:     {label:'Darkwave',bg0:'#06060e',bg1:'#0a0a16',bg2:'#0e0e1e',bg3:'#141428',bg4:'#1a1a32',border:'#222240',border2:'#303058',text:'#c0c0e0',text2:'#6666dd',text3:'#3a3a88'},
+  copper:       {label:'Copper',bg0:'#100a06',bg1:'#180e08',bg2:'#20140c',bg3:'#281a10',bg4:'#302014',border:'#3a281a',border2:'#503824',text:'#e0ccb0',text2:'#cc8844',text3:'#886038'},
+  slate:        {label:'Slate',bg0:'#0e1014',bg1:'#14181c',bg2:'#1a1e24',bg3:'#20262e',bg4:'#282e38',border:'#303844',border2:'#404c5c',text:'#c8d0d8',text2:'#7088a0',text3:'#4a5a6c'},
+  charcoal:     {label:'Charcoal',bg0:'#101010',bg1:'#161616',bg2:'#1c1c1c',bg3:'#242424',bg4:'#2c2c2c',border:'#363636',border2:'#484848',text:'#c8c8c8',text2:'#888888',text3:'#585858'},
+  graphite:     {label:'Graphite',bg0:'#0c0e10',bg1:'#121416',bg2:'#181a1e',bg3:'#1e2226',bg4:'#262a2e',border:'#2e3438',border2:'#3e4448',text:'#c0c8cc',text2:'#6a7a84',text3:'#4a5660'},
+  indigonight:  {label:'Indigo Night',bg0:'#080614',bg1:'#0c0a1c',bg2:'#120e26',bg3:'#181230',bg4:'#1e183c',border:'#261e4c',border2:'#342a64',text:'#c8c0e0',text2:'#5544ee',text3:'#3a2aaa'},
+  twilight:     {label:'Twilight',bg0:'#0e0a14',bg1:'#14101c',bg2:'#1a1624',bg3:'#221c2e',bg4:'#2a2238',border:'#322a44',border2:'#44385c',text:'#d8cce0',text2:'#cc7788',text3:'#7a5068'},
 };
 const APPEAR_DEFAULTS={
   theme:'midnight', chatSize:13, sidebarFont:12, nickFont:12,
@@ -4317,79 +4417,109 @@ function applyThemeCSS(cfg){
     inp.setAttribute('spellcheck',sc?'true':'false');
     inp.setAttribute('autocorrect',sc?'on':'off');
   }
-  // Toggle rain overlay for forest theme
-  const rainEl=document.getElementById('rain-overlay');
-  if(rainEl){
-    if(t.rain){rainEl.classList.add('active');startRain();}
-    else{rainEl.classList.remove('active');stopRain();}
+  // Toggle animation overlay
+  const animEl=document.getElementById('anim-overlay');
+  if(animEl){
+    if(t.animation){animEl.classList.add('active');startAnimation(t.animation);}
+    else{animEl.classList.remove('active');stopAnimation();}
   }
 }
 
-// ─── Rain + Lightning effect ──────────────────────────────────────────────────
-let _rainAnimId=null, _lightningTimer=null;
-function startRain(){
-  if(_rainAnimId)return;
-  const cv=document.getElementById('rain-canvas');
-  if(!cv)return;
+// ─── Animation System ─────────────────────────────────────────────────────────
+let _animId=null,_animTimers=[],_animResizeFn=null,_animCurType=null;
+function stopAnimation(){
+  if(_animId){cancelAnimationFrame(_animId);_animId=null;}
+  _animTimers.forEach(t=>clearInterval(t));_animTimers=[];
+  if(_animResizeFn){window.removeEventListener('resize',_animResizeFn);_animResizeFn=null;}
+  const cv=document.getElementById('anim-canvas');
+  if(cv){const c=cv.getContext('2d');if(c)c.clearRect(0,0,cv.width,cv.height);}
+  document.querySelectorAll('.anim-flash').forEach(e=>e.remove());
+  _animCurType=null;
+}
+function startAnimation(type){
+  if(_animCurType===type)return;
+  stopAnimation();_animCurType=type;
+  const cv=document.getElementById('anim-canvas');if(!cv)return;
   const ctx=cv.getContext('2d');
-  const drops=[];
   function resize(){cv.width=window.innerWidth;cv.height=window.innerHeight;}
-  resize(); window.addEventListener('resize',resize);
-  // Create raindrops
-  for(let i=0;i<150;i++){
-    drops.push({
-      x:Math.random()*cv.width,
-      y:Math.random()*cv.height,
-      len:Math.random()*15+8,
-      speed:Math.random()*4+6,
-      opacity:Math.random()*0.15+0.05,
-    });
-  }
-  function draw(){
-    ctx.clearRect(0,0,cv.width,cv.height);
-    for(const d of drops){
-      ctx.beginPath();
-      ctx.moveTo(d.x,d.y);
-      ctx.lineTo(d.x+1,d.y+d.len);
-      ctx.strokeStyle=`rgba(180,200,220,${d.opacity})`;
-      ctx.lineWidth=0.8;
-      ctx.stroke();
-      d.y+=d.speed;
-      d.x+=0.3;
-      if(d.y>cv.height){d.y=-d.len;d.x=Math.random()*cv.width;}
-    }
-    _rainAnimId=requestAnimationFrame(draw);
-  }
-  draw();
-  // Lightning flashes
-  if(!_lightningTimer){
-    _lightningTimer=setInterval(()=>{
-      if(Math.random()<0.3){ // 30% chance every interval
-        const flash=document.createElement('div');
-        flash.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.06);z-index:0;pointer-events:none;transition:opacity 0.15s;';
-        document.body.appendChild(flash);
-        setTimeout(()=>{flash.style.opacity='0';},80);
-        setTimeout(()=>{
-          flash.remove();
-          // Second flash
-          if(Math.random()<0.5){
-            const f2=document.createElement('div');
-            f2.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.04);z-index:0;pointer-events:none;transition:opacity 0.2s;';
-            document.body.appendChild(f2);
-            setTimeout(()=>{f2.style.opacity='0';},60);
-            setTimeout(()=>f2.remove(),300);
-          }
-        },150);
-      }
-    },8000);
-  }
+  resize();_animResizeFn=resize;window.addEventListener('resize',resize);
+  const fn=_ANIM[type];if(fn)fn(cv,ctx);
 }
-function stopRain(){
-  if(_rainAnimId){cancelAnimationFrame(_rainAnimId);_rainAnimId=null;}
-  if(_lightningTimer){clearInterval(_lightningTimer);_lightningTimer=null;}
-  const cv=document.getElementById('rain-canvas');
-  if(cv){const ctx=cv.getContext('2d');ctx?.clearRect(0,0,cv.width,cv.height);}
-}
+const _ANIM={
+rain(cv,ctx){
+  const drops=[];
+  for(let i=0;i<150;i++)drops.push({x:Math.random()*cv.width,y:Math.random()*cv.height,len:Math.random()*15+8,speed:Math.random()*4+6,opacity:Math.random()*0.15+0.05});
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const d of drops){ctx.beginPath();ctx.moveTo(d.x,d.y);ctx.lineTo(d.x+1,d.y+d.len);ctx.strokeStyle=`rgba(180,200,220,${d.opacity})`;ctx.lineWidth=0.8;ctx.stroke();d.y+=d.speed;d.x+=0.3;if(d.y>cv.height){d.y=-d.len;d.x=Math.random()*cv.width;}}_animId=requestAnimationFrame(draw);})();
+  _animTimers.push(setInterval(()=>{if(Math.random()<0.3){const flash=document.createElement('div');flash.className='anim-flash';flash.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.06);z-index:0;pointer-events:none;transition:opacity 0.15s;';document.body.appendChild(flash);setTimeout(()=>{flash.style.opacity='0';},80);setTimeout(()=>{flash.remove();if(Math.random()<0.5){const f2=document.createElement('div');f2.className='anim-flash';f2.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.04);z-index:0;pointer-events:none;transition:opacity 0.2s;';document.body.appendChild(f2);setTimeout(()=>{f2.style.opacity='0';},60);setTimeout(()=>f2.remove(),300);}},150);}},8000));
+},
+deepspace(cv,ctx){
+  const stars=[];for(let i=0;i<200;i++)stars.push({x:Math.random()*cv.width,y:Math.random()*cv.height,r:Math.random()*1.5+0.3,speed:Math.random()*0.2+0.05,tw:Math.random()*Math.PI*2});
+  let shooters=[];
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const s of stars){s.tw+=0.02;const a=0.3+Math.sin(s.tw)*0.2;ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,Math.PI*2);ctx.fillStyle=`rgba(200,210,240,${a})`;ctx.fill();s.x-=s.speed;if(s.x<0){s.x=cv.width;s.y=Math.random()*cv.height;}}for(let i=shooters.length-1;i>=0;i--){const sh=shooters[i];ctx.beginPath();ctx.moveTo(sh.x,sh.y);ctx.lineTo(sh.x-sh.len,sh.y-sh.len*0.3);ctx.strokeStyle=`rgba(255,255,255,${sh.a})`;ctx.lineWidth=1.2;ctx.stroke();sh.x+=sh.speed;sh.y+=sh.speed*0.3;sh.a-=0.01;if(sh.a<=0)shooters.splice(i,1);}_animId=requestAnimationFrame(draw);})();
+  _animTimers.push(setInterval(()=>{if(Math.random()<0.4)shooters.push({x:Math.random()*cv.width*0.5,y:Math.random()*cv.height*0.3,len:40+Math.random()*40,speed:6+Math.random()*4,a:0.7});},3000));
+},
+snowfall(cv,ctx){
+  const flakes=[];for(let i=0;i<120;i++)flakes.push({x:Math.random()*cv.width,y:Math.random()*cv.height,r:Math.random()*2.5+0.8,speed:Math.random()*1+0.5,w:Math.random()*Math.PI*2,ws:Math.random()*0.02+0.01,opacity:Math.random()*0.4+0.1});
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const f of flakes){f.w+=f.ws;f.x+=Math.sin(f.w)*0.5;f.y+=f.speed;if(f.y>cv.height+5){f.y=-5;f.x=Math.random()*cv.width;}ctx.beginPath();ctx.arc(f.x,f.y,f.r,0,Math.PI*2);ctx.fillStyle=`rgba(220,230,255,${f.opacity})`;ctx.fill();}_animId=requestAnimationFrame(draw);})();
+},
+fireflies(cv,ctx){
+  const flies=[];for(let i=0;i<50;i++)flies.push({x:Math.random()*cv.width,y:Math.random()*cv.height,vx:(Math.random()-0.5)*0.5,vy:(Math.random()-0.5)*0.5,phase:Math.random()*Math.PI*2,r:Math.random()*2+1});
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const f of flies){f.phase+=0.03;const a=0.1+Math.sin(f.phase)*0.15;f.x+=f.vx;f.y+=f.vy;if(f.x<0||f.x>cv.width)f.vx*=-1;if(f.y<0||f.y>cv.height)f.vy*=-1;const g=ctx.createRadialGradient(f.x,f.y,0,f.x,f.y,f.r*4);g.addColorStop(0,`rgba(180,220,60,${a+0.15})`);g.addColorStop(1,'rgba(180,220,60,0)');ctx.beginPath();ctx.arc(f.x,f.y,f.r*4,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();ctx.beginPath();ctx.arc(f.x,f.y,f.r,0,Math.PI*2);ctx.fillStyle=`rgba(200,240,80,${a+0.2})`;ctx.fill();}_animId=requestAnimationFrame(draw);})();
+},
+aurora(cv,ctx){
+  let t=0;
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);t+=0.005;for(let b=0;b<3;b++){ctx.beginPath();const yB=cv.height*0.15+b*50;ctx.moveTo(0,yB);for(let x=0;x<=cv.width;x+=4){const y=yB+Math.sin(x*0.003+t+b*2)*40+Math.sin(x*0.007+t*1.5)*20;ctx.lineTo(x,y);}ctx.lineTo(cv.width,cv.height);ctx.lineTo(0,cv.height);ctx.closePath();const colors=['rgba(40,220,160,0.03)','rgba(80,120,220,0.03)','rgba(160,60,200,0.025)'];ctx.fillStyle=colors[b];ctx.fill();}_animId=requestAnimationFrame(draw);})();
+},
+digitalrain(cv,ctx){
+  const cols=Math.floor(cv.width/14);const ypos=Array(cols).fill(0).map(()=>Math.random()*cv.height);
+  const chars='01アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン';
+  const buf=document.createElement('canvas');buf.width=cv.width;buf.height=cv.height;const bctx=buf.getContext('2d');
+  (function draw(){bctx.fillStyle='rgba(0,0,0,0.05)';bctx.fillRect(0,0,buf.width,buf.height);bctx.font='13px monospace';for(let i=0;i<cols;i++){const ch=chars[Math.floor(Math.random()*chars.length)];bctx.fillStyle=`rgba(0,${180+Math.random()*75},0,0.8)`;bctx.fillText(ch,i*14,ypos[i]);ypos[i]+=14;if(ypos[i]>buf.height&&Math.random()>0.98)ypos[i]=0;}ctx.clearRect(0,0,cv.width,cv.height);ctx.globalAlpha=0.3;ctx.drawImage(buf,0,0);ctx.globalAlpha=1;_animId=requestAnimationFrame(draw);})();
+},
+neongrid(cv,ctx){
+  let offset=0;
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);offset=(offset+0.5)%50;const horizon=cv.height*0.4;const cx=cv.width/2;for(let i=0;i<15;i++){const t=(i*50+offset)/750;const y=horizon+Math.pow(t,1.5)*(cv.height-horizon)*1.2;if(y>cv.height)continue;const a=Math.min(0.15,t*0.3);ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(cv.width,y);ctx.strokeStyle=`rgba(0,200,255,${a})`;ctx.lineWidth=0.8;ctx.stroke();}for(let i=-10;i<=10;i++){const x=cx+i*cv.width*0.15;ctx.beginPath();ctx.moveTo(cx,horizon);ctx.lineTo(x,cv.height);ctx.strokeStyle=`rgba(0,200,255,${Math.min(0.08+Math.abs(i)*0.005,0.15)})`;ctx.lineWidth=0.6;ctx.stroke();}_animId=requestAnimationFrame(draw);})();
+},
+underwater(cv,ctx){
+  const bubbles=[];for(let i=0;i<60;i++)bubbles.push({x:Math.random()*cv.width,y:cv.height+Math.random()*cv.height,r:Math.random()*4+1,speed:Math.random()*1.5+0.3,w:Math.random()*Math.PI*2});
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const b of bubbles){b.w+=0.02;b.x+=Math.sin(b.w)*0.3;b.y-=b.speed;if(b.y<-10){b.y=cv.height+10;b.x=Math.random()*cv.width;}ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,Math.PI*2);ctx.strokeStyle=`rgba(100,200,230,${0.15+b.r*0.03})`;ctx.lineWidth=0.8;ctx.stroke();ctx.beginPath();ctx.arc(b.x-b.r*0.3,b.y-b.r*0.3,b.r*0.2,0,Math.PI*2);ctx.fillStyle=`rgba(150,220,240,${0.1+b.r*0.02})`;ctx.fill();}_animId=requestAnimationFrame(draw);})();
+},
+cherryblossom(cv,ctx){
+  const petals=[];for(let i=0;i<80;i++)petals.push({x:Math.random()*cv.width,y:Math.random()*cv.height,r:Math.random()*4+2,speed:Math.random()*1+0.3,drift:Math.random()*0.5+0.2,rot:Math.random()*Math.PI*2,rs:Math.random()*0.03+0.01,opacity:Math.random()*0.2+0.05});
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const p of petals){p.y+=p.speed;p.x+=p.drift+Math.sin(p.rot)*0.3;p.rot+=p.rs;if(p.y>cv.height+10){p.y=-10;p.x=Math.random()*cv.width;}ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.rot);ctx.beginPath();ctx.ellipse(0,0,p.r,p.r*0.6,0,0,Math.PI*2);ctx.fillStyle=`rgba(255,180,200,${p.opacity})`;ctx.fill();ctx.restore();}_animId=requestAnimationFrame(draw);})();
+},
+starwarp(cv,ctx){
+  const stars=[];for(let i=0;i<200;i++)stars.push({x:(Math.random()-0.5)*cv.width,y:(Math.random()-0.5)*cv.height,z:Math.random()*1000+1});
+  const buf=document.createElement('canvas');buf.width=cv.width;buf.height=cv.height;const bctx=buf.getContext('2d');
+  (function draw(){bctx.fillStyle='rgba(0,0,4,0.15)';bctx.fillRect(0,0,buf.width,buf.height);const cx=cv.width/2,cy=cv.height/2;for(const s of stars){s.z-=3;if(s.z<=0){s.x=(Math.random()-0.5)*cv.width;s.y=(Math.random()-0.5)*cv.height;s.z=1000;}const sx=cx+s.x*(500/s.z),sy=cy+s.y*(500/s.z);const r=Math.max(0.3,(1-s.z/1000)*2);bctx.beginPath();bctx.arc(sx,sy,r,0,Math.PI*2);bctx.fillStyle=`rgba(200,210,255,${Math.min(0.8,1-s.z/1000)})`;bctx.fill();}ctx.clearRect(0,0,cv.width,cv.height);ctx.globalAlpha=0.5;ctx.drawImage(buf,0,0);ctx.globalAlpha=1;_animId=requestAnimationFrame(draw);})();
+},
+ember(cv,ctx){
+  const sparks=[];for(let i=0;i<70;i++)sparks.push({x:Math.random()*cv.width,y:cv.height+Math.random()*100,vx:(Math.random()-0.5)*0.5,vy:-(Math.random()*1.5+0.5),life:Math.random(),r:Math.random()*2+0.5});
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const s of sparks){s.x+=s.vx+Math.sin(s.life*10)*0.2;s.y+=s.vy;s.life-=0.003;if(s.life<=0||s.y<-10){s.x=Math.random()*cv.width;s.y=cv.height+10;s.life=1;s.vx=(Math.random()-0.5)*0.5;s.vy=-(Math.random()*1.5+0.5);}const g=ctx.createRadialGradient(s.x,s.y,0,s.x,s.y,s.r*3);g.addColorStop(0,`rgba(255,${120+Math.random()*40},20,${s.life*0.3})`);g.addColorStop(1,'rgba(255,100,0,0)');ctx.beginPath();ctx.arc(s.x,s.y,s.r*3,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();}_animId=requestAnimationFrame(draw);})();
+},
+nebula(cv,ctx){
+  const clouds=[];for(let i=0;i<40;i++){const hue=Math.random()*360;clouds.push({x:Math.random()*cv.width,y:Math.random()*cv.height,r:Math.random()*60+20,vx:(Math.random()-0.5)*0.3,vy:(Math.random()-0.5)*0.3,hue,phase:Math.random()*Math.PI*2});}
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const c of clouds){c.phase+=0.008;c.x+=c.vx;c.y+=c.vy;if(c.x<-c.r)c.x=cv.width+c.r;if(c.x>cv.width+c.r)c.x=-c.r;if(c.y<-c.r)c.y=cv.height+c.r;if(c.y>cv.height+c.r)c.y=-c.r;const a=0.02+Math.sin(c.phase)*0.01;const g=ctx.createRadialGradient(c.x,c.y,0,c.x,c.y,c.r);g.addColorStop(0,`hsla(${c.hue},60%,50%,${a+0.02})`);g.addColorStop(1,`hsla(${c.hue},60%,50%,0)`);ctx.beginPath();ctx.arc(c.x,c.y,c.r,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();}_animId=requestAnimationFrame(draw);})();
+},
+confetti(cv,ctx){
+  const pieces=[];const colors=['#ff4466','#44ff66','#4488ff','#ffaa00','#ff44ff','#44ffff','#ffff44'];
+  for(let i=0;i<80;i++)pieces.push({x:Math.random()*cv.width,y:Math.random()*cv.height,w:Math.random()*6+3,h:Math.random()*4+2,rot:Math.random()*Math.PI*2,rs:(Math.random()-0.5)*0.08,speed:Math.random()*1.5+0.5,drift:Math.random()*0.5-0.25,color:colors[Math.floor(Math.random()*colors.length)],opacity:Math.random()*0.25+0.05});
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const p of pieces){p.y+=p.speed;p.x+=p.drift;p.rot+=p.rs;if(p.y>cv.height+10){p.y=-10;p.x=Math.random()*cv.width;}ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.rot);ctx.globalAlpha=p.opacity;ctx.fillStyle=p.color;ctx.fillRect(-p.w/2,-p.h/2,p.w,p.h);ctx.globalAlpha=1;ctx.restore();}_animId=requestAnimationFrame(draw);})();
+},
+campfire(cv,ctx){
+  const embers=[];for(let i=0;i<90;i++){const x=cv.width*0.3+Math.random()*cv.width*0.4;embers.push({x,ox:x,y:cv.height+Math.random()*50,vy:-(Math.random()*1.2+0.3),life:Math.random(),r:Math.random()*2+0.5,w:Math.random()*Math.PI*2});}
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);const glow=ctx.createRadialGradient(cv.width/2,cv.height,0,cv.width/2,cv.height,cv.height*0.4);glow.addColorStop(0,'rgba(255,100,20,0.03)');glow.addColorStop(1,'rgba(255,60,0,0)');ctx.fillStyle=glow;ctx.fillRect(0,0,cv.width,cv.height);for(const e of embers){e.w+=0.03;e.x=e.ox+Math.sin(e.w)*20;e.y+=e.vy;e.life-=0.002;if(e.life<=0||e.y<-10){e.ox=cv.width*0.3+Math.random()*cv.width*0.4;e.x=e.ox;e.y=cv.height+10;e.life=1;}const r=e.r*e.life;ctx.beginPath();ctx.arc(e.x,e.y,r,0,Math.PI*2);ctx.fillStyle=`rgba(255,${80+e.life*100},${e.life*30},${e.life*0.25})`;ctx.fill();}_animId=requestAnimationFrame(draw);})();
+},
+oceanwaves(cv,ctx){
+  let t=0;
+  (function draw(){ctx.clearRect(0,0,cv.width,cv.height);t+=0.02;for(let w=0;w<4;w++){ctx.beginPath();const yB=cv.height*0.65+w*30;ctx.moveTo(0,cv.height);for(let x=0;x<=cv.width;x+=3){const y=yB+Math.sin(x*0.005+t+w*1.5)*15+Math.sin(x*0.01+t*0.7)*8;ctx.lineTo(x,y);}ctx.lineTo(cv.width,cv.height);ctx.closePath();ctx.fillStyle=`rgba(20,80,140,${0.02+w*0.005})`;ctx.fill();}_animId=requestAnimationFrame(draw);})();
+},
+plasma(cv,ctx){
+  let t=0;const bw=Math.ceil(cv.width/4),bh=Math.ceil(cv.height/4);
+  const buf=document.createElement('canvas');buf.width=bw;buf.height=bh;const bctx=buf.getContext('2d');const img=bctx.createImageData(bw,bh);
+  (function draw(){t+=0.02;for(let y=0;y<bh;y++){for(let x=0;x<bw;x++){const v=Math.sin(x*0.05+t)+Math.sin(y*0.05+t*0.7)+Math.sin((x+y)*0.03+t*0.5)+Math.sin(Math.sqrt(x*x+y*y)*0.04);const idx=(y*bw+x)*4;img.data[idx]=(Math.sin(v*Math.PI)*0.5+0.5)*40;img.data[idx+1]=(Math.sin(v*Math.PI+2)*0.5+0.5)*30;img.data[idx+2]=(Math.sin(v*Math.PI+4)*0.5+0.5)*50;img.data[idx+3]=20;}}bctx.putImageData(img,0,0);ctx.clearRect(0,0,cv.width,cv.height);ctx.drawImage(buf,0,0,cv.width,cv.height);_animId=requestAnimationFrame(draw);})();
+},
+};
 
 function populateAppearanceModal(cfg){
   const el=id=>document.getElementById(id);
@@ -6780,8 +6910,8 @@ function timeAgo(ts){
 </div>
 <style>#admin-overlay.show{display:flex !important;}</style>
 
-<!-- Rain overlay for forest theme -->
-<div id="rain-overlay"><canvas id="rain-canvas"></canvas></div>
+<!-- Animation overlay for animated themes -->
+<div id="anim-overlay"><canvas id="anim-canvas"></canvas></div>
 <!-- Cover div prevents iOS keyboard from exposing raw source below the app -->
 <div style="position:fixed;inset:-100px;background:var(--bg0,#0b0d0f);z-index:-1;pointer-events:none"></div>
 </body>

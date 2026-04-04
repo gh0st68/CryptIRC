@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.8.4-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.9.0-brightgreen" alt="Version">
   <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
 </p>
 
@@ -77,32 +77,91 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 - **Persistent state** -- everything syncs server-side (themes, favorites, unread, mentions, etc.)
 - **Channel drag-and-drop reorder** -- reorder channels in the sidebar
 - **Mobile lag indicator** -- ping time shown next to channel name in topbar
-- **34 fonts** -- choose from 21 monospace, 10 sans-serif, 2 serif, and 1 cursive font
+- **85 fonts** -- choose from 36 monospace, 25 sans-serif, 10 serif, 7 display, and 7 cursive/handwriting fonts
 - **Clear all data** -- one-click deletion of logs, notepad, and pastes with confirmation
 
-### Themes (20+)
+### Themes (70)
+
+**54 static themes** and **16 animated themes** with real-time canvas effects.
+
 | Theme | Description |
 |-------|-------------|
 | Midnight | Deep dark blue (default) |
 | Dracula | Classic purple-accented dark |
 | Monokai | Warm syntax-inspired dark |
 | Nord | Cool Arctic blue palette |
+| Solarized Dark | Ethan Schoonover's classic |
+| Gruvbox Dark | Retro warm brown tones |
+| Abyss | Pure black void |
+| Light | Clean light theme |
+| Cobalt | Rich blue editor |
+| One Dark | Atom editor inspired |
 | Catppuccin Mocha | Pastel dark with lavender accents |
+| Rose Pine | Soft muted rose |
 | Tokyo Night | Vibrant purple-blue cityscape |
 | Cyberpunk | Neon pink and cyan |
 | Matrix | Green-on-black terminal |
+| Ocean | Deep sea blue |
+| Sunset | Warm purple-orange dusk |
 | Blumhouse | Horror-inspired dark red |
 | Scream | Ghostface neon green |
-| Solarized Dark | Ethan Schoonover's classic |
-| Gruvbox Dark | Retro warm brown tones |
-| One Dark | Atom editor inspired |
-| Ayu Dark | Subtle warm dark |
-| Palenight | Material palenight |
-| Rosepine | Soft muted rose |
-| Kanagawa | Japanese wave blue |
-| Everforest | Natural green tones |
-| Forest Rain | Animated rain with lightning flashes |
-| Synthwave | Retro 80s purple gradient |
+| Ocean Deep | Abyssal blue depths |
+| Neon Tokyo | Hot pink neon cityscape |
+| Vaporwave | Retro pastel purple-pink |
+| Blood Moon | Deep crimson dark |
+| Arctic | Icy blue-white |
+| Golden Hour | Warm amber tones |
+| Midnight Purple | Deep violet darkness |
+| Terminal Green | Classic green terminal |
+| Neon Mint | Bright teal-cyan |
+| Stealth | Neutral monochrome |
+| Lava | Molten orange-red |
+| Frost | Cool blue ice |
+| Cyberdeck | Dark with neon green |
+| Phantom | Ghostly gray-blue |
+| Hacker | Bright green on black |
+| Coffee | Warm brown tones |
+| Emerald | Rich green gemstone |
+| Ruby | Deep red gemstone |
+| Sapphire | Deep blue gemstone |
+| Amethyst | Purple gemstone |
+| Coral | Warm red-orange |
+| Obsidian | Dark volcanic glass |
+| Rose Gold | Warm pink metallic |
+| Retro Terminal | Phosphor green CRT |
+| Blade Runner | Moody orange-purple |
+| Outrun | Synthwave neon purple-pink |
+| Hotline Miami | Neon pink vice |
+| Lo-fi | Warm muted vintage |
+| Darkwave | Deep dark blue-purple |
+| Copper | Warm metallic brown |
+| Slate | Cool blue-gray stone |
+| Charcoal | Neutral dark gray |
+| Graphite | Cool dark gray |
+| Indigo Night | Deep blue-violet |
+| Twilight | Soft purple dusk |
+
+**Animated themes** (canvas overlay effects):
+
+| Theme | Effect |
+|-------|--------|
+| Forest Rain | Rain drops with lightning flashes |
+| Deep Space | Drifting stars with shooting stars |
+| Snowfall | Gentle falling snowflakes |
+| Fireflies | Pulsing, drifting glow dots |
+| Aurora | Wavy green/purple light bands |
+| Digital Rain | Matrix-style falling characters |
+| Neon Grid | 80s Tron perspective grid |
+| Underwater | Rising bubbles |
+| Cherry Blossom | Pink petals falling |
+| Starfield Warp | Stars zooming toward you |
+| Ember | Floating orange sparks |
+| Nebula | Colorful drifting gas clouds |
+| Confetti | Colorful falling confetti |
+| Campfire | Warm embers rising |
+| Ocean Waves | Gentle wave motion |
+| Plasma | Morphing color gradients |
+
 | **Separate mobile theme** | Independent colors, accents, and font sizes for phone vs desktop |
 
 ### Admin
