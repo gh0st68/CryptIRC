@@ -112,6 +112,81 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 - **User management** -- disable, delete, promote to admin
 - **All admin settings persist** to disk (survives server restarts)
 
+### Commands
+
+All commands show in the `/` autocomplete dropdown. Type `/` to browse.
+
+| Command | Description |
+|---------|-------------|
+| `/join` | Join a channel (auto-adds # if missing) |
+| `/part` | Leave a channel |
+| `/msg` | Send private message |
+| `/query` | Open a DM window |
+| `/me` | Send action |
+| `/nick` | Change nickname |
+| `/topic` | View or set channel topic |
+| `/whois` | Look up user info |
+| `/kick` | Kick a user |
+| `/ban` | Ban a user |
+| `/kickban` | Kick and ban |
+| `/unban` | Remove a ban |
+| `/unbanall` | Remove all bans from channel |
+| `/unexemptall` | Remove all ban exempts (+e) |
+| `/mode` | Set channel/user modes |
+| `/op` `/deop` | Give/remove operator |
+| `/voice` `/devoice` | Give/remove voice |
+| `/halfop` | Give half-op |
+| `/owner` | Give owner |
+| `/opall` | Op everyone |
+| `/voiceall` | Voice everyone |
+| `/kickall` | Kick everyone except yourself |
+| `/mdop` | Mass deop all ops except yourself |
+| `/drop` | Strip ALL status (~&@%+) from everyone except yourself |
+| `/ignore` | Ignore a user (supports wildcard masks) |
+| `/unignore` | Stop ignoring a user |
+| `/away` `/back` | Set/clear away status |
+| `/invite` | Invite user to channel |
+| `/list` | List all channels |
+| `/links` | Show server links |
+| `/cycle` | Part and rejoin channel |
+| `/ns` `/cs` | NickServ/ChanServ commands |
+| `/identify` | Identify with NickServ |
+| `/encrypt` | Manage E2E encryption (keygen, add, rotate, on, off) |
+| `/quote` | Send raw IRC command |
+| `/clear` | Clear current buffer |
+| `/help` | Show help or help for a command |
+
+**Fun Commands:**
+
+| Command | Output |
+|---------|--------|
+| `/prism text` | Rainbow mIRC colored text |
+| `/shrug` | ¯\\\_(ツ)\_/¯ |
+| `/tableflip` | (╯°□°)╯︵ ┻━┻ |
+| `/unflip` | ┬─┬ノ( º \_ ºノ) |
+| `/lenny` | ( ͡° ͜ʖ ͡°) |
+| `/disapprove` | ಠ\_ಠ |
+| `/rage` | (ノಠ益ಠ)ノ彡┻━┻ |
+| `/bear` | ʕ•ᴥ•ʔ |
+| `/sparkle text` | ✧･ﾟ: \*✧･ﾟ:\* text \*:･ﾟ✧\*:･ﾟ✧ |
+| `/finger` | ╭∩╮(︶︿︶)╭∩╮ |
+| `/dance` | ♪┏(・o・)┛♪┗(・o・)┓♪ |
+| `/rip name` | ⚰️ R.I.P. name ⚰️ |
+| `/hug nick` | (づ｡◕‿‿◕｡)づ nick |
+
+**Keyboard Shortcuts:**
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+K` | mIRC color picker (16 colors, fg+bg) |
+| `Ctrl+B` | Bold text |
+| `Ctrl+U` | Underline text |
+| `Ctrl+I` | Italic text |
+| `Ctrl+O` | Reset formatting |
+| `Tab` | Nick tab completion |
+| `@` | Nick autocomplete dropdown |
+| `:` | Emoji autocomplete |
+
 ### Deployment
 - **Single binary** -- one `cargo build` and you're done
 - Interactive deploy script for Debian/Ubuntu with Caddy, Postfix, and systemd

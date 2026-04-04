@@ -674,6 +674,17 @@ body > style, body > script { visibility:hidden; }
 .nc-self { color:var(--accent) !important; }
 .nick-mention { border-radius:2px; padding:0 2px; }
 .nick-mention:hover { text-decoration:underline; }
+#reply-bar { display:none; padding:4px 10px; background:var(--bg2); border-top:1px solid var(--border); border-left:2px solid var(--accent); font-size:11px; color:var(--text2); align-items:center; gap:6px; }
+#reply-bar.show { display:flex; }
+#reply-bar-text { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+#reply-bar-nick { font-weight:600; color:var(--accent); margin-right:4px; }
+#reply-bar-close { cursor:pointer; color:var(--text3); font-size:14px; padding:2px 4px; flex-shrink:0; }
+#reply-bar-close:hover { color:var(--text); }
+.msg-reply-quote { font-size:10px; color:var(--text3); border-left:2px solid var(--accent); padding-left:6px; margin-bottom:2px; display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; max-width:80%; }
+.msg-reply-btn { position:absolute; right:6px; top:2px; opacity:0; cursor:pointer; color:var(--text3); padding:2px; transition:opacity .15s; }
+.msg-row:hover .msg-reply-btn { opacity:1; }
+.msg-reply-btn:hover { color:var(--accent); }
+.msg-row { position:relative; }
 .nc0,.nick-entry.nc0{color:#e05a5a} .nc1,.nick-entry.nc1{color:#e0935a} .nc2,.nick-entry.nc2{color:#d4c850} .nc3,.nick-entry.nc3{color:#5adb7a}
 .nc4,.nick-entry.nc4{color:#5ab8e0} .nc5,.nick-entry.nc5{color:#8a70e0} .nc6,.nick-entry.nc6{color:#e05ab0} .nc7,.nick-entry.nc7{color:#5ae0d4}
 .nc8,.nick-entry.nc8{color:#a0c878} .nc9,.nick-entry.nc9{color:#d47890}
@@ -1686,6 +1697,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <span class="lag-dot" id="lag-pill-dot"></span>
       <span id="lag-pill-val"></span>
     </div>
+    <div id="reply-bar"><span id="reply-bar-nick"></span><span id="reply-bar-text"></span><span id="reply-bar-close" onclick="cancelReply()">✕</span></div>
     <div id="input-wrap" style="position:relative">
       <div id="typing-indicator"></div>
       <div id="input-inner">
@@ -2841,6 +2853,15 @@ function buildRow(msg){
     msgBody.appendChild(lock);
   }
   if(msgBody){for(const url of extractMediaUrls(msg.text)){const el=buildMediaEl(url);if(el)msgBody.appendChild(el);}}
+  // Reply button on chat messages
+  if(isChat&&msg.from!=='*'){
+    const replyBtn=document.createElement('span');
+    replyBtn.className='msg-reply-btn';
+    replyBtn.title='Reply';
+    replyBtn.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 17H4V12"/><path d="M4 17L15 6"/><path d="M15 6H20V11"/></svg>';
+    replyBtn.onclick=(e)=>{e.stopPropagation();setReply(msg.from,msg.text);};
+    row.appendChild(replyBtn);
+  }
   return row;
 }
 // Delegated click handler for nick list — attached once, works for all nicks
@@ -3100,6 +3121,28 @@ document.addEventListener('DOMContentLoaded',()=>{
 
 // ─── IRCv3 typing indicator sender ───────────────────────────────────────────
 let _lastTypingSent=0;
+// ─── Reply system ────────────────────────────────────────────────────────────
+let _replyTo=null; // {nick, text}
+function setReply(nick,text){
+  _replyTo={nick,text:text.slice(0,200)};
+  const bar=document.getElementById('reply-bar');
+  document.getElementById('reply-bar-nick').textContent=nick;
+  document.getElementById('reply-bar-text').textContent=text.slice(0,100);
+  bar.classList.add('show');
+  document.getElementById('msg-input').focus();
+}
+function cancelReply(){
+  _replyTo=null;
+  document.getElementById('reply-bar').classList.remove('show');
+}
+function getReplyPrefix(){
+  if(!_replyTo) return '';
+  const quote=_replyTo.text.slice(0,80).replace(/\n/g,' ');
+  const prefix=`> <${_replyTo.nick}> ${quote}\n`;
+  cancelReply();
+  return prefix;
+}
+
 function sendTypingActive(){
   if(!active||!ws||ws.readyState!==1) return;
   const now=Date.now();
@@ -3592,11 +3635,18 @@ async function handleInput(raw){
     }
   } else {
     // Attempt E2E encryption for outgoing plaintext
+    // Handle reply — send quote line first, then the actual message
+    const replyPrefix=getReplyPrefix();
+    if(replyPrefix){
+      const quoteLine=replyPrefix.trim();
+      const quoteWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,quoteLine):null;
+      wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${quoteWire||quoteLine}`});
+      addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:quoteLine,kind:'privmsg',encrypted:!!quoteWire});
+    }
     const e2eWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target])
       ? await e2eEncryptOutgoing(target, raw)
       : null;
     if (e2eWire) {
-      // Send encrypted wire text, show plaintext locally
       wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${e2eWire}`});
       addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw,kind:'privmsg',encrypted:true});
     } else {
@@ -6402,7 +6452,16 @@ function parseMircColors(s){
   }
   return out;
 }
-function renderText(s){return highlightNicks(linkify(parseMircColors(s)));}
+function renderText(s){
+  // Detect Element-style reply quote: > <nick> text
+  const quoteMatch=s.match(/^> <([^>]+)> (.+)/);
+  if(quoteMatch){
+    const qNick=esc(quoteMatch[1]);
+    const qText=esc(quoteMatch[2]);
+    return `<span class="msg-reply-quote"><span style="color:var(--accent);font-weight:600">${qNick}</span> ${qText}</span>`;
+  }
+  return highlightNicks(linkify(parseMircColors(s)));
+}
 function highlightNicks(html){
   if(!active)return html;
   const net=networks.find(n=>n.config.id===active.conn_id);
