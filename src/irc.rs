@@ -519,6 +519,14 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                 conn.lock().await.send_raw(&format!("OPER {} {}\r\n", strip_crlf(login), strip_crlf(pass))).await?;
                             }
                         }
+                        // Auto-identify with NickServ
+                        if cfg.auto_identify {
+                            if let Some(ref pass) = cfg.nickserv_pass {
+                                if !pass.is_empty() {
+                                    conn.lock().await.send_raw(&format!("PRIVMSG NickServ :IDENTIFY {}\r\n", strip_crlf(pass))).await?;
+                                }
+                            }
+                        }
                         for ch in &cfg.auto_join {
                             let safe = strip_crlf(ch);
                             if !safe.is_empty() {

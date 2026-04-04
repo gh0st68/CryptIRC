@@ -272,6 +272,10 @@ pub struct NetworkConfig {
     pub oper_pass:             Option<String>,
     #[serde(default)]
     pub channel_order:         Vec<String>,
+    #[serde(default)]
+    pub nickserv_pass:         Option<String>,
+    #[serde(default)]
+    pub auto_identify:         bool,
 }
 
 impl Default for NetworkConfig {
@@ -286,6 +290,7 @@ impl Default for NetworkConfig {
             auto_join: vec![], auto_reconnect: true,
             oper_login: None, oper_pass: None,
             channel_order: vec![],
+            nickserv_pass: None, auto_identify: false,
         }
     }
 }
@@ -434,6 +439,8 @@ async fn main() -> Result<()> {
         .route("/paste",                post(route_paste_create).layer(DefaultBodyLimit::max(524_288)))
         .route("/paste/:id",            get(route_paste_view))
         .route("/paste/:id/raw",        get(route_paste_raw))
+        .route("/s",                    post(route_short_create).layer(DefaultBodyLimit::max(4_096)))
+        .route("/s/:id",                get(route_short_redirect))
         .route("/preview",              get(route_link_preview))
         .route("/admin/link-preview",   get(route_admin_get_preview_settings).put(route_admin_put_preview_settings))
         .route("/push/vapid-public-key", get(route_push_vapid_key))
@@ -916,6 +923,50 @@ async fn route_paste_raw(
         }
         Ok(None) => (StatusCode::NOT_FOUND, "Not found").into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response(),
+    }
+}
+
+// ─── URL shortener routes ────────────────────────────────────────────────────
+
+async fn route_short_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let token = headers.get("authorization").and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer ")).unwrap_or("");
+    let user = match state.auth.validate_session(token) {
+        Some(u) => u, None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response(),
+    };
+    let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    if url.is_empty() || url.len() > 4096 || (!url.starts_with("http://") && !url.starts_with("https://")) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Invalid URL"}))).into_response();
+    }
+    let id = Uuid::new_v4().to_string()[..6].to_string();
+    let dir = format!("{}/shorts", state.data_dir);
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let data = serde_json::json!({"url": url, "created_at": chrono::Utc::now().timestamp(), "creator": user});
+    let _ = tokio::fs::write(format!("{}/{}.json", dir, id), serde_json::to_string(&data).unwrap_or_default()).await;
+    let short_url = format!("{}/s/{}", state.base_url, id);
+    Json(serde_json::json!({"id": id, "url": short_url, "original": url})).into_response()
+}
+
+async fn route_short_redirect(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let safe_id: String = id.chars().filter(|c| c.is_alphanumeric() || *c == '-').take(10).collect();
+    let path = format!("{}/shorts/{}.json", state.data_dir, safe_id);
+    match tokio::fs::read_to_string(&path).await {
+        Ok(json) => {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+                    return axum::response::Redirect::temporary(url).into_response();
+                }
+            }
+            (StatusCode::NOT_FOUND, Html("Not found".to_string())).into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, Html("Not found".to_string())).into_response(),
     }
 }
 
@@ -1884,6 +1935,12 @@ impl AppState {
                     persisted.oper_pass = Some(format!("enc:{}", enc));
                 }
             }
+            if let Some(ref p) = cfg.nickserv_pass {
+                if !p.is_empty() {
+                    let enc = self.crypto.encrypt(username, p.as_bytes()).await?;
+                    persisted.nickserv_pass = Some(format!("enc:{}", enc));
+                }
+            }
         }
 
         tokio::fs::write(
@@ -1928,6 +1985,13 @@ impl AppState {
                 if let Some(enc) = p.strip_prefix("enc:") {
                     if let Ok(plain) = self.crypto.decrypt(username, enc).await {
                         cfg.oper_pass = Some(String::from_utf8_lossy(&plain).into_owned());
+                    }
+                }
+            }
+            if let Some(ref p) = cfg.nickserv_pass.clone() {
+                if let Some(enc) = p.strip_prefix("enc:") {
+                    if let Ok(plain) = self.crypto.decrypt(username, enc).await {
+                        cfg.nickserv_pass = Some(String::from_utf8_lossy(&plain).into_owned());
                     }
                 }
             }

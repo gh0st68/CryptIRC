@@ -49,6 +49,9 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 - **Multi-device sync** -- messages you send on one device appear on all your other devices
 - **Typing indicators** -- see when someone is typing (IRCv3 draft/typing)
 - **Server-time** -- accurate timestamps from the IRC server
+- **Auto-identify** -- automatically send NickServ IDENTIFY on connect (encrypted credential storage)
+- **Auto-rejoin on kick** -- automatically rejoin channels after being kicked
+- **Channel key manager** -- store and auto-send channel keys (+k) when joining
 - Configurable join/part/quit message filtering
 - **Infinite scroll** -- load older messages from encrypted server logs on demand
 
@@ -64,6 +67,14 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 - **Inline media previews** -- images, videos (.mp4/.webm/.mov), YouTube rich cards with title/author
 - **Link previews** -- server-side metadata fetcher with admin whitelist (SSRF protected)
 - **Pastebin** -- share text snippets with password protection and expiration
+- **URL shortener** -- built-in `/shorten` command creates short redirect URLs
+- **Smart paste** -- paste multi-line text and it auto-offers "send as pastebin?" instead of flooding
+- **Split view** -- view two channels side by side on desktop (`/split`)
+- **Read markers** -- "new messages since you were away" divider line in channels
+- **User notes** -- attach private notes to any nick (visible only to you, synced)
+- **Channel stats dashboard** -- most active users, message counts, peak hours (`/stats`)
+- **#channel autocomplete** -- type `#` to autocomplete channel names
+- **DND mode** -- Do Not Disturb with scheduled quiet hours (`/dnd`)
 - **Encrypted notepad** -- private auto-saving notes, encrypted with vault key
 - **mIRC color formatting** -- Ctrl+K color picker, Ctrl+B/U/I/O for bold/underline/italic/reset
 - **Topic bar** with mIRC color rendering and edit/copy/view menu
@@ -214,6 +225,14 @@ All commands show in the `/` autocomplete dropdown. Type `/` to browse.
 | `/quote` | Send raw IRC command |
 | `/clear` | Clear current buffer |
 | `/help` | Show help or help for a command |
+| `/ascii` | Generate ASCII art text |
+| `/ud` | Urban Dictionary lookup (sends definition to channel) |
+| `/shorten` | Shorten a URL with built-in shortener |
+| `/stats` | Channel statistics dashboard |
+| `/note` | Set or view private notes on a nick |
+| `/dnd` | Do Not Disturb mode (on/off/schedule) |
+| `/split` | Toggle split view (two channels side by side) |
+| `/key` | Save or clear a channel key (+k) |
 
 **Fun Commands:**
 

@@ -1013,6 +1013,36 @@ body > style, body > script { visibility:hidden; }
   15% { opacity:0; }
 }
 .msg-row { animation:fadeIn .15s ease; }
+/* ── Read marker ── */
+.read-marker { display:flex; align-items:center; gap:8px; padding:4px 12px; color:var(--accent); font-size:10px; letter-spacing:.04em; }
+.read-marker::before,.read-marker::after { content:''; flex:1; height:1px; background:var(--accent); opacity:.4; }
+/* ── Split view ── */
+#main.split-active { display:flex; flex-wrap:wrap; }
+#main.split-active #topbar { width:100%; }
+#main.split-active #chat-area { width:50%!important; flex:none; }
+#main.split-active #split-panel { display:flex!important; width:50%; flex:none; }
+#split-panel { display:none; flex-direction:column; border-left:1px solid var(--border); overflow:hidden; }
+#split-panel .split-header { padding:6px 10px; font-size:11px; color:var(--text2); border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px; background:var(--bg1); }
+#split-panel .split-header select { background:var(--bg2); border:1px solid var(--border); color:var(--text); font-size:11px; border-radius:4px; padding:2px 4px; flex:1; font-family:var(--mono); }
+#split-panel .split-chat { flex:1; overflow-y:auto; padding:4px 0; -webkit-overflow-scrolling:touch; }
+/* ── Smart paste dialog ── */
+#smart-paste-dialog { position:fixed; bottom:80px; left:50%; transform:translateX(-50%); background:var(--bg2); border:1px solid var(--border2); border-radius:10px; padding:14px 18px; z-index:180; box-shadow:0 8px 30px rgba(0,0,0,.5); font-size:12px; color:var(--text); display:none; max-width:340px; width:90%; }
+#smart-paste-dialog.show { display:block; }
+#smart-paste-dialog .sp-btns { display:flex; gap:8px; margin-top:10px; }
+#smart-paste-dialog .sp-btn { padding:6px 14px; border-radius:5px; border:none; cursor:pointer; font-family:var(--mono); font-size:12px; }
+#smart-paste-dialog .sp-yes { background:var(--accent); color:#000; font-weight:700; }
+#smart-paste-dialog .sp-no { background:var(--bg4); color:var(--text2); }
+/* ── Stats overlay ── */
+#stats-overlay { position:fixed; inset:0; background:rgba(0,0,0,.8); display:none; align-items:center; justify-content:center; z-index:170; }
+#stats-overlay.show { display:flex; }
+.stats-box { background:var(--bg2); border:1px solid var(--border2); border-radius:12px; padding:20px 24px; max-width:500px; width:90%; max-height:80vh; overflow-y:auto; }
+.stats-box h3 { margin:0 0 12px; font-size:15px; color:var(--accent); font-family:var(--sans); }
+.stats-table { width:100%; font-size:12px; border-collapse:collapse; }
+.stats-table th { text-align:left; color:var(--text2); padding:4px 8px; border-bottom:1px solid var(--border); }
+.stats-table td { padding:4px 8px; border-bottom:1px solid var(--border); }
+.stats-bar { height:6px; background:var(--accent); border-radius:3px; min-width:2px; }
+/* ── Note input ── */
+.note-input { width:100%; background:var(--bg3); border:1px solid var(--border); color:var(--text); font-family:var(--mono); font-size:12px; border-radius:4px; padding:6px 8px; margin-top:4px; resize:vertical; min-height:40px; }
 
 /* ── MOBILE SIDEBAR BACKDROP ───────────────────────────────────────────────── */
 #sidebar-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:40; }
@@ -1605,6 +1635,14 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div class="form-field"><label class="form-label">Accept Invalid TLS</label>
         <select class="form-select" id="f-tls-invalid"><option value="false" selected>No</option><option value="true">Yes (self-signed)</option></select></div>
     </div>
+    <div style="border-top:1px solid var(--border);margin:14px 0 12px;padding-top:12px;">
+      <div style="font-size:11px;color:var(--text2);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">NickServ Auto-Identify</div>
+      <div class="form-row">
+        <div class="form-field"><label class="form-label">Auto-Identify</label>
+          <select class="form-select" id="f-auto-identify"><option value="false" selected>No</option><option value="true">Yes (send IDENTIFY on connect)</option></select></div>
+        <div class="form-field"><label class="form-label">NickServ Password</label><input class="form-input" type="password" id="f-nickserv-pass" placeholder="(optional)" autocomplete="new-password"></div>
+      </div>
+    </div>
     <div class="form-row">
       <div class="form-field"><label class="form-label">Oper Login</label><input class="form-input" id="f-oper-login" placeholder="(optional)" autocapitalize="none"></div>
       <div class="form-field"><label class="form-label">Oper Password</label><input class="form-input" type="password" id="f-oper-pass" placeholder="(optional)" autocomplete="new-password"></div>
@@ -1731,6 +1769,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       </div>
     </div>
     <div id="chat-area" style="display:none"></div>
+    <div id="split-panel"><div class="split-header"><span>Split:</span><select id="split-chan-select" onchange="_splitTarget=this.value;renderSplitChat()"></select><button onclick="toggleSplitView()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px" title="Close split">✕</button></div><div class="split-chat" id="split-chat-area"></div></div>
     <button id="scroll-bottom-btn" onclick="scrollForce()" title="Jump to latest">↓</button>
     <div id="welcome">
       <div class="welcome-logo">CryptIRC</div>
@@ -2369,7 +2408,15 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_names':  updateNames(ev.conn_id,ev.channel,ev.names); renderSidebar(); monitorRefreshOnline(); break;
-    case 'irc_kick':   sysMsg(ev.conn_id,ev.channel,`✗ ${ev.kicked} kicked by ${ev.by}${ev.reason?' ('+ev.reason+')':''}`, 'error'); break;
+    case 'irc_kick':
+      sysMsg(ev.conn_id,ev.channel,`✗ ${ev.kicked} kicked by ${ev.by}${ev.reason?' ('+ev.reason+')':''}`, 'error');
+      // Auto-rejoin on kick if enabled
+      if(ev.kicked===getNick(ev.conn_id) && localStorage.getItem('cryptirc_autorejoin')!=='false'){
+        const _rjKey=bk(ev.conn_id,ev.channel),_rjSavedKey=localStorage.getItem('cryptirc_chankeys');
+        let _rjKeyVal=null;try{const ks=JSON.parse(_rjSavedKey||'{}');_rjKeyVal=ks[_rjKey]||null;}catch(e){}
+        setTimeout(()=>{wsend({type:'join_channel',conn_id:ev.conn_id,channel:ev.channel,key:_rjKeyVal||''});sysMsg(ev.conn_id,ev.channel,'Auto-rejoining after kick...','system');},3000);
+      }
+      break;
     case 'irc_mode': {
       // Parse setter|modes format (e.g. "gh0st|+v felon_1" or just "+v felon_1")
       let modeSetter='', rawModes=ev.modes;
@@ -2627,6 +2674,8 @@ function playNotifSound(type){
 function addMessage(conn_id,target,msg){
   const buf=getBuf(conn_id,target); buf.push(msg);
   if(buf.length>2000)buf.splice(0,buf.length-2000);
+  // Track channel stats
+  if(msg.kind==='privmsg'||msg.kind==='action') trackStat(conn_id,target,msg.from);
   const isDM=target!=='status'&&!target.startsWith('#')&&!target.startsWith('&')&&!target.startsWith('+')&&!target.startsWith('!');
   // Track query/PM buffers
   if(isDM){
@@ -2649,7 +2698,7 @@ function addMessage(conn_id,target,msg){
       if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
       else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
       // Browser desktop notification (popup bubble) when tab not focused
-      if(!document.hasFocus() && soundCfg.desktopNotif!==false && (isDM || msg.mentioned)){
+      if(!document.hasFocus() && soundCfg.desktopNotif!==false && (isDM || msg.mentioned) && !isDndActive()){
         if(Notification?.permission==='granted'){
           try{
             const title=isDM?`DM from ${msg.from}`:`${msg.from} in ${target}`;
@@ -2845,12 +2894,20 @@ function renderChat(){
     area.appendChild(loadMore);
   }
   let lastDate=null;
+  const rmKey=bk(active.conn_id,active.target);
+  const lastReadTs=parseFloat(localStorage.getItem('cryptirc_lastread_'+rmKey)||'0');
+  let markerInserted=false;
   for(const msg of buf){
     const d=new Date(msg.ts*1000).toDateString();
     if(d!==lastDate){const div=document.createElement('div');div.className='day-div';div.textContent=d;area.appendChild(div);lastDate=d;}
+    if(!markerInserted && lastReadTs>0 && msg.ts>lastReadTs && msg.from!=='*'){
+      const marker=document.createElement('div');marker.className='read-marker';marker.textContent='NEW MESSAGES';area.appendChild(marker);markerInserted=true;
+    }
     const r=buildRow(msg);
     area.appendChild(r);
   }
+  // Update last-read timestamp
+  if(buf.length>0) localStorage.setItem('cryptirc_lastread_'+rmKey,String(buf[buf.length-1].ts));
   scrollForce();
 }
 function loadOlderMessages(){
@@ -3160,7 +3217,16 @@ document.addEventListener('DOMContentLoaded',()=>{
     if(!active)return;
     const items=Array.from(e.clipboardData?.items||[]);
     const imgItem=items.find(i=>i.type.startsWith('image/'));
-    if(imgItem){e.preventDefault();const f=imgItem.getAsFile();if(f)uploadFile(f);}
+    if(imgItem){e.preventDefault();const f=imgItem.getAsFile();if(f)uploadFile(f);return;}
+    // Smart paste: detect multi-line text and offer pastebin
+    const txt=e.clipboardData?.getData('text/plain')||'';
+    if(txt && txt.split('\n').length>=5 && document.activeElement===document.getElementById('msg-input')){
+      e.preventDefault();
+      _smartPasteText=txt;
+      const dlg=document.getElementById('smart-paste-dialog');
+      dlg.querySelector('.sp-info').textContent='Pasted text has '+txt.split('\n').length+' lines. Send as pastebin?';
+      dlg.classList.add('show');
+    }
   });
   // SW messages
   navigator.serviceWorker?.addEventListener('message',e=>{
@@ -3234,7 +3300,12 @@ async function handleInput(raw){
       case 'JOIN': {
         let ch=args[0]||'';
         if(ch&&!ch.startsWith('#')&&!ch.startsWith('&')&&!ch.startsWith('+')&&!ch.startsWith('!')) ch='#'+ch;
-        wsend({type:'join_channel',conn_id,channel:ch,key:args[1]||null}); break;
+        let jKey=args[1]||null;
+        // Auto-fill saved channel key if none provided
+        if(!jKey){const ks=loadChanKeys();jKey=ks[bk(conn_id,ch)]||null;}
+        // Save key if provided
+        if(args[1]){const ks=loadChanKeys();ks[bk(conn_id,ch)]=args[1];saveChanKeys(ks);}
+        wsend({type:'join_channel',conn_id,channel:ch,key:jKey}); break;
       }
       case 'PART': case 'LEAVE':
         wsend({type:'part_channel',conn_id,channel:args[0]||target}); break;
@@ -3680,6 +3751,86 @@ async function handleInput(raw){
       }
       case 'ENCRYPT': case 'E2E':
         await handleEncryptCommand(args, conn_id, target); break;
+      case 'ASCII': case 'FIGLET': {
+        const text=args.join(' ');if(!text){sysMsg(conn_id,target,'Usage: /ascii <text>','error');break;}
+        const art=makeAsciiArt(text);
+        for(const line of art.split('\n')){
+          if(!line.trim())continue;
+          const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,line):null;
+          wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||line}`});
+          addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:line,kind:'privmsg',encrypted:!!wire});
+        }
+        break;
+      }
+      case 'UD': case 'URBAN': {
+        const term=args.join(' ');if(!term){sysMsg(conn_id,target,'Usage: /ud <word>','error');break;}
+        sysMsg(conn_id,target,`Looking up "${term}" on Urban Dictionary...`,'system');
+        try{
+          const r=await fetch(`https://api.urbandictionary.com/v0/define?term=${encodeURIComponent(term)}`);
+          const d=await r.json();
+          if(d.list&&d.list.length>0){
+            const def=d.list[0];const clean=def.definition.replace(/\[|\]/g,'').slice(0,300);
+            const msg=`📖 ${term}: ${clean}${def.definition.length>300?'...':''} (👍${def.thumbs_up} 👎${def.thumbs_down})`;
+            const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,msg):null;
+            wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||msg}`});
+            addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:msg,kind:'privmsg',encrypted:!!wire});
+          } else sysMsg(conn_id,target,`No definition found for "${term}"`,'error');
+        }catch(e){sysMsg(conn_id,target,`UD lookup failed — https://www.urbandictionary.com/define.php?term=${encodeURIComponent(term)}`,'error');}
+        break;
+      }
+      case 'SHORTEN': {
+        const url=args[0];if(!url||(!url.startsWith('http://')&&!url.startsWith('https://'))){sysMsg(conn_id,target,'Usage: /shorten <url>','error');break;}
+        try{
+          const token=sessionToken;
+          const r=await fetch(`${location.pathname}s`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},body:JSON.stringify({url})});
+          const d=await r.json();
+          if(d.url){document.getElementById('msg-input').value=d.url;sysMsg(conn_id,target,`Short URL: ${d.url}`,'system');}
+          else sysMsg(conn_id,target,'Failed to create short URL','error');
+        }catch(e){sysMsg(conn_id,target,'URL shortener error','error');}
+        break;
+      }
+      case 'STATS': {
+        showChannelStats(conn_id,target);
+        break;
+      }
+      case 'NOTE': {
+        const nick=args[0];const noteText=args.slice(1).join(' ');
+        if(!nick){sysMsg(conn_id,target,'Usage: /note <nick> [text] — set or view notes','error');break;}
+        const notes=loadUserNotes();
+        if(!noteText){
+          const existing=notes[nick.toLowerCase()];
+          sysMsg(conn_id,target,existing?`Note on ${nick}: ${existing}`:`No note on ${nick}`,'system');
+        } else {
+          notes[nick.toLowerCase()]=noteText;saveUserNotes(notes);
+          sysMsg(conn_id,target,`Note saved for ${nick}`,'system');
+        }
+        break;
+      }
+      case 'DND': {
+        const sub=args[0]?.toLowerCase();
+        if(sub==='on'){localStorage.setItem('cryptirc_dnd','1');sysMsg(conn_id,target,'🔕 Do Not Disturb ON — notifications suppressed','system');}
+        else if(sub==='off'){localStorage.removeItem('cryptirc_dnd');sysMsg(conn_id,target,'🔔 Do Not Disturb OFF','system');}
+        else if(sub==='schedule'){
+          const start=args[1],end=args[2];
+          if(!start||!end){sysMsg(conn_id,target,'Usage: /dnd schedule <HH:MM> <HH:MM>  e.g. /dnd schedule 23:00 07:00','error');break;}
+          localStorage.setItem('cryptirc_dnd_start',start);localStorage.setItem('cryptirc_dnd_end',end);
+          sysMsg(conn_id,target,`🔕 DND scheduled: ${start} — ${end}`,'system');
+        }
+        else{const on=localStorage.getItem('cryptirc_dnd')==='1';sysMsg(conn_id,target,`DND is ${on?'ON':'OFF'}. Usage: /dnd on|off|schedule <start> <end>`,'system');}
+        break;
+      }
+      case 'SPLIT': case 'SPLITVIEW': {
+        toggleSplitView();
+        break;
+      }
+      case 'CHANKEY': case 'KEY': {
+        const ch=args[0],key=args[1];
+        if(!ch){sysMsg(conn_id,target,'Usage: /key #channel [key] — save or clear a channel key','error');break;}
+        const keys=loadChanKeys();
+        if(key){keys[bk(conn_id,ch)]=key;saveChanKeys(keys);sysMsg(conn_id,target,`Key saved for ${ch}`,'system');}
+        else{delete keys[bk(conn_id,ch)];saveChanKeys(keys);sysMsg(conn_id,target,`Key cleared for ${ch}`,'system');}
+        break;
+      }
       default:
         wsend({type:'send',conn_id,raw:raw.slice(1)});
     }
@@ -3998,6 +4149,8 @@ function editNetwork(id){
   document.getElementById('f-tls-invalid').value=c.tls_accept_invalid_certs?'true':'false';
   document.getElementById('f-oper-login').value=c.oper_login||'';
   document.getElementById('f-oper-pass').value=c.oper_pass||'';
+  document.getElementById('f-auto-identify').value=c.auto_identify?'true':'false';
+  document.getElementById('f-nickserv-pass').value='';
   if(c.sasl_plain){
     document.getElementById('f-sasl-method').value='plain';
     document.getElementById('f-sasl-account').value=c.sasl_plain.account||'';
@@ -4030,7 +4183,9 @@ function saveNetwork(){
     auto_join:aj.split(/\s+/).filter(Boolean),
     auto_reconnect:document.getElementById('f-reconnect').value==='true',
     oper_login:document.getElementById('f-oper-login').value||null,
-    oper_pass:document.getElementById('f-oper-pass').value||null};
+    oper_pass:document.getElementById('f-oper-pass').value||null,
+    auto_identify:document.getElementById('f-auto-identify').value==='true',
+    nickserv_pass:document.getElementById('f-nickserv-pass').value||null};
   if(editingNetworkId){
     wsend({type:'update_network',network:cfg}); closeModal();
   } else {
@@ -4844,6 +4999,14 @@ document.addEventListener('click',e=>{
     {cmd:'drop',desc:'Strip all status from everyone',usage:'/drop'},
     {cmd:'unexemptall',desc:'Remove all channel exempts',usage:'/unexemptall'},
     {cmd:'clearexempt',desc:'Remove all channel exempts',usage:'/clearexempt'},
+    {cmd:'ascii',desc:'Generate ASCII art text',usage:'/ascii <text>'},
+    {cmd:'ud',desc:'Urban Dictionary lookup',usage:'/ud <word>'},
+    {cmd:'shorten',desc:'Shorten a URL',usage:'/shorten <url>'},
+    {cmd:'stats',desc:'Channel statistics dashboard',usage:'/stats'},
+    {cmd:'note',desc:'Set or view notes on a nick',usage:'/note <nick> [text]'},
+    {cmd:'dnd',desc:'Do Not Disturb mode',usage:'/dnd on|off|schedule <HH:MM> <HH:MM>'},
+    {cmd:'split',desc:'Toggle split view (two channels)',usage:'/split'},
+    {cmd:'key',desc:'Save/clear a channel key (+k)',usage:'/key #channel [key]'},
   ];
   let slashEl=document.createElement('div');
   slashEl.id='slash-autocomplete';
@@ -4891,6 +5054,176 @@ document.addEventListener('click',e=>{
   document.addEventListener('click',e=>{if(!e.target.closest('#slash-autocomplete')&&!e.target.closest('#msg-input'))slashEl.style.display='none';});
 })();
 
+// ─── # Channel autocomplete ──────────────────────────────────────────────────
+(function(){
+  const inp=document.getElementById('msg-input');if(!inp)return;
+  let chEl=document.createElement('div');chEl.id='chan-autocomplete';
+  chEl.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:102;';
+  inp.parentNode.appendChild(chEl);
+  let chIdx=-1;
+  function getAllChannels(){
+    const out=[];
+    for(const net of (typeof networks!=='undefined'?networks:[])){
+      for(const ch of (net.channels||[])){if(ch.name.startsWith('#')||ch.name.startsWith('&'))out.push(ch.name);}
+    }
+    return [...new Set(out)];
+  }
+  inp.addEventListener('input',()=>{
+    const v=inp.value,pos=inp.selectionStart,before=v.slice(0,pos);
+    const m=before.match(/(^|\s)(#[a-zA-Z0-9_\-]{0,30})$/);
+    if(!m||m[2].length<2){chEl.style.display='none';chIdx=-1;return;}
+    const q=m[2].toLowerCase();
+    const chans=getAllChannels().filter(c=>c.toLowerCase().startsWith(q)).slice(0,10);
+    if(!chans.length){chEl.style.display='none';chIdx=-1;return;}
+    chEl.style.display='block';chIdx=0;
+    chEl.innerHTML=chans.map((c,i)=>`<div class="emoji-ac-item${i===0?' active':''}" data-i="${i}" style="font-size:13px;color:var(--text2)">${esc(c)}</div>`).join('');
+    chEl.querySelectorAll('.emoji-ac-item').forEach(el=>{el.onclick=()=>{completeChan(chans[+el.dataset.i]);};});
+  });
+  function completeChan(ch){
+    const v=inp.value,pos=inp.selectionStart,before=v.slice(0,pos);
+    const m=before.match(/(^|\s)(#[a-zA-Z0-9_\-]{0,30})$/);
+    if(m){inp.value=before.slice(0,before.length-m[2].length)+ch+' '+v.slice(pos);inp.focus();}
+    chEl.style.display='none';chIdx=-1;
+  }
+  inp.addEventListener('keydown',e=>{
+    if(chEl.style.display==='none')return;
+    const items=chEl.querySelectorAll('.emoji-ac-item');if(!items.length)return;
+    if(e.key==='ArrowDown'){e.preventDefault();chIdx=Math.min(chIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===chIdx));}
+    else if(e.key==='ArrowUp'){e.preventDefault();chIdx=Math.max(chIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===chIdx));}
+    else if(e.key==='Tab'||e.key==='Enter'){if(chIdx>=0&&chIdx<items.length){e.preventDefault();const chans=getAllChannels().filter(c=>c.toLowerCase().startsWith(((inp.value.slice(0,inp.selectionStart).match(/(^|\s)(#[a-zA-Z0-9_\-]{0,30})$/)||[])[2]||'').toLowerCase())).slice(0,10);if(chans[chIdx])completeChan(chans[chIdx]);}}
+    else if(e.key==='Escape'){chEl.style.display='none';chIdx=-1;}
+  });
+  document.addEventListener('click',e=>{if(!e.target.closest('#chan-autocomplete')&&!e.target.closest('#msg-input'))chEl.style.display='none';});
+})();
+
+// ─── ASCII art generator ─────────────────────────────────────────────────────
+const _ASCIIFONT={
+A:'01110,10001,11111,10001,10001',B:'11110,10001,11110,10001,11110',C:'01111,10000,10000,10000,01111',
+D:'11110,10001,10001,10001,11110',E:'11111,10000,11110,10000,11111',F:'11111,10000,11110,10000,10000',
+G:'01111,10000,10011,10001,01110',H:'10001,10001,11111,10001,10001',I:'11111,00100,00100,00100,11111',
+J:'11111,00010,00010,10010,01100',K:'10001,10010,11100,10010,10001',L:'10000,10000,10000,10000,11111',
+M:'10001,11011,10101,10001,10001',N:'10001,11001,10101,10011,10001',O:'01110,10001,10001,10001,01110',
+P:'11110,10001,11110,10000,10000',Q:'01110,10001,10101,10010,01101',R:'11110,10001,11110,10010,10001',
+S:'01111,10000,01110,00001,11110',T:'11111,00100,00100,00100,00100',U:'10001,10001,10001,10001,01110',
+V:'10001,10001,01010,01010,00100',W:'10001,10001,10101,11011,10001',X:'10001,01010,00100,01010,10001',
+Y:'10001,01010,00100,00100,00100',Z:'11111,00010,00100,01000,11111',
+'0':'01110,10011,10101,11001,01110','1':'00100,01100,00100,00100,01110','2':'01110,10001,00110,01000,11111',
+'3':'11110,00001,00110,00001,11110','4':'10010,10010,11111,00010,00010','5':'11111,10000,11110,00001,11110',
+'6':'01110,10000,11110,10001,01110','7':'11111,00001,00010,00100,00100','8':'01110,10001,01110,10001,01110',
+'9':'01110,10001,01111,00001,01110',' ':'00000,00000,00000,00000,00000',
+'!':'00100,00100,00100,00000,00100','?':'01110,00001,00110,00000,00100','.':'00000,00000,00000,00000,00100',
+'-':'00000,00000,11111,00000,00000','_':'00000,00000,00000,00000,11111',
+};
+function makeAsciiArt(text){
+  text=text.toUpperCase().slice(0,20);const lines=['','','','',''];
+  for(const ch of text){const data=_ASCIIFONT[ch]||_ASCIIFONT[' '];const rows=data.split(',');
+  for(let r=0;r<5;r++)lines[r]+=rows[r].replace(/1/g,'█').replace(/0/g,' ')+' ';}
+  return lines.join('\n');
+}
+
+// ─── DND (Do Not Disturb) ───────────────────────────────────────────────────
+function isDndActive(){
+  if(localStorage.getItem('cryptirc_dnd')==='1')return true;
+  const start=localStorage.getItem('cryptirc_dnd_start'),end=localStorage.getItem('cryptirc_dnd_end');
+  if(!start||!end)return false;
+  const now=new Date(),h=now.getHours(),m=now.getMinutes(),cur=h*60+m;
+  const[sh,sm]=(start||'0:0').split(':').map(Number),sv=sh*60+sm;
+  const[eh,em]=(end||'0:0').split(':').map(Number),ev=eh*60+em;
+  return sv<ev?(cur>=sv&&cur<ev):(cur>=sv||cur<ev);
+}
+
+// ─── User notes ──────────────────────────────────────────────────────────────
+function loadUserNotes(){try{return JSON.parse(localStorage.getItem('cryptirc_user_notes')||'{}');}catch{return{};}}
+function saveUserNotes(n){localStorage.setItem('cryptirc_user_notes',JSON.stringify(n));savePrefsToServer();}
+
+// ─── Channel key manager ─────────────────────────────────────────────────────
+function loadChanKeys(){try{return JSON.parse(localStorage.getItem('cryptirc_chankeys')||'{}');}catch{return{};}}
+function saveChanKeys(k){localStorage.setItem('cryptirc_chankeys',JSON.stringify(k));}
+
+// ─── Channel stats ───────────────────────────────────────────────────────────
+const _chanStats={};
+function trackStat(conn_id,target,nick){
+  if(!nick||nick==='*')return;
+  const k=bk(conn_id,target);if(!_chanStats[k])_chanStats[k]={};
+  if(!_chanStats[k][nick])_chanStats[k][nick]=0;
+  _chanStats[k][nick]++;
+}
+function showChannelStats(conn_id,target){
+  const k=bk(conn_id,target);const stats=_chanStats[k]||{};
+  const sorted=Object.entries(stats).sort((a,b)=>b[1]-a[1]).slice(0,25);
+  const max=sorted[0]?sorted[0][1]:1;
+  let html=`<h3>📊 Stats — ${esc(target)}</h3>`;
+  if(!sorted.length){html+='<div style="color:var(--text3)">No messages tracked yet for this session.</div>';}
+  else{
+    html+='<table class="stats-table"><thead><tr><th>#</th><th>Nick</th><th>Messages</th><th></th></tr></thead><tbody>';
+    sorted.forEach(([nick,count],i)=>{
+      const pct=Math.round(count/max*100);
+      html+=`<tr><td style="color:var(--text3)">${i+1}</td><td class="nc${nickHash(nick)}">${esc(nick)}</td><td>${count}</td><td style="width:40%"><div class="stats-bar" style="width:${pct}%"></div></td></tr>`;
+    });
+    html+='</tbody></table>';
+    const total=Object.values(stats).reduce((a,b)=>a+b,0);
+    html+=`<div style="margin-top:10px;font-size:11px;color:var(--text3)">${Object.keys(stats).length} unique nicks · ${total} messages this session</div>`;
+  }
+  const overlay=document.getElementById('stats-overlay');
+  overlay.querySelector('.stats-box').innerHTML=html+'<div style="text-align:right;margin-top:12px"><button onclick="document.getElementById(\'stats-overlay\').classList.remove(\'show\')" style="background:var(--bg4);border:1px solid var(--border);color:var(--text);padding:6px 16px;border-radius:5px;cursor:pointer;font-family:var(--mono)">Close</button></div>';
+  overlay.classList.add('show');
+}
+
+// ─── Split view ──────────────────────────────────────────────────────────────
+let _splitActive=false,_splitTarget=null;
+function toggleSplitView(){
+  _splitActive=!_splitActive;
+  const main=document.getElementById('main');
+  if(_splitActive){
+    main.classList.add('split-active');
+    updateSplitPanel();
+    if(active)sysMsg(active.conn_id,active.target,'Split view enabled — use the dropdown in the right panel','system');
+  } else {
+    main.classList.remove('split-active');
+    if(active)sysMsg(active.conn_id,active.target,'Split view disabled','system');
+  }
+}
+function updateSplitPanel(){
+  const sel=document.getElementById('split-chan-select');if(!sel)return;
+  sel.innerHTML='';
+  for(const net of (typeof networks!=='undefined'?networks:[])){
+    for(const ch of (net.channels||[])){
+      const opt=document.createElement('option');opt.value=net.config.id+'/'+ch.name;opt.textContent=ch.name;
+      if(_splitTarget===opt.value)opt.selected=true;
+      sel.appendChild(opt);
+    }
+  }
+  renderSplitChat();
+}
+function renderSplitChat(){
+  const area=document.getElementById('split-chat-area');if(!area)return;area.innerHTML='';
+  if(!_splitTarget){area.innerHTML='<div style="padding:20px;color:var(--text3);font-size:12px">Select a channel above</div>';return;}
+  const[cid,tgt]=_splitTarget.split('/');if(!cid||!tgt)return;
+  const buf=getBuf(cid,tgt);
+  for(const msg of buf.slice(-100)){const r=buildRow(msg);area.appendChild(r);}
+  area.scrollTop=area.scrollHeight;
+}
+
+// ─── Smart paste ─────────────────────────────────────────────────────────────
+let _smartPasteText='';
+function smartPasteYes(){
+  document.getElementById('smart-paste-dialog').classList.remove('show');
+  if(!_smartPasteText||!active)return;
+  // Create paste via API
+  const token=sessionToken;
+  fetch(`${location.pathname}paste`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},
+    body:JSON.stringify({content:_smartPasteText,language:'text',expires_in:0,password:null})
+  }).then(r=>r.json()).then(d=>{
+    if(d.url){document.getElementById('msg-input').value=d.url;showToast('Paste created — URL in input bar');}
+  }).catch(()=>{document.getElementById('msg-input').value=_smartPasteText;});
+  _smartPasteText='';
+}
+function smartPasteNo(){
+  document.getElementById('smart-paste-dialog').classList.remove('show');
+  document.getElementById('msg-input').value+=_smartPasteText;
+  _smartPasteText='';
+}
+
 // ─── Server-side preferences sync ─────────────────────────────────────────────
 let _prefsSaveTimer=null;
 function gatherPreferences(){
@@ -4911,6 +5244,12 @@ function gatherPreferences(){
     favsOnly: localStorage.getItem('cryptirc_favs_only')==='true',
     sidebarCollapsed: localStorage.getItem('cryptirc_sidebar_collapsed')==='1',
     nickCollapsed: localStorage.getItem('cryptirc_nick_collapsed')==='1',
+    userNotes: loadUserNotes(),
+    channelKeys: loadChanKeys(),
+    autoRejoin: localStorage.getItem('cryptirc_autorejoin')!=='false',
+    dnd: localStorage.getItem('cryptirc_dnd')==='1',
+    dndStart: localStorage.getItem('cryptirc_dnd_start')||'',
+    dndEnd: localStorage.getItem('cryptirc_dnd_end')||'',
   };
 }
 function savePrefsToServer(){
@@ -4961,6 +5300,11 @@ function restorePreferences(p){
     if(p.stats){_txBytes=p.stats.tx||0;_rxBytes=p.stats.rx||0;_txCount=p.stats.tc||0;_rxCount=p.stats.rc||0;}
     if(p.ignoreList) localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));
     if(p.highlightWords) localStorage.setItem('cryptirc_highlight_words',JSON.stringify(p.highlightWords));
+    if(p.userNotes) localStorage.setItem('cryptirc_user_notes',JSON.stringify(p.userNotes));
+    if(p.channelKeys) localStorage.setItem('cryptirc_chankeys',JSON.stringify(p.channelKeys));
+    if(p.dnd) localStorage.setItem('cryptirc_dnd','1');
+    if(p.dndStart) localStorage.setItem('cryptirc_dnd_start',p.dndStart);
+    if(p.dndEnd) localStorage.setItem('cryptirc_dnd_end',p.dndEnd);
     if(p.favsOnly!=null) localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
     if(p.sidebarCollapsed!=null) localStorage.setItem('cryptirc_sidebar_collapsed',p.sidebarCollapsed?'1':'');
     if(p.nickCollapsed!=null) localStorage.setItem('cryptirc_nick_collapsed',p.nickCollapsed?'1':'');
@@ -5368,6 +5712,7 @@ function showNickMenu(e,nick){
     {label:'Mention',   action:()=>insertNick(nick)},
     {label:'Slap',      action:async()=>{if(!active)return;const st=`slaps ${nick} around a bit with a large trout`;const sw=(window.E2E?.ready||window.E2E?.channelKeys?.[active.target])?await e2eEncryptOutgoing(active.target,`\x01ACTION ${st}\x01`):null;if(sw)wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :${sw}`});else wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :\x01ACTION ${st}\x01`});addMessage(active.conn_id,active.target,{ts:Date.now()/1000|0,from:getNick(active.conn_id),text:st,kind:'action'});}},
     {label:loadMonitor()[nick.toLowerCase()]?'Unmonitor':'Monitor', action:()=>{const k=nick.toLowerCase();if(loadMonitor()[k]){monitorRemove(nick);showToast(`Removed ${nick} from monitor`);}else{monitorAdd(nick);showToast(`Added ${nick} to monitor`);}}},
+    {label:'📝 Note', action:()=>{const notes=loadUserNotes();const existing=notes[nick.toLowerCase()]||'';const n=prompt(`Note for ${nick}:`,existing);if(n!==null){if(n.trim())notes[nick.toLowerCase()]=n.trim();else delete notes[nick.toLowerCase()];saveUserNotes(notes);showToast(n.trim()?`Note saved for ${nick}`:`Note removed for ${nick}`);}}},
     {label:isIgnored(nick)?'Unignore':'Ignore nick', action:()=>{if(isIgnored(nick)){removeIgnore(nick);showToast(`Unignored ${nick}`);}else{addIgnore(nick);showToast(`Ignoring ${nick}`);}}},
     {label:'Ignore by mask', action:()=>{const mask=prompt(`Ignore mask for ${nick}:\n\nExamples:\n  ${nick}!*@*  (nick only)\n  *!*@*.host.com  (by host)\n  *!user@*  (by username)`,`${nick}!*@*`);if(mask&&mask.trim()){addIgnore(mask.trim());showToast(`Ignoring ${mask.trim()}`);}}},
   ];
@@ -6910,6 +7255,10 @@ function timeAgo(ts){
 </div>
 <style>#admin-overlay.show{display:flex !important;}</style>
 
+<!-- Stats overlay -->
+<div id="stats-overlay" onclick="if(event.target===this)this.classList.remove('show')"><div class="stats-box"></div></div>
+<!-- Smart paste dialog -->
+<div id="smart-paste-dialog"><div class="sp-info"></div><div class="sp-btns"><button class="sp-btn sp-yes" onclick="smartPasteYes()">Create Pastebin</button><button class="sp-btn sp-no" onclick="smartPasteNo()">Paste as Text</button></div></div>
 <!-- Animation overlay for animated themes -->
 <div id="anim-overlay"><canvas id="anim-canvas"></canvas></div>
 <!-- Cover div prevents iOS keyboard from exposing raw source below the app -->
