@@ -2251,7 +2251,7 @@ function handleEvent(ev) {
       // If WE parted, remove channel and switch away
       if(ev.nick===getNick(ev.conn_id)){
         if(pNet) pNet.channels=pNet.channels.filter(c=>c.name!==ev.channel);
-        delete buffers[bk(ev.conn_id,ev.channel)];
+        // Keep buffer so history loads when rejoined
         unread.delete(bk(ev.conn_id,ev.channel));
         mentionUnread.delete(bk(ev.conn_id,ev.channel));
         // Remove from favorites if favorited
@@ -2454,19 +2454,25 @@ function handleEvent(ev) {
     case 'irc_list_entry': handleListEntry(ev); break;
     case 'irc_list_end': handleListEnd(); break;
     case 'irc_ban_entry': {
-      // Synthetic event: server sent 367 (ban list entry)
-      // Accumulated in banListAccum for /unbanall
       const key = ev.conn_id + '/' + ev.channel;
+      // Check if this is for /unbanall
       if (pendingUnbanAll[key]) {
         if (!banListAccum[key]) banListAccum[key] = [];
         banListAccum[key].push(ev.mask);
       }
-      sysMsg(ev.conn_id, ev.channel, `Ban: ${ev.mask}${ev.set_by ? ' (set by '+ev.set_by+')' : ''}`, 'system');
+      // Check if this is for /unexemptall (348 reuses ban_entry event)
+      if (window._pendingUnexempt?.[key]) {
+        if (!window._exemptAccum[key]) window._exemptAccum[key] = [];
+        window._exemptAccum[key].push(ev.mask);
+        sysMsg(ev.conn_id, ev.channel, `Exempt: ${ev.mask}${ev.set_by ? ' (set by '+ev.set_by+')' : ''}`, 'system');
+      } else {
+        sysMsg(ev.conn_id, ev.channel, `Ban: ${ev.mask}${ev.set_by ? ' (set by '+ev.set_by+')' : ''}`, 'system');
+      }
       break;
     }
     case 'irc_ban_end': {
-      // Synthetic event: server sent 368 (end of ban list)
       const key  = ev.conn_id + '/' + ev.channel;
+      // Check if this is for /unbanall (368)
       if (pendingUnbanAll[key]) {
         delete pendingUnbanAll[key];
         const masks = banListAccum[key] || [];
@@ -2476,6 +2482,18 @@ function handleEvent(ev) {
         } else {
           sysMsg(ev.conn_id, ev.channel, `Removing ${masks.length} ban${masks.length===1?'':'s'}…`, 'system');
           batchMode(ev.conn_id, ev.channel, '-b', masks);
+        }
+      }
+      // Check if this is for /unexemptall (349)
+      if (window._pendingUnexempt?.[key]) {
+        delete window._pendingUnexempt[key];
+        const masks = window._exemptAccum?.[key] || [];
+        delete window._exemptAccum?.[key];
+        if (!masks.length) {
+          sysMsg(ev.conn_id, ev.channel, 'Exempt list is already empty.', 'system');
+        } else {
+          sysMsg(ev.conn_id, ev.channel, `Removing ${masks.length} exempt${masks.length===1?'':'s'}…`, 'system');
+          batchMode(ev.conn_id, ev.channel, '-e', masks);
         }
       }
       break;
@@ -3273,6 +3291,18 @@ async function handleInput(raw){
         break;
       }
 
+      case 'UNEXEMPTALL': case 'REMOVEEXEMPT': case 'CLEAREXEMPT': {
+        const exChan = args[0] || target;
+        sysMsg(conn_id, target, `Fetching exempt list for ${exChan}…`, 'system');
+        if(!window._pendingUnexempt) window._pendingUnexempt={};
+        if(!window._exemptAccum) window._exemptAccum={};
+        const exKey=conn_id+'/'+exChan;
+        window._pendingUnexempt[exKey]=true;
+        window._exemptAccum[exKey]=[];
+        wsend({type:'send', conn_id, raw:`MODE ${exChan} +e`});
+        break;
+      }
+
       // ── Mode shortcuts ───────────────────────────────────────────────
       case 'MODE':
         wsend({type:'send',conn_id,raw:`MODE ${args.join(' ')}`}); break;
@@ -3480,9 +3510,9 @@ async function handleInput(raw){
         if(closeTarget.startsWith('#')||closeTarget.startsWith('&')||closeTarget.startsWith('+')||closeTarget.startsWith('!')){
           wsend({type:'part_channel',conn_id,channel:closeTarget});
         } else {
-          // Remove PM buffer
+          // Close PM but keep buffer for history
           if(queryBufs[conn_id]) queryBufs[conn_id].delete(closeTarget.toLowerCase());
-          delete buffers[bk(conn_id,closeTarget)];
+          unread.delete(bk(conn_id,closeTarget));
           if(isActive(conn_id,closeTarget)) setActive(conn_id,'status');
           renderSidebar();
         }
@@ -4632,6 +4662,8 @@ document.addEventListener('click',e=>{
     {cmd:'mdop',desc:'Mass deop all but yourself',usage:'/mdop'},
     {cmd:'massdeop',desc:'Mass deop all but yourself',usage:'/massdeop'},
     {cmd:'drop',desc:'Strip all status from everyone',usage:'/drop'},
+    {cmd:'unexemptall',desc:'Remove all channel exempts',usage:'/unexemptall'},
+    {cmd:'clearexempt',desc:'Remove all channel exempts',usage:'/clearexempt'},
   ];
   let slashEl=document.createElement('div');
   slashEl.id='slash-autocomplete';
@@ -4795,8 +4827,9 @@ function closeAllPMs(conn_id){
 }
 function closeQuery(conn_id,lc){
   if(queryBufs[conn_id])queryBufs[conn_id].delete(lc);
-  delete buffers[bk(conn_id,lc)];
+  // Keep buffer so history reloads when reopened, just clear unread
   unread.delete(bk(conn_id,lc));
+  mentionUnread.delete(bk(conn_id,lc));
   saveQueryBufs();
   if(active&&active.conn_id===conn_id&&active.target.toLowerCase()===lc)setActive(conn_id,'status');
   renderSidebar();
@@ -5866,6 +5899,8 @@ const HELP_TEXT = {
   mdop:        '/mdop                       — Mass deop all ops except yourself',
   massdeop:    '/massdeop                   — Same as /mdop',
   drop:        '/drop                       — Strip ALL status (~&@%+) from everyone except yourself',
+  unexemptall: '/unexemptall [channel]      — Remove all ban exempts (+e) from the channel',
+  clearexempt: '/clearexempt [channel]      — Same as /unexemptall',
   // Kick/Ban
   kick:        '/kick <nick> [reason]        — Kick a user',
   ban:         '/ban <nick|mask>             — Ban a user',
@@ -6168,7 +6203,7 @@ function showHelp(conn_id, target, specific) {
     ['Channel info',   ['topic','names','who','whois','banlist']],
     ['Mode shortcuts', ['op','deop','voice','devoice','halfop','protect','owner','mode']],
     ['Mass ops',       ['voiceall','devoiceall','opall','deopall','mdop','drop','kickall']],
-    ['Kick/Ban',       ['kick','ban','unban','kickban','tban','invite','banlist','unbanall']],
+    ['Kick/Ban',       ['kick','ban','unban','kickban','tban','invite','banlist','unbanall','unexemptall']],
     ['Ignore',         ['ignore','unignore','ignorelist']],
     ['Services',       ['ns','cs','identify','ghost','regain']],
     ['Oper',           ['oper','kill','shun','gline','kline','rehash']],

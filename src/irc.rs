@@ -548,12 +548,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let user_nick = { conn.lock().await.nick.clone() };
                         // echo-message: if server echoes our own PRIVMSG, skip it here —
                         // the Send handler already broadcasts IrcEcho for multi-device sync
-                        if echo_message_enabled && from == user_nick {
-                            // Verify this is actually from us (check prefix has our user@host)
-                            // to avoid suppressing messages from different users with same nick
+                        // Don't suppress echo for batch messages (chathistory/+H playback)
+                        let in_batch = p.tags.contains_key("batch");
+                        if echo_message_enabled && from == user_nick && !in_batch {
                             if let Some(ref pfx) = p.prefix {
                                 if pfx.contains('!') {
-                                    // Has user@host — it's from the server echoing us
                                     continue;
                                 }
                             }
@@ -950,6 +949,20 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     }
                     // 368 = RPL_ENDOFBANLIST
                     "368" => {
+                        let channel = p.params.get(1).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcBanEnd { conn_id: conn_id.to_string(), channel });
+                    }
+                    // 348 = RPL_EXCEPTLIST (exempt list entry)
+                    "348" => {
+                        let channel = p.params.get(1).cloned().unwrap_or_default();
+                        let mask    = p.params.get(2).cloned().unwrap_or_default();
+                        let set_by  = p.params.get(3).cloned().unwrap_or_default();
+                        send(ServerEvent::IrcBanEntry {
+                            conn_id: conn_id.to_string(), channel, mask, set_by, ts,
+                        });
+                    }
+                    // 349 = RPL_ENDOFEXCEPTLIST
+                    "349" => {
                         let channel = p.params.get(1).cloned().unwrap_or_default();
                         send(ServerEvent::IrcBanEnd { conn_id: conn_id.to_string(), channel });
                     }
