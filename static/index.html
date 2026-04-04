@@ -1835,6 +1835,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <button class="settings-menu-item" onclick="showSessionManager();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>Sessions</button>
           <button class="settings-menu-item" onclick="showChangePass();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>Vault Password</button>
           <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Help</button>
+          <button class="settings-menu-item" onclick="showOperPanel();closeSettingsMenu()" style="color:#f0c040"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRC Oper</button>
           <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Admin</button>
           <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Clear All Data</button>
           <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Delete Account</button>
@@ -3028,7 +3029,7 @@ function _renderSidebarNow(){
       ci.style.position='relative';
       const chMuted=isMuted(id+'/'+ch.name)||isMuted('net:'+id);
       const mc=mentionUnread.get(k)||0;
-      const chEnc=window.E2E?.channelKeys?.[ch.name];
+      const chEnc=(()=>{const ck=window.E2E?.channelKeys;if(!ck)return null;if(ck[ch.name])return ck[ch.name];const lk=ch.name.toLowerCase();for(const k in ck)if(k.toLowerCase()===lk)return ck[k];return null;})();
       const chLock=chEnc?'<svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)" stroke="var(--accent)" stroke-width="1" style="opacity:.7;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2.5"/></svg>':'<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:.2;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9 0"/></svg>';
       ci.innerHTML=`${chLock}${esc(ch.name)}<span class="chan-right">${uc&&!chMuted?`<span class="chan-unread-badge${mc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
       ci.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,id,ch.name,'channel');});
@@ -3047,7 +3048,7 @@ function _renderSidebarNow(){
         qi.style.fontStyle='italic';
         qi.style.position='relative';
         const pmMuted=isMuted(id+'/'+lc)||isMuted('net:'+id);
-        const dmEnc=window.E2E?.dmSessions?.[lc]||window.E2E?.dmSessions?.[display];
+        const dmEnc=(()=>{const ds=window.E2E?.dmSessions;if(!ds)return null;if(ds[lc])return ds[lc];if(ds[display])return ds[display];const lk=lc.toLowerCase();for(const k in ds)if(k.toLowerCase()===lk)return ds[k];return null;})();
         const dmLock=dmEnc?'<svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)" stroke="var(--accent)" stroke-width="1" style="opacity:.7;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2.5"/></svg>':'<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:.2;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9 0"/></svg>';
         qi.innerHTML=`${dmLock}${esc(display)}<span class="chan-right">${uc&&!pmMuted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${pmMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
         qi.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,id,lc,'pm');});
@@ -3238,7 +3239,7 @@ function buildCondensedRow(group){
   let tsHtml='';
   if(lastTs){const t=new Date(lastTs*1000);const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';tsHtml=`<span class="sc-ts">${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}</span>`;}
   row.innerHTML=`<span class="sc-summary">${tsHtml}↕ <span class="sc-summary-text">${summary}</span></span><div class="sc-expand">${group.map(m=>`<div style="padding:1px 0">— ${esc(m.text||'')}</div>`).join('')}</div>`;
-  row.onclick=()=>row.classList.toggle('expanded');
+  row.onclick=()=>{row.classList.toggle('expanded');if(row.classList.contains('expanded'))requestAnimationFrame(()=>row.scrollIntoView({block:'end',behavior:'smooth'}));};
   return row;
 }
 function buildRow(msg){
@@ -3353,11 +3354,11 @@ function updateTypingIndicator(){
   const el=document.getElementById('typing-indicator');
   if(!el||!window._typingState)return;
   if(!active){el.className='';el.textContent='';return;}
-  const prefix=active.conn_id+'/'+active.target+'/';
+  const prefix=(active.conn_id+'/'+active.target+'/').toLowerCase();
   const typers=[];
   const now=Date.now();
   for(const[k,t]of Object.entries(window._typingState)){
-    if(k.startsWith(prefix)&&now-t<6000){
+    if(k.toLowerCase().startsWith(prefix)&&now-t<6000){
       typers.push(k.slice(prefix.length));
     }
   }
@@ -3589,17 +3590,14 @@ function sendTypingActive(){
   if(now-_lastTypingSent<3000) return;
   _lastTypingSent=now;
   const target=active.target;
-  if(!target) return;
-  // Only send typing to channels (not PMs — avoids 401 errors for offline nicks)
-  if(!target.startsWith('#')&&!target.startsWith('&')) return;
+  if(!target||target==='status') return;
   ws.send(JSON.stringify({type:'send',conn_id:active.conn_id,raw:`@+typing=active TAGMSG ${target}`}));
 }
 function sendTypingDone(){
   if(!active||!ws||ws.readyState!==1) return;
   _lastTypingSent=0;
   const target=active.target;
-  if(!target) return;
-  if(!target.startsWith('#')&&!target.startsWith('&')) return;
+  if(!target||target==='status') return;
   ws.send(JSON.stringify({type:'send',conn_id:active.conn_id,raw:`@+typing=done TAGMSG ${target}`}));
 }
 
@@ -5795,6 +5793,330 @@ function secSaveToggle(key,val){
   applyThemeCSS(cfg);
 }
 
+// ─── IRC Oper Panel ──────────────────────────────────────────────────────────
+let _operIRCd='unrealircd';
+let _operConnId=null;
+function showOperPanel(){
+  document.getElementById('oper-overlay').classList.add('show');
+  renderOperMain();
+}
+function closeOperPanel(){document.getElementById('oper-overlay').classList.remove('show');}
+function operSend(raw){
+  if(!_operConnId){showToast('Select a network first');return;}
+  wsend({type:'send',conn_id:_operConnId,raw});
+}
+function operPrompt(title,fields,onSubmit){
+  const body=document.getElementById('oper-body');
+  let html='<button class="oper-back" onclick="renderOperMain()">&larr; Back</button>';
+  html+=`<div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:12px">${title}</div>`;
+  html+='<div class="oper-form">';
+  for(const f of fields){
+    html+=`<label>${esc(f.label)}</label>`;
+    if(f.type==='select'){
+      html+=`<select id="oper-f-${f.id}">`;
+      for(const o of f.options) html+=`<option value="${esc(o.value)}">${esc(o.label)}</option>`;
+      html+=`</select>`;
+    } else if(f.type==='textarea'){
+      html+=`<textarea id="oper-f-${f.id}" placeholder="${esc(f.placeholder||'')}" rows="2"></textarea>`;
+    } else {
+      html+=`<input id="oper-f-${f.id}" type="${f.type||'text'}" placeholder="${esc(f.placeholder||'')}" value="${esc(f.default||'')}">`;
+    }
+  }
+  html+='<div class="oper-form-actions"><button class="oper-form-btn cancel" onclick="renderOperMain()">Cancel</button>';
+  html+=`<button class="oper-form-btn" id="oper-submit">Execute</button></div></div>`;
+  body.innerHTML=html;
+  document.getElementById('oper-submit').onclick=()=>{
+    const vals={};for(const f of fields)vals[f.id]=document.getElementById('oper-f-'+f.id)?.value||'';
+    onSubmit(vals);
+    showToast('Command sent');
+    renderOperMain();
+  };
+  const first=body.querySelector('input,select,textarea');if(first)first.focus();
+}
+function operConfirm(title,msg,onYes){
+  const body=document.getElementById('oper-body');
+  let html='<button class="oper-back" onclick="renderOperMain()">&larr; Back</button>';
+  html+=`<div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:8px">${title}</div>`;
+  html+=`<div style="font-size:12px;color:var(--text3);margin-bottom:16px">${msg}</div>`;
+  html+='<div class="oper-form-actions"><button class="oper-form-btn cancel" onclick="renderOperMain()">Cancel</button>';
+  html+=`<button class="oper-form-btn danger" id="oper-yes">Confirm</button></div>`;
+  body.innerHTML=html;
+  document.getElementById('oper-yes').onclick=()=>{onYes();showToast('Command sent');renderOperMain();};
+}
+
+const OPER_IRCDS={
+  unrealircd:{label:'UnrealIRCd',commands:{
+    bans:[
+      {label:'List G-Lines',icon:'📋',action:()=>operSend('STATS G')},
+      {label:'List K-Lines',icon:'📋',action:()=>operSend('STATS k')},
+      {label:'List Z-Lines',icon:'📋',action:()=>operSend('STATS Z')},
+      {label:'List Shuns',icon:'📋',action:()=>operSend('STATS s')},
+      {label:'List Spamfilters',icon:'📋',action:()=>operSend('STATS S')},
+      {label:'List Excepts (E-Lines)',icon:'📋',action:()=>operSend('STATS e')},
+      {label:'Add G-Line',icon:'🔨',action:()=>operPrompt('Add G-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host.com'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0 (permanent)'},{id:'reason',label:'Reason',placeholder:'Reason for ban'}],v=>operSend(`GLINE ${v.mask} ${v.duration} :${v.reason}`))},
+      {label:'Remove G-Line',icon:'✖',action:()=>operPrompt('Remove G-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host.com'}],v=>operSend(`GLINE -${v.mask}`))},
+      {label:'Add K-Line',icon:'🔨',action:()=>operPrompt('Add K-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host.com'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`KLINE ${v.mask} ${v.duration} :${v.reason}`))},
+      {label:'Remove K-Line',icon:'✖',action:()=>operPrompt('Remove K-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host.com'}],v=>operSend(`KLINE -${v.mask}`))},
+      {label:'Add Z-Line',icon:'🔨',action:()=>operPrompt('Add Z-Line (IP ban)',[{id:'ip',label:'IP / CIDR',placeholder:'192.168.1.0/24'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`ZLINE ${v.ip} ${v.duration} :${v.reason}`))},
+      {label:'Remove Z-Line',icon:'✖',action:()=>operPrompt('Remove Z-Line',[{id:'ip',label:'IP / CIDR',placeholder:'192.168.1.0/24'}],v=>operSend(`ZLINE -${v.ip}`))},
+      {label:'Add Shun',icon:'🔇',action:()=>operPrompt('Add Shun',[{id:'mask',label:'Host mask',placeholder:'*@annoying.host'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`SHUN ${v.mask} ${v.duration} :${v.reason}`))},
+      {label:'Remove Shun',icon:'✖',action:()=>operPrompt('Remove Shun',[{id:'mask',label:'Host mask',placeholder:'*@annoying.host'}],v=>operSend(`SHUN -${v.mask}`))},
+      {label:'Add Spamfilter',icon:'🛡',action:()=>operPrompt('Add Spamfilter',[{id:'target',label:'Target',placeholder:'cpn',default:'cpn'},{id:'action',label:'Action',type:'select',options:[{value:'kill',label:'Kill'},{value:'gzline',label:'GZ-Line'},{value:'gline',label:'G-Line'},{value:'shun',label:'Shun'},{value:'block',label:'Block'},{value:'warn',label:'Warn'}]},{id:'duration',label:'Ban duration',placeholder:'1d / 0',default:'0'},{id:'reason',label:'Reason',placeholder:'No spamming'},{id:'regex',label:'Regex pattern',placeholder:'/badword/i'}],v=>operSend(`SPAMFILTER add ${v.target} ${v.action} ${v.duration} ${v.reason} ${v.regex}`))},
+      {label:'Add E-Line (Exempt)',icon:'✅',action:()=>operPrompt('Add Exception',[{id:'mask',label:'Host mask',placeholder:'*@trusted.host'},{id:'duration',label:'Duration',placeholder:'0'},{id:'reason',label:'Reason',placeholder:'Trusted'}],v=>operSend(`ELINE ${v.mask} ${v.duration} :${v.reason}`))},
+      {label:'Remove E-Line',icon:'✖',action:()=>operPrompt('Remove E-Line',[{id:'mask',label:'Host mask',placeholder:'*@trusted.host'}],v=>operSend(`ELINE -${v.mask}`))},
+    ],
+    users:[
+      {label:'Kill User',icon:'💀',danger:true,action:()=>operPrompt('Kill User',[{id:'nick',label:'Nickname',placeholder:'baduser'},{id:'reason',label:'Reason',placeholder:'Violation of rules'}],v=>operSend(`KILL ${v.nick} :${v.reason}`))},
+      {label:'SAJOIN',icon:'➡️',action:()=>operPrompt('Force Join',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAJOIN ${v.nick} ${v.chan}`))},
+      {label:'SAPART',icon:'⬅️',action:()=>operPrompt('Force Part',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'chan',label:'Channel',placeholder:'#channel'},{id:'reason',label:'Reason',placeholder:''}],v=>operSend(`SAPART ${v.nick} ${v.chan}${v.reason?` :${v.reason}`:''}`))},
+      {label:'SANICK',icon:'✏️',action:()=>operPrompt('Force Nick Change',[{id:'nick',label:'Current nick',placeholder:'oldnick'},{id:'newnick',label:'New nick',placeholder:'newnick'}],v=>operSend(`SANICK ${v.nick} ${v.newnick}`))},
+      {label:'SAMODE',icon:'🔧',action:()=>operPrompt('Force Mode',[{id:'target',label:'Target',placeholder:'#channel or nick'},{id:'modes',label:'Modes',placeholder:'+o user'}],v=>operSend(`SAMODE ${v.target} ${v.modes}`))},
+      {label:'SAUMODE',icon:'🔧',action:()=>operPrompt('Force User Mode',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'modes',label:'Modes',placeholder:'+x / -i'}],v=>operSend(`SAUMODE ${v.nick} ${v.modes}`))},
+      {label:'Check Clones',icon:'🔍',action:()=>operPrompt('Check Clones',[{id:'ip',label:'IP address',placeholder:'192.168.1.1'}],v=>operSend(`WHO ${v.ip}`))},
+      {label:'GLOBOPS',icon:'📢',action:()=>operPrompt('GLOBOPS Notice',[{id:'msg',label:'Message',type:'textarea',placeholder:'Announcement...'}],v=>operSend(`GLOBOPS :${v.msg}`))},
+      {label:'Wallops',icon:'📢',action:()=>operPrompt('Wallops',[{id:'msg',label:'Message',type:'textarea',placeholder:'Message...'}],v=>operSend(`WALLOPS :${v.msg}`))},
+      {label:'CHGHOST',icon:'🏷',action:()=>operPrompt('Change Host',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'vhost',label:'Virtual host',placeholder:'cool.vhost.net'}],v=>operSend(`CHGHOST ${v.nick} ${v.vhost}`))},
+      {label:'CHGIDENT',icon:'🏷',action:()=>operPrompt('Change Ident',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'ident',label:'Ident',placeholder:'newident'}],v=>operSend(`CHGIDENT ${v.nick} ${v.ident}`))},
+      {label:'CHGNAME',icon:'🏷',action:()=>operPrompt('Change Realname',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'name',label:'Realname',placeholder:'New Name'}],v=>operSend(`CHGNAME ${v.nick} :${v.name}`))},
+    ],
+    channels:[
+      {label:'SAJOIN Self',icon:'➡️',action:()=>operPrompt('Join as Oper',[{id:'chan',label:'Channel',placeholder:'#secret'}],v=>{const net=networks.find(n=>n.config.id===_operConnId);operSend(`SAJOIN ${net?.nick||'me'} ${v.chan}`);})},
+      {label:'Force Topic',icon:'📝',action:()=>operPrompt('Set Topic',[{id:'chan',label:'Channel',placeholder:'#channel'},{id:'topic',label:'Topic',type:'textarea',placeholder:'New topic'}],v=>{operSend(`SAMODE ${v.chan} +t`);setTimeout(()=>operSend(`TOPIC ${v.chan} :${v.topic}`),500);})
+},
+      {label:'Clear All Bans',icon:'🧹',action:()=>operPrompt('Clear Bans',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAMODE ${v.chan} -b *!*@*`))},
+      {label:'Clear Invex (+I)',icon:'🧹',action:()=>operPrompt('Clear Invite Exceptions',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAMODE ${v.chan} -I *!*@*`))},
+      {label:'Clear Excepts (+e)',icon:'🧹',action:()=>operPrompt('Clear Ban Exceptions',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAMODE ${v.chan} -e *!*@*`))},
+    ],
+    server:[
+      {label:'REHASH',icon:'🔄',action:()=>operConfirm('Rehash Server','Reload config?',()=>operSend('REHASH'))},
+      {label:'REHASH -tls',icon:'🔐',action:()=>operConfirm('Rehash TLS','Reload TLS certs?',()=>operSend('REHASH -tls'))},
+      {label:'Server Map',icon:'🗺',action:()=>operSend('MAP')},
+      {label:'Server Links',icon:'🔗',action:()=>operSend('LINKS')},
+      {label:'LUSERS',icon:'📊',action:()=>operSend('LUSERS')},
+      {label:'Uptime',icon:'⏱',action:()=>operSend('STATS u')},
+      {label:'Traffic Stats',icon:'📈',action:()=>operSend('STATS T')},
+      {label:'MOTD',icon:'📜',action:()=>operSend('MOTD')},
+      {label:'Opers Online',icon:'👑',action:()=>operSend('STATS p')},
+      {label:'Module List',icon:'📦',action:()=>operSend('STATS l')},
+      {label:'Connect Server',icon:'🔗',action:()=>operPrompt('Connect Server',[{id:'server',label:'Server',placeholder:'hub.irc.net'}],v=>operSend(`CONNECT ${v.server}`))},
+      {label:'Squit',icon:'✂️',danger:true,action:()=>operPrompt('Squit',[{id:'server',label:'Server',placeholder:'leaf.irc.net'},{id:'reason',label:'Reason',placeholder:'Maintenance'}],v=>operSend(`SQUIT ${v.server} :${v.reason}`))},
+      {label:'DIE',icon:'☠️',danger:true,action:()=>operConfirm('⚠ Shutdown','SHUT DOWN the IRC server?',()=>operSend('DIE'))},
+      {label:'RESTART',icon:'🔁',danger:true,action:()=>operConfirm('⚠ Restart','RESTART the IRC server?',()=>operSend('RESTART'))},
+    ],
+  }},
+  inspircd:{label:'InspIRCd',commands:{
+    bans:[
+      {label:'List G-Lines',icon:'📋',action:()=>operSend('STATS G')},
+      {label:'List K-Lines',icon:'📋',action:()=>operSend('STATS k')},
+      {label:'List Z-Lines',icon:'📋',action:()=>operSend('STATS Z')},
+      {label:'List Q-Lines',icon:'📋',action:()=>operSend('STATS Q')},
+      {label:'List E-Lines',icon:'📋',action:()=>operSend('STATS e')},
+      {label:'List Shuns',icon:'📋',action:()=>operSend('STATS H')},
+      {label:'Add G-Line',icon:'🔨',action:()=>operPrompt('Add G-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host'},{id:'duration',label:'Duration (secs)',placeholder:'86400'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`GLINE ${v.mask} ${v.duration} :${v.reason}`))},
+      {label:'Remove G-Line',icon:'✖',action:()=>operPrompt('Remove G-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host'}],v=>operSend(`GLINE ${v.mask}`))},
+      {label:'Add K-Line',icon:'🔨',action:()=>operPrompt('Add K-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host'},{id:'duration',label:'Duration (secs)',placeholder:'86400'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`KLINE ${v.mask} ${v.duration} :${v.reason}`))},
+      {label:'Remove K-Line',icon:'✖',action:()=>operPrompt('Remove K-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host'}],v=>operSend(`KLINE ${v.mask}`))},
+      {label:'Add Z-Line',icon:'🔨',action:()=>operPrompt('Add Z-Line',[{id:'ip',label:'IP/CIDR',placeholder:'192.168.1.0/24'},{id:'duration',label:'Duration (secs)',placeholder:'86400'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`ZLINE ${v.ip} ${v.duration} :${v.reason}`))},
+      {label:'Remove Z-Line',icon:'✖',action:()=>operPrompt('Remove Z-Line',[{id:'ip',label:'IP/CIDR',placeholder:'192.168.1.0/24'}],v=>operSend(`ZLINE ${v.ip}`))},
+      {label:'Add Q-Line (nick)',icon:'🚫',action:()=>operPrompt('Add Q-Line',[{id:'nick',label:'Nick mask',placeholder:'badnick*'},{id:'duration',label:'Duration (secs)',placeholder:'86400'},{id:'reason',label:'Reason',placeholder:'Reserved'}],v=>operSend(`QLINE ${v.nick} ${v.duration} :${v.reason}`))},
+      {label:'Remove Q-Line',icon:'✖',action:()=>operPrompt('Remove Q-Line',[{id:'nick',label:'Nick mask',placeholder:'badnick*'}],v=>operSend(`QLINE ${v.nick}`))},
+    ],
+    users:[
+      {label:'Kill User',icon:'💀',danger:true,action:()=>operPrompt('Kill User',[{id:'nick',label:'Nickname',placeholder:'baduser'},{id:'reason',label:'Reason',placeholder:'Violation'}],v=>operSend(`KILL ${v.nick} :${v.reason}`))},
+      {label:'SAJOIN',icon:'➡️',action:()=>operPrompt('Force Join',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAJOIN ${v.nick} ${v.chan}`))},
+      {label:'SAPART',icon:'⬅️',action:()=>operPrompt('Force Part',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAPART ${v.nick} ${v.chan}`))},
+      {label:'SANICK',icon:'✏️',action:()=>operPrompt('Force Nick',[{id:'nick',label:'Current nick',placeholder:'oldnick'},{id:'newnick',label:'New nick',placeholder:'newnick'}],v=>operSend(`SANICK ${v.nick} ${v.newnick}`))},
+      {label:'SAMODE',icon:'🔧',action:()=>operPrompt('Force Mode',[{id:'target',label:'Target',placeholder:'#channel or nick'},{id:'modes',label:'Modes',placeholder:'+o user'}],v=>operSend(`SAMODE ${v.target} ${v.modes}`))},
+      {label:'SAQUIT',icon:'💀',danger:true,action:()=>operPrompt('Force Quit',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'reason',label:'Reason',placeholder:'Forced quit'}],v=>operSend(`SAQUIT ${v.nick} :${v.reason}`))},
+      {label:'CHGHOST',icon:'🏷',action:()=>operPrompt('Change Host',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'vhost',label:'vHost',placeholder:'cool.vhost'}],v=>operSend(`CHGHOST ${v.nick} ${v.vhost}`))},
+      {label:'CHGIDENT',icon:'🏷',action:()=>operPrompt('Change Ident',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'ident',label:'Ident',placeholder:'newident'}],v=>operSend(`CHGIDENT ${v.nick} ${v.ident}`))},
+      {label:'CHGNAME',icon:'🏷',action:()=>operPrompt('Change Realname',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'name',label:'Realname',placeholder:'New Name'}],v=>operSend(`CHGNAME ${v.nick} :${v.name}`))},
+      {label:'Clones Check',icon:'🔍',action:()=>operPrompt('Check Clones',[{id:'ip',label:'IP',placeholder:'192.168.1.1'}],v=>operSend(`CLONES ${v.ip}`))},
+      {label:'Wallops',icon:'📢',action:()=>operPrompt('Wallops',[{id:'msg',label:'Message',type:'textarea',placeholder:'Message...'}],v=>operSend(`WALLOPS :${v.msg}`))},
+    ],
+    channels:[
+      {label:'SAJOIN Self',icon:'➡️',action:()=>operPrompt('Join as Oper',[{id:'chan',label:'Channel',placeholder:'#secret'}],v=>{const net=networks.find(n=>n.config.id===_operConnId);operSend(`SAJOIN ${net?.nick||'me'} ${v.chan}`);})},
+      {label:'Force Topic',icon:'📝',action:()=>operPrompt('Set Topic',[{id:'chan',label:'Channel',placeholder:'#channel'},{id:'topic',label:'Topic',type:'textarea',placeholder:'New topic'}],v=>{operSend(`SAMODE ${v.chan} +t`);setTimeout(()=>operSend(`TOPIC ${v.chan} :${v.topic}`),500);})
+},
+      {label:'Clear All Bans',icon:'🧹',action:()=>operPrompt('Clear Bans',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAMODE ${v.chan} -b *!*@*`))},
+    ],
+    server:[
+      {label:'REHASH',icon:'🔄',action:()=>operConfirm('Rehash','Reload config?',()=>operSend('REHASH'))},
+      {label:'Server Map',icon:'🗺',action:()=>operSend('MAP')},
+      {label:'Links',icon:'🔗',action:()=>operSend('LINKS')},
+      {label:'LUSERS',icon:'📊',action:()=>operSend('LUSERS')},
+      {label:'Uptime',icon:'⏱',action:()=>operSend('STATS u')},
+      {label:'MOTD',icon:'📜',action:()=>operSend('MOTD')},
+      {label:'Opers Online',icon:'👑',action:()=>operSend('STATS p')},
+      {label:'Connect Server',icon:'🔗',action:()=>operPrompt('Connect Server',[{id:'server',label:'Server',placeholder:'hub.irc.net'}],v=>operSend(`CONNECT ${v.server}`))},
+      {label:'Squit',icon:'✂️',danger:true,action:()=>operPrompt('Squit',[{id:'server',label:'Server',placeholder:'leaf.irc.net'},{id:'reason',label:'Reason',placeholder:'Maintenance'}],v=>operSend(`SQUIT ${v.server} :${v.reason}`))},
+      {label:'DIE',icon:'☠️',danger:true,action:()=>operConfirm('⚠ Shutdown','Shut down?',()=>operSend('DIE'))},
+      {label:'RESTART',icon:'🔁',danger:true,action:()=>operConfirm('⚠ Restart','Restart?',()=>operSend('RESTART'))},
+    ],
+  }},
+  charybdis:{label:'charybdis / Solanum',commands:{
+    bans:[
+      {label:'List K-Lines',icon:'📋',action:()=>operSend('STATS K')},
+      {label:'List D-Lines',icon:'📋',action:()=>operSend('STATS d')},
+      {label:'List X-Lines',icon:'📋',action:()=>operSend('STATS x')},
+      {label:'List RESVs',icon:'📋',action:()=>operSend('STATS q')},
+      {label:'Add K-Line',icon:'🔨',action:()=>operPrompt('Add K-Line',[{id:'duration',label:'Duration (mins, 0=perm)',placeholder:'1440'},{id:'mask',label:'user@host',placeholder:'*@bad.host'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`KLINE ${v.duration} ${v.mask} :${v.reason}`))},
+      {label:'Remove K-Line',icon:'✖',action:()=>operPrompt('Remove K-Line',[{id:'mask',label:'user@host',placeholder:'*@bad.host'}],v=>operSend(`UNKLINE ${v.mask}`))},
+      {label:'Add D-Line',icon:'🔨',action:()=>operPrompt('Add D-Line',[{id:'duration',label:'Duration (mins)',placeholder:'1440'},{id:'ip',label:'IP/CIDR',placeholder:'192.168.1.0/24'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`DLINE ${v.duration} ${v.ip} :${v.reason}`))},
+      {label:'Remove D-Line',icon:'✖',action:()=>operPrompt('Remove D-Line',[{id:'ip',label:'IP/CIDR',placeholder:'192.168.1.0/24'}],v=>operSend(`UNDLINE ${v.ip}`))},
+      {label:'Add RESV',icon:'🚫',action:()=>operPrompt('Add RESV',[{id:'duration',label:'Duration (mins)',placeholder:'0'},{id:'target',label:'Nick or #chan',placeholder:'badnick'},{id:'reason',label:'Reason',placeholder:'Reserved'}],v=>operSend(`RESV ${v.duration} ${v.target} :${v.reason}`))},
+      {label:'Remove RESV',icon:'✖',action:()=>operPrompt('Remove RESV',[{id:'target',label:'Nick or #chan',placeholder:'badnick'}],v=>operSend(`UNRESV ${v.target}`))},
+    ],
+    users:[
+      {label:'Kill User',icon:'💀',danger:true,action:()=>operPrompt('Kill',[{id:'nick',label:'Nickname',placeholder:'baduser'},{id:'reason',label:'Reason',placeholder:'Violation'}],v=>operSend(`KILL ${v.nick} :${v.reason}`))},
+      {label:'Wallops',icon:'📢',action:()=>operPrompt('Wallops',[{id:'msg',label:'Message',type:'textarea',placeholder:'Message...'}],v=>operSend(`WALLOPS :${v.msg}`))},
+      {label:'Force Nick',icon:'✏️',action:()=>operPrompt('Force Nick',[{id:'nick',label:'Current nick',placeholder:'oldnick'},{id:'newnick',label:'New nick',placeholder:'newnick'}],v=>operSend(`FNICK ${v.nick} ${v.newnick}`))},
+    ],
+    channels:[
+      {label:'Join (override)',icon:'➡️',action:()=>operPrompt('Join (override +p/+i/+k)',[{id:'chan',label:'Channel',placeholder:'#secret'}],v=>operSend(`JOIN ${v.chan} override`))},
+      {label:'Clear Bans',icon:'🧹',action:()=>operPrompt('Clear Bans',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`MODE ${v.chan} -b *!*@*`))},
+    ],
+    server:[
+      {label:'REHASH',icon:'🔄',action:()=>operConfirm('Rehash','Reload config?',()=>operSend('REHASH'))},
+      {label:'Map',icon:'🗺',action:()=>operSend('MAP')},
+      {label:'Links',icon:'🔗',action:()=>operSend('LINKS')},
+      {label:'LUSERS',icon:'📊',action:()=>operSend('LUSERS')},
+      {label:'Uptime',icon:'⏱',action:()=>operSend('STATS u')},
+      {label:'MOTD',icon:'📜',action:()=>operSend('MOTD')},
+      {label:'Opers',icon:'👑',action:()=>operSend('STATS p')},
+      {label:'Connect',icon:'🔗',action:()=>operPrompt('Connect',[{id:'server',label:'Server',placeholder:'hub.irc.net'}],v=>operSend(`CONNECT ${v.server}`))},
+      {label:'Squit',icon:'✂️',danger:true,action:()=>operPrompt('Squit',[{id:'server',label:'Server',placeholder:'leaf.irc.net'},{id:'reason',label:'Reason',placeholder:''}],v=>operSend(`SQUIT ${v.server} :${v.reason}`))},
+      {label:'DIE',icon:'☠️',danger:true,action:()=>operConfirm('⚠ Shutdown','Shut down?',()=>operSend('DIE'))},
+      {label:'RESTART',icon:'🔁',danger:true,action:()=>operConfirm('⚠ Restart','Restart?',()=>operSend('RESTART'))},
+    ],
+  }},
+  ratbox:{label:'ircd-ratbox',commands:{
+    bans:[
+      {label:'List K-Lines',icon:'📋',action:()=>operSend('STATS K')},
+      {label:'List D-Lines',icon:'📋',action:()=>operSend('STATS d')},
+      {label:'List RESVs',icon:'📋',action:()=>operSend('STATS q')},
+      {label:'Add K-Line',icon:'🔨',action:()=>operPrompt('Add K-Line',[{id:'duration',label:'Duration (mins)',placeholder:'1440'},{id:'mask',label:'user@host',placeholder:'*@bad.host'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`KLINE ${v.duration} ${v.mask} :${v.reason}`))},
+      {label:'Remove K-Line',icon:'✖',action:()=>operPrompt('Remove K-Line',[{id:'mask',label:'user@host',placeholder:'*@bad.host'}],v=>operSend(`UNKLINE ${v.mask}`))},
+      {label:'Add D-Line',icon:'🔨',action:()=>operPrompt('Add D-Line',[{id:'duration',label:'Duration (mins)',placeholder:'1440'},{id:'ip',label:'IP/CIDR',placeholder:'192.168.1.0/24'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`DLINE ${v.duration} ${v.ip} :${v.reason}`))},
+      {label:'Remove D-Line',icon:'✖',action:()=>operPrompt('Remove D-Line',[{id:'ip',label:'IP/CIDR',placeholder:'192.168.1.0/24'}],v=>operSend(`UNDLINE ${v.ip}`))},
+      {label:'Add RESV',icon:'🚫',action:()=>operPrompt('Add RESV',[{id:'duration',label:'Duration (mins)',placeholder:'0'},{id:'target',label:'Nick or #chan',placeholder:'badnick'},{id:'reason',label:'Reason',placeholder:'Reserved'}],v=>operSend(`RESV ${v.duration} ${v.target} :${v.reason}`))},
+      {label:'Remove RESV',icon:'✖',action:()=>operPrompt('Remove RESV',[{id:'target',label:'Nick or #chan',placeholder:'badnick'}],v=>operSend(`UNRESV ${v.target}`))},
+    ],
+    users:[
+      {label:'Kill',icon:'💀',danger:true,action:()=>operPrompt('Kill',[{id:'nick',label:'Nickname',placeholder:'baduser'},{id:'reason',label:'Reason',placeholder:'Violation'}],v=>operSend(`KILL ${v.nick} :${v.reason}`))},
+      {label:'Wallops',icon:'📢',action:()=>operPrompt('Wallops',[{id:'msg',label:'Message',type:'textarea',placeholder:'Message...'}],v=>operSend(`WALLOPS :${v.msg}`))},
+    ],
+    channels:[
+      {label:'Clear Bans',icon:'🧹',action:()=>operPrompt('Clear Bans',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`MODE ${v.chan} -b *!*@*`))},
+    ],
+    server:[
+      {label:'REHASH',icon:'🔄',action:()=>operConfirm('Rehash','Reload?',()=>operSend('REHASH'))},
+      {label:'Map',icon:'🗺',action:()=>operSend('MAP')},
+      {label:'Links',icon:'🔗',action:()=>operSend('LINKS')},
+      {label:'LUSERS',icon:'📊',action:()=>operSend('LUSERS')},
+      {label:'Uptime',icon:'⏱',action:()=>operSend('STATS u')},
+      {label:'MOTD',icon:'📜',action:()=>operSend('MOTD')},
+      {label:'Opers',icon:'👑',action:()=>operSend('STATS p')},
+      {label:'DIE',icon:'☠️',danger:true,action:()=>operConfirm('⚠ Shutdown','Shut down?',()=>operSend('DIE'))},
+      {label:'RESTART',icon:'🔁',danger:true,action:()=>operConfirm('⚠ Restart','Restart?',()=>operSend('RESTART'))},
+    ],
+  }},
+  hybrid:{label:'ircd-hybrid',commands:{
+    bans:[
+      {label:'List K-Lines',icon:'📋',action:()=>operSend('STATS K')},
+      {label:'List D-Lines',icon:'📋',action:()=>operSend('STATS d')},
+      {label:'Add K-Line',icon:'🔨',action:()=>operPrompt('Add K-Line',[{id:'duration',label:'Duration (mins)',placeholder:'1440'},{id:'mask',label:'user@host',placeholder:'*@bad.host'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`KLINE ${v.duration} ${v.mask} :${v.reason}`))},
+      {label:'Remove K-Line',icon:'✖',action:()=>operPrompt('Remove K-Line',[{id:'mask',label:'user@host',placeholder:'*@bad.host'}],v=>operSend(`UNKLINE ${v.mask}`))},
+      {label:'Add D-Line',icon:'🔨',action:()=>operPrompt('Add D-Line',[{id:'ip',label:'IP/CIDR',placeholder:'192.168.1.0/24'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`DLINE ${v.ip} :${v.reason}`))},
+      {label:'Remove D-Line',icon:'✖',action:()=>operPrompt('Remove D-Line',[{id:'ip',label:'IP/CIDR',placeholder:'192.168.1.0/24'}],v=>operSend(`UNDLINE ${v.ip}`))},
+    ],
+    users:[
+      {label:'Kill',icon:'💀',danger:true,action:()=>operPrompt('Kill',[{id:'nick',label:'Nickname',placeholder:'baduser'},{id:'reason',label:'Reason',placeholder:'Violation'}],v=>operSend(`KILL ${v.nick} :${v.reason}`))},
+      {label:'Wallops',icon:'📢',action:()=>operPrompt('Wallops',[{id:'msg',label:'Message',type:'textarea',placeholder:'Message...'}],v=>operSend(`WALLOPS :${v.msg}`))},
+    ],
+    channels:[
+      {label:'Clear Bans',icon:'🧹',action:()=>operPrompt('Clear Bans',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`MODE ${v.chan} -b *!*@*`))},
+    ],
+    server:[
+      {label:'REHASH',icon:'🔄',action:()=>operConfirm('Rehash','Reload?',()=>operSend('REHASH'))},
+      {label:'Map',icon:'🗺',action:()=>operSend('MAP')},
+      {label:'LUSERS',icon:'📊',action:()=>operSend('LUSERS')},
+      {label:'Uptime',icon:'⏱',action:()=>operSend('STATS u')},
+      {label:'MOTD',icon:'📜',action:()=>operSend('MOTD')},
+      {label:'DIE',icon:'☠️',danger:true,action:()=>operConfirm('⚠ Shutdown','Shut down?',()=>operSend('DIE'))},
+      {label:'RESTART',icon:'🔁',danger:true,action:()=>operConfirm('⚠ Restart','Restart?',()=>operSend('RESTART'))},
+    ],
+  }},
+  ngircd:{label:'ngIRCd',commands:{
+    bans:[
+      {label:'List K-Lines',icon:'📋',action:()=>operSend('STATS k')},
+      {label:'Add K-Line',icon:'🔨',action:()=>operPrompt('Add K-Line',[{id:'mask',label:'user@host',placeholder:'*@bad.host'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`KLINE ${v.mask} :${v.reason}`))},
+    ],
+    users:[
+      {label:'Kill',icon:'💀',danger:true,action:()=>operPrompt('Kill',[{id:'nick',label:'Nickname',placeholder:'baduser'},{id:'reason',label:'Reason',placeholder:'Violation'}],v=>operSend(`KILL ${v.nick} :${v.reason}`))},
+      {label:'Wallops',icon:'📢',action:()=>operPrompt('Wallops',[{id:'msg',label:'Message',type:'textarea',placeholder:'Message...'}],v=>operSend(`WALLOPS :${v.msg}`))},
+    ],
+    channels:[],
+    server:[
+      {label:'REHASH',icon:'🔄',action:()=>operConfirm('Rehash','Reload?',()=>operSend('REHASH'))},
+      {label:'LUSERS',icon:'📊',action:()=>operSend('LUSERS')},
+      {label:'MOTD',icon:'📜',action:()=>operSend('MOTD')},
+      {label:'Connect',icon:'🔗',action:()=>operPrompt('Connect',[{id:'server',label:'Server',placeholder:'hub.irc.net'}],v=>operSend(`CONNECT ${v.server}`))},
+      {label:'DIE',icon:'☠️',danger:true,action:()=>operConfirm('⚠ Shutdown','Shut down?',()=>operSend('DIE'))},
+    ],
+  }},
+};
+const OPER_CATEGORIES=[
+  {key:'bans',label:'Server Bans',icon:'🛡'},
+  {key:'users',label:'User Management',icon:'👤'},
+  {key:'channels',label:'Channel Management',icon:'#️⃣'},
+  {key:'server',label:'Server Management',icon:'🖥'},
+];
+function renderOperMain(){
+  const body=document.getElementById('oper-body');
+  let html='';
+  html+='<div class="oper-section"><div class="oper-section-title">Network</div>';
+  html+='<select class="oper-net-select" id="oper-net-select" onchange="_operConnId=this.value">';
+  html+='<option value="">— Select network —</option>';
+  for(const net of networks){
+    const sel=_operConnId===net.config.id?' selected':'';
+    html+=`<option value="${esc(net.config.id)}"${sel}>${esc(net.config.label||net.config.server)}</option>`;
+  }
+  html+='</select></div>';
+  html+='<div class="oper-section"><div class="oper-section-title">IRCd Type</div>';
+  html+='<select class="oper-net-select" id="oper-ircd-select" onchange="_operIRCd=this.value;renderOperMain()">';
+  for(const[k,v] of Object.entries(OPER_IRCDS)){
+    html+=`<option value="${k}"${_operIRCd===k?' selected':''}>${esc(v.label)}</option>`;
+  }
+  html+='</select></div>';
+  html+='<div class="oper-section"><div class="oper-section-title">Authenticate</div><div class="oper-grid">';
+  html+='<button class="oper-btn" data-oper-cmd="_operlogin">👑 OPER Login</button></div></div>';
+  const ircd=OPER_IRCDS[_operIRCd];
+  if(ircd){
+    for(const cat of OPER_CATEGORIES){
+      const cmds=ircd.commands[cat.key];
+      if(!cmds||!cmds.length)continue;
+      html+=`<div class="oper-section"><div class="oper-section-title">${cat.icon} ${cat.label}</div><div class="oper-grid">`;
+      for(const cmd of cmds) html+=`<button class="oper-btn${cmd.danger?' danger':''}" data-oper-cmd="${esc(cmd.label)}">${cmd.icon||'▸'} ${esc(cmd.label)}</button>`;
+      html+='</div></div>';
+    }
+  }
+  body.innerHTML=html;
+  // Bind oper login
+  const loginBtn=body.querySelector('[data-oper-cmd="_operlogin"]');
+  if(loginBtn) loginBtn.onclick=()=>{if(!_operConnId){showToast('Select a network first');return;}operPrompt('OPER Login',[{id:'name',label:'Oper name',placeholder:'admin'},{id:'pass',label:'Password',type:'password',placeholder:'oper password'}],v=>operSend(`OPER ${v.name} ${v.pass}`));};
+  // Bind command buttons
+  if(ircd){
+    for(const cat of OPER_CATEGORIES){
+      const cmds=ircd.commands[cat.key];if(!cmds)continue;
+      for(const cmd of cmds){
+        const btn=body.querySelector(`[data-oper-cmd="${cmd.label.replace(/"/g,'&quot;')}"]`);
+        if(btn) btn.onclick=()=>{if(!_operConnId){showToast('Select a network first');return;}cmd.action();};
+      }
+    }
+  }
+}
+
 // ─── Self-signed cert warning popup ──────────────────────────────────────────
 function showCertWarning(conn_id){
   const net=networks.find(n=>n.config.id===conn_id);
@@ -6757,6 +7079,7 @@ window._renderSidebarNow=function(){
 void((function(){/* old custom drag-and-drop removed — replaced by SortableJS */})());
 void((function(){/* old network drag-and-drop removed — replaced by SortableJS */})());
 
+let _sortableFavorites=null;
 function renderFavorites(){
   const el=document.getElementById('favorites-list');
   let favs=loadFavorites();
@@ -6773,6 +7096,8 @@ function renderFavorites(){
     return true; // Keep PM favorites
   });
   if(favs.length!==before) saveFavorites(favs);
+  // Destroy old sortable before rebuilding DOM
+  if(_sortableFavorites){_sortableFavorites.destroy();_sortableFavorites=null;}
   el.innerHTML='';
   if(!favs.length)return;
   const hdr=document.createElement('div');hdr.className='fav-header';hdr.textContent='Favorites';
@@ -6781,12 +7106,36 @@ function renderFavorites(){
     const k=bk(f.conn_id,f.target),isA=isActive(f.conn_id,f.target),uc=unread.get(k)||0;
     const net=networks.find(n=>n.config.id===f.conn_id);
     const ci=document.createElement('div');
-    ci.className=`chan-item${isA?' active':''}`;
+    ci.className=`chan-item fav-item${isA?' active':''}`;
+    ci.dataset.favKey=f.key;
     const netLabel=net?esc(net.config.label||net.config.server):'?';
     const fmc=mentionUnread.get(k)||0;
     ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span>${uc?`<span class="chan-unread-badge${fmc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}`;
     ci.onclick=()=>{setActive(f.conn_id,f.target);closeSidebar();};
     el.appendChild(ci);
+  }
+  // Init SortableJS for favorite reordering
+  if(typeof Sortable!=='undefined'&&favs.length>1){
+    _sortableFavorites=Sortable.create(el,{
+      animation:150,
+      draggable:'.fav-item',
+      ghostClass:'ui-sortable-ghost',
+      dragClass:'ui-sortable-dragging',
+      delay:LONG_TOUCH_MS,
+      delayOnTouchOnly:true,
+      touchStartThreshold:10,
+      onStart(){_sidebarDragLock=true;},
+      onEnd(evt){
+        _sidebarDragLock=false;
+        const items=[...el.querySelectorAll('.fav-item')];
+        const newOrder=items.map(i=>i.dataset.favKey);
+        const favMap=Object.create(null);for(const f of loadFavorites())favMap[f.key]=f;
+        const reordered=newOrder.filter(k=>favMap[k]).map(k=>favMap[k]);
+        // Add any favorites not in the DOM (shouldn't happen, but safety)
+        for(const f of Object.values(favMap)){if(!newOrder.includes(f.key))reordered.push(f);}
+        saveFavorites(reordered);
+      },
+    });
   }
 }
 
@@ -8901,6 +9250,37 @@ function timeAgo(ts){
 </div>
 <style>#uploads-overlay.show{display:flex !important;}</style>
 <!-- Stats overlay -->
+<!-- IRC Oper Panel -->
+<div id="oper-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeOperPanel()">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:560px;width:94%;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
+      <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:#f0c040;display:flex;align-items:center;gap:8px">⚡ IRC Oper Panel</span>
+      <span onclick="closeOperPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px 8px">&#10005;</span>
+    </div>
+    <div id="oper-body" style="overflow-y:auto;flex:1;padding:12px 20px;-webkit-overflow-scrolling:touch"></div>
+  </div>
+</div>
+<style>#oper-overlay.show{display:flex !important;}
+.oper-section{margin-bottom:16px;}
+.oper-section-title{font-size:10px;color:var(--text3);letter-spacing:.08em;text-transform:uppercase;margin-bottom:8px;font-weight:600;}
+.oper-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;}
+@media(max-width:400px){.oper-grid{grid-template-columns:1fr;}}
+.oper-btn{background:var(--bg3);border:1px solid var(--border);color:var(--text2);font-family:var(--mono);font-size:11px;padding:8px 10px;border-radius:6px;cursor:pointer;text-align:left;transition:background .12s,color .12s;display:flex;align-items:center;gap:6px;min-height:36px;}
+.oper-btn:hover{background:var(--bg4);color:var(--text);}
+.oper-btn.danger{border-color:rgba(248,113,113,.3);}
+.oper-btn.danger:hover{background:rgba(248,113,113,.15);color:#f87171;}
+.oper-form{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:12px;margin-top:8px;}
+.oper-form label{font-size:11px;color:var(--text3);display:block;margin-bottom:3px;}
+.oper-form input,.oper-form select,.oper-form textarea{width:100%;background:var(--bg1);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 8px;border-radius:4px;margin-bottom:8px;box-sizing:border-box;}
+.oper-form textarea{resize:vertical;min-height:40px;}
+.oper-form-actions{display:flex;gap:6px;justify-content:flex-end;}
+.oper-form-btn{background:var(--accent);color:#000;border:none;font-family:var(--mono);font-weight:700;font-size:11px;padding:6px 14px;border-radius:5px;cursor:pointer;}
+.oper-form-btn.cancel{background:var(--bg4);color:var(--text3);}
+.oper-form-btn.danger{background:#f87171;color:#000;}
+.oper-back{background:none;border:none;color:var(--accent);font-family:var(--mono);font-size:12px;cursor:pointer;padding:4px 8px;border-radius:6px;display:flex;align-items:center;gap:4px;margin-bottom:10px;}
+.oper-back:hover{background:var(--bg4);}
+.oper-net-select{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 8px;border-radius:6px;margin-bottom:6px;}
+</style>
 <div id="stats-overlay" onclick="if(event.target===this)this.classList.remove('show')"><div class="stats-box"></div></div>
 <!-- Smart paste dialog -->
 <div id="smart-paste-dialog"><div class="sp-info"></div><div class="sp-btns"><button class="sp-btn sp-yes" onclick="smartPasteYes()">Create Pastebin</button><button class="sp-btn sp-no" onclick="smartPasteNo()">Paste as Text</button></div></div>
