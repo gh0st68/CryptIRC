@@ -587,7 +587,7 @@ body > style, body > script { visibility:hidden; }
 #nick-toggle:hover { color:var(--text,#eee); }
 #nick-toggle .toggle-icon { display:inline; }
 #nick-toggle .toggle-mobile { display:none; }
-#chan-title { font-weight:500; font-size:13px; white-space:nowrap; }
+#chan-title { font-weight:500; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex-shrink:1; }
 #topic-menu {
   display:none; position:fixed; z-index:300;
   background:var(--bg2); border:1px solid var(--border2); border-radius:8px;
@@ -2243,7 +2243,7 @@ function handleEvent(ev) {
       }
       break;
     case 'connecting':   sysMsg(ev.conn_id,'status',`Connecting to ${ev.server}…`,'system'); setNetDot(ev.conn_id,'connecting'); break;
-    case 'connected':    sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); clearTimeout(window._rtTimer); document.getElementById('reconnect-toast').classList.remove('show'); break;
+    case 'connected':    sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); clearTimeout(window._rtTimer); document.getElementById('reconnect-toast').classList.remove('show'); keepnickStartPoll(ev.conn_id); break;
     case 'disconnected': sysMsg(ev.conn_id,'status',`Disconnected: ${ev.reason}`,'error'); setNetDot(ev.conn_id,'offline'); lagMap[ev.conn_id]=null; if(active&&active.conn_id===ev.conn_id) updateLagDisplay(); break;
     case 'reconnecting': {
       const t=document.getElementById('reconnect-toast');
@@ -2285,6 +2285,22 @@ function handleEvent(ev) {
       // Suppress noisy 401 "No such nick/channel" errors
       // Suppress noisy server errors (typing on unsupported networks, offline nicks, etc)
       if(ev.text&&(ev.text.includes('No such nick/channel')||ev.text.includes('Command disabled')||ev.text.includes('Unknown command')||ev.text.includes('@+typing'))) break;
+      // Intercept ISON (303) replies for keepnick
+      if(ev.target==='status'&&_keepnickIsonPending[ev.conn_id]){
+        const t=(ev.text||'').replace(/^:\s*/,'').trim();
+        const kn=loadKeepNicks();
+        if(kn[ev.conn_id]){
+          const desired=kn[ev.conn_id].nick.toLowerCase();
+          // Check if reply text contains only nicks (ISON reply pattern)
+          const words=t?t.split(/\s+/):[];
+          const allNickChars=words.every(w=>/^[a-zA-Z0-9_\-\[\]\\`^|{}]+$/.test(w));
+          if(allNickChars||t===''){
+            delete _keepnickIsonPending[ev.conn_id];
+            keepnickHandleIson(ev.conn_id,t);
+            break;
+          }
+        }
+      }
       // Intercept links data for /links overlay
       if(ev.from==='links'&&window._linksData!=null){
         if(ev.text==='End of /LINKS'){renderLinksOverlay();}
@@ -2379,6 +2395,7 @@ function handleEvent(ev) {
       if(!quitChans.length) sysMsg(ev.conn_id,'status',`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit');
       renderSidebar(); blinkUserCount('part');
       monitorOffline(ev.nick);
+      keepnickOnQuit(ev.conn_id,ev.nick);
       break;
     }
     case 'irc_nick': {
@@ -2390,7 +2407,12 @@ function handleEvent(ev) {
         refreshUserCount(ev.conn_id,ch.name);
       }
       if(!nickChans.length) sysMsg(ev.conn_id,'status',`• ${ev.old} is now known as ${ev.new}`,'nick');
-      if(ev.old===getNick(ev.conn_id)||ev.new===getNick(ev.conn_id)) updateNick(ev.conn_id,ev.new);
+      if(ev.old===getNick(ev.conn_id)||ev.new===getNick(ev.conn_id)){
+        updateNick(ev.conn_id,ev.new);
+        keepnickOnOwnNickChange(ev.conn_id,ev.old,ev.new);
+      } else {
+        keepnickOnNickChange(ev.conn_id,ev.old,ev.new);
+      }
       renderSidebar();
       break;
     }
@@ -3360,6 +3382,11 @@ async function handleInput(raw){
       // ── Identity ────────────────────────────────────────────────────
       case 'NICK':
         if(!args[0]){sysMsg(conn_id,target,'Usage: /nick <newnick>','error');break;}
+        // KeepNick: if user manually changes AWAY from the kept nick, deactivate
+        {const kn=loadKeepNicks();
+        if(kn[conn_id]&&kn[conn_id].active&&getNick(conn_id).toLowerCase()===kn[conn_id].nick.toLowerCase()&&args[0].toLowerCase()!==kn[conn_id].nick.toLowerCase()){
+          keepnickDeactivate(conn_id);sysMsg(conn_id,target,`KeepNick deactivated (you changed away from ${kn[conn_id].nick}). Use /keepnick to reactivate.`,'system');
+        }}
         wsend({type:'send',conn_id,raw:`NICK ${args[0]}`}); break;
       case 'AWAY':
         wsend({type:'send',conn_id,raw:`AWAY :${args.join(' ')||'Away'}`});
@@ -3821,6 +3848,37 @@ async function handleInput(raw){
       }
       case 'SPLIT': case 'SPLITVIEW': {
         toggleSplitView();
+        break;
+      }
+      case 'KEEPNICK': {
+        const desired=args[0]||getNick(conn_id);
+        if(!desired){sysMsg(conn_id,target,'Usage: /keepnick [nick] — keep a nick (defaults to current)','error');break;}
+        keepnickSet(conn_id,desired);
+        const net=networks.find(n=>n.config.id===conn_id);
+        sysMsg(conn_id,target,`KeepNick: keeping "${desired}" on ${net?.config?.label||'this network'}. Will reclaim if lost.`,'system');
+        break;
+      }
+      case 'UNKEEPNICK': {
+        const kn=loadKeepNicks();
+        if(!kn[conn_id]){sysMsg(conn_id,target,'No keepnick set for this network.','error');break;}
+        const was=kn[conn_id].nick;
+        keepnickRemove(conn_id);
+        sysMsg(conn_id,target,`KeepNick: stopped keeping "${was}".`,'system');
+        break;
+      }
+      case 'LISTNICK': case 'LISTNICKS': case 'KEEPNICKS': {
+        const kn=loadKeepNicks();
+        const entries=Object.entries(kn);
+        if(!entries.length){sysMsg(conn_id,target,'No keepnicks set.','system');break;}
+        sysMsg(conn_id,target,'── KeepNick List ──','system');
+        for(const[cid,v] of entries){
+          const net=networks.find(n=>n.config.id===cid);
+          const label=net?.config?.label||cid.slice(0,8);
+          const cur=getNick(cid)||'?';
+          const hasIt=cur.toLowerCase()===v.nick.toLowerCase();
+          const status=hasIt?'✓ have it':v.active?'polling...':'inactive';
+          sysMsg(conn_id,target,`  ${label}: ${v.nick} [${status}]`,'system');
+        }
         break;
       }
       case 'CHANKEY': case 'KEY': {
@@ -5110,6 +5168,9 @@ document.addEventListener('click',e=>{
     {cmd:'note',desc:'Set/view notes on a nick',usage:'/note <nick> [text]'},
     {cmd:'dnd',desc:'Do Not Disturb mode',usage:'/dnd on|off|schedule HH:MM HH:MM'},
     {cmd:'split',desc:'Toggle split view (two channels)',usage:'/split'},
+    {cmd:'keepnick',desc:'Keep a nick (reclaim if lost)',usage:'/keepnick [nick]'},
+    {cmd:'unkeepnick',desc:'Stop keeping a nick',usage:'/unkeepnick'},
+    {cmd:'listnick',desc:'List all kept nicks',usage:'/listnick'},
     // ── Fun ──
     {cmd:'prism',desc:'Rainbow colored text',usage:'/prism message'},
     {cmd:'shrug',desc:'¯\\_(ツ)_/¯',usage:'/shrug [text]'},
@@ -5142,7 +5203,7 @@ document.addEventListener('click',e=>{
     slashEl.style.display='block'; slashIdx=0;
     slashEl.innerHTML=show.map((c,i)=>`<div class="slash-ac-item${i===0?' active':''}" data-i="${i}"><span class="slash-ac-cmd">/${c.cmd}</span><span class="slash-ac-desc">${c.desc}</span></div>`).join('');
     slashEl.querySelectorAll('.slash-ac-item').forEach(el=>{
-      el.onclick=()=>{completeSlash(show[+el.dataset.i]);};
+      el.addEventListener('pointerdown',e=>{e.preventDefault();completeSlash(show[+el.dataset.i]);});
     });
   }
   function completeSlash(c){
@@ -5341,6 +5402,110 @@ function smartPasteNo(){
   _smartPasteText='';
 }
 
+// ─── KeepNick — irssi keepnick.pl clone ──────────────────────────────────────
+// Storage: { conn_id: { nick, active } }
+const _keepnickTimers={},_keepnickIsonPending={};
+function loadKeepNicks(){try{return JSON.parse(localStorage.getItem('cryptirc_keepnicks')||'{}');}catch{return{};}}
+function saveKeepNicks(kn){localStorage.setItem('cryptirc_keepnicks',JSON.stringify(kn));savePrefsToServer();}
+function keepnickSet(conn_id,nick){
+  const kn=loadKeepNicks();
+  kn[conn_id]={nick:nick,active:true};
+  saveKeepNicks(kn);
+  keepnickStartPoll(conn_id);
+}
+function keepnickRemove(conn_id){
+  const kn=loadKeepNicks();
+  delete kn[conn_id];
+  saveKeepNicks(kn);
+  keepnickStopPoll(conn_id);
+}
+function keepnickDeactivate(conn_id){
+  const kn=loadKeepNicks();
+  if(kn[conn_id]){kn[conn_id].active=false;saveKeepNicks(kn);}
+  keepnickStopPoll(conn_id);
+}
+function keepnickReactivate(conn_id){
+  const kn=loadKeepNicks();
+  if(kn[conn_id]){kn[conn_id].active=true;saveKeepNicks(kn);keepnickStartPoll(conn_id);}
+}
+function keepnickStartPoll(conn_id){
+  keepnickStopPoll(conn_id);
+  const kn=loadKeepNicks();
+  if(!kn[conn_id]||!kn[conn_id].active)return;
+  // Don't poll if we already have the nick
+  const cur=getNick(conn_id);
+  if(cur&&cur.toLowerCase()===kn[conn_id].nick.toLowerCase())return;
+  _keepnickTimers[conn_id]=setInterval(()=>{
+    const kn2=loadKeepNicks();
+    if(!kn2[conn_id]||!kn2[conn_id].active){keepnickStopPoll(conn_id);return;}
+    const cur2=getNick(conn_id);
+    if(cur2&&cur2.toLowerCase()===kn2[conn_id].nick.toLowerCase()){keepnickStopPoll(conn_id);return;}
+    // Send ISON query and mark pending
+    _keepnickIsonPending[conn_id]=true;
+    wsend({type:'send',conn_id,raw:'ISON '+kn2[conn_id].nick});
+  },12000);
+}
+function keepnickStopPoll(conn_id){
+  if(_keepnickTimers[conn_id]){clearInterval(_keepnickTimers[conn_id]);delete _keepnickTimers[conn_id];}
+}
+// Called when we detect the kept nick is available — grab it
+function keepnickGrab(conn_id){
+  const kn=loadKeepNicks();
+  if(!kn[conn_id]||!kn[conn_id].active)return;
+  wsend({type:'send',conn_id,raw:'NICK '+kn[conn_id].nick});
+}
+// Called on irc_nick when OUR nick changes — check if we got it back or lost it
+function keepnickOnOwnNickChange(conn_id,oldNick,newNick){
+  const kn=loadKeepNicks();
+  if(!kn[conn_id])return;
+  const desired=kn[conn_id].nick.toLowerCase();
+  if(newNick.toLowerCase()===desired){
+    // Got the nick back — stop polling
+    keepnickStopPoll(conn_id);
+    sysMsg(conn_id,'status',`✓ KeepNick: Got ${newNick} back`,'system');
+  } else if(oldNick.toLowerCase()===desired){
+    // Lost the nick — reactivate polling
+    keepnickReactivate(conn_id);
+  }
+}
+// Called on irc_quit — check if the quitter had our desired nick
+function keepnickOnQuit(conn_id,nick){
+  const kn=loadKeepNicks();
+  if(!kn[conn_id]||!kn[conn_id].active)return;
+  if(nick.toLowerCase()===kn[conn_id].nick.toLowerCase()){
+    sysMsg(conn_id,'status',`KeepNick: ${nick} quit — reclaiming nick...`,'system');
+    setTimeout(()=>keepnickGrab(conn_id),500);
+  }
+}
+// Called on irc_nick — check if someone changed FROM our desired nick
+function keepnickOnNickChange(conn_id,oldNick,newNick){
+  const kn=loadKeepNicks();
+  if(!kn[conn_id]||!kn[conn_id].active)return;
+  if(oldNick.toLowerCase()===kn[conn_id].nick.toLowerCase()){
+    sysMsg(conn_id,'status',`KeepNick: ${oldNick} changed nick — reclaiming...`,'system');
+    setTimeout(()=>keepnickGrab(conn_id),500);
+  }
+}
+// Handle ISON (303) reply — intercept before it renders
+function keepnickHandleIson(conn_id,text){
+  const kn=loadKeepNicks();
+  if(!kn[conn_id]||!kn[conn_id].active)return false;
+  const desired=kn[conn_id].nick.toLowerCase();
+  // ISON reply is "nick1 nick2 ..." — if our nick is NOT in the list, it's free
+  const onlineNicks=text.trim().split(/\s+/).map(n=>n.toLowerCase());
+  if(!onlineNicks.includes(desired)||text.trim()===''){
+    keepnickGrab(conn_id);
+  }
+  return true; // consumed — don't show in status
+}
+// Start polls for all active keepnicks on page load / reconnect
+function keepnickInitAll(){
+  const kn=loadKeepNicks();
+  for(const cid of Object.keys(kn)){
+    if(kn[cid].active)keepnickStartPoll(cid);
+  }
+}
+
 // ─── Server-side preferences sync ─────────────────────────────────────────────
 let _prefsSaveTimer=null;
 function gatherPreferences(){
@@ -5367,6 +5532,7 @@ function gatherPreferences(){
     dnd: localStorage.getItem('cryptirc_dnd')==='1',
     dndStart: localStorage.getItem('cryptirc_dnd_start')||'',
     dndEnd: localStorage.getItem('cryptirc_dnd_end')||'',
+    keepnicks: loadKeepNicks(),
   };
 }
 function savePrefsToServer(){
@@ -5422,6 +5588,7 @@ function restorePreferences(p){
     if(p.dnd) localStorage.setItem('cryptirc_dnd','1');
     if(p.dndStart) localStorage.setItem('cryptirc_dnd_start',p.dndStart);
     if(p.dndEnd) localStorage.setItem('cryptirc_dnd_end',p.dndEnd);
+    if(p.keepnicks) localStorage.setItem('cryptirc_keepnicks',JSON.stringify(p.keepnicks));
     if(p.favsOnly!=null) localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
     if(p.sidebarCollapsed!=null) localStorage.setItem('cryptirc_sidebar_collapsed',p.sidebarCollapsed?'1':'');
     if(p.nickCollapsed!=null) localStorage.setItem('cryptirc_nick_collapsed',p.nickCollapsed?'1':'');
@@ -6709,6 +6876,9 @@ function showHelpPanel(){
       'dnd on|off — Toggle Do Not Disturb mode',
       'dnd schedule HH:MM HH:MM — Schedule quiet hours',
       'split — Toggle split view (two channels side by side)',
+      'keepnick [nick] — Keep a nick (auto-reclaim via ISON poll + QUIT/NICK events)',
+      'unkeepnick — Stop keeping the nick for current network',
+      'listnick — List all kept nicks with active/inactive status',
     ],
     ['Fun &amp; Emotes',
       'prism text — Rainbow mIRC colored text',
@@ -6747,6 +6917,7 @@ function showHelpPanel(){
     <div class="help-cmd"><span class="help-cmd-name">Auto-identify</span><span class="help-cmd-desc">NickServ IDENTIFY on connect (network settings)</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Auto-rejoin</span><span class="help-cmd-desc">Rejoin channels automatically after being kicked</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Channel keys</span><span class="help-cmd-desc">Saved +k keys auto-sent on join (/key to manage)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">KeepNick</span><span class="help-cmd-desc">irssi-style nick keeper — ISON poll + QUIT/NICK events</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Smart paste</span><span class="help-cmd-desc">Multi-line paste auto-offers pastebin creation</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Read markers</span><span class="help-cmd-desc">"New messages" divider when switching channels</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Split view</span><span class="help-cmd-desc">View two channels side by side (/split)</span></div>
