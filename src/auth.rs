@@ -131,6 +131,13 @@ impl AuthManager {
         if password.len() < 10 {
             bail!("Password must be at least 10 characters");
         }
+        let has_upper = password.chars().any(|c| c.is_uppercase());
+        let has_lower = password.chars().any(|c| c.is_lowercase());
+        let has_digit = password.chars().any(|c| c.is_ascii_digit());
+        let has_special = password.chars().any(|c| !c.is_alphanumeric());
+        if !has_upper || !has_lower || !has_digit || !has_special {
+            bail!("Password must contain uppercase, lowercase, number, and special character");
+        }
         if !email.contains('@') || email.len() > 254 {
             bail!("Invalid email address");
         }
@@ -364,6 +371,34 @@ impl AuthManager {
         if let Some(token) = validate_uuid(raw_token) {
             self.sessions.remove(&token);
         }
+    }
+
+    /// List all sessions for a user (returns token_prefix, created_at, last_used)
+    pub fn list_sessions(&self, username: &str) -> Vec<(String, i64, i64)> {
+        let uname = username.trim().to_lowercase();
+        self.sessions.iter()
+            .filter(|s| s.username == uname)
+            .map(|s| {
+                let prefix = format!("{}…{}", &s.key()[..4], &s.key()[s.key().len()-4..]);
+                (prefix, s.created_at, s.last_used)
+            })
+            .collect()
+    }
+
+    /// Revoke a session by token prefix (first4…last4)
+    pub fn revoke_session_by_prefix(&self, username: &str, prefix: &str) {
+        let uname = username.trim().to_lowercase();
+        let to_remove: Vec<String> = self.sessions.iter()
+            .filter(|s| {
+                s.username == uname && {
+                    let k = s.key();
+                    let p = format!("{}…{}", &k[..4], &k[k.len()-4..]);
+                    p == prefix
+                }
+            })
+            .map(|s| s.key().clone())
+            .collect();
+        for k in to_remove { self.sessions.remove(&k); }
     }
 
     /// Delete a user account: remove user file, sessions, and user data directory.

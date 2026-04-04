@@ -53,7 +53,7 @@ impl CryptoManager {
         let key  = derive_key(passphrase, &salt)?;
 
         let canary = self.canary_path(username);
-        if canary.exists() {
+        if tokio::fs::metadata(&canary).await.is_ok() {
             let enc = tokio::fs::read_to_string(&canary).await?;
             let plaintext = decrypt_with_key(&key, &enc)
                 .map_err(|_| anyhow::anyhow!("Incorrect passphrase"))?;
@@ -88,7 +88,7 @@ impl CryptoManager {
         let old_key = derive_key(old, &salt)?;
 
         let canary = self.canary_path(username);
-        if canary.exists() {
+        if tokio::fs::metadata(&canary).await.is_ok() {
             let enc = tokio::fs::read_to_string(&canary).await?;
             let pt  = decrypt_with_key(&old_key, &enc)
                 .map_err(|_| anyhow::anyhow!("Old passphrase incorrect"))?;
@@ -100,10 +100,19 @@ impl CryptoManager {
         rand::thread_rng().fill_bytes(&mut new_salt);
         let new_key = derive_key(new, &new_salt)?;
 
-        // Re-encrypt all log files for this user's connections
-        let log_dir = PathBuf::from(&self.data_dir).join("logs");
-        if log_dir.exists() {
-            re_encrypt_tree(&log_dir, &old_key, &new_key).await?;
+        // Re-encrypt only THIS user's log files (scoped by their network conn_ids)
+        let net_dir_path = PathBuf::from(&self.data_dir).join("networks").join(sanitize_username(username));
+        if net_dir_path.exists() {
+            if let Ok(mut rd) = tokio::fs::read_dir(&net_dir_path).await {
+                while let Ok(Some(entry)) = rd.next_entry().await {
+                    if let Some(conn_id) = entry.path().file_stem().and_then(|s| s.to_str()) {
+                        let user_log_dir = PathBuf::from(&self.data_dir).join("logs").join(conn_id);
+                        if user_log_dir.exists() {
+                            re_encrypt_tree(&user_log_dir, &old_key, &new_key).await?;
+                        }
+                    }
+                }
+            }
         }
 
         // Re-encrypt network config passwords for this user

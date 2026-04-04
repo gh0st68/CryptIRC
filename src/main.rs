@@ -59,7 +59,6 @@ pub struct AppState {
     pub e2e_store:           Arc<E2EStore>,
     pub paste_store:         Arc<paste::PasteStore>,
     pub preview_service:     Arc<preview::PreviewService>,
-    pub global_tx:           broadcast::Sender<ServerEvent>,
     pub user_events:         UserEventMap,
     pub upload_dir:          String,
     pub base_url:            String,
@@ -67,17 +66,26 @@ pub struct AppState {
     pub data_dir:            String,
     pub registration_open:   Arc<tokio::sync::RwLock<bool>>,
     pub registration_code:   Arc<tokio::sync::RwLock<String>>,
+    pub admin_settings_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
     pub fn user_tx(&self, username: &str) -> broadcast::Sender<ServerEvent> {
         self.user_events
             .entry(username.to_string())
-            .or_insert_with(|| broadcast::channel(512).0)
+            .or_insert_with(|| broadcast::channel(128).0)
             .clone()
     }
     pub fn send_to_user(&self, username: &str, evt: ServerEvent) {
         let _ = self.user_tx(username).send(evt);
+    }
+    /// M11: Prune stale user_events entries with no active subscribers
+    pub fn prune_user_events(&self) {
+        let stale: Vec<String> = self.user_events.iter()
+            .filter(|e| e.value().receiver_count() == 0)
+            .map(|e| e.key().clone())
+            .collect();
+        for k in stale { self.user_events.remove(&k); }
     }
     pub fn disconnect_requested(&self, conn_id: &str) -> bool {
         self.disconnect_requests.contains(conn_id)
@@ -276,6 +284,8 @@ pub struct NetworkConfig {
     pub nickserv_pass:         Option<String>,
     #[serde(default)]
     pub auto_identify:         bool,
+    #[serde(default)]
+    pub disabled_caps:         Vec<String>,
 }
 
 impl Default for NetworkConfig {
@@ -291,6 +301,7 @@ impl Default for NetworkConfig {
             oper_login: None, oper_pass: None,
             channel_order: vec![],
             nickserv_pass: None, auto_identify: false,
+            disabled_caps: vec![],
         }
     }
 }
@@ -388,25 +399,25 @@ async fn main() -> Result<()> {
     let e2e_store = Arc::new(E2EStore::new(&data_dir));
     let paste_store = Arc::new(paste::PasteStore::new(&data_dir));
     let preview_service = Arc::new(preview::PreviewService::new(&data_dir));
-    let (global_tx, _) = broadcast::channel(64);
 
     let state = AppState {
         connections:         Arc::new(DashMap::new()),
         conn_owners:         Arc::new(DashMap::new()),
         disconnect_requests: Arc::new(DashSet::new()),
-        crypto, certs, logger, auth, notifier, e2e_store, paste_store, preview_service, global_tx,
+        crypto, certs, logger, auth, notifier, e2e_store, paste_store, preview_service,
         user_events:         Arc::new(DashMap::new()),
         upload_dir, base_url, from_email,
         data_dir: data_dir.clone(),
         registration_open: Arc::new(tokio::sync::RwLock::new(registration_open)),
         registration_code: Arc::new(tokio::sync::RwLock::new(reg_code)),
+        admin_settings_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
-    // Background: purge expired sessions hourly
-    { let a = state.auth.clone();
+    // Background: purge expired sessions and stale user events hourly
+    { let a = state.auth.clone(); let s = state.clone();
       tokio::spawn(async move {
           let mut iv = tokio::time::interval(tokio::time::Duration::from_secs(3600));
-          loop { iv.tick().await; a.purge_expired_sessions(); }
+          loop { iv.tick().await; a.purge_expired_sessions(); s.prune_user_events(); }
       });
     }
 
@@ -434,6 +445,11 @@ async fn main() -> Result<()> {
         .route("/auth/reset",            post(route_reset_password).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/me",               get(route_me))
         .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(26_214_400)))
+        .route("/uploads",               get(route_uploads_list))
+        .route("/uploads/delete",        post(route_uploads_delete).layer(DefaultBodyLimit::max(4_096)))
+        .route("/uploads/clear",         post(route_uploads_clear))
+        .route("/auth/sessions",         get(route_sessions_list))
+        .route("/auth/sessions/revoke",  post(route_sessions_revoke).layer(DefaultBodyLimit::max(4_096)))
         .route("/files/:name",           get(serve_file))
         .route("/pub/:name",            get(serve_file_public))
         .route("/paste",                post(route_paste_create).layer(DefaultBodyLimit::max(524_288)))
@@ -540,13 +556,13 @@ async fn route_auth_status(State(state): State<AppState>) -> impl IntoResponse {
 
 // ── Admin endpoints ──────────────────────────────────────────────────────────
 
-fn admin_check(state: &AppState, headers: &HeaderMap) -> Option<String> {
+fn extract_session_user(state: &AppState, headers: &HeaderMap) -> Option<String> {
     let token = bearer_token(headers)?;
     state.auth.validate_session(&token)
 }
 
 async fn route_admin_users(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(user) = admin_check(&state, &headers) else {
+    let Some(user) = extract_session_user(&state, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state.auth.is_admin(&user).await {
@@ -556,7 +572,7 @@ async fn route_admin_users(State(state): State<AppState>, headers: HeaderMap) ->
 }
 
 async fn route_admin_delete_user(State(state): State<AppState>, headers: HeaderMap, Path(target): Path<String>) -> impl IntoResponse {
-    let Some(user) = admin_check(&state, &headers) else {
+    let Some(user) = extract_session_user(&state, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state.auth.is_admin(&user).await {
@@ -570,7 +586,7 @@ async fn route_admin_delete_user(State(state): State<AppState>, headers: HeaderM
 }
 
 async fn route_admin_disable_user(State(state): State<AppState>, headers: HeaderMap, Path(target): Path<String>) -> impl IntoResponse {
-    let Some(user) = admin_check(&state, &headers) else {
+    let Some(user) = extract_session_user(&state, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state.auth.is_admin(&user).await {
@@ -583,7 +599,7 @@ async fn route_admin_disable_user(State(state): State<AppState>, headers: Header
 }
 
 async fn route_admin_get_settings(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(user) = admin_check(&state, &headers) else {
+    let Some(user) = extract_session_user(&state, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state.auth.is_admin(&user).await {
@@ -604,7 +620,7 @@ struct AdminSettings { registration_open: Option<bool>, registration_code: Optio
 struct AdminAddUser { username: String, password: String, #[serde(default)] email: String }
 
 async fn route_admin_add_user(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<AdminAddUser>) -> impl IntoResponse {
-    let Some(user) = admin_check(&state, &headers) else {
+    let Some(user) = extract_session_user(&state, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state.auth.is_admin(&user).await {
@@ -629,7 +645,7 @@ async fn route_admin_add_user(State(state): State<AppState>, headers: HeaderMap,
 }
 
 async fn route_admin_put_settings(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<AdminSettings>) -> impl IntoResponse {
-    let Some(user) = admin_check(&state, &headers) else {
+    let Some(user) = extract_session_user(&state, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state.auth.is_admin(&user).await {
@@ -641,7 +657,8 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     if let Some(code) = body.registration_code {
         *state.registration_code.write().await = code;
     }
-    // Persist admin settings to disk — merge with existing to preserve link preview settings
+    // Persist admin settings to disk under lock to prevent concurrent read-modify-write races
+    let _guard = state.admin_settings_lock.lock().await;
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
     let mut existing: serde_json::Value = if let Ok(json) = tokio::fs::read_to_string(&path).await {
         serde_json::from_str(&json).unwrap_or_default()
@@ -649,6 +666,7 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     existing["registration_open"] = serde_json::json!(*state.registration_open.read().await);
     existing["registration_code"] = serde_json::json!(*state.registration_code.read().await);
     let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
+    drop(_guard);
     (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
 }
 
@@ -658,12 +676,16 @@ async fn route_register(State(state): State<AppState>, Json(body): Json<Register
     }
     let req_code = state.registration_code.read().await.clone();
     if !req_code.is_empty() {
-        // Timing-safe comparison to prevent oracle attacks on registration code
+        // Timing-safe comparison with no length oracle — always compare max(len) bytes
         let a = req_code.as_bytes();
         let b = body.code.as_bytes();
-        let mismatch = if a.len() != b.len() { 1u8 } else {
-            a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        };
+        let max_len = a.len().max(b.len()).max(1);
+        let mut mismatch = (a.len() != b.len()) as u8;
+        for i in 0..max_len {
+            let x = if i < a.len() { a[i] } else { 0xFF };
+            let y = if i < b.len() { b[i] } else { 0x00 };
+            mismatch |= x ^ y;
+        }
         if mismatch != 0 {
             return (StatusCode::FORBIDDEN, Json(Msg { message: "Invalid registration code.".into() })).into_response();
         }
@@ -698,6 +720,30 @@ async fn route_login(State(state): State<AppState>, Json(body): Json<LoginBody>)
 async fn route_logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Some(t) = bearer_token(&headers) { state.auth.logout(&t); }
     (StatusCode::OK, Json(Msg { message: "Logged out".into() }))
+}
+
+async fn route_sessions_list(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let user = match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
+        Some(u) => u, None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response(),
+    };
+    let current_token = bearer_token(&headers).unwrap_or_default();
+    let current_prefix = if current_token.len() >= 8 { format!("{}…{}", &current_token[..4], &current_token[current_token.len()-4..]) } else { String::new() };
+    let sessions: Vec<_> = state.auth.list_sessions(&user).iter().map(|(prefix, created, last_used)| {
+        serde_json::json!({"prefix": prefix, "created_at": created, "last_used": last_used, "current": *prefix == current_prefix})
+    }).collect();
+    Json(serde_json::json!({"sessions": sessions})).into_response()
+}
+
+async fn route_sessions_revoke(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let user = match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
+        Some(u) => u, None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response(),
+    };
+    let prefix = body.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+    if prefix.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Missing prefix"}))).into_response();
+    }
+    state.auth.revoke_session_by_prefix(&user, prefix);
+    Json(serde_json::json!({"ok": true})).into_response()
 }
 
 async fn route_verify(State(state): State<AppState>, Query(q): Query<VerifyQuery>) -> impl IntoResponse {
@@ -809,11 +855,43 @@ async fn route_me(State(state): State<AppState>, headers: HeaderMap) -> impl Int
 async fn route_upload(State(state): State<AppState>, headers: HeaderMap, multipart: Multipart) -> impl IntoResponse {
     match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
         None    => (StatusCode::UNAUTHORIZED, Json(Msg { message: "Not authenticated".into() })).into_response(),
-        Some(_) => match upload::handle_upload(&state.upload_dir, multipart).await {
-            Ok(r)  => (StatusCode::OK, Json(r)).into_response(),
+        Some(user) => match upload::handle_upload(&state.upload_dir, multipart).await {
+            Ok(r)  => {
+                // Track upload for the user
+                let _ = upload::record_upload(&state.data_dir, &user, &r).await;
+                (StatusCode::OK, Json(r)).into_response()
+            }
             Err(e) => (StatusCode::BAD_REQUEST, Json(Msg { message: e.to_string() })).into_response(),
         }
     }
+}
+
+async fn route_uploads_list(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let user = match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
+        Some(u) => u, None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response(),
+    };
+    let files = upload::list_user_uploads(&state.data_dir, &user).await;
+    Json(serde_json::json!({"files": files})).into_response()
+}
+
+async fn route_uploads_delete(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<serde_json::Value>) -> impl IntoResponse {
+    let user = match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
+        Some(u) => u, None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response(),
+    };
+    let filename = body.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+    if filename.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Missing filename"}))).into_response();
+    }
+    upload::delete_user_upload(&state.data_dir, &state.upload_dir, &user, filename).await;
+    Json(serde_json::json!({"ok": true})).into_response()
+}
+
+async fn route_uploads_clear(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let user = match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
+        Some(u) => u, None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response(),
+    };
+    upload::clear_user_uploads(&state.data_dir, &state.upload_dir, &user).await;
+    Json(serde_json::json!({"ok": true})).into_response()
 }
 
 async fn route_e2e_get_bundle(
@@ -942,7 +1020,7 @@ async fn route_short_create(
     if url.is_empty() || url.len() > 4096 || (!url.starts_with("http://") && !url.starts_with("https://")) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Invalid URL"}))).into_response();
     }
-    let id = Uuid::new_v4().to_string()[..6].to_string();
+    let id = Uuid::new_v4().to_string().replace('-', "")[..10].to_string(); // 10-char hex ID
     let dir = format!("{}/shorts", state.data_dir);
     let _ = tokio::fs::create_dir_all(&dir).await;
     let data = serde_json::json!({"url": url, "created_at": chrono::Utc::now().timestamp(), "creator": user});
@@ -961,7 +1039,22 @@ async fn route_short_redirect(
         Ok(json) => {
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json) {
                 if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
-                    return axum::response::Redirect::temporary(url).into_response();
+                    let escaped = html_escape(url);
+                    // Interstitial warning page instead of raw redirect to prevent open redirect abuse
+                    return Html(format!(
+                        "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+                         <title>CryptIRC — Redirect</title>\
+                         <style>body{{background:#000004;color:#d0d0e8;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}\
+                         .box{{background:#080814;border:1px solid #1a1a38;border-radius:12px;padding:28px 36px;max-width:500px;width:90%;text-align:center}}\
+                         a{{color:#00d4aa;word-break:break-all}} .warn{{color:#ffaa00;font-size:12px;margin:12px 0}}\
+                         .btn{{display:inline-block;background:#00d4aa;color:#000;padding:10px 24px;border-radius:6px;text-decoration:none;font-weight:700;margin-top:8px}}</style></head>\
+                         <body><div class=\"box\"><h3>🔗 External Link</h3>\
+                         <div class=\"warn\">You are about to leave CryptIRC and visit:</div>\
+                         <div style=\"margin:12px 0;padding:10px;background:#04040c;border-radius:6px\"><a href=\"{0}\">{0}</a></div>\
+                         <a class=\"btn\" href=\"{0}\">Continue →</a>\
+                         <div style=\"margin-top:12px;font-size:11px;color:#4a4a78\">This link was shortened by a CryptIRC user.</div>\
+                         </div></body></html>", escaped
+                    )).into_response();
                 }
             }
             (StatusCode::NOT_FOUND, Html("Not found".to_string())).into_response()
@@ -994,7 +1087,7 @@ async fn route_link_preview(
 }
 
 async fn route_admin_get_preview_settings(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(user) = admin_check(&state, &headers) else {
+    let Some(user) = extract_session_user(&state, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state.auth.is_admin(&user).await {
@@ -1009,13 +1102,14 @@ async fn route_admin_put_preview_settings(
     headers: HeaderMap,
     Json(body): Json<preview::PreviewSettings>,
 ) -> impl IntoResponse {
-    let Some(user) = admin_check(&state, &headers) else {
+    let Some(user) = extract_session_user(&state, &headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     if !state.auth.is_admin(&user).await {
         return StatusCode::FORBIDDEN.into_response();
     }
-    // Load existing admin settings and merge preview settings
+    // Load existing admin settings and merge preview settings — under lock
+    let _guard = state.admin_settings_lock.lock().await;
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
     let mut existing: serde_json::Value = if let Ok(json) = tokio::fs::read_to_string(&path).await {
         serde_json::from_str(&json).unwrap_or_default()
@@ -1023,6 +1117,7 @@ async fn route_admin_put_preview_settings(
     existing["link_preview_mode"] = serde_json::json!(body.mode);
     existing["link_preview_whitelist"] = serde_json::json!(body.whitelist);
     let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
+    drop(_guard);
     Json(serde_json::json!({"message":"Settings saved"})).into_response()
 }
 
@@ -1386,7 +1481,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                             if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
                                 let lc = ch.to_lowercase();
                                 if upper.starts_with("JOIN ") {
-                                    if !cfg.auto_join.iter().any(|c| c.to_lowercase() == lc) {
+                                    if !cfg.auto_join.iter().any(|c| c.to_lowercase() == lc) && cfg.auto_join.len() < 100 {
                                         cfg.auto_join.push(ch.to_string());
                                         let _ = state.save_network(&cfg, username).await;
                                     }
@@ -1520,7 +1615,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
         ClientMessage::E2EPublishBundle { bundle } => {
             info!("[E2E] publish_bundle for {}", username);
             match state.e2e_store.store_bundle(username, &bundle).await {
-                Ok(info) => { info!("[E2E] bundle published for {}", username);
+                Ok(_) => { info!("[E2E] bundle published for {}", username);
                     // L5: use same threshold as client OTPK_REFILL_BELOW = 10
                     let remaining = state.e2e_store.otpk_count(username).await;
                     if remaining < 10 {
@@ -1543,7 +1638,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 .take(64).collect();
             // Try direct username lookup first, then resolve IRC nick to username
             info!("[E2E] fetch_bundle request for '{}' from {}", safe, username);
-            let resolved = if state.e2e_store.fetch_bundle(&safe).await.is_some() {
+            let resolved = if state.e2e_store.has_bundle(&safe).await {
                 info!("[E2E] direct lookup found bundle for '{}'", safe);
                 safe.clone()
             } else if let Some(real_user) = state.resolve_nick_to_username(&safe).await {
@@ -1696,14 +1791,14 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             // Limit to 4KB to prevent abuse; validate it's well-formed JSON
             if settings.len() <= 4096 && serde_json::from_str::<serde_json::Value>(&settings).is_ok() {
                 let dir = std::path::PathBuf::from(&state.data_dir)
-                    .join("users").join(username);
+                    .join("users").join(&safe_username(username));
                 let _ = tokio::fs::create_dir_all(&dir).await;
                 let _ = tokio::fs::write(dir.join("appearance.json"), &settings).await;
             }
         }
         ClientMessage::LoadAppearance {} => {
             let path = std::path::PathBuf::from(&state.data_dir)
-                .join("users").join(username).join("appearance.json");
+                .join("users").join(&safe_username(username)).join("appearance.json");
             if let Ok(data) = tokio::fs::read_to_string(&path).await {
                 send(ServerEvent::Appearance { settings: data });
             }
@@ -1711,14 +1806,14 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
         ClientMessage::SavePreferences { prefs } => {
             if prefs.len() <= 65536 && serde_json::from_str::<serde_json::Value>(&prefs).is_ok() {
                 let dir = std::path::PathBuf::from(&state.data_dir)
-                    .join("users").join(username);
+                    .join("users").join(&safe_username(username));
                 let _ = tokio::fs::create_dir_all(&dir).await;
                 let _ = tokio::fs::write(dir.join("preferences.json"), &prefs).await;
             }
         }
         ClientMessage::LoadPreferences {} => {
             let path = std::path::PathBuf::from(&state.data_dir)
-                .join("users").join(username).join("preferences.json");
+                .join("users").join(&safe_username(username)).join("preferences.json");
             if let Ok(data) = tokio::fs::read_to_string(&path).await {
                 send(ServerEvent::Preferences { prefs: data });
             }
@@ -1728,7 +1823,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             else if state.crypto.is_unlocked(username).await {
                 match state.crypto.encrypt(username, content.as_bytes()).await {
                     Ok(enc) => {
-                        let dir = std::path::PathBuf::from(&state.data_dir).join("users").join(username);
+                        let dir = std::path::PathBuf::from(&state.data_dir).join("users").join(&safe_username(username));
                         let _ = tokio::fs::create_dir_all(&dir).await;
                         let _ = tokio::fs::write(dir.join("notepad.enc"), &enc).await;
                     }
@@ -1738,7 +1833,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
         }
         ClientMessage::LoadNotepad {} => {
             if state.crypto.is_unlocked(username).await {
-                let path = std::path::PathBuf::from(&state.data_dir).join("users").join(username).join("notepad.enc");
+                let path = std::path::PathBuf::from(&state.data_dir).join("users").join(&safe_username(username)).join("notepad.enc");
                 if let Ok(enc) = tokio::fs::read_to_string(&path).await {
                     match state.crypto.decrypt(username, enc.trim()).await {
                         Ok(pt) => send(ServerEvent::Notepad { content: String::from_utf8_lossy(&pt).to_string() }),
@@ -1759,7 +1854,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             }
             // Delete notepad
             let notepad_path = std::path::PathBuf::from(&state.data_dir)
-                .join("users").join(username).join("notepad.enc");
+                .join("users").join(&safe_username(username)).join("notepad.enc");
             let _ = tokio::fs::remove_file(&notepad_path).await;
             // Delete pastes by this user
             let paste_dir = std::path::PathBuf::from(&state.data_dir).join("pastes");
@@ -1797,9 +1892,10 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             }
         }
         ClientMessage::DeleteAccount { password } => {
-            // Verify password before deleting
+            // Verify password before deleting (login creates a session, so logout it immediately)
             match state.auth.login(username, &password).await {
-                Ok(_) => {
+                Ok(temp_token) => {
+                    state.auth.logout(&temp_token); // L35: clean up orphaned session
                     // Disconnect all IRC connections for this user
                     let conns: Vec<String> = state.conn_owners.iter()
                         .filter(|e| e.value() == username)
@@ -2017,6 +2113,11 @@ impl AppState {
 }
 
 // ─── String sanitization ──────────────────────────────────────────────────────
+
+/// Sanitize a username for safe filesystem path usage (defense-in-depth)
+pub fn safe_username(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').take(64).collect()
+}
 
 pub fn strip_crlf(s: &str) -> String {
     s.chars().filter(|&c| c != '\r' && c != '\n' && c != '\0').collect()

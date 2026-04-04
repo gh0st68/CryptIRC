@@ -52,7 +52,7 @@ impl PasteStore {
             anyhow::bail!("Paste cannot be empty");
         }
 
-        let id = Uuid::new_v4().to_string()[..8].to_string(); // Short 8-char ID
+        let id = Uuid::new_v4().to_string().replace('-', "")[..12].to_string(); // 12-char hex ID (~2^48 entropy)
         let now = chrono::Utc::now().timestamp();
 
         let expires_at = match req.expires_in {

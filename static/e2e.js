@@ -50,11 +50,11 @@ window.E2E = {
   ready:        false,      // true only after identityKeys are confirmed (C6)
   e2eEncKey:    null,       // CryptoKey (AES-256-GCM) — wraps blobs at rest
   identityKeys: null,       // { dhKeyPair, signKeyPair }
-  dmSessions:   {},         // nick → DoubleRatchetSession
-  channelKeys:  {},         // channel → CryptoKey (AES-256-GCM)
-  trustStore:   {},         // nick → { fingerprint, verified, keyChanged }
+  dmSessions:   Object.create(null),  // nick → DoubleRatchetSession (null prototype to prevent pollution)
+  channelKeys:  Object.create(null),  // channel → CryptoKey (AES-256-GCM)
+  trustStore:   Object.create(null),  // nick → { fingerprint, verified, keyChanged }
   _spkBlob:     null,       // raw encrypted SPK blob (set when server sends it)
-  _encryptLock: {},         // nick → Promise chain (S3: serialise per-session sends)
+  _encryptLock: Object.create(null),  // nick → Promise chain (S3: serialise per-session sends)
 };
 
 // ─── Initialise on vault unlock ───────────────────────────────────────────────
@@ -286,7 +286,7 @@ async function x3dhRespond(x3dhHeader) {
 
 // ─── Session blob cache (for SPK and OTPKs loaded async) ─────────────────────
 
-E2E._sessionCache = {};  // partner → raw blob string
+E2E._sessionCache = Object.create(null);  // partner → raw blob string (null prototype)
 
 async function loadSessionBlobFromCache(partner) {
   if (E2E._sessionCache[partner]) return E2E._sessionCache[partner];
@@ -520,7 +520,9 @@ async function chainKeyStep(ck) {
 async function messageEncrypt(keyBytes, plaintext, header) {
   const key   = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ct    = await crypto.subtle.encrypt({ name:'AES-GCM', iv:nonce }, key, plaintext);
+  // Include header as Associated Data to prevent header tampering
+  const ad = header ? new TextEncoder().encode(JSON.stringify(header)) : new Uint8Array(0);
+  const ct    = await crypto.subtle.encrypt({ name:'AES-GCM', iv:nonce, additionalData:ad }, key, plaintext);
   return concat(nonce, new Uint8Array(ct));
 }
 
@@ -528,7 +530,8 @@ async function messageDecrypt(keyBytes, ctWithNonce, header) {
   const key   = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
   const nonce = ctWithNonce.slice(0, 12);
   const ct    = ctWithNonce.slice(12);
-  return new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv:nonce }, key, ct));
+  const ad = header ? new TextEncoder().encode(JSON.stringify(header)) : new Uint8Array(0);
+  return new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv:nonce, additionalData:ad }, key, ct));
 }
 
 // ─── Channel PSK ─────────────────────────────────────────────────────────────
@@ -658,8 +661,12 @@ async function computeFingerprint(b64PubKey) {
 async function safetyPhrase(pubKeyA, pubKeyB) {
   const a   = base64ToBytes(pubKeyA);
   const b   = base64ToBytes(pubKeyB);
-  // Lexicographic sort ensures deterministic order regardless of who calls it
-  const cmp = a.join(',') < b.join(',');
+  // Proper byte-by-byte comparison for deterministic ordering
+  let cmp = false;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i] < b[i]) { cmp = true; break; }
+    if (a[i] > b[i]) { cmp = false; break; }
+  }
   const ikm = cmp ? concat(a, b) : concat(b, a);
   const digest = await crypto.subtle.digest('SHA-256', ikm);
   return bytesToMnemonic(new Uint8Array(digest).slice(0, 16)).slice(0, 12).join(' ');
@@ -778,8 +785,10 @@ async function e2eHandleEvent(ev) {
         console.warn('[E2E] Not ready to process x3dh header');
         break;
       }
-      E2E._pendingIncomingX3DH = E2E._pendingIncomingX3DH || {};
+      E2E._pendingIncomingX3DH = E2E._pendingIncomingX3DH || Object.create(null);
       E2E._pendingIncomingX3DH[nick] = ev.header;
+      // Notify any waiting decryptor
+      if (E2E._x3dhWaiters?.[nick]) E2E._x3dhWaiters[nick](ev.header);
       // Also try to immediately set up the session so it's ready when message arrives
       try {
         console.log('[E2E] Pre-initializing receiver session from relayed x3dh...');
@@ -902,14 +911,15 @@ async function e2eDecryptIncoming(from, target, text) {
         x3dh = E2E._pendingIncomingX3DH[from];
         delete E2E._pendingIncomingX3DH[from];
       }
-      // If no x3dh and no session, wait briefly — relay might arrive after IRC message
+      // If no x3dh and no session, wait up to 3s for relay header using event-driven approach
       if (!x3dh && !E2E.dmSessions[from]) {
-        for (let i = 0; i < 20 && !E2E._pendingIncomingX3DH?.[from]; i++) {
-          await new Promise(r => setTimeout(r, 150));
-        }
-        if (E2E._pendingIncomingX3DH?.[from]) {
-          x3dh = E2E._pendingIncomingX3DH[from];
-          delete E2E._pendingIncomingX3DH[from];
+        x3dh = await new Promise(resolve => {
+          if (E2E._pendingIncomingX3DH?.[from]) { resolve(E2E._pendingIncomingX3DH[from]); delete E2E._pendingIncomingX3DH[from]; return; }
+          if (!E2E._x3dhWaiters) E2E._x3dhWaiters = Object.create(null);
+          const timeout = setTimeout(() => { delete E2E._x3dhWaiters[from]; resolve(null); }, 3000);
+          E2E._x3dhWaiters[from] = (hdr) => { clearTimeout(timeout); delete E2E._x3dhWaiters[from]; resolve(hdr); };
+        });
+        if (x3dh) {
         }
       }
       console.log('[E2E] Incoming DM from', from, 'has_x3dh:', !!x3dh, 'has_session:', !!E2E.dmSessions[from], 'ready:', E2E.ready, 'has_spk:', !!E2E._spkBlob);
@@ -1143,7 +1153,7 @@ function updateE2EIndicator(target) {
     const encActive = !!E2E.channelKeys[t] || (isDMActive && !!E2E.dmSessions[t]);
     const trust = E2E.trustStore[t];
     const lockedSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2"/></svg>';
-    const unlockedSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>';
+    const unlockedSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9 0" fill="none"/></svg>';
     lock.innerHTML = encActive ? lockedSvg : unlockedSvg;
     lock.style.color = encActive ? 'var(--accent)' : 'var(--text2)';
     lock.title = encActive
@@ -1199,7 +1209,7 @@ async function importPub(b64, usage) {
   return crypto.subtle.importKey(
     'raw', base64ToBytes(b64),
     { name: usage==='ECDSA' ? 'ECDSA' : 'ECDH', namedCurve:'P-256' },
-    true,
+    true,  // Public keys must be extractable — exportPub() needs it for E2E bundle sharing
     usage==='ECDSA' ? ['verify'] : []
   );
 }

@@ -89,15 +89,20 @@ pub struct NotifPrefs {
 // ─── Notification manager ─────────────────────────────────────────────────────
 
 pub struct NotificationManager {
-    data_dir:    String,
-    vapid_keys:  VapidKeys,
+    data_dir:     String,
+    vapid_keys:   VapidKeys,
+    push_client:  WebPushClient,
 }
 
 impl NotificationManager {
     pub fn new(data_dir: &str, vapid_keys: VapidKeys) -> Self {
         std::fs::create_dir_all(format!("{}/push", data_dir)).ok();
         std::fs::create_dir_all(format!("{}/notif_prefs", data_dir)).ok();
-        Self { data_dir: data_dir.to_string(), vapid_keys }
+        Self {
+            data_dir: data_dir.to_string(),
+            vapid_keys,
+            push_client: WebPushClient::new().expect("Failed to create WebPushClient"),
+        }
     }
 
     pub fn vapid_public_key(&self) -> &str {
@@ -258,15 +263,6 @@ impl NotificationManager {
     }
 
     async fn send_push(&self, sub: &PushSubscription, payload: &str) -> Result<()> {
-        let p256dh = base64::Engine::decode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            &sub.keys.p256dh,
-        )?;
-        let auth = base64::Engine::decode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            &sub.keys.auth,
-        )?;
-
         let subscription_info = SubscriptionInfo::new(
             &sub.endpoint,
             &sub.keys.p256dh,
@@ -291,8 +287,7 @@ impl NotificationManager {
         builder.set_ttl(86400); // 24 hours — push service will retry delivery
         let message = builder.build()?;
 
-        let client = WebPushClient::new()?;
-        match client.send(message).await {
+        match self.push_client.send(message).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 let endpoint = &sub.endpoint;

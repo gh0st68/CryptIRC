@@ -248,11 +248,21 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
 
     let send = |evt: ServerEvent| state.send_to_user(username, evt);
 
-    // SASL method selection
+    // SASL method selection — refuse SASL PLAIN over non-TLS to prevent cleartext credential leak
     let sasl_method: Option<SaslMethod> = if cfg.sasl_external {
         Some(SaslMethod::External)
     } else if let Some(ref sc) = cfg.sasl_plain {
-        Some(SaslMethod::Plain { account: sc.account.clone(), password: sc.password.clone() })
+        if !cfg.tls {
+            warn!("[{}] SASL PLAIN disabled — TLS is off, credentials would travel in cleartext", conn_id);
+            send(ServerEvent::IrcMessage {
+                conn_id: conn_id.to_string(), from: "*".into(), target: "status".into(),
+                text: "⚠ SASL PLAIN disabled — cannot send credentials over an unencrypted connection. Enable TLS or use SASL EXTERNAL.".into(),
+                ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, prefix: None,
+            });
+            None
+        } else {
+            Some(SaslMethod::Plain { account: sc.account.clone(), password: sc.password.clone() })
+        }
     } else { None };
 
     let use_sasl        = sasl_method.is_some();
@@ -377,17 +387,13 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                 ];
                                 let mut req: Vec<&str> = Vec::new();
                                 for w in wanted {
+                                    // Skip caps the user has disabled for this network
+                                    if cfg.disabled_caps.iter().any(|d| d == w) { continue; }
                                     if available_caps.iter().any(|c| c == w) {
                                         req.push(w);
                                     }
                                 }
-                                // Track supported caps
-                                if req.contains(&"echo-message") {
-                                    echo_message_enabled = true;
-                                }
-                                if req.contains(&"message-tags") {
-                                    conn.lock().await.message_tags = true;
-                                }
+                                // Note: echo_message_enabled and message_tags are set in CAP ACK handler, not here
                                 // Request IRCv3 caps first (without sasl)
                                 if !req.is_empty() {
                                     let req_str = req.join(" ");
@@ -410,6 +416,9 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             }
                             "ACK" => {
                                 info!("[{}] CAP ACK: {}", conn_id, caps);
+                                // L43: Set capability flags on ACK, not on REQ
+                                if caps.contains("echo-message") { echo_message_enabled = true; }
+                                if caps.contains("message-tags") { conn.lock().await.message_tags = true; }
                                 if caps.contains("sasl") && sasl_state == SaslState::CapReqSent {
                                     // SASL cap accepted — start authentication
                                     let method = match &sasl_method {
@@ -447,6 +456,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                 let mut req: Vec<&str> = Vec::new();
                                 for cap in caps.split_whitespace() {
                                     let cap_name = cap.split('=').next().unwrap_or(cap);
+                                    if cfg.disabled_caps.iter().any(|d| d == cap_name) { continue; }
                                     if wanted.contains(&cap_name) {
                                         req.push(cap_name);
                                     }
@@ -568,7 +578,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         // Reply to CTCP VERSION
                         if text == "\x01VERSION\x01" {
                             conn.lock().await.send_raw(&format!(
-                                "NOTICE {} :\x01VERSION CryptIRC v0.6.5 - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
+                                "NOTICE {} :\x01VERSION CryptIRC v0.9.0 - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
                                 from
                             )).await?;
                             continue;

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#0b0d0f">
+<meta name="theme-color" content="#000004">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -19,10 +19,10 @@
 <style>
 /* ── CSS custom properties ─────────────────────────────────────────────────── */
 :root {
-  /* Theme defaults — overridden by applyThemeCSS() after login */
-  --bg0:#0b0d0f; --bg1:#111418; --bg2:#181d24; --bg3:#1e242e; --bg4:#252c38;
-  --border:#2a3444; --border2:#3a4a60;
-  --text:#c8d8e8; --text2:#7a9ab8; --text3:#4a6278;
+  /* Theme defaults (Starfield Warp) — overridden by applyThemeCSS() after login */
+  --bg0:#000004; --bg1:#04040c; --bg2:#080814; --bg3:#0c0c1e; --bg4:#121228;
+  --border:#1a1a38; --border2:#2a2a50;
+  --text:#d0d0e8; --text2:#8888cc; --text3:#4a4a78;
   --accent:#00d4aa; --accent2:#0099ff;
   --warn:#ffaa00; --error:#ff4466; --join:#44cc88; --part:#cc6644;
   --notice:#9988cc; --action:#ffcc44;
@@ -211,6 +211,18 @@ body > style, body > script { visibility:hidden; }
   transition:color .2s;
 }
 .lock-btn:hover { color:var(--text); }
+#favs-bar {
+  display:none; padding:6px 14px; cursor:pointer; flex-shrink:0;
+  border-bottom:1px solid var(--border);
+  background:var(--bg2); color:var(--text3); font-size:11px;
+  align-items:center; gap:6px; transition:all .15s;
+  user-select:none; -webkit-user-select:none;
+}
+#favs-bar:hover { color:var(--text2); background:var(--bg3); }
+#favs-bar.active { display:flex; background:var(--accent); color:#000; }
+#favs-bar.active #favs-icon { stroke:#000; fill:#000; opacity:.7; }
+#favs-bar.active #favs-label { font-weight:700; }
+#favs-bar.inactive { display:flex; }
 #sidebar-scroll {
   flex:1; overflow-y:auto; padding:0;
   -webkit-overflow-scrolling:touch;
@@ -265,6 +277,9 @@ body > style, body > script { visibility:hidden; }
 }
 .chan-item:hover, .chan-item:active { background:var(--bg3); color:var(--text); }
 .chan-item.drag-over { border-top:2px solid var(--accent); margin-top:-2px; }
+.net-group.drag-over { border-top:2px solid var(--accent); margin-top:-2px; }
+.net-group[draggable] .net-label { cursor:grab; }
+.net-group[draggable]:active .net-label { cursor:grabbing; }
 .chan-item.active { background:var(--bg4); color:var(--accent); }
 .chan-unread-dot { display:none; }
 .chan-unread-badge { margin-left:auto; flex-shrink:0; background:var(--bg3); color:var(--text2); font-size:10px; font-weight:700; min-width:18px; height:18px; line-height:18px; text-align:center; border-radius:9px; padding:0 5px; }
@@ -358,12 +373,13 @@ body > style, body > script { visibility:hidden; }
   display:none; position:absolute; bottom:calc(100% + 6px); left:50%; transform:translateX(-50%);
   background:var(--bg2); border:1px solid var(--border2); border-radius:10px;
   padding:6px; min-width:160px; box-shadow:0 8px 24px rgba(0,0,0,.5);
-  z-index:300;
+  z-index:300; max-height:min(70vh, 500px); overflow-y:auto; -webkit-overflow-scrolling:touch;
 }
 .settings-menu.open { display:flex; flex-direction:column; gap:2px; }
 .settings-menu-item {
   background:none; border:none; color:var(--text2); font-family:var(--mono); font-size:13px;
-  padding:12px 14px; border-radius:6px; cursor:pointer; text-align:left;
+  padding:10px 14px; border-radius:6px; cursor:pointer; text-align:left;
+  display:flex; align-items:center; gap:10px;
   transition:background .12s, color .12s; white-space:nowrap;
   min-height:44px; display:flex; align-items:center;
 }
@@ -671,6 +687,14 @@ body > style, body > script { visibility:hidden; }
 .row-error .msg-body { color:var(--error); }
 .row-topic .msg-body { color:var(--accent); }
 .row-nick .msg-body, .row-mode .msg-body, .row-kick .msg-body { color:var(--text3); }
+/* ── Condensed status messages ── */
+.status-condensed { padding:2px 12px; font-size:11px; color:var(--text3); cursor:pointer; opacity:.7; transition:opacity .15s; line-height:1.6; text-align:center; }
+.status-condensed:hover { opacity:1; }
+.status-condensed .sc-expand { display:none; font-size:11px; color:var(--text3); padding:2px 0; }
+.status-condensed.expanded .sc-expand { display:block; }
+.status-condensed .sc-summary { display:inline; }
+.status-condensed .sc-ts { font-size:10px; opacity:.5; margin-right:6px; }
+.status-condensed.expanded .sc-summary-text { display:none; }
 .nc-self { color:var(--accent) !important; }
 .nick-mention { border-radius:2px; padding:0 2px; }
 .nick-mention:hover { text-decoration:underline; }
@@ -702,12 +726,11 @@ body > style, body > script { visibility:hidden; }
   background:var(--bg1); border-top:1px solid var(--border);
   display:flex; align-items:center; flex-shrink:0;
 }
-#input-inner { background:var(--bg1) !important; }
 #input-wrap #send-btn, #input-wrap .upload-btn { background:var(--bg1); }
 #input-nick { display:none; }
 #input-inner {
   flex:1; display:flex; align-items:center; min-width:0;
-  background:none; border:none; border-radius:0;
+  background:var(--bg1); border:none; border-radius:0;
   transition:none;
 }
 #input-inner:focus-within { background:var(--bg2); border-top:1px solid var(--accent); margin-top:-1px; box-shadow:0 -4px 12px rgba(0,212,170,.1); }
@@ -926,15 +949,7 @@ body > style, body > script { visibility:hidden; }
 
 /* ── RECONNECT TOAST ───────────────────────────────────────────────────────── */
 /* M10: position relative to viewport, not fixed pixel */
-#reconnect-toast {
-  position:fixed; bottom:calc(var(--input-bar-h, 70px) + 8px + var(--sab));
-  left:50%; transform:translateX(-50%);
-  background:var(--bg2); border:1px solid var(--warn); border-radius:8px;
-  padding:8px 16px; font-size:11px; color:var(--warn);
-  box-shadow:0 8px 24px rgba(0,0,0,.5); display:none; z-index:50;
-  max-width:90vw; align-items:center; gap:6px;
-}
-#reconnect-toast.show { display:flex; }
+/* reconnect-toast removed — info shown in status buffer */
 
 /* ── PUSH NOTIFICATION SETTINGS ────────────────────────────────────────────── */
 .notif-section { margin-bottom:18px; }
@@ -1013,6 +1028,16 @@ body > style, body > script { visibility:hidden; }
   15% { opacity:0; }
 }
 .msg-row { animation:fadeIn .15s ease; }
+/* ── Highlight tags ── */
+.hl-tag { display:inline-flex; align-items:center; gap:4px; background:var(--bg4); border:1px solid var(--border); border-radius:12px; padding:3px 8px 3px 10px; font-size:11px; color:var(--text); }
+.hl-tag-x { background:none; border:none; color:var(--text3); cursor:pointer; font-size:14px; padding:0 2px; line-height:1; }
+.hl-tag-x:hover { color:var(--error); }
+/* ── Audio player ── */
+.msg-audio { margin-top:4px; display:block; }
+.msg-audio audio { max-width:320px; width:100%; height:36px; border-radius:6px; }
+/* ── Lightbox zoom ── */
+#lightbox img { cursor:grab; transition:transform .2s; }
+#lightbox img.zoomed { cursor:move; max-width:none; max-height:none; }
 /* ── Read marker ── */
 .read-marker { display:flex; align-items:center; gap:8px; padding:4px 12px; color:var(--accent); font-size:10px; letter-spacing:.04em; }
 .read-marker::before,.read-marker::after { content:''; flex:1; height:1px; background:var(--accent); opacity:.4; }
@@ -1205,9 +1230,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 </div>
 
 <!-- ── LIGHTBOX ──────────────── -->
-<div id="lightbox" onclick="closeLightbox()">
+<div id="lightbox" onclick="if(event.target===this)closeLightbox()">
   <button id="lightbox-close" onclick="closeLightbox();event.stopPropagation()">✕</button>
-  <img id="lightbox-img" src="" alt="">
+  <img id="lightbox-img" src="" alt="" ondblclick="toggleLightboxZoom(event)">
 </div>
 
 <!-- ── DROP OVERLAY ──────────── -->
@@ -1217,7 +1242,6 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 <div id="sidebar-backdrop" onclick="closeSidebar();document.getElementById('nick-panel').classList.remove('open');this.classList.remove('show')"></div>
 
 <!-- ── RECONNECT TOAST ────────── -->
-<div id="reconnect-toast"></div>
 
 <!-- ── NOTIFICATION SETTINGS MODAL ── -->
 <div class="modal-overlay" id="notif-modal">
@@ -1284,8 +1308,13 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 
     <div class="notif-section">
       <div class="notif-section-title">Custom Highlight Words</div>
-      <div class="notif-sublabel" style="margin-bottom:8px">Get notified when these words appear in any message (comma-separated)</div>
-      <input class="form-input" id="notif-highlight-words" placeholder="e.g. bug, deploy, urgent" onchange="saveHighlightWords()">
+      <div class="notif-sublabel" style="margin-bottom:8px">Get notified when these words appear in any message. Press Enter to add.</div>
+      <div style="display:flex;gap:6px;margin-bottom:8px">
+        <input class="form-input" id="notif-highlight-input" placeholder="Type a word and press Enter" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addHighlightWord();}">
+        <button onclick="addHighlightWord()" style="background:var(--accent);color:#000;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-family:var(--mono);font-weight:700;font-size:12px;flex-shrink:0">+ Add</button>
+      </div>
+      <div id="highlight-tags" style="display:flex;flex-wrap:wrap;gap:6px;min-height:24px"></div>
+      <input type="hidden" id="notif-highlight-words">
     </div>
 
     <div class="notif-section">
@@ -1475,8 +1504,12 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <button class="appear-toggle" id="a-timestamps" onclick="this.classList.toggle('on');applyAppearance()"></button>
         </div>
         <div class="appear-row">
-          <span class="appear-label">Show join/part/quit</span>
-          <button class="appear-toggle" id="a-joinpart" onclick="this.classList.toggle('on');applyAppearance()"></button>
+          <span class="appear-label">Status messages</span>
+          <select id="a-statusmsg" style="width:auto;min-width:120px;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="applyAppearance()">
+            <option value="show">Show all</option>
+            <option value="condense">Condense</option>
+            <option value="hide">Hide</option>
+          </select>
         </div>
         <div class="appear-row">
           <span class="appear-label">Compact mode</span>
@@ -1489,14 +1522,6 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <div class="appear-row">
           <span class="appear-label">Show nick list</span>
           <button class="appear-toggle" id="a-nicklist" onclick="this.classList.toggle('on');applyAppearance()"></button>
-        </div>
-        <div class="appear-row">
-          <span class="appear-label">Spell check</span>
-          <button class="appear-toggle" id="a-spellcheck" onclick="this.classList.toggle('on');applyAppearance()"></button>
-        </div>
-        <div class="appear-row">
-          <span class="appear-label">Link previews</span>
-          <button class="appear-toggle" id="a-linkpreviews" onclick="this.classList.toggle('on');applyAppearance()"></button>
         </div>
       </div>
 
@@ -1557,6 +1582,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <span class="appear-value" id="a-brightness-val"></span>
         </div>
       </div>
+
+      <!-- Privacy/Security and Behavior sections moved to standalone Security panel -->
 
       <div style="display:flex;justify-content:center;padding-top:8px;">
         <button class="appear-reset" onclick="resetAppearance()">Reset to Defaults</button>
@@ -1647,6 +1674,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div class="form-field"><label class="form-label">Oper Login</label><input class="form-input" id="f-oper-login" placeholder="(optional)" autocapitalize="none"></div>
       <div class="form-field"><label class="form-label">Oper Password</label><input class="form-input" type="password" id="f-oper-pass" placeholder="(optional)" autocomplete="new-password"></div>
     </div>
+    <div style="border-top:1px solid var(--border);margin:14px 0 12px;padding-top:12px;">
+      <div style="font-size:11px;color:var(--text2);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px">IRCv3 Capabilities</div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:8px">All enabled by default. Disable if a server has issues with specific caps.</div>
+      <div id="f-caps-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px"></div>
+    </div>
     <div class="modal-actions">
       <button class="btn-cancel" onclick="closeModal()">Cancel</button>
       <button class="btn-save" id="modal-save-btn" onclick="saveNetwork()">Add &amp; Connect</button>
@@ -1706,8 +1738,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     <div id="sidebar-header">
       <canvas id="starfield" width="300" height="50"></canvas>
       <span class="logo">CryptIRC</span>
-      <button class="lock-btn" id="favs-toggle" title="Toggle favorites only" onclick="toggleFavsOnly()" style="font-size:12px">☆</button>
       <button class="lock-btn" id="vault-lock-btn" title="Lock vault" onclick="lockVault()">🔒</button>
+    </div>
+    <div id="favs-bar" onclick="toggleFavsOnly()" title="Toggle favorites filter">
+      <svg id="favs-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+      <span id="favs-label">Favorites</span>
     </div>
     <div id="sidebar-scroll">
       <div id="favorites-list"></div>
@@ -1718,17 +1753,21 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div style="position:relative">
         <button class="sidebar-btn" onclick="toggleSettingsMenu()" id="settings-gear-btn">⚙ Settings</button>
         <div id="settings-menu" class="settings-menu">
-          <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()">🔔 Notifications</button>
-          <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()">🎨 Theme</button>
-          <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)">👁 Monitor</button>
-          <button class="settings-menu-item" onclick="showNotepad();closeSettingsMenu()">📝 Notepad</button>
-          <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()">📜 Certs</button>
-          <button class="settings-menu-item" onclick="showIgnorePanel();closeSettingsMenu()">🚫 Ignored Users</button>
-          <button class="settings-menu-item" onclick="showChangePass();closeSettingsMenu()">🔑 Vault Password</button>
-          <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()">❓ Help</button>
-          <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()">👑 Admin</button>
-          <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b">🧹 Clear All Data</button>
-          <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b">🗑 Delete Account</button>
+          <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Notifications</button>
+          <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="19" cy="13.5" r="2.5"/><circle cx="6.5" cy="10" r="2.5"/><circle cx="10.5" cy="17.5" r="2.5"/></svg>Theme</button>
+          <button class="settings-menu-item" onclick="showSecurityPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Security</button>
+          <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>Monitor</button>
+          <button class="settings-menu-item" onclick="showNotepad();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Notepad</button>
+          <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 7V5a4 4 0 0 0-8 0v2"/><circle cx="12" cy="14" r="1.5"/></svg> Certs</button>
+          <button class="settings-menu-item" onclick="showCapsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRCv3 Caps</button>
+          <button class="settings-menu-item" onclick="showIgnorePanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>Ignored Users</button>
+          <button class="settings-menu-item" onclick="showUploadsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>My Uploads</button>
+          <button class="settings-menu-item" onclick="showSessionManager();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>Sessions</button>
+          <button class="settings-menu-item" onclick="showChangePass();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>Vault Password</button>
+          <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Help</button>
+          <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Admin</button>
+          <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Clear All Data</button>
+          <button class="settings-menu-item" onclick="showDeleteAccount();closeSettingsMenu()" style="color:#ff6b6b"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Delete Account</button>
         </div>
       </div>
       <button class="sidebar-btn" onclick="doLogout()">Logout</button>
@@ -1744,7 +1783,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <span class="lag-dot" id="lag-mobile-dot"></span>
         <span id="lag-mobile-val"></span>
       </span>
-      <span id="e2e-lock" title="Enable channel encryption" style="flex-shrink:0;cursor:pointer;padding:2px;color:var(--text2)" onclick="showEncryptPanel()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg></span>
+      <span id="e2e-lock" title="Not encrypted — click to set up" style="flex-shrink:0;cursor:pointer;padding:2px;color:var(--text2)" onclick="showEncryptPanel()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9 0" fill="none"/></svg></span>
       <span id="mentions-btn" onclick="toggleMentionsPanel()" title="Mentions"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.2L4 17.2V4h16v12z"/><circle cx="8" cy="10" r="1.5"/><circle cx="12" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg><span class="mentions-count" id="mentions-count"></span></span>
       <span id="search-btn" onclick="toggleSearchPanel()" title="Search" style="cursor:pointer;padding:4px;color:var(--text2);flex-shrink:0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
       <span id="topic-sep" style="display:none;color:var(--border);font-size:14px;flex-shrink:0">│</span>
@@ -2086,7 +2125,7 @@ function connectWs() {
   const proto=location.protocol==='https:'?'wss':'ws';
   ws=new WebSocket(`${proto}://${location.host}/cryptirc/ws`);
   ws.onmessage=e=>{_rxBytes+=(e.data||'').length;_rxCount++;flashLed('rx');updateStarfieldTitle();try{handleEvent(JSON.parse(e.data));}catch(err){console.error('WS parse error:',err);}};
-  ws.onclose=()=>setTimeout(connectWs,3000);
+  ws.onclose=()=>{_rateQueue=[];if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}setTimeout(connectWs,3000);};
   ws.onerror=()=>ws.close();
 }
 // Reconnect + reload history when app comes back from background (iOS PWA minimize)
@@ -2243,16 +2282,23 @@ function handleEvent(ev) {
       }
       break;
     case 'connecting':   sysMsg(ev.conn_id,'status',`Connecting to ${ev.server}…`,'system'); setNetDot(ev.conn_id,'connecting'); break;
-    case 'connected':    sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); clearTimeout(window._rtTimer); document.getElementById('reconnect-toast').classList.remove('show'); keepnickStartPoll(ev.conn_id); break;
-    case 'disconnected': sysMsg(ev.conn_id,'status',`Disconnected: ${ev.reason}`,'error'); setNetDot(ev.conn_id,'offline'); lagMap[ev.conn_id]=null; if(active&&active.conn_id===ev.conn_id) updateLagDisplay(); break;
+    case 'connected':    sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); keepnickStartPoll(ev.conn_id); break;
+    case 'disconnected':
+      sysMsg(ev.conn_id,'status',`Disconnected: ${ev.reason}`,'error'); setNetDot(ev.conn_id,'offline'); lagMap[ev.conn_id]=null; if(active&&active.conn_id===ev.conn_id) updateLagDisplay();
+      if(ev.reason&&ev.reason.includes('certificate verify failed')&&!window._certWarnShown?.[ev.conn_id]){
+        if(!window._certWarnShown)window._certWarnShown={};
+        window._certWarnShown[ev.conn_id]=true;
+        showCertWarning(ev.conn_id);
+      }
+      break;
     case 'reconnecting': {
-      const t=document.getElementById('reconnect-toast');
-      const netLabel=networks.find(n=>n.config.id===ev.conn_id)?.config.label||ev.conn_id.slice(0,8);
-      t.innerHTML=`<span>↻ Reconnecting to ${esc(netLabel)} (attempt ${ev.attempt}) in ${ev.delay_secs}s</span><span onclick="document.getElementById('reconnect-toast').classList.remove('show');clearTimeout(window._rtTimer)" style="cursor:pointer;margin-left:10px;opacity:.6;font-size:14px">✕</span>`;
-      t.classList.add('show');
-      clearTimeout(window._rtTimer);
-      window._rtTimer=setTimeout(()=>t.classList.remove('show'),(ev.delay_secs*1000)+4000);
       sysMsg(ev.conn_id,'status',`↻ Reconnecting in ${ev.delay_secs}s (attempt ${ev.attempt})…`,'system');
+      // Detect self-signed cert error and show helpful popup (once per network)
+      if(ev.reason&&ev.reason.includes('certificate verify failed')&&!window._certWarnShown?.[ev.conn_id]){
+        if(!window._certWarnShown)window._certWarnShown={};
+        window._certWarnShown[ev.conn_id]=true;
+        showCertWarning(ev.conn_id);
+      }
       break;
     }
     case 'lag_update': lagMap[ev.conn_id]=ev.ms; if(active&&active.conn_id===ev.conn_id) updateLagDisplay(); break;
@@ -2282,24 +2328,33 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_message':
+      // Route user notices to the active channel instead of opening a PM
+      if(ev.kind==='Notice'&&ev.target&&ev.target!=='status'&&!ev.target.startsWith('#')&&!ev.target.startsWith('&')&&ev.from!=='*'&&!ev.from.includes('.')){
+        ev.target=active&&active.conn_id===ev.conn_id?active.target:'status';
+      }
       // Suppress noisy 401 "No such nick/channel" errors
       // Suppress noisy server errors (typing on unsupported networks, offline nicks, etc)
       if(ev.text&&(ev.text.includes('No such nick/channel')||ev.text.includes('Command disabled')||ev.text.includes('Unknown command')||ev.text.includes('@+typing'))) break;
-      // Intercept ISON (303) replies for keepnick
+      // Intercept ISON (303) replies for keepnick — narrow window to prevent swallowing other messages
       if(ev.target==='status'&&_keepnickIsonPending[ev.conn_id]){
-        const t=(ev.text||'').replace(/^:\s*/,'').trim();
-        const kn=loadKeepNicks();
-        if(kn[ev.conn_id]){
-          const desired=kn[ev.conn_id].nick.toLowerCase();
-          // Check if reply text contains only nicks (ISON reply pattern)
-          const words=t?t.split(/\s+/):[];
-          const allNickChars=words.every(w=>/^[a-zA-Z0-9_\-\[\]\\`^|{}]+$/.test(w));
-          if(allNickChars||t===''){
-            delete _keepnickIsonPending[ev.conn_id];
-            keepnickHandleIson(ev.conn_id,t);
-            break;
+        const pendingTs=_keepnickIsonPending[ev.conn_id];
+        // Only intercept within 5 seconds of sending ISON and if text is short (nicks only)
+        if(typeof pendingTs==='number'&&Date.now()-pendingTs<5000){
+          const t=(ev.text||'').replace(/^:\s*/,'').trim();
+          if(t.length<200){
+            const kn=loadKeepNicks();
+            if(kn[ev.conn_id]){
+              const words=t?t.split(/\s+/):[];
+              const allNickChars=words.length<=10&&words.every(w=>/^[a-zA-Z0-9_\-\[\]\\`^|{}]+$/.test(w));
+              if(allNickChars||t===''){
+                delete _keepnickIsonPending[ev.conn_id];
+                keepnickHandleIson(ev.conn_id,t);
+                break;
+              }
+            }
           }
         }
+        delete _keepnickIsonPending[ev.conn_id]; // Expire stale pending flag
       }
       // Intercept links data for /links overlay
       if(ev.from==='links'&&window._linksData!=null){
@@ -2314,7 +2369,31 @@ function handleEvent(ev) {
         // Suppress x3dh header messages (handled internally, not displayed)
         if (plaintext === null && !encrypted && ev.text.startsWith('[e2ex3dh]')) return;
         const displayText = plaintext !== null ? plaintext : ev.text;
+        // Block PMs if enabled — auto-reply once per sender per 3 hours, then silently drop
+        const _isDmIncoming=ev.target!=='status'&&!ev.target.startsWith('#')&&!ev.target.startsWith('&')&&ev.from!==getNick(ev.conn_id)&&ev.from!=='*';
+        if(_isDmIncoming&&localStorage.getItem('cryptirc_block_pms')==='true'){
+          const _bpKey='bp:'+ev.conn_id+':'+ev.from.toLowerCase();
+          const _bpLast=parseInt(localStorage.getItem(_bpKey)||'0');
+          const _bpFirst=Date.now()-_bpLast>3*3600*1000;
+          if(_bpFirst){
+            localStorage.setItem(_bpKey,String(Date.now()));
+            // Notify the sender once
+            wsend({type:'send',conn_id:ev.conn_id,raw:`NOTICE ${ev.from} :This user has private messages disabled (+g). Your message has been silently dropped. Use /msg to try again later.`});
+            // Notify ourselves once per sender per 3 hours
+            sysMsg(ev.conn_id,'status',`📫 ${ev.from} tried to message you (PMs blocked). Preview: ${(displayText||'').slice(0,80)}`,'system');
+          }
+          return; // drop the message
+        }
         const mentioned=checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts);
+        // ZNC playback detection — batch old messages silently
+        const zncMsg={ts:ev.ts,from:ev.from,text:displayText,kind:ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg',encrypted,mentioned,prefix:ev.prefix||null};
+        if(zncDetectBatch(ev.conn_id,ev.target,zncMsg)){
+          // Still add to buffer but don't trigger notifications/sounds
+          const buf=getBuf(ev.conn_id,ev.target);buf.push(zncMsg);if(buf.length>2000)buf.splice(0,buf.length-2000);
+          trackSeen(ev.from,ev.target,ev.ts);trackStat(ev.conn_id,ev.target,ev.from);
+          if(isActive(ev.conn_id,ev.target))appendMsgRow(zncMsg);
+          return;
+        }
         addMessage(ev.conn_id, ev.target, {
           ts:        ev.ts,
           from:      ev.from,
@@ -2484,6 +2563,7 @@ function handleEvent(ev) {
           } else if('beIkl'.includes(c)){argIdx++;} // modes that consume an arg
         }
         renderSidebar(); refreshUserCount(ev.conn_id,ev.target);
+        if(isActive(ev.conn_id,ev.target)) renderNickPanel(mCh.names);
       }
       break;
     }
@@ -2696,8 +2776,8 @@ function playNotifSound(type){
 function addMessage(conn_id,target,msg){
   const buf=getBuf(conn_id,target); buf.push(msg);
   if(buf.length>2000)buf.splice(0,buf.length-2000);
-  // Track channel stats
-  if(msg.kind==='privmsg'||msg.kind==='action') trackStat(conn_id,target,msg.from);
+  // Track channel stats and seen database
+  if(msg.kind==='privmsg'||msg.kind==='action'){trackStat(conn_id,target,msg.from);trackSeen(msg.from,target,msg.ts);trackLastSpoke(conn_id,target,msg.from,msg.ts);}
   const isDM=target!=='status'&&!target.startsWith('#')&&!target.startsWith('&')&&!target.startsWith('+')&&!target.startsWith('!');
   // Track query/PM buffers
   if(isDM){
@@ -2778,12 +2858,18 @@ function prependLogs(conn_id,target,lines){
 function isActive(c,t){return active&&active.conn_id===c&&active.target===t;}
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
+let _sidebarRenderTimer=null,_sidebarDragLock=false;
 function renderSidebar(){
+  if(_sidebarRenderTimer||_sidebarDragLock)return;
+  _sidebarRenderTimer=setTimeout(()=>{_sidebarRenderTimer=null;_renderSidebarNow();},50);
+}
+function _renderSidebarNow(){
   const el=document.getElementById('network-list');
   el.innerHTML='';
   for(const net of networks){
     const id=net.config.id;
-    const g=document.createElement('div'); g.className='net-group';
+    const g=document.createElement('div'); g.className='net-group'; g.dataset.netId=id;
+    if(window.innerWidth>768) g.draggable=true;
     const sk=bk(id,'status'),sa=isActive(id,'status'),sc=unread.get(sk)||0;
     const netMuted=isMuted('net:'+id)||isMuted(id+'/status');
     g.innerHTML=`<div class="net-label${sa?' active':''}" onclick="setActive('${id}','status');closeSidebar();" style="${sa?'background:var(--bg4);':''}">
@@ -2791,9 +2877,12 @@ function renderSidebar(){
       <span class="net-name">${esc(net.config.label||net.config.server)}</span>
       ${sc&&!netMuted?`<span class="chan-unread-badge${mentionUnread.get(sk)?` highlight`:''}">${sc>99?'99+':sc}</span>`:''}
       <span class="net-actions">
-        <button class="net-btn net-kebab" onclick="event.stopPropagation();toggleNetMenu('${id}','${esc(net.config.label||net.config.server)}')" title="Options">⋮</button>
+        <button class="net-btn net-kebab" data-net-id="${id}" title="Options">⋮</button>
       </span>
     </div>`;
+    // Attach net kebab listener safely (no inline onclick with user data)
+    const netKebab=g.querySelector('.net-kebab');
+    if(netKebab){netKebab.addEventListener('click',e=>{e.stopPropagation();toggleNetMenu(id,net.config.label||net.config.server);});}
     // Sort channels by saved order
     const order=net.config.channel_order||[];
     const sorted=[...(net.channels||[])].sort((a,b)=>{
@@ -2817,7 +2906,10 @@ function renderSidebar(){
       ci.style.position='relative';
       const chMuted=isMuted(id+'/'+ch.name)||isMuted('net:'+id);
       const mc=mentionUnread.get(k)||0;
-      ci.innerHTML=`${esc(ch.name)}<span class="chan-right">${uc&&!chMuted?`<span class="chan-unread-badge${mc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab" onclick="event.stopPropagation();toggleChanMenu(this,'${id}','${esc(ch.name)}','channel')">⋮</span></span>`;
+      const chEnc=window.E2E?.channelKeys?.[ch.name];
+      const chLock=chEnc?'<svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)" stroke="var(--accent)" stroke-width="1" style="opacity:.7;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2.5"/></svg>':'<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:.2;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9 0"/></svg>';
+      ci.innerHTML=`${chLock}${esc(ch.name)}<span class="chan-right">${uc&&!chMuted?`<span class="chan-unread-badge${mc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
+      ci.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,id,ch.name,'channel');});
       ci.onclick=()=>{setActive(id,ch.name);closeSidebar();};
       chanContainer.appendChild(ci);
     }
@@ -2833,7 +2925,10 @@ function renderSidebar(){
         qi.style.fontStyle='italic';
         qi.style.position='relative';
         const pmMuted=isMuted(id+'/'+lc)||isMuted('net:'+id);
-        qi.innerHTML=`${esc(display)}<span class="chan-right">${uc&&!pmMuted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${pmMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab" onclick="event.stopPropagation();toggleChanMenu(this,'${id}','${esc(lc)}','pm')">⋮</span></span>`;
+        const dmEnc=window.E2E?.dmSessions?.[lc]||window.E2E?.dmSessions?.[display];
+        const dmLock=dmEnc?'<svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)" stroke="var(--accent)" stroke-width="1" style="opacity:.7;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2.5"/></svg>':'<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:.2;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9 0"/></svg>';
+        qi.innerHTML=`${dmLock}${esc(display)}<span class="chan-right">${uc&&!pmMuted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${pmMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
+        qi.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,id,lc,'pm');});
         qi.onclick=()=>{setActive(id,display);closeSidebar();};
         g.appendChild(qi);
       }
@@ -2919,14 +3014,29 @@ function renderChat(){
   const rmKey=bk(active.conn_id,active.target);
   const lastReadTs=parseFloat(localStorage.getItem('cryptirc_lastread_'+rmKey)||'0');
   let markerInserted=false;
-  for(const msg of buf){
+  const statusMsgMode=(loadAppearance().statusMsg)||'condense';
+  const isStatusKind=k=>['join','part','quit','nick','mode','kick'].includes(k);
+  let i=0;
+  while(i<buf.length){
+    const msg=buf[i];
     const d=new Date(msg.ts*1000).toDateString();
     if(d!==lastDate){const div=document.createElement('div');div.className='day-div';div.textContent=d;area.appendChild(div);lastDate=d;}
     if(!markerInserted && lastReadTs>0 && msg.ts>lastReadTs && msg.from!=='*'){
       const marker=document.createElement('div');marker.className='read-marker';marker.textContent='NEW MESSAGES';area.appendChild(marker);markerInserted=true;
     }
-    const r=buildRow(msg);
-    area.appendChild(r);
+    // Condense consecutive status messages
+    if(statusMsgMode==='condense'&&isStatusKind(msg.kind)){
+      const group=[msg];
+      while(i+1<buf.length&&isStatusKind(buf[i+1].kind)){i++;group.push(buf[i]);}
+      if(group.length>=2){
+        area.appendChild(buildCondensedRow(group));
+      } else {
+        area.appendChild(buildRow(msg));
+      }
+    } else {
+      area.appendChild(buildRow(msg));
+    }
+    i++;
   }
   // Update last-read timestamp
   if(buf.length>0) localStorage.setItem('cryptirc_lastread_'+rmKey,String(buf[buf.length-1].ts));
@@ -2942,10 +3052,66 @@ function loadOlderMessages(){
 }
 function appendMsgRow(msg){
   const area=document.getElementById('chat-area');if(area.style.display==='none')return;
+  const statusMsgMode=(loadAppearance().statusMsg)||'condense';
+  const isStatus=['join','part','quit','nick','mode','kick'].includes(msg.kind);
+  if(statusMsgMode==='condense'&&isStatus){
+    // Try to merge with an existing condensed row at the bottom
+    const lastChild=area.lastElementChild;
+    if(lastChild&&lastChild.classList.contains('status-condensed')){
+      const grp=JSON.parse(lastChild.dataset.msgs||'[]');
+      grp.push({kind:msg.kind,text:msg.text,from:msg.from||''});
+      lastChild.dataset.msgs=JSON.stringify(grp);
+      lastChild.querySelector('.sc-summary-text').textContent=buildCondensedSummary(grp);
+      lastChild.querySelector('.sc-expand').innerHTML=grp.map(m=>`<div style="padding:1px 0">— ${esc(m.text||'')}</div>`).join('');
+      scrollBottom();return;
+    }
+    // Previous element is a single status row — convert it + new one into condensed
+    if(lastChild&&lastChild.classList.contains('msg-row')&&['row-join','row-part','row-quit','row-nick','row-mode','row-kick'].some(c=>lastChild.classList.contains(c))){
+      const prevKind=(lastChild.className.match(/row-(\w+)/)||[])[1]||'system';
+      const prevMsg={kind:prevKind,text:lastChild.querySelector('.msg-body')?.textContent||'',from:lastChild.dataset.from||''};
+      const grp=[prevMsg,{kind:msg.kind,text:msg.text,from:msg.from||''}];
+      const condensed=buildCondensedRow(grp.map((g,i)=>({...g,ts:msg.ts})));
+      area.replaceChild(condensed,lastChild);
+      scrollBottom();return;
+    }
+  }
   const r=buildRow(msg);
   area.appendChild(r);
   if(msg.mentioned){r.classList.add('flash');setTimeout(()=>r.classList.remove('flash'),3000);}
   scrollBottom();
+}
+function buildCondensedSummary(group){
+  const joins=[],parts=[],quits=[],nicks=[],modes=[],kicks=[];
+  for(const m of group){
+    const nick=m.from||m.text?.match(/^[⊕⊗✗•] ?(\S+)/)?.[1]||'?';
+    if(m.kind==='join')joins.push(nick);
+    else if(m.kind==='part')parts.push(nick);
+    else if(m.kind==='quit')quits.push(nick);
+    else if(m.kind==='nick')nicks.push(nick);
+    else if(m.kind==='mode')modes.push(nick);
+    else if(m.kind==='kick')kicks.push(nick);
+  }
+  const parts_arr=[];
+  if(joins.length) parts_arr.push(`${joins.length} joined`);
+  if(parts.length) parts_arr.push(`${parts.length} left`);
+  if(quits.length) parts_arr.push(`${quits.length} quit`);
+  if(nicks.length) parts_arr.push(`${nicks.length} changed nick`);
+  if(modes.length) parts_arr.push(`${modes.length} mode change${modes.length>1?'s':''}`);
+  if(kicks.length) parts_arr.push(`${kicks.length} kicked`);
+  return parts_arr.join(', ');
+}
+function buildCondensedRow(group){
+  const row=document.createElement('div');
+  row.className='status-condensed';
+  row.dataset.msgs=JSON.stringify(group.map(m=>({kind:m.kind,text:m.text,from:m.from||''})));
+  const summary=buildCondensedSummary(group.map(m=>({kind:m.kind,text:m.text,from:m.from||''})));
+  // Timestamp from the last message in the group
+  const lastTs=group[group.length-1]?.ts;
+  let tsHtml='';
+  if(lastTs){const t=new Date(lastTs*1000);const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';tsHtml=`<span class="sc-ts">${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}</span>`;}
+  row.innerHTML=`<span class="sc-summary">${tsHtml}↕ <span class="sc-summary-text">${summary}</span></span><div class="sc-expand">${group.map(m=>`<div style="padding:1px 0">— ${esc(m.text||'')}</div>`).join('')}</div>`;
+  row.onclick=()=>row.classList.toggle('expanded');
+  return row;
 }
 function buildRow(msg){
   const row=document.createElement('div'); row.className=`msg-row row-${msg.kind}`; row.dataset.ts=msg.ts; row.dataset.from=msg.from||'';
@@ -3128,6 +3294,13 @@ function buildMediaEl(url){
     wrap.appendChild(img);
     return wrap;
   }
+  // Audio
+  if(AUDIO_EXTS.test(url)){
+    const wrap=document.createElement('div');wrap.className='msg-audio';
+    const aud=document.createElement('audio');aud.src=authedUrl;aud.controls=true;aud.preload='metadata';
+    wrap.appendChild(aud);
+    return wrap;
+  }
   // Videos
   if(VID_EXTS.test(url)){
     const wrap=document.createElement('div');wrap.className='msg-media';
@@ -3138,15 +3311,16 @@ function buildMediaEl(url){
   // YouTube — rich card with thumbnail + info
   const ytId=extractYouTubeId(url);
   if(ytId){
+    const _ytUid=ytId+'_'+(Date.now()%1000000);
     const wrap=document.createElement('a');
     wrap.href=url;wrap.target='_blank';wrap.rel='noopener noreferrer';
     wrap.className='msg-yt';
-    wrap.innerHTML=`<div class="msg-yt-thumb"><img src="https://img.youtube.com/vi/${ytId}/hqdefault.jpg" alt="YouTube" loading="lazy"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${ytId}">Loading...</div><div class="msg-yt-meta" id="yt-m-${ytId}"><span>YouTube</span></div></div>`;
+    wrap.innerHTML=`<div class="msg-yt-thumb"><img src="https://img.youtube.com/vi/${ytId}/hqdefault.jpg" alt="YouTube" loading="lazy"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${_ytUid}">Loading...</div><div class="msg-yt-meta" id="yt-m-${_ytUid}"><span>YouTube</span></div></div>`;
     wrap.querySelector('img').onerror=()=>wrap.style.display='none';
     // Fetch video info via noembed (no API key needed, privacy-friendly)
     fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${ytId}`).then(r=>r.json()).then(d=>{
-      const titleEl=document.getElementById('yt-t-'+ytId);
-      const metaEl=document.getElementById('yt-m-'+ytId);
+      const titleEl=document.getElementById('yt-t-'+_ytUid);
+      const metaEl=document.getElementById('yt-m-'+_ytUid);
       if(titleEl&&d.title) titleEl.textContent=d.title;
       if(metaEl){
         const parts=[];
@@ -3190,8 +3364,7 @@ function extractYouTubeId(url){
   const m=url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
   return m?m[1]:null;
 }
-function openLightbox(src){document.getElementById('lightbox-img').src=src;document.getElementById('lightbox').classList.add('show');}
-function closeLightbox(){document.getElementById('lightbox').classList.remove('show');}
+// openLightbox/closeLightbox defined in lightbox zoom/pan section below
 
 // ─── Input ────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded',()=>{
@@ -3231,7 +3404,7 @@ document.addEventListener('DOMContentLoaded',()=>{
   document.getElementById('vault-pass')?.addEventListener('keydown',e=>{if(e.key==='Enter')doUnlock();});
 
   // Drag & drop
-  document.addEventListener('dragover',e=>{e.preventDefault();if(!active)return;document.getElementById('drop-overlay').classList.add('show');});
+  document.addEventListener('dragover',e=>{e.preventDefault();if(!active)return;if(!e.dataTransfer.types.includes('Files'))return;document.getElementById('drop-overlay').classList.add('show');});
   document.addEventListener('dragleave',e=>{if(!e.relatedTarget)document.getElementById('drop-overlay').classList.remove('show');});
   document.addEventListener('drop',e=>{e.preventDefault();document.getElementById('drop-overlay').classList.remove('show');if(active&&e.dataTransfer.files.length)handleFileSelect(e.dataTransfer.files);});
   // Paste image
@@ -3850,6 +4023,39 @@ async function handleInput(raw){
         toggleSplitView();
         break;
       }
+      case 'SEEN': {
+        const nick=args[0];if(!nick){sysMsg(conn_id,target,'Usage: /seen <nick>','error');break;}
+        const s=getSeen(nick);
+        if(s){
+          const ago=Math.round(Date.now()/1000-s.ts);
+          const agoStr=ago<60?ago+'s ago':ago<3600?Math.round(ago/60)+'m ago':ago<86400?Math.round(ago/3600)+'h ago':Math.round(ago/86400)+'d ago';
+          sysMsg(conn_id,target,`${s.nick} was last seen ${agoStr} in ${s.channel}`,'system');
+        } else {
+          sysMsg(conn_id,target,`${nick} has not been seen this session.`,'system');
+        }
+        break;
+      }
+      case 'RATELIMIT': {
+        const ms=parseInt(args[0]);
+        if(!args[0]){sysMsg(conn_id,target,`Rate limit: ${getRateLimit()}ms between messages. Usage: /ratelimit <ms> (default 500)`,'system');break;}
+        if(isNaN(ms)||ms<100||ms>10000){sysMsg(conn_id,target,'Rate limit must be 100-10000ms','error');break;}
+        setRateLimit(ms);sysMsg(conn_id,target,`Rate limit set to ${ms}ms between messages`,'system');
+        break;
+      }
+      case 'EXPIRE': case 'MSGEXPIRY': {
+        const hours=parseInt(args[0]);
+        if(!args[0]){sysMsg(conn_id,target,`Message expiry: ${getMessageExpiry()||'off'} hours. Usage: /expire <hours> (0 = off)`,'system');break;}
+        if(isNaN(hours)||hours<0){sysMsg(conn_id,target,'Usage: /expire <hours> (0 = off)','error');break;}
+        setMessageExpiry(hours);sysMsg(conn_id,target,hours?`Messages will auto-expire after ${hours} hour${hours>1?'s':''}`:'Message expiry disabled','system');
+        break;
+      }
+      case 'AUTOLOCK': {
+        const mins=parseInt(args[0]);
+        if(!args[0]){sysMsg(conn_id,target,`Vault auto-lock: ${getVaultAutoLock()||'off'} minutes. Usage: /autolock <minutes> (0 = off)`,'system');break;}
+        if(isNaN(mins)||mins<0){sysMsg(conn_id,target,'Usage: /autolock <minutes> (0 = off)','error');break;}
+        setVaultAutoLock(mins);sysMsg(conn_id,target,mins?`Vault will auto-lock after ${mins} minute${mins>1?'s':''} of inactivity`:'Vault auto-lock disabled','system');
+        break;
+      }
       case 'KEEPNICK': {
         const desired=args[0]||getNick(conn_id);
         if(!desired){sysMsg(conn_id,target,'Usage: /keepnick [nick] — keep a nick (defaults to current)','error');break;}
@@ -3906,10 +4112,10 @@ async function handleInput(raw){
       ? await e2eEncryptOutgoing(target, raw)
       : null;
     if (e2eWire) {
-      wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${e2eWire}`});
+      rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${e2eWire}`});
       addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw,kind:'privmsg',encrypted:true});
     } else {
-      wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${raw}`});
+      rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${raw}`});
       addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw,kind:'privmsg'});
     }
   }
@@ -3971,6 +4177,15 @@ function pickMircColor(num,type){
   document.getElementById('mirc-color-picker')?.remove();
 }
 
+// Track last-spoke timestamps per channel for smart tab completion
+const _lastSpoke={};
+function trackLastSpoke(conn_id,target,nick,ts){
+  if(!nick||nick==='*')return;
+  const k=bk(conn_id,target);
+  if(!_lastSpoke[k])_lastSpoke[k]={};
+  _lastSpoke[k][nick.toLowerCase()]=ts||Date.now()/1000;
+}
+let _tabCycleState=null; // {partial, matches, index, stamp}
 function tabComplete(inp){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
@@ -3978,8 +4193,31 @@ function tabComplete(inp){
   if(!ch)return;
   const val=inp.value,words=val.split(' ');
   const partial=words[words.length-1].toLowerCase();
-  const match=ch.names.find(n=>stripPfx(n).toLowerCase().startsWith(partial));
-  if(match){words[words.length-1]=stripPfx(match)+(words.length===1?': ':' ');inp.value=words.join(' ');}
+  if(!partial)return;
+  // Check if we're cycling through previous tab results
+  const now=Date.now();
+  if(_tabCycleState&&_tabCycleState.partial===partial&&now-_tabCycleState.stamp<3000){
+    // Cycle to next match
+    _tabCycleState.index=(_tabCycleState.index+1)%_tabCycleState.matches.length;
+    _tabCycleState.stamp=now;
+    words[words.length-1]=_tabCycleState.matches[_tabCycleState.index]+(words.length===1?': ':' ');
+    inp.value=words.join(' ');
+    return;
+  }
+  // Build match list sorted by most recent speaker
+  const k=bk(active.conn_id,active.target);
+  const spokeMap=_lastSpoke[k]||{};
+  const nicks=(ch.names||[]).map(n=>stripPfx(n)).filter(n=>n.toLowerCase().startsWith(partial));
+  if(!nicks.length)return;
+  // Sort: most recent speaker first, then alphabetical
+  nicks.sort((a,b)=>{
+    const ta=spokeMap[a.toLowerCase()]||0, tb=spokeMap[b.toLowerCase()]||0;
+    if(tb!==ta) return tb-ta;
+    return a.toLowerCase().localeCompare(b.toLowerCase());
+  });
+  _tabCycleState={partial,matches:nicks,index:0,stamp:now};
+  words[words.length-1]=nicks[0]+(words.length===1?': ':' ');
+  inp.value=words.join(' ');
 }
 function insertNick(nick){const inp=document.getElementById('msg-input');if(!inp.disabled){inp.value+=nick+': ';inp.focus();}}
 
@@ -4181,7 +4419,41 @@ function resetNetworkForm(){
   document.getElementById('f-tls-invalid').value='false';
   document.getElementById('f-oper-login').value='';
   document.getElementById('f-oper-pass').value='';
+  document.getElementById('f-auto-identify').value='false';
+  document.getElementById('f-nickserv-pass').value='';
   onSaslMethodChange();
+  renderCapsGrid([]);
+}
+const _ALL_CAPS=[
+  {id:'away-notify',label:'Away Notify',desc:'See when users go away/back'},
+  {id:'account-notify',label:'Account Notify',desc:'Account login/logout events'},
+  {id:'extended-join',label:'Extended Join',desc:'Show account+realname on join'},
+  {id:'server-time',label:'Server Time',desc:'Accurate server-side timestamps'},
+  {id:'multi-prefix',label:'Multi Prefix',desc:'Show all user prefixes (@+%)'},
+  {id:'cap-notify',label:'Cap Notify',desc:'Server advertises new caps'},
+  {id:'message-tags',label:'Message Tags',desc:'IRCv3 message metadata'},
+  {id:'batch',label:'Batch',desc:'Group related messages'},
+  {id:'echo-message',label:'Echo Message',desc:'Server echoes your messages back'},
+  {id:'invite-notify',label:'Invite Notify',desc:'See channel invites'},
+  {id:'setname',label:'Setname',desc:'Real-time realname changes'},
+  {id:'account-tag',label:'Account Tag',desc:'Account name in message tags'},
+  {id:'userhost-in-names',label:'Userhost in Names',desc:'Full user@host in NAMES'},
+  {id:'chghost',label:'Chghost',desc:'Host/ident change notifications'},
+  {id:'labeled-response',label:'Labeled Response',desc:'Match responses to commands'},
+  {id:'draft/typing',label:'Typing Indicators',desc:'See when someone is typing'},
+  {id:'standard-replies',label:'Standard Replies',desc:'Structured server replies'},
+];
+function renderCapsGrid(disabledCaps){
+  const grid=document.getElementById('f-caps-grid');if(!grid)return;
+  grid.innerHTML='';
+  for(const cap of _ALL_CAPS){
+    const on=!disabledCaps.includes(cap.id);
+    const el=document.createElement('label');
+    el.style.cssText='display:flex;align-items:center;gap:5px;cursor:pointer;padding:3px 0;color:var(--text2);';
+    el.title=cap.desc;
+    el.innerHTML=`<input type="checkbox" data-cap="${cap.id}" ${on?'checked':''} style="accent-color:var(--accent);margin:0;cursor:pointer"><span>${cap.label}</span>`;
+    grid.appendChild(el);
+  }
 }
 function showAddNetwork(){
   resetNetworkForm();
@@ -4209,6 +4481,7 @@ function editNetwork(id){
   document.getElementById('f-oper-pass').value=c.oper_pass||'';
   document.getElementById('f-auto-identify').value=c.auto_identify?'true':'false';
   document.getElementById('f-nickserv-pass').value='';
+  renderCapsGrid(c.disabled_caps||[]);
   if(c.sasl_plain){
     document.getElementById('f-sasl-method').value='plain';
     document.getElementById('f-sasl-account').value=c.sasl_plain.account||'';
@@ -4243,7 +4516,8 @@ function saveNetwork(){
     oper_login:document.getElementById('f-oper-login').value||null,
     oper_pass:document.getElementById('f-oper-pass').value||null,
     auto_identify:document.getElementById('f-auto-identify').value==='true',
-    nickserv_pass:document.getElementById('f-nickserv-pass').value||null};
+    nickserv_pass:document.getElementById('f-nickserv-pass').value||null,
+    disabled_caps:[...document.querySelectorAll('#f-caps-grid input[data-cap]:not(:checked)')].map(el=>el.dataset.cap)};
   if(editingNetworkId){
     wsend({type:'update_network',network:cfg}); closeModal();
   } else {
@@ -4519,20 +4793,27 @@ const THEMES={
   alien:        {label:'👽 Alien',bg0:'#020808',bg1:'#041010',bg2:'#061818',bg3:'#082020',bg4:'#0c2c2c',border:'#0e3a2a',border2:'#145038',text:'#88ffcc',text2:'#44ee88',text3:'#227744',animation:'alien'},
 };
 const APPEAR_DEFAULTS={
-  theme:'midnight', chatSize:13, sidebarFont:12, nickFont:12,
+  theme:'starwarp', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
-  timestamps:true, joinpart:true, compact:false, coloredNicks:true,
+  timestamps:true, joinpart:true, statusMsg:'condense', compact:false, coloredNicks:true,
   accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, msgGap:4,
   font:"'JetBrains Mono',monospace", linkPreviews:true,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
 };
 function isMobileView(){return window.innerWidth<=768;}
+let _appearCache=null,_appearCacheTs=0;
 function loadAppearance(){
-  try{return{...APPEAR_DEFAULTS,...JSON.parse(localStorage.getItem('cryptirc_appear')||'{}')};}
-  catch{return{...APPEAR_DEFAULTS};}
+  const now=Date.now();
+  if(_appearCache&&now-_appearCacheTs<2000)return _appearCache;
+  try{_appearCache={...APPEAR_DEFAULTS,...JSON.parse(localStorage.getItem('cryptirc_appear')||'{}')};}
+  catch{_appearCache={...APPEAR_DEFAULTS};}
+  _appearCacheTs=now;
+  return _appearCache;
 }
+function invalidateAppearCache(){_appearCache=null;_appearCacheTs=0;}
 function saveAppearance(cfg){
+  invalidateAppearCache();
   const json=JSON.stringify(cfg);
   try{localStorage.setItem('cryptirc_appear',json);}catch(e){}
   wsend({type:'save_appearance',settings:json});
@@ -4552,12 +4833,13 @@ function applyAppearance(){
     nickPanelW: +el('a-nickpanel-w').value||prev.nickPanelW||160,
     lineHeight: +el('a-line-height').value||prev.lineHeight||1.55,
     timestamps: el('a-timestamps').classList.contains('on'),
-    joinpart:   el('a-joinpart').classList.contains('on'),
+    joinpart:   true,
+    statusMsg:  el('a-statusmsg').value||'condense',
     compact:    el('a-compact').classList.contains('on'),
     coloredNicks: el('a-colorednicks').classList.contains('on'),
     nickList:   el('a-nicklist').classList.contains('on'),
-    spellcheck: el('a-spellcheck').classList.contains('on'),
-    linkPreviews: el('a-linkpreviews').classList.contains('on'),
+    spellcheck: prev.spellcheck!==undefined?prev.spellcheck:true,
+    linkPreviews: prev.linkPreviews!==undefined?prev.linkPreviews:true,
     msgGap:     +el('a-msg-gap').value||prev.msgGap||4,
     accent:     el('a-accent-color').value||prev.accent||'#00d4aa',
     accent2:    el('a-accent2-color').value||prev.accent2||'#0099ff',
@@ -4613,13 +4895,13 @@ function applyThemeCSS(cfg){
     body { font-size:${fontSize}px; ${cfg.brightness&&cfg.brightness!==100?`filter:brightness(${cfg.brightness/100});`:''} }
     :root { --mono:${cfg.font||"'JetBrains Mono',monospace"}; }
     .msg-row { line-height:${cfg.lineHeight}; ${cfg.compact?'padding:1px 12px;':''} gap:${cfg.msgGap||4}px; }
-    .msg-ts { ${showTs?'':'display:none;'} font-size:${Math.max(fontSize-3,8)}px; }
+    .msg-ts, .sc-ts { ${showTs?'':'display:none;'} font-size:${Math.max(fontSize-3,8)}px; }
     .msg-nick { width:${nickW}px; font-size:${fontSize}px; }
     .msg-body { font-size:${fontSize}px; }
     .chan-item { font-size:${cfg.sidebarFont}px; }
     .net-label { font-size:${Math.max(cfg.sidebarFont-1,9)}px; }
     .nick-entry { font-size:${cfg.nickFont}px; }
-    ${cfg.joinpart?'':'.row-join,.row-part,.row-quit{display:none;}'}
+    ${cfg.statusMsg==='hide'?'.row-join,.row-part,.row-quit,.row-nick,.row-mode,.row-kick,.status-condensed{display:none!important;}':''}
     ${cfg.compact?'.msg-row:hover{background:none;}':''}
     ${cfg.coloredNicks===false?'.nc0,.nc1,.nc2,.nc3,.nc4,.nc5,.nc6,.nc7,.nc8,.nc9{color:var(--text2)!important;}.nc-self{color:var(--accent)!important;}':''}
     ${cfg.nickList===false?'#nick-panel{display:none!important;}':''}
@@ -4829,12 +5111,11 @@ function populateAppearanceModal(cfg){
   el('a-line-height').value=cfg.lineHeight;
   el('a-msg-gap').value=cfg.msgGap!=null?cfg.msgGap:4;
   cfg.timestamps ? el('a-timestamps').classList.add('on') : el('a-timestamps').classList.remove('on');
-  cfg.joinpart ? el('a-joinpart').classList.add('on') : el('a-joinpart').classList.remove('on');
+  el('a-statusmsg').value=cfg.statusMsg||'condense';
   cfg.compact ? el('a-compact').classList.add('on') : el('a-compact').classList.remove('on');
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
-  cfg.spellcheck!==false ? el('a-spellcheck').classList.add('on') : el('a-spellcheck').classList.remove('on');
-  cfg.linkPreviews!==false ? el('a-linkpreviews').classList.add('on') : el('a-linkpreviews').classList.remove('on');
+  // spellcheck and linkPreviews toggles are now in the Security panel
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;
   el('a-accent-swatch').style.background=cfg.accent;
@@ -4866,6 +5147,7 @@ function populateAppearanceModal(cfg){
   el('a-mobile-accent-swatch').style.background=cfg.mobileAccent||cfg.accent;
   el('a-mobile-accent2-color').value=cfg.mobileAccent2||cfg.accent2;
   el('a-mobile-accent2-swatch').style.background=cfg.mobileAccent2||cfg.accent2;
+  // Privacy/Security/Behavior settings are now in the standalone Security panel
   // Theme cards
   const grid=el('theme-grid'); grid.innerHTML='';
   for(const[key,t] of Object.entries(THEMES)){
@@ -5168,6 +5450,10 @@ document.addEventListener('click',e=>{
     {cmd:'note',desc:'Set/view notes on a nick',usage:'/note <nick> [text]'},
     {cmd:'dnd',desc:'Do Not Disturb mode',usage:'/dnd on|off|schedule HH:MM HH:MM'},
     {cmd:'split',desc:'Toggle split view (two channels)',usage:'/split'},
+    {cmd:'seen',desc:'When was a nick last seen?',usage:'/seen <nick>'},
+    {cmd:'ratelimit',desc:'Set message rate limit (ms)',usage:'/ratelimit <ms>'},
+    {cmd:'expire',desc:'Auto-delete old messages (hours)',usage:'/expire <hours>'},
+    {cmd:'autolock',desc:'Vault auto-lock timer (minutes)',usage:'/autolock <minutes>'},
     {cmd:'keepnick',desc:'Keep a nick (reclaim if lost)',usage:'/keepnick [nick]'},
     {cmd:'unkeepnick',desc:'Stop keeping a nick',usage:'/unkeepnick'},
     {cmd:'listnick',desc:'List all kept nicks',usage:'/listnick'},
@@ -5231,6 +5517,363 @@ document.addEventListener('click',e=>{
   // Close on click outside
   document.addEventListener('click',e=>{if(!e.target.closest('#slash-autocomplete')&&!e.target.closest('#msg-input'))slashEl.style.display='none';});
 })();
+
+// ─── Security panel ──────────────────────────────────────────────────────────
+function showSecurityPanel(){
+  const el=id=>document.getElementById(id);
+  el('sec-vault-autolock').value=String(getVaultAutoLock());
+  el('sec-msg-expiry').value=String(getMessageExpiry());
+  el('sec-ratelimit').value=String(getRateLimit());
+  const cfg=loadAppearance();
+  localStorage.getItem('cryptirc_autorejoin')!=='false'?el('sec-autorejoin').classList.add('on'):el('sec-autorejoin').classList.remove('on');
+  localStorage.getItem('cryptirc_block_pms')==='true'?el('sec-block-pms').classList.add('on'):el('sec-block-pms').classList.remove('on');
+  cfg.linkPreviews!==false?el('sec-linkpreviews').classList.add('on'):el('sec-linkpreviews').classList.remove('on');
+  cfg.spellcheck!==false?el('sec-spellcheck').classList.add('on'):el('sec-spellcheck').classList.remove('on');
+  document.getElementById('security-overlay').classList.add('show');
+}
+function closeSecurityPanel(){document.getElementById('security-overlay').classList.remove('show');}
+function secSaveToggle(key,val){
+  invalidateAppearCache();
+  const cfg=loadAppearance();
+  cfg[key]=val;
+  saveAppearance(cfg);
+  applyThemeCSS(cfg);
+}
+
+// ─── Self-signed cert warning popup ──────────────────────────────────────────
+function showCertWarning(conn_id){
+  const net=networks.find(n=>n.config.id===conn_id);
+  const label=net?.config?.label||net?.config?.server||'this server';
+  const existing=document.getElementById('cert-warn-popup');
+  if(existing)existing.remove();
+  const popup=document.createElement('div');
+  popup.id='cert-warn-popup';
+  popup.style.cssText='position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--warn);border-radius:10px;padding:16px 20px;z-index:200;box-shadow:0 8px 30px rgba(0,0,0,.5);max-width:400px;width:90%;font-size:12px;color:var(--text);';
+  popup.innerHTML=`
+    <div style="display:flex;align-items:flex-start;gap:10px">
+      <span style="font-size:22px;flex-shrink:0">⚠️</span>
+      <div style="flex:1">
+        <div style="font-weight:700;margin-bottom:6px;color:var(--warn)">SSL Certificate Error</div>
+        <div style="color:var(--text2);line-height:1.5;margin-bottom:10px">
+          <strong>${esc(label)}</strong> is using a self-signed or untrusted SSL certificate. This is common with ZNC bouncers and private IRC servers.<br><br>
+          To connect, edit your network settings and set <strong>"Accept Invalid TLS"</strong> to <strong>Yes (self-signed)</strong>.
+        </div>
+        <div style="display:flex;gap:8px" id="cert-warn-btns"></div>
+      </div>
+    </div>`;
+  document.body.appendChild(popup);
+  // Attach button listeners safely (no inline onclick with conn_id)
+  const btns=popup.querySelector('#cert-warn-btns');
+  const editBtn=document.createElement('button');
+  editBtn.textContent='Edit Network';editBtn.style.cssText='background:var(--accent);color:#000;border:none;border-radius:6px;padding:7px 14px;cursor:pointer;font-family:var(--mono);font-weight:700;font-size:12px';
+  editBtn.addEventListener('click',()=>{editNetwork(conn_id);popup.remove();});
+  const dismissBtn=document.createElement('button');
+  dismissBtn.textContent='Dismiss';dismissBtn.style.cssText='background:var(--bg4);color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:7px 14px;cursor:pointer;font-family:var(--mono);font-size:12px';
+  dismissBtn.addEventListener('click',()=>popup.remove());
+  btns.appendChild(editBtn);btns.appendChild(dismissBtn);
+}
+
+// ─── ZNC playback detection ──────────────────────────────────────────────────
+let _zncPlayback={};
+function zncDetectBatch(conn_id,target,msg){
+  // ZNC sends server-time timestamps in the past during playback
+  const now=Date.now()/1000;
+  const age=now-msg.ts;
+  const k=bk(conn_id,target);
+  if(age>60){
+    // Message is >60 seconds old — likely ZNC playback
+    if(!_zncPlayback[k])_zncPlayback[k]={count:0,start:now};
+    _zncPlayback[k].count++;
+    return true; // batching
+  } else if(_zncPlayback[k]){
+    // First real-time message after batch — insert summary
+    const batch=_zncPlayback[k];
+    delete _zncPlayback[k];
+    if(batch.count>3){
+      addMessage(conn_id,target,{ts:now,from:'*',text:`── Playback: ${batch.count} buffered messages ──`,kind:'system'});
+    }
+  }
+  return false;
+}
+
+// ─── Inline audio player ─────────────────────────────────────────────────────
+const AUDIO_EXTS=/\.(mp3|ogg|flac|wav|m4a|aac|opus)(\?|#|$)/i;
+
+// ─── Image lightbox zoom/pan ─────────────────────────────────────────────────
+let _lbZoom=1,_lbPanX=0,_lbPanY=0,_lbDragging=false,_lbStartX=0,_lbStartY=0;
+function toggleLightboxZoom(e){
+  e.stopPropagation();
+  const img=document.getElementById('lightbox-img');
+  if(_lbZoom===1){_lbZoom=3;img.classList.add('zoomed');_lbPanX=0;_lbPanY=0;}
+  else{_lbZoom=1;img.classList.remove('zoomed');_lbPanX=0;_lbPanY=0;}
+  img.style.transform=`translate(${_lbPanX}px,${_lbPanY}px) scale(${_lbZoom})`;
+}
+function openLightbox(src){
+  _lbZoom=1;_lbPanX=0;_lbPanY=0;
+  const img=document.getElementById('lightbox-img');
+  img.src=src;img.classList.remove('zoomed');img.style.transform='';
+  document.getElementById('lightbox').classList.add('show');
+}
+function closeLightbox(){
+  document.getElementById('lightbox').classList.remove('show');
+  const img=document.getElementById('lightbox-img');img.classList.remove('zoomed');img.style.transform='';
+}
+(function(){
+  const lb=document.getElementById('lightbox');if(!lb)return;
+  // Pinch zoom for mobile
+  let _lastDist=0;
+  lb.addEventListener('touchstart',e=>{
+    if(e.touches.length===2){
+      _lastDist=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+    } else if(e.touches.length===1&&_lbZoom>1){
+      _lbDragging=true;_lbStartX=e.touches[0].clientX-_lbPanX;_lbStartY=e.touches[0].clientY-_lbPanY;
+    }
+  },{passive:true});
+  lb.addEventListener('touchmove',e=>{
+    const img=document.getElementById('lightbox-img');
+    if(e.touches.length===2){
+      e.preventDefault();
+      const dist=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+      _lbZoom=Math.max(1,Math.min(5,_lbZoom*(dist/_lastDist)));
+      _lastDist=dist;
+      if(_lbZoom<=1.05){_lbZoom=1;_lbPanX=0;_lbPanY=0;img.classList.remove('zoomed');}else{img.classList.add('zoomed');}
+      img.style.transform=`translate(${_lbPanX}px,${_lbPanY}px) scale(${_lbZoom})`;
+    } else if(_lbDragging&&e.touches.length===1){
+      _lbPanX=e.touches[0].clientX-_lbStartX;_lbPanY=e.touches[0].clientY-_lbStartY;
+      img.style.transform=`translate(${_lbPanX}px,${_lbPanY}px) scale(${_lbZoom})`;
+    }
+  },{passive:false});
+  lb.addEventListener('touchend',()=>{_lbDragging=false;});
+  // Mouse drag for desktop when zoomed
+  lb.addEventListener('mousedown',e=>{
+    if(_lbZoom>1){_lbDragging=true;_lbStartX=e.clientX-_lbPanX;_lbStartY=e.clientY-_lbPanY;e.preventDefault();}
+  });
+  lb.addEventListener('mousemove',e=>{
+    if(_lbDragging){
+      _lbPanX=e.clientX-_lbStartX;_lbPanY=e.clientY-_lbStartY;
+      document.getElementById('lightbox-img').style.transform=`translate(${_lbPanX}px,${_lbPanY}px) scale(${_lbZoom})`;
+    }
+  });
+  lb.addEventListener('mouseup',()=>{_lbDragging=false;});
+  // Scroll wheel zoom on desktop
+  lb.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const img=document.getElementById('lightbox-img');
+    _lbZoom=Math.max(1,Math.min(5,_lbZoom+(e.deltaY<0?0.3:-0.3)));
+    if(_lbZoom<=1.05){_lbZoom=1;_lbPanX=0;_lbPanY=0;img.classList.remove('zoomed');}else{img.classList.add('zoomed');}
+    img.style.transform=`translate(${_lbPanX}px,${_lbPanY}px) scale(${_lbZoom})`;
+  },{passive:false});
+})();
+
+// ─── Message expiry ──────────────────────────────────────────────────────────
+function getMessageExpiry(){return parseInt(localStorage.getItem('cryptirc_msg_expiry')||'0');}
+function setMessageExpiry(hours){localStorage.setItem('cryptirc_msg_expiry',String(hours));savePrefsToServer();}
+function runMessageExpiry(){
+  const hours=getMessageExpiry();if(!hours)return;
+  const cutoff=Date.now()/1000-(hours*3600);
+  for(const k of Object.keys(buffers)){
+    buffers[k]=buffers[k].filter(m=>m.ts>cutoff);
+  }
+}
+// Run expiry check every 5 minutes + clean up stale bp: keys
+setInterval(()=>{
+  runMessageExpiry();
+  // Clean up expired block-PM cooldown keys (>6 hours old)
+  const now=Date.now();
+  for(let i=localStorage.length-1;i>=0;i--){
+    const k=localStorage.key(i);
+    if(k&&k.startsWith('bp:')&&now-parseInt(localStorage.getItem(k)||'0')>6*3600*1000)localStorage.removeItem(k);
+  }
+},300000);
+
+// ─── Vault auto-lock timer ───────────────────────────────────────────────────
+let _vaultAutoLockTimer=null,_vaultLastActivity=Date.now();
+function getVaultAutoLock(){return parseInt(localStorage.getItem('cryptirc_vault_autolock')||'0');}
+function setVaultAutoLock(mins){localStorage.setItem('cryptirc_vault_autolock',String(mins));resetVaultAutoLock();}
+function resetVaultAutoLock(){
+  _vaultLastActivity=Date.now();
+  clearTimeout(_vaultAutoLockTimer);
+  const mins=getVaultAutoLock();
+  if(!mins)return;
+  _vaultAutoLockTimer=setTimeout(()=>{
+    if(typeof lockVault==='function'){lockVault();showToast('Vault auto-locked after '+mins+' minutes of inactivity');}
+  },mins*60000);
+}
+// Reset timer on any user interaction
+['click','keydown','touchstart','mousemove'].forEach(ev=>document.addEventListener(ev,()=>{
+  if(getVaultAutoLock())resetVaultAutoLock();
+},{passive:true}));
+
+// ─── Seen database ───────────────────────────────────────────────────────────
+const _seenDb={};
+function trackSeen(nick,channel,ts){
+  if(!nick||nick==='*')return;
+  _seenDb[nick.toLowerCase()]={nick,channel,ts};
+}
+function getSeen(nick){return _seenDb[nick.toLowerCase()]||null;}
+
+// ─── Client-side rate limiter ────────────────────────────────────────────────
+let _rateQueue=[],_rateTimer=null;
+function getRateLimit(){return parseInt(localStorage.getItem('cryptirc_ratelimit')||'500');}
+function setRateLimit(ms){localStorage.setItem('cryptirc_ratelimit',String(ms));savePrefsToServer();}
+function rateLimitedSend(msg){
+  _rateQueue.push(msg);
+  if(!_rateTimer)drainRateQueue();
+}
+function drainRateQueue(){
+  if(!_rateQueue.length){_rateTimer=null;return;}
+  const msg=_rateQueue.shift();
+  wsend(msg);
+  _rateTimer=setTimeout(drainRateQueue,getRateLimit());
+}
+
+// ─── Session manager ─────────────────────────────────────────────────────────
+async function showSessionManager(){
+  const list=document.getElementById('sessions-list');
+  list.innerHTML='<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">Loading...</div>';
+  document.getElementById('sessions-overlay').classList.add('show');
+  try{
+    const r=await fetch(`${location.pathname}auth/sessions`,{headers:{'Authorization':`Bearer ${sessionToken}`}});
+    const d=await r.json();
+    if(!d.sessions||!d.sessions.length){list.innerHTML='<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">No active sessions.</div>';return;}
+    list.innerHTML='';
+    for(const s of d.sessions.sort((a,b)=>b.last_used-a.last_used)){
+      const row=document.createElement('div');
+      row.style.cssText='display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;';
+      const created=new Date(s.created_at*1000);
+      const lastUsed=new Date(s.last_used*1000);
+      const ago=Math.round((Date.now()/1000-s.last_used)/60);
+      const agoStr=ago<1?'just now':ago<60?ago+'m ago':ago<1440?Math.round(ago/60)+'h ago':Math.round(ago/1440)+'d ago';
+      row.innerHTML=`<span style="font-size:16px;flex-shrink:0">${s.current?'🟢':'⚪'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="color:var(--text)">${s.prefix} ${s.current?'<span style="color:var(--accent);font-size:10px">(this device)</span>':''}</div>
+          <div style="font-size:10px;color:var(--text3)">Active ${agoStr} · Created ${created.toLocaleDateString()}</div>
+        </div>
+        ${s.current?'':'<button onclick="revokeSession(\''+s.prefix+'\')" style="background:none;border:1px solid var(--border);color:var(--error);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;flex-shrink:0;font-family:var(--mono)">Revoke</button>'}`;
+      list.appendChild(row);
+    }
+  }catch(e){list.innerHTML='<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">Failed to load sessions.</div>';}
+}
+async function revokeSession(prefix){
+  if(!confirm('Revoke this session? The device will be logged out.'))return;
+  await fetch(`${location.pathname}auth/sessions/revoke`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${sessionToken}`},body:JSON.stringify({prefix})});
+  showSessionManager();
+}
+
+// ─── IRCv3 Caps panel ────────────────────────────────────────────────────────
+const _IRCV3_CAPS=[
+  {cap:'away-notify',label:'Away Notify',desc:'Get notified when users go away or return'},
+  {cap:'account-notify',label:'Account Notify',desc:'Get notified when users log in/out of services'},
+  {cap:'extended-join',label:'Extended Join',desc:'Show account and realname on join'},
+  {cap:'server-time',label:'Server Time',desc:'Accurate timestamps from the server'},
+  {cap:'multi-prefix',label:'Multi Prefix',desc:'Show all nick prefixes (@%+ etc)'},
+  {cap:'cap-notify',label:'Cap Notify',desc:'Get notified of new/removed server capabilities'},
+  {cap:'message-tags',label:'Message Tags',desc:'IRCv3 message metadata (required for many features)'},
+  {cap:'batch',label:'Batch',desc:'Group related messages together'},
+  {cap:'echo-message',label:'Echo Message',desc:'Server echoes your messages back (multi-device sync)'},
+  {cap:'invite-notify',label:'Invite Notify',desc:'Get notified when someone is invited to a channel'},
+  {cap:'setname',label:'Set Name',desc:'Real-time realname change notifications'},
+  {cap:'account-tag',label:'Account Tag',desc:'Attach account name to messages'},
+  {cap:'userhost-in-names',label:'Userhost in NAMES',desc:'Full user@host in NAMES reply'},
+  {cap:'chghost',label:'Change Host',desc:'Real-time hostname/username change notifications'},
+  {cap:'labeled-response',label:'Labeled Response',desc:'Match server responses to specific commands'},
+  {cap:'draft/typing',label:'Typing Indicators',desc:'See when someone is typing'},
+  {cap:'standard-replies',label:'Standard Replies',desc:'Structured error/warning messages from server'},
+];
+
+function showCapsPanel(){
+  const sel=document.getElementById('caps-net-select');
+  sel.innerHTML='';
+  for(const net of networks){
+    const opt=document.createElement('option');
+    opt.value=net.config.id;
+    opt.textContent=net.config.label||net.config.server;
+    sel.appendChild(opt);
+  }
+  if(!networks.length) sel.innerHTML='<option>No networks</option>';
+  renderCapsToggles();
+  document.getElementById('caps-overlay').classList.add('show');
+}
+function closeCapsPanel(){document.getElementById('caps-overlay').classList.remove('show');}
+
+function renderCapsToggles(){
+  const list=document.getElementById('caps-list');
+  const connId=document.getElementById('caps-net-select').value;
+  const net=networks.find(n=>n.config.id===connId);
+  if(!net){list.innerHTML='<div style="color:var(--text3);font-size:12px;padding:12px">Select a network.</div>';return;}
+  const disabled=net.config.disabled_caps||[];
+  list.innerHTML='';
+  for(const c of _IRCV3_CAPS){
+    const on=!disabled.includes(c.cap);
+    const row=document.createElement('div');
+    row.style.cssText='display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);';
+    row.innerHTML=`<div style="flex:1;min-width:0">
+      <div style="font-size:12px;color:var(--text);font-weight:500">${c.label}</div>
+      <div style="font-size:10px;color:var(--text3)">${c.desc}</div>
+    </div>
+    <button class="appear-toggle${on?' on':''}" data-cap="${c.cap}" onclick="toggleCap(this,'${connId}','${c.cap}')"></button>`;
+    list.appendChild(row);
+  }
+  const note=document.createElement('div');
+  note.style.cssText='padding:10px 0 0;font-size:10px;color:var(--text3);';
+  note.textContent='Changes apply on next connect. Reconnect the network for changes to take effect.';
+  list.appendChild(note);
+}
+
+function toggleCap(btn,connId,cap){
+  btn.classList.toggle('on');
+  const net=networks.find(n=>n.config.id===connId);
+  if(!net)return;
+  if(!net.config.disabled_caps)net.config.disabled_caps=[];
+  const isOn=btn.classList.contains('on');
+  if(isOn){
+    net.config.disabled_caps=net.config.disabled_caps.filter(c=>c!==cap);
+  } else {
+    if(!net.config.disabled_caps.includes(cap))net.config.disabled_caps.push(cap);
+  }
+  // Save to server
+  wsend({type:'update_network',network:net.config});
+}
+
+// ─── Uploads panel ───────────────────────────────────────────────────────────
+async function showUploadsPanel(){
+  const list=document.getElementById('uploads-list');
+  list.innerHTML='<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">Loading...</div>';
+  document.getElementById('uploads-overlay').classList.add('show');
+  try{
+    const r=await fetch(`${location.pathname}uploads`,{headers:{'Authorization':`Bearer ${sessionToken}`}});
+    const d=await r.json();
+    if(!d.files||!d.files.length){list.innerHTML='<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">No uploads yet.</div>';return;}
+    list.innerHTML='';
+    const totalSize=d.files.reduce((a,f)=>a+f.size,0);
+    const summary=document.createElement('div');
+    summary.style.cssText='font-size:11px;color:var(--text3);padding:4px 0 8px;border-bottom:1px solid var(--border);margin-bottom:6px;';
+    summary.textContent=`${d.files.length} file${d.files.length>1?'s':''} · ${formatBytes(totalSize)}`;
+    list.appendChild(summary);
+    for(const f of d.files.slice().reverse()){
+      const row=document.createElement('div');
+      row.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px;';
+      const isImg=f.content_type.startsWith('image/');
+      const preview=isImg?`<img src="${f.url}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0">`:'<span style="font-size:20px;flex-shrink:0;width:36px;text-align:center">📄</span>';
+      const date=new Date(f.uploaded_at*1000);
+      const dateStr=date.toLocaleDateString()+' '+date.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+      row.innerHTML=`${preview}<div style="flex:1;min-width:0;overflow:hidden"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)" title="${esc(f.original_name)}">${esc(f.original_name)}</div><div style="font-size:10px;color:var(--text3)">${formatBytes(f.size)} · ${dateStr}</div></div><button onclick="deleteUpload('${esc(f.filename)}')" style="background:none;border:1px solid var(--border);color:var(--error);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;flex-shrink:0;font-family:var(--mono)">✕</button>`;
+      list.appendChild(row);
+    }
+  }catch(e){list.innerHTML='<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">Failed to load uploads.</div>';}
+}
+function closeUploadsPanel(){document.getElementById('uploads-overlay').classList.remove('show');}
+async function deleteUpload(filename){
+  if(!confirm('Delete this file?'))return;
+  await fetch(`${location.pathname}uploads/delete`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${sessionToken}`},body:JSON.stringify({filename})});
+  showUploadsPanel();
+}
+async function clearAllUploads(){
+  if(!confirm('Delete ALL your uploaded files? This cannot be undone.'))return;
+  await fetch(`${location.pathname}uploads/clear`,{method:'POST',headers:{'Authorization':`Bearer ${sessionToken}`}});
+  showUploadsPanel();
+}
+function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
 
 // ─── # Channel autocomplete ──────────────────────────────────────────────────
 (function(){
@@ -5441,7 +6084,7 @@ function keepnickStartPoll(conn_id){
     const cur2=getNick(conn_id);
     if(cur2&&cur2.toLowerCase()===kn2[conn_id].nick.toLowerCase()){keepnickStopPoll(conn_id);return;}
     // Send ISON query and mark pending
-    _keepnickIsonPending[conn_id]=true;
+    _keepnickIsonPending[conn_id]=Date.now();
     wsend({type:'send',conn_id,raw:'ISON '+kn2[conn_id].nick});
   },12000);
 }
@@ -5533,6 +6176,7 @@ function gatherPreferences(){
     dndStart: localStorage.getItem('cryptirc_dnd_start')||'',
     dndEnd: localStorage.getItem('cryptirc_dnd_end')||'',
     keepnicks: loadKeepNicks(),
+    networkOrder: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_net_order')||'[]');}catch{return[];}})(),
   };
 }
 function savePrefsToServer(){
@@ -5589,6 +6233,7 @@ function restorePreferences(p){
     if(p.dndStart) localStorage.setItem('cryptirc_dnd_start',p.dndStart);
     if(p.dndEnd) localStorage.setItem('cryptirc_dnd_end',p.dndEnd);
     if(p.keepnicks) localStorage.setItem('cryptirc_keepnicks',JSON.stringify(p.keepnicks));
+    if(p.networkOrder) localStorage.setItem('cryptirc_net_order',JSON.stringify(p.networkOrder));
     if(p.favsOnly!=null) localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
     if(p.sidebarCollapsed!=null) localStorage.setItem('cryptirc_sidebar_collapsed',p.sidebarCollapsed?'1':'');
     if(p.nickCollapsed!=null) localStorage.setItem('cryptirc_nick_collapsed',p.nickCollapsed?'1':'');
@@ -5648,13 +6293,13 @@ function closeQuery(conn_id,lc){
   document.addEventListener('dragstart',e=>{
     const ci=e.target.closest('.chan-item[draggable]');
     if(!ci)return;
-    dragEl=ci;
+    dragEl=ci;_sidebarDragLock=true;
     ci.style.opacity='.4';
     e.dataTransfer.effectAllowed='move';
     e.dataTransfer.setData('text/plain',ci.dataset.target);
   });
   document.addEventListener('dragend',e=>{
-    if(dragEl){dragEl.style.opacity='';dragEl=null;}
+    if(dragEl){dragEl.style.opacity='';dragEl=null;_sidebarDragLock=false;}
     document.querySelectorAll('.chan-item.drag-over').forEach(el=>el.classList.remove('drag-over'));
   });
   document.addEventListener('dragover',e=>{
@@ -5746,6 +6391,128 @@ function closeQuery(conn_id,lc){
   },{passive:true});
 })();
 
+// ─── Network drag-and-drop reorder ──────────────────────────────────────────
+(function(){
+  let dragNet=null;
+  function getNetworkOrder(){try{return JSON.parse(localStorage.getItem('cryptirc_net_order')||'[]');}catch{return[];}}
+  function saveNetworkOrder(order){localStorage.setItem('cryptirc_net_order',JSON.stringify(order));savePrefsToServer();}
+  function applyNetworkOrder(){
+    const order=getNetworkOrder();if(!order.length)return;
+    networks.sort((a,b)=>{
+      const ai=order.indexOf(a.config.id),bi=order.indexOf(b.config.id);
+      if(ai===-1&&bi===-1)return 0;if(ai===-1)return 1;if(bi===-1)return -1;
+      return ai-bi;
+    });
+  }
+  // Apply saved order on every sidebar render
+  const origRender=window._renderSidebarNow;
+  window._renderSidebarNow=function(){applyNetworkOrder();origRender();};
+  // Desktop drag
+  document.addEventListener('dragstart',e=>{
+    const ng=e.target.closest('.net-group[draggable]');
+    if(!ng||e.target.closest('.chan-item'))return;
+    dragNet=ng;ng.style.opacity='.4';_sidebarDragLock=true;
+    e.dataTransfer.effectAllowed='move';
+    e.dataTransfer.setData('text/plain',ng.dataset.netId);
+  });
+  document.addEventListener('dragend',e=>{
+    if(dragNet){dragNet.style.opacity='';dragNet=null;_sidebarDragLock=false;}
+    document.querySelectorAll('.net-group.drag-over').forEach(el=>el.classList.remove('drag-over'));
+  });
+  document.addEventListener('dragover',e=>{
+    if(!dragNet)return;
+    const ng=e.target.closest('.net-group[draggable]');
+    if(!ng||ng===dragNet)return;
+    // Don't interfere with channel drag
+    if(e.target.closest('.chan-item'))return;
+    e.preventDefault();e.dataTransfer.dropEffect='move';
+    document.querySelectorAll('.net-group.drag-over').forEach(el=>el.classList.remove('drag-over'));
+    ng.classList.add('drag-over');
+  });
+  document.addEventListener('drop',e=>{
+    if(!dragNet)return;
+    const ng=e.target.closest('.net-group[draggable]');
+    if(!ng||ng===dragNet)return;
+    if(e.target.closest('.chan-item'))return;
+    e.preventDefault();
+    const container=document.getElementById('network-list');
+    if(!container)return;
+    const groups=[...container.querySelectorAll('.net-group')];
+    const fromIdx=groups.indexOf(dragNet),toIdx=groups.indexOf(ng);
+    if(fromIdx<toIdx) ng.after(dragNet); else ng.before(dragNet);
+    // Save new order
+    const newGroups=[...container.querySelectorAll('.net-group')];
+    const order=newGroups.map(el=>el.dataset.netId);
+    saveNetworkOrder(order);
+    // Reorder the in-memory networks array to match
+    const netMap=Object.create(null);for(const n of networks)netMap[n.config.id]=n;
+    networks.length=0;for(const id of order){if(netMap[id])networks.push(netMap[id]);}
+    // Add any networks not in the order (newly added)
+    for(const n of Object.values(netMap)){if(!order.includes(n.config.id))networks.push(n);}
+    ng.classList.remove('drag-over');
+  });
+  // Touch drag for network reorder (mobile) — requires 1s hold before drag activates
+  let touchNet=null,touchNetClone=null,touchNetStartY=0,_touchNetHoldTimer=null,_touchNetReady=false;
+  document.addEventListener('touchstart',e=>{
+    const ng=e.target.closest('.net-group');
+    if(!ng||e.target.closest('.chan-item')||e.target.closest('.chan-kebab')||e.target.closest('.net-kebab'))return;
+    if(!e.target.closest('.net-label'))return;
+    touchNet=ng;touchNetStartY=e.touches[0].clientY;_touchNetReady=false;
+    _touchNetHoldTimer=setTimeout(()=>{
+      _touchNetReady=true;
+      ng.style.outline='2px solid var(--accent)';ng.style.outlineOffset='-2px';
+    },1000);
+  },{passive:true});
+  document.addEventListener('touchmove',e=>{
+    if(!touchNet)return;
+    const dy=Math.abs(e.touches[0].clientY-touchNetStartY);
+    // Cancel hold timer if finger moves too much before hold completes
+    if(!_touchNetReady&&dy>8){clearTimeout(_touchNetHoldTimer);touchNet.style.outline='';touchNet.style.outlineOffset='';touchNet=null;return;}
+    if(!_touchNetReady)return;
+    if(dy<10)return;
+    if(!touchNetClone){
+      _sidebarDragLock=true;
+      touchNetClone=touchNet.cloneNode(true);
+      touchNetClone.style.cssText='position:fixed;z-index:9999;opacity:.7;pointer-events:none;width:'+touchNet.offsetWidth+'px;background:var(--bg2);border-radius:6px;border:1px solid var(--accent);';
+      document.body.appendChild(touchNetClone);
+      touchNet.style.opacity='.3';
+    }
+    touchNetClone.style.left=touchNet.getBoundingClientRect().left+'px';
+    touchNetClone.style.top=(e.touches[0].clientY-20)+'px';
+    touchNetClone.style.display='none';
+    const under=document.elementFromPoint(e.touches[0].clientX,e.touches[0].clientY);
+    touchNetClone.style.display='';
+    document.querySelectorAll('.net-group.drag-over').forEach(el=>el.classList.remove('drag-over'));
+    const target=under?.closest('.net-group');
+    if(target&&target!==touchNet) target.classList.add('drag-over');
+  },{passive:true});
+  document.addEventListener('touchend',e=>{
+    if(!touchNet)return;
+    if(touchNetClone){
+      touchNetClone.remove();touchNetClone=null;
+      const overEl=document.querySelector('.net-group.drag-over');
+      if(overEl&&overEl!==touchNet){
+        const container=document.getElementById('network-list');
+        if(container){
+          const groups=[...container.querySelectorAll('.net-group')];
+          const fromIdx=groups.indexOf(touchNet),toIdx=groups.indexOf(overEl);
+          if(fromIdx<toIdx) overEl.after(touchNet); else overEl.before(touchNet);
+          const newGroups=[...container.querySelectorAll('.net-group')];
+          const order=newGroups.map(el=>el.dataset.netId);
+          saveNetworkOrder(order);
+          const netMap=Object.create(null);for(const n of networks)netMap[n.config.id]=n;
+          networks.length=0;for(const id of order){if(netMap[id])networks.push(netMap[id]);}
+          for(const n of Object.values(netMap)){if(!order.includes(n.config.id))networks.push(n);}
+        }
+      }
+      overEl?.classList.remove('drag-over');
+    }
+    clearTimeout(_touchNetHoldTimer);
+    touchNet.style.opacity='';touchNet.style.outline='';touchNet.style.outlineOffset='';
+    touchNet=null;_sidebarDragLock=false;_touchNetReady=false;
+  },{passive:true});
+})();
+
 function renderFavorites(){
   const el=document.getElementById('favorites-list');
   let favs=loadFavorites();
@@ -5790,8 +6557,12 @@ function applyFavsOnly(){
   const on=localStorage.getItem('cryptirc_favs_only')==='true';
   document.getElementById('network-list').style.display=on?'none':'';
   document.getElementById('favorites-list').style.flex=on?'1':'';
-  const btn=document.getElementById('favs-toggle');
-  if(btn){btn.textContent=on?'★':'☆';btn.title=on?'Show all networks':'Favorites only';}
+  const bar=document.getElementById('favs-bar');
+  if(bar){
+    bar.className=on?'active':'inactive';
+    document.getElementById('favs-label').textContent=on?'Showing Favorites Only':'Favorites';
+    bar.title=on?'Click to show all channels':'Click to filter to favorites only';
+  }
 }
 // Apply on load
 document.addEventListener('DOMContentLoaded',()=>{
@@ -5895,9 +6666,7 @@ function isMuted(key){return !!loadMuted()[key];}
 function toggleMute(key){const m=loadMuted();if(m[key])delete m[key];else m[key]=true;saveMuted(m);renderSidebar();}
 
 function toggleNetMenu(id,label){
-  // Close any existing dropdown
   document.querySelectorAll('.net-dropdown.open').forEach(d=>d.classList.remove('open'));
-  // Find or create dropdown for this network
   const netLabel=document.getElementById('dot-'+id)?.parentElement;
   if(!netLabel)return;
   let dd=netLabel.querySelector('.net-dropdown');
@@ -5905,14 +6674,22 @@ function toggleNetMenu(id,label){
     dd=document.createElement('div');
     dd.className='net-dropdown';
     const muted=isMuted('net:'+id);
-    dd.innerHTML=`
-      <button class="net-dropdown-item" onclick="event.stopPropagation();wsend({type:'connect',id:'${id}'});closeNetMenus()">⚡ Connect</button>
-      <button class="net-dropdown-item" onclick="event.stopPropagation();wsend({type:'disconnect',id:'${id}'});closeNetMenus()">✕ Disconnect</button>
-      <button class="net-dropdown-item" onclick="event.stopPropagation();toggleMute('net:${id}');closeNetMenus()">${muted?'🔔 Unmute':'🔇 Mute'}</button>
-      <button class="net-dropdown-item" onclick="event.stopPropagation();closeAllPMs('${id}');closeNetMenus()">✕ Close All PMs</button>
-      <button class="net-dropdown-item" onclick="event.stopPropagation();editNetwork('${id}');closeNetMenus()">✎ Edit</button>
-      <button class="net-dropdown-item" style="color:#f87171" onclick="event.stopPropagation();removeNetwork('${id}','${label.replace(/'/g,"\\'")}');closeNetMenus()">🗑 Remove</button>
-    `;
+    const items=[
+      {text:'⚡ Connect',action:()=>{wsend({type:'connect',id});closeNetMenus();}},
+      {text:'✕ Disconnect',action:()=>{wsend({type:'disconnect',id});closeNetMenus();}},
+      {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>{toggleMute('net:'+id);closeNetMenus();}},
+      {text:'✕ Close All PMs',action:()=>{closeAllPMs(id);closeNetMenus();}},
+      {text:'✎ Edit',action:()=>{editNetwork(id);closeNetMenus();}},
+      {text:'🗑 Remove',action:()=>{removeNetwork(id,label);closeNetMenus();},style:'color:#f87171'},
+    ];
+    for(const it of items){
+      const btn=document.createElement('button');
+      btn.className='net-dropdown-item';
+      btn.textContent=it.text;
+      if(it.style)btn.style.cssText=it.style;
+      btn.addEventListener('click',e=>{e.stopPropagation();it.action();});
+      dd.appendChild(btn);
+    }
     netLabel.appendChild(dd);
   }
   dd.classList.toggle('open');
@@ -5929,12 +6706,21 @@ function toggleChanMenu(btn,connId,target,kind){
   const fav=isFavorite(connId,target);
   const muteKey=connId+'/'+target;
   const muted=isMuted(muteKey);
-  dd.innerHTML=`
-    <button class="chan-dropdown-item" onclick="event.stopPropagation();toggleFavorite('${connId}','${target}');closeChanMenus()">${fav?'★ Unfavorite':'☆ Favorite'}</button>
-    <button class="chan-dropdown-item" onclick="event.stopPropagation();toggleMute('${muteKey}');closeChanMenus()">${muted?'🔔 Unmute':'🔇 Mute'}</button>
-    <button class="chan-dropdown-item" onclick="event.stopPropagation();clearBufHistory('${connId}','${target}');closeChanMenus()">🗑 Clear History</button>
-    ${kind==='channel'?`<button class="chan-dropdown-item" style="color:#f87171" onclick="event.stopPropagation();wsend({type:'part_channel',conn_id:'${connId}',channel:'${target}'});closeChanMenus()">Leave</button>`:`<button class="chan-dropdown-item" style="color:#f87171" onclick="event.stopPropagation();closeQuery('${connId}','${target}');closeChanMenus()">Close</button>`}
-  `;
+  const items=[
+    {text:fav?'★ Unfavorite':'☆ Favorite',action:()=>{toggleFavorite(connId,target);closeChanMenus();}},
+    {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>{toggleMute(muteKey);closeChanMenus();}},
+    {text:'🗑 Clear History',action:()=>{clearBufHistory(connId,target);closeChanMenus();}},
+  ];
+  if(kind==='channel') items.push({text:'Leave',action:()=>{wsend({type:'part_channel',conn_id:connId,channel:target});closeChanMenus();},style:'color:#f87171'});
+  else items.push({text:'Close',action:()=>{closeQuery(connId,target);closeChanMenus();},style:'color:#f87171'});
+  for(const it of items){
+    const b=document.createElement('button');
+    b.className='chan-dropdown-item';
+    b.textContent=it.text;
+    if(it.style)b.style.cssText=it.style;
+    b.addEventListener('click',e=>{e.stopPropagation();it.action();});
+    dd.appendChild(b);
+  }
   ci.appendChild(dd);
 }
 function closeChanMenus(){document.querySelectorAll('.chan-dropdown').forEach(d=>d.remove());}
@@ -5955,6 +6741,8 @@ function removeNetwork(id,label){
   for(const k of Object.keys(buffers)){if(k.startsWith(id+'/'))delete buffers[k];}
   // Clean up unread counts
   for(const [k] of unread){if(k.startsWith(id+'/'))unread.delete(k);}
+  // Clean up stale network order entry
+  try{const no=JSON.parse(localStorage.getItem('cryptirc_net_order')||'[]').filter(x=>x!==id);localStorage.setItem('cryptirc_net_order',JSON.stringify(no));}catch(e){}
 }
 
 // ─── Nick context menu ────────────────────────────────────────────────────────
@@ -6258,7 +7046,7 @@ async function showNotifModal() {
   await loadNotifPrefs();
   renderNotifModal();
   renderNotifNetworkList();
-  document.getElementById('notif-highlight-words').value=getHighlightWords().join(', ');
+  renderHighlightTags();
   // Populate sound and desktop notification toggles
   const cfg=loadAppearance();
   const spm=document.getElementById('a-sound-pm');
@@ -6269,10 +7057,29 @@ async function showNotifModal() {
   if(dnt){cfg.desktopNotif!==false?dnt.classList.add('on'):dnt.classList.remove('on');}
 }
 function saveHighlightWords(){
-  const raw=document.getElementById('notif-highlight-words').value;
-  const words=raw.split(',').map(w=>w.trim().toLowerCase()).filter(Boolean);
+  const words=getHighlightWords();
   localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));
   savePrefsToServer();
+  renderHighlightTags();
+}
+function addHighlightWord(){
+  const inp=document.getElementById('notif-highlight-input');
+  const word=inp.value.trim().toLowerCase();
+  if(!word)return;
+  const words=getHighlightWords();
+  if(!words.includes(word)){words.push(word);localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));savePrefsToServer();}
+  inp.value='';renderHighlightTags();
+}
+function removeHighlightWord(word){
+  const words=getHighlightWords().filter(w=>w!==word);
+  localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));
+  savePrefsToServer();renderHighlightTags();
+}
+function renderHighlightTags(){
+  const c=document.getElementById('highlight-tags');if(!c)return;
+  const words=getHighlightWords();
+  if(!words.length){c.innerHTML='<span style="font-size:11px;color:var(--text3)">No highlight words set.</span>';return;}
+  c.innerHTML=words.map(w=>`<span class="hl-tag">${esc(w)}<button class="hl-tag-x" onclick="removeHighlightWord('${esc(w)}')">&times;</button></span>`).join('');
 }
 function closeNotifModal() { document.getElementById('notif-modal').classList.remove('open'); }
 
@@ -6503,7 +7310,7 @@ function batchMode(conn_id, channel, modeChar, nicks) {
 
 // ── Nick list accessors ───────────────────────────────────────────────────────
 
-function getChannelNicks(conn_id, channel) {
+function getChannelNicksByTarget(conn_id, channel) {
   const net = networks.find(n => n.config.id === conn_id);
   const ch  = net?.channels.find(c => c.name === channel);
   if (!ch) return [];
@@ -6876,6 +7683,10 @@ function showHelpPanel(){
       'dnd on|off — Toggle Do Not Disturb mode',
       'dnd schedule HH:MM HH:MM — Schedule quiet hours',
       'split — Toggle split view (two channels side by side)',
+      'seen nick — When a nick was last seen and where',
+      'ratelimit ms — Set message send rate (default 500ms, like irssi)',
+      'expire hours — Auto-delete old messages (0 = off)',
+      'autolock minutes — Vault auto-lock after inactivity (0 = off)',
       'keepnick [nick] — Keep a nick (auto-reclaim via ISON poll + QUIT/NICK events)',
       'unkeepnick — Stop keeping the nick for current network',
       'listnick — List all kept nicks with active/inactive status',
@@ -6933,7 +7744,16 @@ function showHelpPanel(){
     <div class="help-cmd"><span class="help-cmd-name">Nick monitoring</span><span class="help-cmd-desc">Track when users come online/offline</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Multi-device sync</span><span class="help-cmd-desc">Settings, themes, unread sync across devices</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Typing indicators</span><span class="help-cmd-desc">See when someone is typing (IRCv3)</span></div>
-    <div class="help-cmd"><span class="help-cmd-name">Client TLS certs</span><span class="help-cmd-desc">ECDSA P-256 certs for SASL EXTERNAL</span></div>`;
+    <div class="help-cmd"><span class="help-cmd-name">Client TLS certs</span><span class="help-cmd-desc">ECDSA P-256 certs for SASL EXTERNAL</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">ZNC playback</span><span class="help-cmd-desc">Detects and batches ZNC buffer playback</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Audio player</span><span class="help-cmd-desc">Inline playback for mp3/ogg/flac/wav links</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Image lightbox</span><span class="help-cmd-desc">Click images to zoom — pinch/scroll/double-tap</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Message expiry</span><span class="help-cmd-desc">Auto-delete old messages (/expire hours)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Session manager</span><span class="help-cmd-desc">View and revoke active sessions (Settings → Sessions)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Vault auto-lock</span><span class="help-cmd-desc">Auto-lock vault after idle (/autolock minutes)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Seen database</span><span class="help-cmd-desc">Track when nicks were last active (/seen nick)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Rate limiter</span><span class="help-cmd-desc">Client-side flood protection (/ratelimit ms)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Metadata stripping</span><span class="help-cmd-desc">EXIF/GPS auto-removed from uploaded JPEG/PNG</span></div>`;
   body.appendChild(feat);
   // Keyboard shortcuts
   const kb=document.createElement('div');kb.className='help-section';
@@ -7700,6 +8520,112 @@ function timeAgo(ts){
 </div>
 <style>#admin-overlay.show{display:flex !important;}</style>
 
+<!-- IRCv3 Caps overlay -->
+<div id="caps-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeCapsPanel()">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:480px;width:92%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+      <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">🔧 IRCv3 Capabilities</span>
+      <span onclick="closeCapsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+    </div>
+    <div style="padding:8px 20px 4px;font-size:11px;color:var(--text3)">Toggle capabilities per network. Changes take effect on next connect.</div>
+    <div style="padding:4px 20px 8px">
+      <select id="caps-net-select" onchange="renderCapsToggles()" style="width:100%;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)"></select>
+    </div>
+    <div id="caps-list" style="overflow-y:auto;flex:1;padding:4px 20px 16px;-webkit-overflow-scrolling:touch"></div>
+  </div>
+</div>
+<style>#caps-overlay.show{display:flex !important;}</style>
+<!-- Security panel overlay -->
+<div id="security-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeSecurityPanel()">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+      <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">🔒 Security &amp; Privacy</span>
+      <span onclick="closeSecurityPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+    </div>
+    <div style="overflow-y:auto;flex:1;padding:12px 20px;-webkit-overflow-scrolling:touch">
+
+      <div class="appear-section">
+        <div class="appear-section-title">Vault</div>
+        <div class="appear-row">
+          <div><span class="appear-label">Auto-lock timer</span><div style="font-size:10px;color:var(--text3)">Lock vault after inactivity</div></div>
+          <select id="sec-vault-autolock" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="setVaultAutoLock(+this.value)">
+            <option value="0">Off</option><option value="5">5 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hour</option><option value="120">2 hours</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="appear-section">
+        <div class="appear-section-title">Messages</div>
+        <div class="appear-row">
+          <div><span class="appear-label">Message expiry</span><div style="font-size:10px;color:var(--text3)">Auto-delete old messages from buffer</div></div>
+          <select id="sec-msg-expiry" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="setMessageExpiry(+this.value)">
+            <option value="0">Off</option><option value="1">1 hour</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">24 hours</option><option value="72">3 days</option><option value="168">7 days</option>
+          </select>
+        </div>
+        <div class="appear-row">
+          <div><span class="appear-label">Rate limit</span><div style="font-size:10px;color:var(--text3)">Delay between sent messages (flood protection)</div></div>
+          <select id="sec-ratelimit" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="setRateLimit(+this.value)">
+            <option value="200">200ms (fast)</option><option value="500">500ms (default)</option><option value="1000">1 sec</option><option value="2000">2 sec</option><option value="3000">3 sec (safe)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="appear-section">
+        <div class="appear-section-title">Privacy</div>
+        <div class="appear-row">
+          <div><span class="appear-label">Block private messages</span><div style="font-size:10px;color:var(--text3)">Auto-reply once then silently drop PMs (+g mode)</div></div>
+          <button class="appear-toggle" id="sec-block-pms" onclick="this.classList.toggle('on');localStorage.setItem('cryptirc_block_pms',this.classList.contains('on')?'true':'false')"></button>
+        </div>
+      </div>
+
+      <div class="appear-section">
+        <div class="appear-section-title">Behavior</div>
+        <div class="appear-row">
+          <span class="appear-label">Auto-rejoin on kick</span>
+          <button class="appear-toggle" id="sec-autorejoin" onclick="this.classList.toggle('on');localStorage.setItem('cryptirc_autorejoin',this.classList.contains('on')?'true':'false')"></button>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Link previews</span>
+          <button class="appear-toggle" id="sec-linkpreviews" onclick="this.classList.toggle('on');secSaveToggle('linkPreviews',this.classList.contains('on'))"></button>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Spellcheck</span>
+          <button class="appear-toggle" id="sec-spellcheck" onclick="this.classList.toggle('on');secSaveToggle('spellcheck',this.classList.contains('on'))"></button>
+        </div>
+      </div>
+
+      <div style="text-align:center;padding-top:8px">
+        <button onclick="closeSecurityPanel()" style="background:var(--bg4);border:1px solid var(--border);color:var(--text);padding:8px 24px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:12px">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+<style>#security-overlay.show{display:flex !important;}</style>
+<!-- Session manager overlay -->
+<div id="sessions-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)this.classList.remove('show')">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+      <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">📱 Active Sessions</span>
+      <span onclick="document.getElementById('sessions-overlay').classList.remove('show')" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+    </div>
+    <div id="sessions-list" style="overflow-y:auto;flex:1;padding:12px 16px;-webkit-overflow-scrolling:touch"></div>
+  </div>
+</div>
+<style>#sessions-overlay.show{display:flex !important;}</style>
+<!-- Uploads overlay -->
+<div id="uploads-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeUploadsPanel()">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:500px;width:92%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+      <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">📁 My Uploads</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="clearAllUploads()" style="background:var(--bg4);border:1px solid var(--border);color:var(--error);padding:4px 10px;border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:11px">Delete All</button>
+        <span onclick="closeUploadsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+      </div>
+    </div>
+    <div id="uploads-list" style="overflow-y:auto;flex:1;padding:8px 16px;-webkit-overflow-scrolling:touch"></div>
+  </div>
+</div>
+<style>#uploads-overlay.show{display:flex !important;}</style>
 <!-- Stats overlay -->
 <div id="stats-overlay" onclick="if(event.target===this)this.classList.remove('show')"><div class="stats-box"></div></div>
 <!-- Smart paste dialog -->
@@ -7707,6 +8633,6 @@ function timeAgo(ts){
 <!-- Animation overlay for animated themes -->
 <div id="anim-overlay"><canvas id="anim-canvas"></canvas></div>
 <!-- Cover div prevents iOS keyboard from exposing raw source below the app -->
-<div style="position:fixed;inset:-100px;background:var(--bg0,#0b0d0f);z-index:-1;pointer-events:none"></div>
+<div style="position:fixed;inset:-100px;background:var(--bg0,#000004);z-index:-1;pointer-events:none"></div>
 </body>
 </html>

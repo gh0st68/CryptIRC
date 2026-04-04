@@ -140,6 +140,12 @@ impl E2EStore {
     }
 
     /// Fetch a bundle and atomically consume one OTPK.
+    /// Check if a user has a published key bundle (without consuming an OTPK).
+    pub async fn has_bundle(&self, username: &str) -> bool {
+        let dir = self.user_dir(username);
+        tokio::fs::metadata(dir.join("bundle.json")).await.is_ok()
+    }
+
     pub async fn fetch_bundle(&self, username: &str) -> Option<FetchedBundle> {
         let dir  = self.user_dir(username);
         let json = tokio::fs::read_to_string(dir.join("bundle.json")).await.ok()?;

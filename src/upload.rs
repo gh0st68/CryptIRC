@@ -70,6 +70,9 @@ pub async fn handle_upload(upload_dir: &str, mut multipart: Multipart) -> Result
             anyhow::bail!("File type not permitted");
         }
 
+        // Strip image metadata (EXIF, GPS, camera info, etc.) for privacy
+        let data = strip_image_metadata(&data, &ext);
+
         let filename = format!("{}.{}", Uuid::new_v4(), ext);
         std::fs::create_dir_all(upload_dir)?;
         let path = PathBuf::from(upload_dir).join(&filename);
@@ -133,8 +136,199 @@ pub fn content_type_for(filename: &str) -> &'static str {
     safe_content_type(&ext)
 }
 
+// ─── Per-user upload tracking ────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, serde::Deserialize, Clone)]
+pub struct UploadRecord {
+    pub filename: String,
+    pub original_name: String,
+    pub size: usize,
+    pub content_type: String,
+    pub url: String,
+    pub uploaded_at: i64,
+}
+
+fn user_uploads_path(data_dir: &str, username: &str) -> PathBuf {
+    PathBuf::from(data_dir).join("uploads").join(format!("{}.json", username))
+}
+
+pub async fn record_upload(data_dir: &str, username: &str, result: &UploadResult) -> Result<()> {
+    let path = user_uploads_path(data_dir, username);
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let mut records = load_user_records(&path).await;
+    records.push(UploadRecord {
+        filename: result.filename.clone(),
+        original_name: result.original_name.clone(),
+        size: result.size,
+        content_type: result.content_type.clone(),
+        url: result.url.clone(),
+        uploaded_at: chrono::Utc::now().timestamp(),
+    });
+    let _ = tokio::fs::write(&path, serde_json::to_string(&records).unwrap_or_default()).await;
+    Ok(())
+}
+
+pub async fn list_user_uploads(data_dir: &str, username: &str) -> Vec<UploadRecord> {
+    load_user_records(&user_uploads_path(data_dir, username)).await
+}
+
+pub async fn delete_user_upload(data_dir: &str, upload_dir: &str, username: &str, filename: &str) {
+    let safe: String = filename.chars().filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-').take(128).collect();
+    let path = user_uploads_path(data_dir, username);
+    let mut records = load_user_records(&path).await;
+    if records.iter().any(|r| r.filename == safe) {
+        let _ = tokio::fs::remove_file(PathBuf::from(upload_dir).join(&safe)).await;
+        records.retain(|r| r.filename != safe);
+        let _ = tokio::fs::write(&path, serde_json::to_string(&records).unwrap_or_default()).await;
+    }
+}
+
+pub async fn clear_user_uploads(data_dir: &str, upload_dir: &str, username: &str) {
+    let path = user_uploads_path(data_dir, username);
+    let records = load_user_records(&path).await;
+    for r in &records {
+        let _ = tokio::fs::remove_file(PathBuf::from(upload_dir).join(&r.filename)).await;
+    }
+    let _ = tokio::fs::write(&path, "[]").await;
+}
+
+async fn load_user_records(path: &PathBuf) -> Vec<UploadRecord> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => vec![],
+    }
+}
+
 /// Returns true if the filename has an image extension (safe for inline display).
 pub fn is_image(filename: &str) -> bool {
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "ico")
+}
+
+/// Strip metadata from images for privacy.
+/// JPEG: removes all APP1-APP15 markers (EXIF, XMP, IPTC, GPS, camera info, etc.)
+///       while preserving APP0 (JFIF), DQT, DHT, SOF, SOS and image data.
+/// PNG:  removes all non-critical ancillary chunks (tEXt, iTXt, zTXt, eXIf, etc.)
+///       while preserving IHDR, PLTE, IDAT, IEND, tRNS, gAMA, cHRM, sRGB, iCCP.
+fn strip_image_metadata(data: &[u8], ext: &str) -> Vec<u8> {
+    match ext {
+        "jpg" | "jpeg" => strip_jpeg_metadata(data),
+        "png" => strip_png_metadata(data),
+        _ => data.to_vec(),
+    }
+}
+
+fn strip_jpeg_metadata(data: &[u8]) -> Vec<u8> {
+    // JPEG structure: FF D8 (SOI) followed by segments: FF xx [length_hi length_lo] [data...]
+    // We keep: APP0 (FFE0/JFIF), DQT (FFDB), DHT (FFC4), SOF0-SOF15 (FFC0-FFCF except FFC4/FFC8),
+    //          DRI (FFDD), SOS (FFDA) + image data, COM removal optional
+    // We strip: APP1-APP15 (FFE1-FFEF = EXIF, XMP, IPTC, ICC, etc.)
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return data.to_vec(); // Not JPEG, return as-is
+    }
+
+    let mut out = Vec::with_capacity(data.len());
+    out.push(0xFF);
+    out.push(0xD8); // SOI
+
+    let mut i = 2;
+    while i + 1 < data.len() {
+        if data[i] != 0xFF {
+            // Shouldn't happen in well-formed JPEG header area, skip byte
+            i += 1;
+            continue;
+        }
+
+        let marker = data[i + 1];
+
+        // SOS (Start of Scan) — everything after this is image data, copy the rest
+        if marker == 0xDA {
+            out.extend_from_slice(&data[i..]);
+            break;
+        }
+
+        // EOI
+        if marker == 0xD9 {
+            out.push(0xFF);
+            out.push(0xD9);
+            break;
+        }
+
+        // Standalone markers (no length field): RST0-RST7, SOI, TEM
+        if (0xD0..=0xD7).contains(&marker) || marker == 0xD8 || marker == 0x01 {
+            out.push(0xFF);
+            out.push(marker);
+            i += 2;
+            continue;
+        }
+
+        // All other markers have a 2-byte length
+        if i + 3 >= data.len() {
+            break;
+        }
+        let seg_len = ((data[i + 2] as usize) << 8) | (data[i + 3] as usize);
+        if seg_len < 2 || i + 2 + seg_len > data.len() {
+            break; // Malformed, just return rest as-is
+        }
+
+        let is_app_metadata = (0xE1..=0xEF).contains(&marker); // APP1-APP15
+        let is_comment = marker == 0xFE; // COM marker
+
+        if is_app_metadata || is_comment {
+            // Skip this segment (strip it)
+            i += 2 + seg_len;
+        } else {
+            // Keep this segment
+            out.extend_from_slice(&data[i..i + 2 + seg_len]);
+            i += 2 + seg_len;
+        }
+    }
+
+    out
+}
+
+fn strip_png_metadata(data: &[u8]) -> Vec<u8> {
+    // PNG structure: 8-byte signature, then chunks: [4-byte length][4-byte type][data][4-byte CRC]
+    // Critical chunks to keep: IHDR, PLTE, IDAT, IEND
+    // Safe ancillary to keep: tRNS, gAMA, cHRM, sRGB, iCCP, sBIT, pHYs
+    // Strip everything else: tEXt, iTXt, zTXt, eXIf, dSIG, tIME, etc.
+    const PNG_SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    if data.len() < 8 || data[..8] != PNG_SIG {
+        return data.to_vec(); // Not PNG
+    }
+
+    let keep_chunks: &[&[u8]] = &[
+        b"IHDR", b"PLTE", b"IDAT", b"IEND",
+        b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"sBIT", b"pHYs",
+    ];
+
+    let mut out = Vec::with_capacity(data.len());
+    out.extend_from_slice(&PNG_SIG);
+
+    let mut i = 8;
+    while i + 12 <= data.len() {
+        let chunk_len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+        let chunk_type = &data[i + 4..i + 8];
+        let total = 12 + chunk_len; // 4 (len) + 4 (type) + data + 4 (CRC)
+
+        if i + total > data.len() {
+            break; // Malformed
+        }
+
+        if keep_chunks.iter().any(|k| *k == chunk_type) {
+            out.extend_from_slice(&data[i..i + total]);
+        }
+
+        // IEND is always last
+        if chunk_type == b"IEND" {
+            break;
+        }
+
+        i += total;
+    }
+
+    out
 }
