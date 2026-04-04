@@ -4458,6 +4458,7 @@ const THEMES={
   graphite:     {label:'Graphite',bg0:'#0c0e10',bg1:'#121416',bg2:'#181a1e',bg3:'#1e2226',bg4:'#262a2e',border:'#2e3438',border2:'#3e4448',text:'#c0c8cc',text2:'#6a7a84',text3:'#4a5660'},
   indigonight:  {label:'Indigo Night',bg0:'#080614',bg1:'#0c0a1c',bg2:'#120e26',bg3:'#181230',bg4:'#1e183c',border:'#261e4c',border2:'#342a64',text:'#c8c0e0',text2:'#5544ee',text3:'#3a2aaa'},
   twilight:     {label:'Twilight',bg0:'#0e0a14',bg1:'#14101c',bg2:'#1a1624',bg3:'#221c2e',bg4:'#2a2238',border:'#322a44',border2:'#44385c',text:'#d8cce0',text2:'#cc7788',text3:'#7a5068'},
+  alien:        {label:'👽 Alien',bg0:'#020808',bg1:'#041010',bg2:'#061818',bg3:'#082020',bg4:'#0c2c2c',border:'#0e3a2a',border2:'#145038',text:'#88ffcc',text2:'#44ee88',text3:'#227744',animation:'alien'},
 };
 const APPEAR_DEFAULTS={
   theme:'midnight', chatSize:13, sidebarFont:12, nickFont:12,
@@ -4673,6 +4674,88 @@ plasma(cv,ctx){
   let t=0;const bw=Math.ceil(cv.width/4),bh=Math.ceil(cv.height/4);
   const buf=document.createElement('canvas');buf.width=bw;buf.height=bh;const bctx=buf.getContext('2d');const img=bctx.createImageData(bw,bh);
   (function draw(){t+=0.02;for(let y=0;y<bh;y++){for(let x=0;x<bw;x++){const v=Math.sin(x*0.05+t)+Math.sin(y*0.05+t*0.7)+Math.sin((x+y)*0.03+t*0.5)+Math.sin(Math.sqrt(x*x+y*y)*0.04);const idx=(y*bw+x)*4;img.data[idx]=(Math.sin(v*Math.PI)*0.5+0.5)*40;img.data[idx+1]=(Math.sin(v*Math.PI+2)*0.5+0.5)*30;img.data[idx+2]=(Math.sin(v*Math.PI+4)*0.5+0.5)*50;img.data[idx+3]=20;}}bctx.putImageData(img,0,0);ctx.clearRect(0,0,cv.width,cv.height);ctx.drawImage(buf,0,0,cv.width,cv.height);_animId=requestAnimationFrame(draw);})();
+},
+alien(cv,ctx){
+  // Stars background
+  const stars=[];for(let i=0;i<100;i++)stars.push({x:Math.random()*cv.width,y:Math.random()*cv.height,r:Math.random()*1.2+0.3,tw:Math.random()*Math.PI*2});
+  // UFOs that drift across the screen
+  const ufos=[];for(let i=0;i<3;i++)ufos.push({x:Math.random()*cv.width,y:40+Math.random()*cv.height*0.25,vx:(Math.random()-0.5)*1.2,vy:0,w:40+Math.random()*20,bob:Math.random()*Math.PI*2,beamOn:false,beamTimer:0});
+  // Sheep on the ground that walk around
+  const sheep=[];for(let i=0;i<5;i++)sheep.push({x:Math.random()*cv.width,y:cv.height-30-Math.random()*20,vx:(Math.random()-0.5)*0.6,abducted:false,abY:0,abUfo:null,phase:Math.random()*Math.PI*2,dir:Math.random()>0.5?1:-1});
+  let t=0;
+  (function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);t+=0.02;
+    // Stars
+    for(const s of stars){s.tw+=0.015;const a=0.2+Math.sin(s.tw)*0.15;ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,Math.PI*2);ctx.fillStyle=`rgba(150,220,180,${a})`;ctx.fill();}
+    // Sheep on ground
+    for(const sh of sheep){
+      if(!sh.abducted){
+        sh.phase+=0.04;sh.x+=sh.vx;
+        if(sh.x<20||sh.x>cv.width-20){sh.vx*=-1;sh.dir*=-1;}
+        const bx=sh.x,by=sh.y+Math.sin(sh.phase)*1;
+        // Body (fluffy cloud shape)
+        ctx.fillStyle='rgba(220,220,210,0.15)';
+        ctx.beginPath();ctx.ellipse(bx,by,8,6,0,0,Math.PI*2);ctx.fill();
+        ctx.beginPath();ctx.ellipse(bx-4,by-3,4,4,0,0,Math.PI*2);ctx.fill();
+        ctx.beginPath();ctx.ellipse(bx+4,by-3,4,4,0,0,Math.PI*2);ctx.fill();
+        // Head
+        ctx.fillStyle='rgba(180,180,170,0.18)';
+        ctx.beginPath();ctx.arc(bx+(sh.dir*8),by-1,3.5,0,Math.PI*2);ctx.fill();
+        // Legs
+        ctx.strokeStyle='rgba(200,200,190,0.12)';ctx.lineWidth=1;
+        ctx.beginPath();ctx.moveTo(bx-4,by+5);ctx.lineTo(bx-4,by+10);ctx.moveTo(bx+4,by+5);ctx.lineTo(bx+4,by+10);ctx.stroke();
+      } else {
+        // Being abducted - float upward
+        sh.abY-=0.8;
+        const bx=sh.x,by=sh.y+sh.abY;
+        if(by<-20){sh.abducted=false;sh.abY=0;sh.x=Math.random()*cv.width;sh.y=cv.height-30-Math.random()*20;}
+        ctx.fillStyle=`rgba(100,255,150,${0.15+Math.sin(t*5)*0.05})`;
+        ctx.beginPath();ctx.ellipse(bx,by,8,6,Math.sin(t*3)*0.3,0,Math.PI*2);ctx.fill();
+        ctx.beginPath();ctx.ellipse(bx-4,by-3,4,4,0,0,Math.PI*2);ctx.fill();
+        ctx.beginPath();ctx.ellipse(bx+4,by-3,4,4,0,0,Math.PI*2);ctx.fill();
+      }
+    }
+    // UFOs
+    for(const u of ufos){
+      u.bob+=0.03;u.x+=u.vx;u.y+=Math.sin(u.bob)*0.3;
+      if(u.x<-60)u.x=cv.width+60;if(u.x>cv.width+60)u.x=-60;
+      // Tractor beam timer
+      u.beamTimer--;
+      if(u.beamTimer<=0){u.beamOn=Math.random()<0.02;if(u.beamOn)u.beamTimer=200+Math.random()*150;}
+      // UFO body - saucer shape
+      const ux=u.x,uy=u.y;
+      // Glow under UFO
+      const gl=ctx.createRadialGradient(ux,uy+6,0,ux,uy+6,u.w*0.6);
+      gl.addColorStop(0,'rgba(80,255,120,0.06)');gl.addColorStop(1,'rgba(80,255,120,0)');
+      ctx.fillStyle=gl;ctx.beginPath();ctx.arc(ux,uy+6,u.w*0.6,0,Math.PI*2);ctx.fill();
+      // Dome (top bubble)
+      ctx.fillStyle='rgba(120,255,180,0.12)';
+      ctx.beginPath();ctx.ellipse(ux,uy-5,u.w*0.25,8,0,Math.PI,0);ctx.fill();
+      // Main saucer body
+      ctx.fillStyle='rgba(60,180,100,0.15)';
+      ctx.beginPath();ctx.ellipse(ux,uy,u.w*0.5,6,0,0,Math.PI*2);ctx.fill();
+      // Lights on rim
+      for(let li=0;li<5;li++){
+        const la=li/5*Math.PI*2+t*2;
+        const lx=ux+Math.cos(la)*u.w*0.4,ly=uy+Math.sin(la)*3;
+        ctx.beginPath();ctx.arc(lx,ly,1.5,0,Math.PI*2);
+        ctx.fillStyle=`rgba(${li%2?'255,100,100':'100,255,100'},${0.2+Math.sin(t*4+li)*0.1})`;ctx.fill();
+      }
+      // Tractor beam
+      if(u.beamOn){
+        const beamW=u.w*0.3;
+        const grd=ctx.createLinearGradient(ux,uy+8,ux,cv.height);
+        grd.addColorStop(0,'rgba(80,255,120,0.08)');grd.addColorStop(0.5,'rgba(80,255,120,0.04)');grd.addColorStop(1,'rgba(80,255,120,0)');
+        ctx.fillStyle=grd;
+        ctx.beginPath();ctx.moveTo(ux-beamW*0.5,uy+8);ctx.lineTo(ux-beamW*1.5,cv.height);ctx.lineTo(ux+beamW*1.5,cv.height);ctx.lineTo(ux+beamW*0.5,uy+8);ctx.closePath();ctx.fill();
+        // Check if any sheep is under the beam — abduct it!
+        for(const sh of sheep){
+          if(!sh.abducted && Math.abs(sh.x-ux)<beamW*2 && sh.y>uy){sh.abducted=true;sh.abY=0;}
+        }
+      }
+    }
+    _animId=requestAnimationFrame(draw);
+  })();
 },
 };
 
@@ -4930,58 +5013,105 @@ document.addEventListener('click',e=>{
   const inp=document.getElementById('msg-input');
   if(!inp)return;
   const CMDS=[
-    {cmd:'join',desc:'Join a channel',usage:'/join #channel'},
-    {cmd:'part',desc:'Leave channel',usage:'/part [reason]'},
-    {cmd:'msg',desc:'Send private message',usage:'/msg nick text'},
-    {cmd:'me',desc:'Send action',usage:'/me does something'},
-    {cmd:'nick',desc:'Change nickname',usage:'/nick newnick'},
+    // ── Channel ──
+    {cmd:'join',desc:'Join a channel',usage:'/join #channel [key]'},
+    {cmd:'part',desc:'Leave channel',usage:'/part [#channel] [reason]'},
+    {cmd:'cycle',desc:'Part and rejoin',usage:'/cycle [#channel]'},
     {cmd:'topic',desc:'View/set topic',usage:'/topic [text]'},
-    {cmd:'whois',desc:'Look up user',usage:'/whois nick'},
-    {cmd:'query',desc:'Open DM window',usage:'/query nick'},
-    {cmd:'kick',desc:'Kick user',usage:'/kick nick [reason]'},
-    {cmd:'ban',desc:'Ban user',usage:'/ban nick'},
-    {cmd:'kickban',desc:'Kick and ban',usage:'/kickban nick [reason]'},
-    {cmd:'unban',desc:'Remove ban',usage:'/unban mask'},
-    {cmd:'mode',desc:'Set channel mode',usage:'/mode +o nick'},
+    {cmd:'list',desc:'List all channels',usage:'/list'},
+    {cmd:'links',desc:'Show server links',usage:'/links'},
+    {cmd:'invite',desc:'Invite user to channel',usage:'/invite nick [#channel]'},
+    {cmd:'names',desc:'Refresh nick list',usage:'/names'},
+    {cmd:'key',desc:'Save/clear a channel key (+k)',usage:'/key #channel [key]'},
+    // ── Messaging ──
+    {cmd:'msg',desc:'Send private message',usage:'/msg nick text'},
+    {cmd:'query',desc:'Open DM window',usage:'/query nick [text]'},
+    {cmd:'me',desc:'Send action',usage:'/me does something'},
+    {cmd:'say',desc:'Send raw text',usage:'/say text'},
+    {cmd:'notice',desc:'Send notice',usage:'/notice nick text'},
+    {cmd:'ctcp',desc:'Send CTCP command',usage:'/ctcp nick command'},
+    {cmd:'slap',desc:'Slap with a trout',usage:'/slap nick'},
+    // ── Identity ──
+    {cmd:'nick',desc:'Change nickname',usage:'/nick newnick'},
+    {cmd:'away',desc:'Set away status',usage:'/away [message]'},
+    {cmd:'back',desc:'Remove away',usage:'/back'},
+    {cmd:'whois',desc:'Look up user info',usage:'/whois nick'},
+    {cmd:'whowas',desc:'Look up offline user',usage:'/whowas nick'},
+    {cmd:'who',desc:'List channel users',usage:'/who #channel'},
+    // ── User Modes ──
+    {cmd:'mode',desc:'Set channel/user mode',usage:'/mode +o nick'},
     {cmd:'op',desc:'Give operator',usage:'/op nick'},
     {cmd:'deop',desc:'Remove operator',usage:'/deop nick'},
     {cmd:'voice',desc:'Give voice',usage:'/voice nick'},
     {cmd:'devoice',desc:'Remove voice',usage:'/devoice nick'},
-    {cmd:'invite',desc:'Invite to channel',usage:'/invite nick'},
-    {cmd:'away',desc:'Set away status',usage:'/away [message]'},
-    {cmd:'back',desc:'Remove away',usage:'/back'},
-    {cmd:'notice',desc:'Send notice',usage:'/notice nick text'},
-    {cmd:'ignore',desc:'Ignore user',usage:'/ignore nick'},
-    {cmd:'unignore',desc:'Remove ignore',usage:'/unignore nick'},
-    {cmd:'clear',desc:'Clear chat',usage:'/clear'},
-    {cmd:'close',desc:'Close DM/channel',usage:'/close'},
-    {cmd:'encrypt',desc:'Toggle E2E encryption',usage:'/encrypt on|off'},
-    {cmd:'monitor',desc:'Monitor a nick',usage:'/monitor nick'},
-    {cmd:'unmonitor',desc:'Stop monitoring',usage:'/unmonitor nick'},
-    {cmd:'slap',desc:'Slap with a trout',usage:'/slap nick'},
-    {cmd:'say',desc:'Send raw text',usage:'/say text'},
-    {cmd:'list',desc:'List channels',usage:'/list'},
-    {cmd:'names',desc:'Refresh nick list',usage:'/names'},
-    {cmd:'who',desc:'List users',usage:'/who #channel'},
-    {cmd:'cycle',desc:'Part and rejoin',usage:'/cycle'},
-    {cmd:'ns',desc:'NickServ command',usage:'/ns identify pass'},
-    {cmd:'cs',desc:'ChanServ command',usage:'/cs op #chan nick'},
-    {cmd:'identify',desc:'Identify to NickServ',usage:'/identify password'},
-    {cmd:'quote',desc:'Send raw IRC',usage:'/quote COMMAND'},
-    {cmd:'help',desc:'Show help',usage:'/help [command]'},
-    {cmd:'ping',desc:'Ping a user',usage:'/ping nick'},
-    {cmd:'version',desc:'CTCP version',usage:'/version nick'},
+    {cmd:'halfop',desc:'Give half-op',usage:'/halfop nick'},
+    {cmd:'dehalfop',desc:'Remove half-op',usage:'/dehalfop nick'},
+    {cmd:'owner',desc:'Give owner (+q)',usage:'/owner nick'},
+    {cmd:'deowner',desc:'Remove owner (-q)',usage:'/deowner nick'},
+    {cmd:'admin',desc:'Give admin/protect (+a)',usage:'/admin nick'},
+    {cmd:'deadmin',desc:'Remove admin (-a)',usage:'/deadmin nick'},
+    // ── Mass Operations ──
+    {cmd:'opall',desc:'Op everyone in channel',usage:'/opall'},
+    {cmd:'deopall',desc:'Deop everyone',usage:'/deopall'},
+    {cmd:'mdop',desc:'Mass deop all but yourself',usage:'/mdop'},
+    {cmd:'drop',desc:'Strip all status from everyone',usage:'/drop'},
+    {cmd:'voiceall',desc:'Voice everyone',usage:'/voiceall'},
+    {cmd:'devoiceall',desc:'Devoice everyone',usage:'/devoiceall'},
+    {cmd:'kickall',desc:'Kick everyone (except you)',usage:'/kickall'},
+    // ── Moderation ──
+    {cmd:'kick',desc:'Kick user',usage:'/kick nick [reason]'},
+    {cmd:'ban',desc:'Ban user',usage:'/ban nick'},
+    {cmd:'unban',desc:'Remove ban',usage:'/unban mask'},
+    {cmd:'kickban',desc:'Kick and ban',usage:'/kickban nick [reason]'},
+    {cmd:'tban',desc:'Temporary ban',usage:'/tban nick seconds [reason]'},
     {cmd:'banlist',desc:'View ban list',usage:'/banlist'},
     {cmd:'unbanall',desc:'Remove all bans',usage:'/unbanall'},
-    {cmd:'opall',desc:'Op everyone',usage:'/opall'},
-    {cmd:'voiceall',desc:'Voice everyone',usage:'/voiceall'},
-    {cmd:'kickall',desc:'Kick everyone',usage:'/kickall'},
-    {cmd:'halfop',desc:'Give half-op',usage:'/halfop nick'},
-    {cmd:'owner',desc:'Give owner',usage:'/owner nick'},
-    {cmd:'tban',desc:'Temporary ban',usage:'/tban nick duration'},
-    {cmd:'links',desc:'Show server links',usage:'/links'},
+    {cmd:'unexemptall',desc:'Remove all ban exempts (+e)',usage:'/unexemptall'},
+    {cmd:'ignore',desc:'Ignore user or mask',usage:'/ignore nick|mask'},
+    {cmd:'unignore',desc:'Remove ignore',usage:'/unignore nick|mask'},
+    {cmd:'ignorelist',desc:'Show ignored users',usage:'/ignorelist'},
+    // ── Services ──
+    {cmd:'ns',desc:'NickServ command',usage:'/ns identify password'},
+    {cmd:'cs',desc:'ChanServ command',usage:'/cs op #chan nick'},
+    {cmd:'identify',desc:'Identify to NickServ',usage:'/identify password'},
+    {cmd:'register',desc:'Register with NickServ',usage:'/register password email'},
+    {cmd:'ghost',desc:'Ghost a nick',usage:'/ghost nick [password]'},
+    {cmd:'regain',desc:'Recover a nick',usage:'/regain nick [password]'},
+    // ── IRCOp ──
+    {cmd:'oper',desc:'Authenticate as IRCOp',usage:'/oper login password'},
+    {cmd:'kill',desc:'Kill a user',usage:'/kill nick reason'},
+    {cmd:'shun',desc:'Shun a user',usage:'/shun mask duration reason'},
+    {cmd:'gline',desc:'G-line (network ban)',usage:'/gline mask duration reason'},
+    {cmd:'zline',desc:'Z-line (IP ban)',usage:'/zline mask duration reason'},
+    {cmd:'kline',desc:'K-line (server ban)',usage:'/kline mask duration reason'},
+    {cmd:'rehash',desc:'Reload server config',usage:'/rehash'},
+    {cmd:'squit',desc:'Disconnect a server',usage:'/squit server reason'},
+    // ── Connection ──
+    {cmd:'connect',desc:'Connect to server',usage:'/connect'},
+    {cmd:'disconnect',desc:'Disconnect from server',usage:'/disconnect'},
+    {cmd:'quote',desc:'Send raw IRC command',usage:'/quote RAW LINE'},
+    // ── Encryption ──
+    {cmd:'encrypt',desc:'Manage E2E encryption',usage:'/encrypt on|off|keygen|add|rotate'},
+    // ── Client ──
+    {cmd:'close',desc:'Close current DM/channel',usage:'/close'},
+    {cmd:'clear',desc:'Clear current chat',usage:'/clear'},
+    {cmd:'clearall',desc:'Clear all chat buffers',usage:'/clearall'},
+    {cmd:'help',desc:'Show help panel',usage:'/help'},
+    {cmd:'ping',desc:'CTCP ping user',usage:'/ping nick'},
+    {cmd:'version',desc:'CTCP version user',usage:'/version nick'},
+    {cmd:'time',desc:'CTCP time user',usage:'/time nick'},
+    {cmd:'monitor',desc:'Monitor nick online/offline',usage:'/monitor nick'},
+    {cmd:'unmonitor',desc:'Stop monitoring',usage:'/unmonitor nick'},
+    // ── Tools ──
+    {cmd:'ascii',desc:'Generate ASCII art text',usage:'/ascii <text>'},
+    {cmd:'ud',desc:'Urban Dictionary lookup',usage:'/ud <word>'},
+    {cmd:'shorten',desc:'Shorten a URL',usage:'/shorten <url>'},
+    {cmd:'stats',desc:'Channel statistics dashboard',usage:'/stats'},
+    {cmd:'note',desc:'Set/view notes on a nick',usage:'/note <nick> [text]'},
+    {cmd:'dnd',desc:'Do Not Disturb mode',usage:'/dnd on|off|schedule HH:MM HH:MM'},
+    {cmd:'split',desc:'Toggle split view (two channels)',usage:'/split'},
+    // ── Fun ──
     {cmd:'prism',desc:'Rainbow colored text',usage:'/prism message'},
-    {cmd:'rainbow',desc:'Rainbow colored text',usage:'/rainbow message'},
     {cmd:'shrug',desc:'¯\\_(ツ)_/¯',usage:'/shrug [text]'},
     {cmd:'tableflip',desc:'(╯°□°)╯︵ ┻━┻',usage:'/tableflip [text]'},
     {cmd:'unflip',desc:'┬─┬ノ( º _ ºノ)',usage:'/unflip [text]'},
@@ -4994,19 +5124,6 @@ document.addEventListener('click',e=>{
     {cmd:'dance',desc:'♪┏(・o・)┛♪',usage:'/dance [text]'},
     {cmd:'rip',desc:'⚰️ R.I.P. ⚰️',usage:'/rip name'},
     {cmd:'hug',desc:'(づ｡◕‿‿◕｡)づ',usage:'/hug nick'},
-    {cmd:'mdop',desc:'Mass deop all but yourself',usage:'/mdop'},
-    {cmd:'massdeop',desc:'Mass deop all but yourself',usage:'/massdeop'},
-    {cmd:'drop',desc:'Strip all status from everyone',usage:'/drop'},
-    {cmd:'unexemptall',desc:'Remove all channel exempts',usage:'/unexemptall'},
-    {cmd:'clearexempt',desc:'Remove all channel exempts',usage:'/clearexempt'},
-    {cmd:'ascii',desc:'Generate ASCII art text',usage:'/ascii <text>'},
-    {cmd:'ud',desc:'Urban Dictionary lookup',usage:'/ud <word>'},
-    {cmd:'shorten',desc:'Shorten a URL',usage:'/shorten <url>'},
-    {cmd:'stats',desc:'Channel statistics dashboard',usage:'/stats'},
-    {cmd:'note',desc:'Set or view notes on a nick',usage:'/note <nick> [text]'},
-    {cmd:'dnd',desc:'Do Not Disturb mode',usage:'/dnd on|off|schedule <HH:MM> <HH:MM>'},
-    {cmd:'split',desc:'Toggle split view (two channels)',usage:'/split'},
-    {cmd:'key',desc:'Save/clear a channel key (+k)',usage:'/key #channel [key]'},
   ];
   let slashEl=document.createElement('div');
   slashEl.id='slash-autocomplete';
@@ -5020,7 +5137,7 @@ document.addEventListener('click',e=>{
     if(!v.startsWith('/')||v.includes(' ')){slashEl.style.display='none';slashIdx=-1;return;}
     const q=v.slice(1).toLowerCase();
     const matches=q?CMDS.filter(c=>c.cmd.startsWith(q)):CMDS;
-    const show=matches.slice(0,30);
+    const show=matches.slice(0,80);
     if(!show.length){slashEl.style.display='none';slashIdx=-1;return;}
     slashEl.style.display='block'; slashIdx=0;
     slashEl.innerHTML=show.map((c,i)=>`<div class="slash-ac-item${i===0?' active':''}" data-i="${i}"><span class="slash-ac-cmd">/${c.cmd}</span><span class="slash-ac-desc">${c.desc}</span></div>`).join('');
@@ -5045,7 +5162,7 @@ document.addEventListener('click',e=>{
       const v=inp.value;
       const q=v.slice(1).toLowerCase();
       const matches=q?CMDS.filter(c=>c.cmd.startsWith(q)):CMDS;
-      const show=matches.slice(0,30);
+      const show=matches.slice(0,80);
       if(show[slashIdx])completeSlash(show[slashIdx]);
     }
     else if(e.key==='Escape'){slashEl.style.display='none';slashIdx=-1;}
@@ -6479,33 +6596,190 @@ function showHelpPanel(){
   const body=document.getElementById('help-body');
   body.innerHTML='';
   const sections=[
-    ['Channel','join #channel — Join a channel','part — Leave current channel','cycle — Part and rejoin','topic [text] — View or set topic','list — List all channels','invite nick — Invite user to channel','names — Refresh user list'],
-    ['Messaging','msg nick text — Send private message','me text — Send action (/me waves)','say text — Send text to current target','notice nick text — Send notice','ctcp nick cmd — Send CTCP','slap nick — Slap with a trout','query nick — Open DM window'],
-    ['Identity','nick newnick — Change nickname','away [msg] — Set away','back — Remove away','whois nick — Look up user info','whowas nick — Look up offline user','who #channel — List channel users'],
-    ['User Modes','op nick — Give operator status','deop nick — Remove operator','voice nick — Give voice','devoice nick — Remove voice','halfop nick — Give half-op','owner nick — Give owner','mode +mode — Set raw mode'],
-    ['Mass Operations','opall — Op everyone in channel','deopall — Deop everyone','voiceall — Voice everyone','devoiceall — Devoice everyone','kickall — Kick everyone (except you)'],
-    ['Moderation','kick nick [reason] — Kick user','ban nick — Ban user','unban mask — Remove ban','kickban nick — Kick and ban','tban nick duration — Temporary ban','banlist — View ban list','unbanall — Remove all bans','ignore nick — Ignore user','unignore nick — Remove ignore','ignorelist — Show ignored users'],
-    ['Services','ns command — Send to NickServ','cs command — Send to ChanServ','identify password — Identify to NickServ','ghost nick — Ghost a nick','regain nick — Recover a nick'],
-    ['IRCOp','oper user pass — Authenticate as IRCOp','kill nick reason — Kill user','shun/gline/zline/kline — Server bans','rehash — Reload server config','squit server — Disconnect server'],
-    ['Connection','connect — Connect to server','disconnect — Disconnect from server','quote text — Send raw IRC command'],
-    ['Client','close — Close current DM or channel','clear — Clear current chat','clearall — Clear all chat buffers','ping nick — CTCP ping user','version nick — CTCP version','time nick — CTCP time','monitor nick — Add nick to monitor','unmonitor nick — Remove from monitor','encrypt on/off — Toggle E2E encryption','help [cmd] — Show command help'],
+    ['Channel',
+      'join #channel [key] — Join a channel (auto-adds # if missing)',
+      'part [#channel] [reason] — Leave a channel',
+      'cycle — Part and rejoin current channel',
+      'topic [text] — View or set channel topic',
+      'list — List all channels on the server',
+      'links — Show server links',
+      'invite nick — Invite user to current channel',
+      'names — Refresh the nick list',
+      'key #channel [key] — Save or clear a channel key (+k)',
+    ],
+    ['Messaging',
+      'msg nick text — Send a private message',
+      'query nick [text] — Open a DM window',
+      'me text — Send an action (/me waves)',
+      'say text — Send raw text to current target',
+      'notice nick text — Send a notice',
+      'ctcp nick command — Send a CTCP command',
+      'slap nick — Slap someone with a large trout',
+    ],
+    ['Identity &amp; Info',
+      'nick newnick — Change your nickname',
+      'away [message] — Set away status',
+      'back — Remove away status',
+      'whois nick — Look up user info',
+      'whowas nick — Look up offline user',
+      'who #channel — List users in a channel',
+    ],
+    ['User Modes',
+      'mode +mode [args] — Set channel or user mode',
+      'op nick — Give operator (+o)',
+      'deop nick — Remove operator (-o)',
+      'voice nick — Give voice (+v)',
+      'devoice nick — Remove voice (-v)',
+      'halfop nick — Give half-op (+h)',
+      'dehalfop nick — Remove half-op (-h)',
+      'admin nick — Give admin/protect (+a)',
+      'deadmin nick — Remove admin (-a)',
+      'owner nick — Give owner (+q)',
+      'deowner nick — Remove owner (-q)',
+    ],
+    ['Mass Operations',
+      'opall — Op everyone in the channel',
+      'deopall — Deop everyone',
+      'mdop — Mass deop all except yourself',
+      'drop — Strip ALL status (~&amp;@%+) from everyone except you',
+      'voiceall — Voice everyone',
+      'devoiceall — Devoice everyone',
+      'kickall — Kick everyone except yourself',
+    ],
+    ['Moderation',
+      'kick nick [reason] — Kick a user',
+      'ban nick — Ban a user (nick!*@*)',
+      'unban mask — Remove a ban',
+      'kickban nick [reason] — Kick and ban',
+      'tban nick seconds [reason] — Temporary ban with auto-unban',
+      'banlist — View the ban list',
+      'unbanall — Remove ALL bans from channel',
+      'unexemptall — Remove all ban exempts (+e)',
+      'ignore nick|mask — Ignore a user (supports wildcard masks)',
+      'unignore nick|mask — Stop ignoring a user',
+      'ignorelist — Show your ignore list',
+    ],
+    ['Services',
+      'ns command — Send to NickServ',
+      'cs command — Send to ChanServ',
+      'identify password — Identify with NickServ',
+      'register password email — Register with NickServ',
+      'ghost nick [pass] — Ghost a nick',
+      'regain nick [pass] — Recover/regain a nick',
+    ],
+    ['IRCOp',
+      'oper login password — Authenticate as IRCOp',
+      'kill nick reason — Kill a user from the network',
+      'shun mask duration reason — Shun a user',
+      'gline mask duration reason — G-line (network ban)',
+      'zline mask duration reason — Z-line (IP ban)',
+      'kline mask duration reason — K-line (server ban)',
+      'rehash — Reload server configuration',
+      'squit server reason — Disconnect a linked server',
+    ],
+    ['Connection',
+      'connect — Connect to the current server',
+      'disconnect — Disconnect from the current server',
+      'quote text — Send a raw IRC command',
+    ],
+    ['Encryption (E2E)',
+      'encrypt keygen — Generate Signal protocol identity',
+      'encrypt on — Enable E2E for current DM',
+      'encrypt off — Disable E2E for current DM',
+      'encrypt add #channel — Set a channel encryption key',
+      'encrypt rotate — Rotate your E2E keys',
+    ],
+    ['Client',
+      'close — Close the current DM or channel tab',
+      'clear — Clear current chat history',
+      'clearall — Clear ALL chat buffers',
+      'help — Show this help panel',
+      'ping nick — CTCP ping a user',
+      'version nick — CTCP version a user',
+      'time nick — CTCP time a user',
+      'monitor nick — Monitor a nick for online/offline',
+      'unmonitor nick — Stop monitoring a nick',
+    ],
+    ['Tools',
+      'ascii text — Generate ASCII block-letter art',
+      'ud word — Urban Dictionary lookup (sends to channel)',
+      'shorten url — Shorten a URL with built-in shortener',
+      'stats — Channel statistics dashboard (top talkers)',
+      'note nick [text] — Set or view private notes on a nick',
+      'dnd on|off — Toggle Do Not Disturb mode',
+      'dnd schedule HH:MM HH:MM — Schedule quiet hours',
+      'split — Toggle split view (two channels side by side)',
+    ],
+    ['Fun &amp; Emotes',
+      'prism text — Rainbow mIRC colored text',
+      'shrug [text] — ¯\\_(ツ)_/¯',
+      'tableflip [text] — (╯°□°)╯︵ ┻━┻',
+      'unflip [text] — ┬─┬ノ( º _ ºノ)',
+      'lenny [text] — ( ͡° ͜ʖ ͡°)',
+      'disapprove [text] — ಠ_ಠ',
+      'rage [text] — (ノಠ益ಠ)ノ彡┻━┻',
+      'bear [text] — ʕ•ᴥ•ʔ',
+      'sparkle text — ✧･ﾟ: *✧ text ✧*:･ﾟ✧',
+      'finger [text] — ╭∩╮(︶︿︶)╭∩╮',
+      'dance [text] — ♪┏(・o・)┛♪┗(・o・)┓♪',
+      'rip name — ⚰️ R.I.P. name ⚰️',
+      'hug nick — (づ｡◕‿‿◕｡)づ nick',
+    ],
   ];
   for(const[title,...cmds] of sections){
     const sec=document.createElement('div');sec.className='help-section';
     sec.innerHTML=`<div class="help-section-title">${title}</div>`;
     for(const cmd of cmds){
-      const[name,desc]=cmd.split(' — ');
-      sec.innerHTML+=`<div class="help-cmd"><span class="help-cmd-name">/${name}</span><span class="help-cmd-desc">${desc||''}</span></div>`;
+      const sep=cmd.indexOf(' — ');
+      const name=sep>=0?cmd.slice(0,sep):cmd;
+      const desc=sep>=0?cmd.slice(sep+3):'';
+      sec.innerHTML+=`<div class="help-cmd"><span class="help-cmd-name">/${name}</span><span class="help-cmd-desc">${desc}</span></div>`;
     }
     body.appendChild(sec);
   }
+  // Features section
+  const feat=document.createElement('div');feat.className='help-section';
+  feat.innerHTML=`<div class="help-section-title">Features</div>
+    <div class="help-cmd"><span class="help-cmd-name">70 themes</span><span class="help-cmd-desc">16 animated (canvas effects) + 54 static themes</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">85 fonts</span><span class="help-cmd-desc">Monospace, sans-serif, serif, display, handwriting</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">E2E encryption</span><span class="help-cmd-desc">Signal protocol for DMs + AES-256-GCM for channels</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Encrypted vault</span><span class="help-cmd-desc">Argon2id KDF — all data encrypted at rest</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Auto-identify</span><span class="help-cmd-desc">NickServ IDENTIFY on connect (network settings)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Auto-rejoin</span><span class="help-cmd-desc">Rejoin channels automatically after being kicked</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Channel keys</span><span class="help-cmd-desc">Saved +k keys auto-sent on join (/key to manage)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Smart paste</span><span class="help-cmd-desc">Multi-line paste auto-offers pastebin creation</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Read markers</span><span class="help-cmd-desc">"New messages" divider when switching channels</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Split view</span><span class="help-cmd-desc">View two channels side by side (/split)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">User notes</span><span class="help-cmd-desc">Private notes on nicks (right-click → Note)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">DND mode</span><span class="help-cmd-desc">Suppress notifications with scheduled quiet hours</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">URL shortener</span><span class="help-cmd-desc">Built-in /shorten command creates short links</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Channel stats</span><span class="help-cmd-desc">Top talkers dashboard (/stats)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Link previews</span><span class="help-cmd-desc">Images, YouTube cards, and metadata previews</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Pastebin</span><span class="help-cmd-desc">Share text snippets with password &amp; expiration</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">File uploads</span><span class="help-cmd-desc">Drag-and-drop or paperclip button</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Encrypted notepad</span><span class="help-cmd-desc">Private auto-saving notes (vault encrypted)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Push notifications</span><span class="help-cmd-desc">Desktop &amp; mobile push for DMs and mentions</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Nick monitoring</span><span class="help-cmd-desc">Track when users come online/offline</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Multi-device sync</span><span class="help-cmd-desc">Settings, themes, unread sync across devices</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Typing indicators</span><span class="help-cmd-desc">See when someone is typing (IRCv3)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Client TLS certs</span><span class="help-cmd-desc">ECDSA P-256 certs for SASL EXTERNAL</span></div>`;
+  body.appendChild(feat);
   // Keyboard shortcuts
   const kb=document.createElement('div');kb.className='help-section';
   kb.innerHTML=`<div class="help-section-title">Keyboard Shortcuts</div>
     <div class="help-cmd"><span class="help-cmd-name">Enter</span><span class="help-cmd-desc">Send message</span></div>
     <div class="help-cmd"><span class="help-cmd-name">↑ / ↓</span><span class="help-cmd-desc">Scroll through input history</span></div>
-    <div class="help-cmd"><span class="help-cmd-name">Tab</span><span class="help-cmd-desc">Nick completion</span></div>
-    <div class="help-cmd"><span class="help-cmd-name">: (colon)</span><span class="help-cmd-desc">Emoji autocomplete</span></div>`;
+    <div class="help-cmd"><span class="help-cmd-name">Tab</span><span class="help-cmd-desc">Nick tab completion</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">@ (at sign)</span><span class="help-cmd-desc">Nick autocomplete dropdown</span></div>
+    <div class="help-cmd"><span class="help-cmd-name"># (hash)</span><span class="help-cmd-desc">Channel autocomplete dropdown</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">: (colon)</span><span class="help-cmd-desc">Emoji autocomplete (:wave: style)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">/ (slash)</span><span class="help-cmd-desc">Command autocomplete — shows all commands</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Ctrl+K</span><span class="help-cmd-desc">mIRC color picker (16 colors, fg+bg)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Ctrl+B</span><span class="help-cmd-desc">Bold text formatting</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Ctrl+U</span><span class="help-cmd-desc">Underline text formatting</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Ctrl+I</span><span class="help-cmd-desc">Italic text formatting</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Ctrl+O</span><span class="help-cmd-desc">Reset all formatting</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Escape</span><span class="help-cmd-desc">Close autocomplete / overlays</span></div>`;
   body.appendChild(kb);
   // Support section
   const sup=document.createElement('div');sup.className='help-support';
@@ -6513,7 +6787,7 @@ function showHelpPanel(){
     <div class="help-support-text">
       Join us on <span class="help-support-server">irc.twistednet.org</span><br>
       Channels: <span class="help-support-chan">#dev</span> and <span class="help-support-chan">#twisted</span><br><br>
-      <span style="font-size:11px;color:var(--text3)">CryptIRC v0.4 — End-to-end encrypted IRC</span>
+      <span style="font-size:11px;color:var(--text3)">CryptIRC v0.9 — End-to-end encrypted IRC · 70 themes · 85 fonts · 90+ commands</span>
     </div>`;
   body.appendChild(sup);
   document.getElementById('help-overlay').classList.add('show');
