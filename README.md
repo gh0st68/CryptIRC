@@ -13,8 +13,8 @@
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
   <img src="https://img.shields.io/badge/version-0.9.0-brightgreen" alt="Version">
-  <img src="https://img.shields.io/badge/themes-71-purple" alt="Themes">
-  <img src="https://img.shields.io/badge/fonts-85-blue" alt="Fonts">
+  <img src="https://img.shields.io/badge/themes-121-purple" alt="Themes">
+  <img src="https://img.shields.io/badge/fonts-135-blue" alt="Fonts">
   <img src="https://img.shields.io/badge/commands-100+-red" alt="Commands">
   <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
 </p>
@@ -136,12 +136,12 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 - **Mobile lag indicator** -- ping time shown next to channel name in topbar
 - **SVG icon settings menu** -- clean Lucide-style line icons, scrollable on small screens
 - **Standalone security panel** -- vault auto-lock, message expiry, rate limit, PM blocking, spellcheck, link previews
-- **85 fonts** -- 36 monospace, 25 sans-serif, 10 serif, 7 display, 7 cursive/handwriting from Google Fonts
+- **135 fonts** -- 41 monospace, 45 sans-serif, 20 serif, 17 display, 12 cursive/handwriting from Google Fonts
 - **Clear all data** -- one-click deletion of logs, notepad, and pastes with confirmation
 
-### Themes (71)
+### Themes (121)
 
-**54 static themes** and **17 animated themes** with real-time canvas effects.
+**89 static themes** and **32 animated themes** with real-time canvas effects.
 
 | Theme | Description |
 |-------|-------------|
@@ -161,29 +161,32 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 | Tokyo Night | Vibrant purple-blue cityscape |
 | Cyberpunk | Neon pink and cyan |
 | Matrix | Green-on-black terminal |
-| Ocean / Ocean Deep | Sea blue depths |
+| Ocean / Ocean Deep / Deep Sea | Sea blue depths |
 | Sunset | Warm purple-orange dusk |
 | Blumhouse | Horror-inspired dark red |
 | Scream | Ghostface neon green |
-| Neon Tokyo | Hot pink neon cityscape |
+| Neon Tokyo / Neon Blue / Neon Mint | Neon cityscape / glow themes |
 | Vaporwave | Retro pastel purple-pink |
 | Blood Moon | Deep crimson dark |
-| Arctic / Frost | Icy blue-white |
-| Golden Hour | Warm amber tones |
-| Midnight Purple | Deep violet darkness |
+| Arctic / Frost / Glacier / Winterfell / Tundra | Icy cold tones |
+| Golden Hour / Solar Flare / Sunflower | Warm amber / golden |
+| Midnight Purple / Ultraviolet / Indigo Night | Deep violet / purple |
 | Terminal Green / Retro Terminal / Hacker | Green CRT styles |
-| Neon Mint | Bright teal-cyan |
-| Stealth / Charcoal / Graphite / Slate | Monochrome/gray tones |
-| Lava / Ember / Copper / Coffee | Warm earth tones |
-| Cyberdeck | Dark with neon green |
-| Phantom / Obsidian / Darkwave | Dark mysterious |
+| Stealth / Charcoal / Graphite / Slate / Zinc / Ash / Noir | Monochrome / gray |
+| Lava / Copper / Coffee / Oxide / Pumpkin Spice | Warm earth tones |
+| Cyberdeck / Cybernetic | Dark with neon accents |
+| Phantom / Obsidian / Darkwave / Storm | Dark mysterious |
 | Emerald / Ruby / Sapphire / Amethyst / Coral | Gemstone colors |
-| Rose Gold | Warm pink metallic |
+| Rose Gold / Sakura / Bubblegum / Candy / Salmon | Pink / rose tones |
 | Blade Runner / Outrun / Hotline Miami | Retro neon |
-| Lo-fi | Warm muted vintage |
-| Indigo Night / Twilight | Evening purples |
+| Lo-fi / Sepia / Desert / Warm Gray | Warm muted vintage |
+| Twilight / Dusk / Mauve | Evening purples / soft |
+| Wine / Burgundy | Deep red elegance |
+| Teal / Spearmint / Verdant / Pine Forest / Wasabi | Green / teal tones |
+| Petrol / Mango / Volcanic | Bold accent colors |
+| Ivory Tower | Light warm theme |
 
-**Animated themes** (canvas overlay effects):
+**Animated themes** (32 with canvas overlay effects):
 
 | Theme | Effect |
 |-------|--------|
@@ -204,6 +207,21 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 | Ocean Waves | Gentle wave motion |
 | Plasma | Morphing color gradients |
 | Alien | UFOs with tractor beams abducting eSheep |
+| Lightning | Storm with zigzag lightning bolts and rain |
+| Sandstorm | Desert sand particles blowing across |
+| Hologram | Cyan scan lines with shimmer effect |
+| Meteors | Streaking meteors across starry sky |
+| Pixel Rain | Retro pixel blocks falling |
+| Synthwave | Retro sun with perspective grid |
+| Toxic Rain | Green acid rain droplets |
+| Fairy Dust | Sparkly particles that pulse and drift |
+| Comets | Glowing comets with trailing tails |
+| Lava Lamp | Soft morphing color blobs |
+| Electric | Arcing electric bolts between nodes |
+| Galaxy | Spiral galaxy with orbiting stars |
+| Glitch | Random colored static and offset glitches |
+| Firewall | Scrolling amber hex characters |
+| Northern | Vivid multi-color aurora curtains |
 
 **Separate mobile theme** -- independent colors, accents, and font sizes for phone vs desktop.
 
@@ -409,7 +427,7 @@ Accessible from the sidebar gear menu:
 | Panel | Contents |
 |-------|----------|
 | Notifications | Push alerts, desktop popups, sounds, trigger rules, custom highlight words (tag UI), per-network mute |
-| Theme | 71 themes (17 animated), 85 fonts, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
+| Theme | 121 themes (32 animated), 135 fonts, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
 | Security | Vault auto-lock timer, message expiry, rate limit, block PMs (+g), auto-rejoin, link previews, spellcheck |
 | Monitor | Nick online/offline tracking with push notifications |
 | Notepad | Private encrypted auto-saving notes |
