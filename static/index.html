@@ -2205,6 +2205,7 @@ function handleEvent(ev) {
           kind:      ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg',
           encrypted: encrypted,
           mentioned: mentioned,
+          prefix: ev.prefix||null,
         });
         // Auto-open query for pending WHOIS
         if(window._pendingWhois&&window._pendingWhois[ev.conn_id]){
@@ -2934,7 +2935,7 @@ function updateTopbar(){
   } else {
     topicInline.style.display='none';
     topicSep.style.display='none';
-    topicMenuBtn.style.display=active&&active.target!=='status'?'':'none';
+    topicMenuBtn.style.display=active?'':'none';
     topbarSpacer.style.display='';
   }
 }
@@ -3316,6 +3317,30 @@ async function handleInput(raw){
         if(!nicks.length){sysMsg(conn_id,target,'No ops to deop','system');break;}
         batchMode(conn_id,target,'-o',nicks);
         sysMsg(conn_id,target,`Deopping ${nicks.length} ops…`,'system'); break;
+      }
+      case 'MDOP': case 'MASSDEOP': case 'DROP': {
+        const self=getNick(conn_id);
+        const net=networks.find(n=>n.config.id===conn_id);
+        const ch=net?.channels?.find(c=>c.name===target);
+        if(!ch){sysMsg(conn_id,target,'Not in a channel','error');break;}
+        let count=0;
+        // Remove owners (~) → -q
+        const owners=ch.names.filter(n=>n.startsWith('~')).map(n=>stripPfx(n)).filter(n=>n!==self);
+        if(owners.length){batchMode(conn_id,target,'-q',owners);count+=owners.length;}
+        // Remove admins (&) → -a
+        const admins=ch.names.filter(n=>n.startsWith('&')||n.startsWith('~&')).map(n=>stripPfx(n)).filter(n=>n!==self&&!owners.includes(n));
+        if(admins.length){batchMode(conn_id,target,'-a',admins);count+=admins.length;}
+        // Remove ops (@) → -o
+        const ops=ch.names.filter(n=>n.includes('@')).map(n=>stripPfx(n)).filter(n=>n!==self&&!owners.includes(n)&&!admins.includes(n));
+        if(ops.length){batchMode(conn_id,target,'-o',ops);count+=ops.length;}
+        // Remove halfops (%) → -h
+        const hops=ch.names.filter(n=>n.includes('%')).map(n=>stripPfx(n)).filter(n=>n!==self);
+        if(hops.length){batchMode(conn_id,target,'-h',hops);count+=hops.length;}
+        // Remove voice (+) → -v
+        const voiced=ch.names.filter(n=>n.startsWith('+')||n.includes('+')).map(n=>stripPfx(n)).filter(n=>n!==self);
+        if(voiced.length){batchMode(conn_id,target,'-v',voiced);count+=voiced.length;}
+        sysMsg(conn_id,target,count?`Stripping all status from ${count} users…`:'No users to strip','system');
+        break;
       }
       case 'VOICEALL': {
         const nicks = getChannelNonVoiced(conn_id, target);
@@ -4589,6 +4614,24 @@ document.addEventListener('click',e=>{
     {cmd:'halfop',desc:'Give half-op',usage:'/halfop nick'},
     {cmd:'owner',desc:'Give owner',usage:'/owner nick'},
     {cmd:'tban',desc:'Temporary ban',usage:'/tban nick duration'},
+    {cmd:'links',desc:'Show server links',usage:'/links'},
+    {cmd:'prism',desc:'Rainbow colored text',usage:'/prism message'},
+    {cmd:'rainbow',desc:'Rainbow colored text',usage:'/rainbow message'},
+    {cmd:'shrug',desc:'¯\\_(ツ)_/¯',usage:'/shrug [text]'},
+    {cmd:'tableflip',desc:'(╯°□°)╯︵ ┻━┻',usage:'/tableflip [text]'},
+    {cmd:'unflip',desc:'┬─┬ノ( º _ ºノ)',usage:'/unflip [text]'},
+    {cmd:'lenny',desc:'( ͡° ͜ʖ ͡°)',usage:'/lenny [text]'},
+    {cmd:'disapprove',desc:'ಠ_ಠ',usage:'/disapprove [text]'},
+    {cmd:'rage',desc:'(ノಠ益ಠ)ノ彡┻━┻',usage:'/rage [text]'},
+    {cmd:'bear',desc:'ʕ•ᴥ•ʔ',usage:'/bear [text]'},
+    {cmd:'sparkle',desc:'✧･ﾟ sparkle text ･ﾟ✧',usage:'/sparkle text'},
+    {cmd:'finger',desc:'╭∩╮(︶︿︶)╭∩╮',usage:'/finger [text]'},
+    {cmd:'dance',desc:'♪┏(・o・)┛♪',usage:'/dance [text]'},
+    {cmd:'rip',desc:'⚰️ R.I.P. ⚰️',usage:'/rip name'},
+    {cmd:'hug',desc:'(づ｡◕‿‿◕｡)づ',usage:'/hug nick'},
+    {cmd:'mdop',desc:'Mass deop all but yourself',usage:'/mdop'},
+    {cmd:'massdeop',desc:'Mass deop all but yourself',usage:'/massdeop'},
+    {cmd:'drop',desc:'Strip all status from everyone',usage:'/drop'},
   ];
   let slashEl=document.createElement('div');
   slashEl.id='slash-autocomplete';
@@ -4602,7 +4645,7 @@ document.addEventListener('click',e=>{
     if(!v.startsWith('/')||v.includes(' ')){slashEl.style.display='none';slashIdx=-1;return;}
     const q=v.slice(1).toLowerCase();
     const matches=q?CMDS.filter(c=>c.cmd.startsWith(q)):CMDS;
-    const show=matches.slice(0,12);
+    const show=matches.slice(0,30);
     if(!show.length){slashEl.style.display='none';slashIdx=-1;return;}
     slashEl.style.display='block'; slashIdx=0;
     slashEl.innerHTML=show.map((c,i)=>`<div class="slash-ac-item${i===0?' active':''}" data-i="${i}"><span class="slash-ac-cmd">/${c.cmd}</span><span class="slash-ac-desc">${c.desc}</span></div>`).join('');
@@ -4627,7 +4670,7 @@ document.addEventListener('click',e=>{
       const v=inp.value;
       const q=v.slice(1).toLowerCase();
       const matches=q?CMDS.filter(c=>c.cmd.startsWith(q)):CMDS;
-      const show=matches.slice(0,12);
+      const show=matches.slice(0,30);
       if(show[slashIdx])completeSlash(show[slashIdx]);
     }
     else if(e.key==='Escape'){slashEl.style.display='none';slashIdx=-1;}
@@ -5112,7 +5155,8 @@ function showNickMenu(e,nick){
     {label:'Mention',   action:()=>insertNick(nick)},
     {label:'Slap',      action:async()=>{if(!active)return;const st=`slaps ${nick} around a bit with a large trout`;const sw=(window.E2E?.ready||window.E2E?.channelKeys?.[active.target])?await e2eEncryptOutgoing(active.target,`\x01ACTION ${st}\x01`):null;if(sw)wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :${sw}`});else wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :\x01ACTION ${st}\x01`});addMessage(active.conn_id,active.target,{ts:Date.now()/1000|0,from:getNick(active.conn_id),text:st,kind:'action'});}},
     {label:loadMonitor()[nick.toLowerCase()]?'Unmonitor':'Monitor', action:()=>{const k=nick.toLowerCase();if(loadMonitor()[k]){monitorRemove(nick);showToast(`Removed ${nick} from monitor`);}else{monitorAdd(nick);showToast(`Added ${nick} to monitor`);}}},
-    {label:isIgnored(nick)?'Unignore':'Ignore', action:()=>{if(isIgnored(nick)){removeIgnore(nick);showToast(`Unignored ${nick}`);}else{addIgnore(nick);showToast(`Ignoring ${nick}`);}}},
+    {label:isIgnored(nick)?'Unignore':'Ignore nick', action:()=>{if(isIgnored(nick)){removeIgnore(nick);showToast(`Unignored ${nick}`);}else{addIgnore(nick);showToast(`Ignoring ${nick}`);}}},
+    {label:'Ignore by mask', action:()=>{const mask=prompt(`Ignore mask for ${nick}:\n\nExamples:\n  ${nick}!*@*  (nick only)\n  *!*@*.host.com  (by host)\n  *!user@*  (by username)`,`${nick}!*@*`);if(mask&&mask.trim()){addIgnore(mask.trim());showToast(`Ignoring ${mask.trim()}`);}}},
   ];
   // Channel power options — only show if we have sufficient power and in a channel
   if(isChan&&myPower>=2){
@@ -5216,6 +5260,22 @@ function showTopicMenu(e){
     const fav=isFavorite(conn_id,target);
     m.innerHTML+=`<button class="topic-menu-item" onclick="toggleFavorite('${conn_id}','${esc(target)}');closeTopicMenu()">${fav?'★ Unfavorite':'☆ Favorite'}</button>`;
     m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">✕ Close PM</button>`;
+  } else if(target==='status'){
+    // Status window — network management options
+    const net=networks.find(n=>n.config.id===conn_id);
+    const netLabel=net?esc(net.config.label||net.config.server):'Network';
+    m.innerHTML+=`<button class="topic-menu-item" onclick="editNetwork('${conn_id}');closeTopicMenu()">✎ Edit ${netLabel}</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="closeTopicMenu();const ch=prompt('Channel name:');if(ch){let c=ch.trim();if(c&&!c.startsWith('#')&&!c.startsWith('&'))c='#'+c;if(c)wsend({type:'join_channel',conn_id:'${conn_id}',channel:c,key:null});}">📺 Join channel</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="chanListData=[];chanListConnId='${conn_id}';document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';document.getElementById('chanlist-count').textContent='';document.getElementById('chanlist-search').value='';document.getElementById('chanlist-overlay').classList.add('show');wsend({type:'send',conn_id:'${conn_id}',raw:'LIST'});closeTopicMenu()">📋 List channels</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="showIgnorePanel();closeTopicMenu()">🚫 Ignored users</button>`;
+    const netMuted=isMuted('net:'+conn_id);
+    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleMute('net:${conn_id}');closeTopicMenu()">${netMuted?'🔔 Unmute network':'🔇 Mute network'}</button>`;
+    if(net?.connected){
+      m.innerHTML+=`<button class="topic-menu-item" onclick="wsend({type:'disconnect',id:'${conn_id}'});closeTopicMenu()">⚡ Disconnect</button>`;
+    } else {
+      m.innerHTML+=`<button class="topic-menu-item" onclick="wsend({type:'connect',id:'${conn_id}'});closeTopicMenu()">⚡ Connect</button>`;
+    }
+    m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="removeNetwork('${conn_id}','${netLabel}');closeTopicMenu()">🗑 Delete network</button>`;
   }
   const btn=document.getElementById('topic-menu-btn');
   const r=btn.getBoundingClientRect();
@@ -5654,13 +5714,13 @@ let ignoreList = new Set(JSON.parse(localStorage.getItem('cryptirc_ignore') || '
 const pendingUnbanAll = {};
 const banListAccum    = {}; // "conn_id/channel" → [mask, ...]
 
-function addIgnore(nick) {
-  ignoreList.add(nick.toLowerCase());
+function addIgnore(mask) {
+  ignoreList.add(mask.toLowerCase());
   localStorage.setItem('cryptirc_ignore', JSON.stringify([...ignoreList]));
   savePrefsToServer();
 }
-function removeIgnore(nick) {
-  ignoreList.delete(nick.toLowerCase());
+function removeIgnore(mask) {
+  ignoreList.delete(mask.toLowerCase());
   localStorage.setItem('cryptirc_ignore', JSON.stringify([...ignoreList]));
   savePrefsToServer();
 }
@@ -5677,7 +5737,7 @@ function showIgnorePanel(){
     </div>
     <div style="padding:12px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch">
       <div style="display:flex;gap:6px;margin-bottom:12px">
-        <input id="ignore-add-input" placeholder="Add nick to ignore..." style="flex:1;padding:6px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none">
+        <input id="ignore-add-input" placeholder="nick, nick!*@host, *!*@*.isp.com" style="flex:1;padding:6px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none">
         <button onclick="const inp=document.getElementById('ignore-add-input');if(inp.value.trim()){addIgnore(inp.value.trim());inp.value='';this.closest('[style*=fixed]').remove();showIgnorePanel();}" style="padding:6px 12px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px">Add</button>
       </div>`;
     if(!list.length){
@@ -5712,8 +5772,25 @@ function showIgnorePanel(){
     }
   },100);
 }
-function isIgnored(nick) {
-  return ignoreList.has(nick.toLowerCase());
+function isIgnored(nick, prefix) {
+  const lnick = nick.toLowerCase();
+  const lpfx = (prefix||'').toLowerCase();
+  for (const mask of ignoreList) {
+    // Exact nick match
+    if (mask === lnick) return true;
+    // Wildcard mask match (nick!user@host pattern)
+    if (mask.includes('!') || mask.includes('@') || mask.includes('*')) {
+      // Match against full prefix if available
+      const target = lpfx || lnick;
+      if (wildcardMatch(target, mask)) return true;
+    }
+  }
+  return false;
+}
+function wildcardMatch(str, pattern) {
+  // Convert IRC wildcard pattern to regex
+  const re = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i');
+  return re.test(str);
 }
 
 // ─── Unread PM flash (every 20 minutes) ───────────────────────────────────────
@@ -5736,7 +5813,7 @@ const _origAddMessage = addMessage;
 // Wrap addMessage to filter ignores
 window.addMessage = function(conn_id, target, msg) {
   if (msg.kind === 'privmsg' || msg.kind === 'action') {
-    if (isIgnored(msg.from)) return; // silently drop
+    if (isIgnored(msg.from, msg.prefix)) return; // silently drop
     monitorUpdate(msg.from, conn_id, target, msg.text);
   }
   _origAddMessage(conn_id, target, msg);
@@ -5786,6 +5863,9 @@ const HELP_TEXT = {
   opall:       '/opall                       — Op all non-op users',
   deopall:     '/deopall                     — Deop all ops',
   kickall:     '/kickall [reason]            — Kick everyone except yourself',
+  mdop:        '/mdop                       — Mass deop all ops except yourself',
+  massdeop:    '/massdeop                   — Same as /mdop',
+  drop:        '/drop                       — Strip ALL status (~&@%+) from everyone except yourself',
   // Kick/Ban
   kick:        '/kick <nick> [reason]        — Kick a user',
   ban:         '/ban <nick|mask>             — Ban a user',
@@ -5810,8 +5890,26 @@ const HELP_TEXT = {
   gline:       '/gline <mask> <duration>:r  — G-LINE a user (oper)',
   kline:       '/kline <mask>               — K-LINE a user (oper)',
   rehash:      '/rehash                     — Rehash server config (oper)',
+  // Encryption
+  encrypt:     '/encrypt on|off|keygen|add  — Manage E2E encryption for channel or DM',
+  // Fun
+  prism:       '/prism <message>            — Send text in rainbow mIRC colors',
+  rainbow:     '/rainbow <message>          — Same as /prism',
+  shrug:       '/shrug [text]               — ¯\\_(ツ)_/¯',
+  tableflip:   '/tableflip [text]           — (╯°□°)╯︵ ┻━┻',
+  unflip:      '/unflip [text]              — ┬─┬ノ( º _ ºノ)',
+  lenny:       '/lenny [text]               — ( ͡° ͜ʖ ͡°)',
+  disapprove:  '/disapprove [text]          — ಠ_ಠ',
+  rage:        '/rage [text]                — (ノಠ益ಠ)ノ彡┻━┻',
+  bear:        '/bear [text]                — ʕ•ᴥ•ʔ',
+  sparkle:     '/sparkle <text>             — ✧･ﾟ: *✧･ﾟ:* text *:･ﾟ✧*:･ﾟ✧',
+  finger:      '/finger [text]              — ╭∩╮(︶︿︶)╭∩╮',
+  dance:       '/dance [text]               — ♪┏(・o・)┛♪┗(・o・)┓♪',
+  rip:         '/rip <name>                 — ⚰️ R.I.P. name ⚰️',
+  hug:         '/hug [nick]                 — (づ｡◕‿‿◕｡)づ nick',
   // Utility
   quote:       '/quote <raw command>        — Send raw IRC (alias: /raw)',
+  links:       '/links                      — Show server links',
   clear:       '/clear                      — Clear current buffer',
   clearall:    '/clearall                   — Clear all buffers',
   help:        '/help [command]             — Show this help or help for a command',
@@ -6069,12 +6167,14 @@ function showHelp(conn_id, target, specific) {
     ['Messaging',      ['me','say','msg','notice','ctcp','ping','slap']],
     ['Channel info',   ['topic','names','who','whois','banlist']],
     ['Mode shortcuts', ['op','deop','voice','devoice','halfop','protect','owner','mode']],
-    ['Mass ops',       ['voiceall','devoiceall','opall','deopall','kickall']],
+    ['Mass ops',       ['voiceall','devoiceall','opall','deopall','mdop','drop','kickall']],
     ['Kick/Ban',       ['kick','ban','unban','kickban','tban','invite','banlist','unbanall']],
     ['Ignore',         ['ignore','unignore','ignorelist']],
     ['Services',       ['ns','cs','identify','ghost','regain']],
     ['Oper',           ['oper','kill','shun','gline','kline','rehash']],
-    ['Utility',        ['quote','clear','clearall','help']],
+    ['Encryption',     ['encrypt']],
+    ['Fun',            ['prism','shrug','tableflip','unflip','lenny','disapprove','rage','bear','sparkle','finger','dance','rip','hug']],
+    ['Utility',        ['quote','clear','clearall','links','help']],
   ];
   sysMsg(conn_id, target, '─── CryptIRC Commands ───────────────────────', 'system');
   for (const [cat, cmds] of categories) {

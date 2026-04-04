@@ -175,7 +175,7 @@ pub enum ServerEvent {
     /// base64-encoded. The client uses it to encrypt/decrypt private E2E key blobs.
     VaultUnlocked    { e2e_enc_key: String },
     VaultError       { message: String },
-    IrcMessage       { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind },
+    IrcMessage       { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String> },
     /// Echo of user's own sent message — for multi-device sync
     IrcEcho          { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind },
     IrcJoin          { conn_id: String, nick: String,  channel: String, ts: i64 },
@@ -1272,6 +1272,12 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 if safe.is_empty() { return; }
                 // Skip TAGMSG from logging (typing indicators etc)
                 let is_tagmsg = safe.contains("TAGMSG");
+                // Silently drop TAGMSG for connections that don't support message-tags
+                if is_tagmsg {
+                    let c = conn.lock().await;
+                    if !c.message_tags { return; }
+                    drop(c);
+                }
                 info!("[{}] SEND ({}B): {}", conn_id, safe.len(), &safe[..safe.len().min(80)]);
                 let mut c = conn.lock().await;
                 let nick = c.nick.clone();
