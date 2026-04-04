@@ -13,6 +13,9 @@
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
   <img src="https://img.shields.io/badge/version-0.9.0-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/themes-71-purple" alt="Themes">
+  <img src="https://img.shields.io/badge/fonts-85-blue" alt="Fonts">
+  <img src="https://img.shields.io/badge/commands-100+-red" alt="Commands">
   <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
 </p>
 
@@ -28,30 +31,43 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 
 ### Encryption & Security
 - **Per-user vaults** -- each user has their own passphrase and encryption key (Argon2id KDF + AES-256-GCM)
-- **Signal-protocol E2E** for direct messages -- X3DH key agreement + Double Ratchet
+- **Signal-protocol E2E** for direct messages -- X3DH key agreement + Double Ratchet with authenticated headers
 - **Channel encryption** -- pre-shared AES-256-GCM keys for group channels
 - **Encrypted logs** -- every line encrypted at rest with the user's vault key
 - **Encrypted notepad** -- private encrypted notes stored server-side
-- **Encrypted credential storage** -- IRC passwords and SASL secrets never stored in plaintext
+- **Encrypted credential storage** -- IRC passwords, NickServ passwords, and SASL secrets never stored in plaintext
 - **Vault lock/unlock** -- locking the vault zeros the key from memory and disconnects IRC
+- **Vault auto-lock** -- configurable idle timer (5min–2hrs) automatically locks the vault
 - **Client TLS certificates** -- generate and manage ECDSA P-256 certs for SASL EXTERNAL
 - **Zero-knowledge architecture** -- the server cannot read your messages or credentials
-- **Timing-safe comparisons** -- registration codes use constant-time comparison
-- **XSS protection** -- comprehensive HTML escaping on all user content
-- **CSP headers** -- Content-Security-Policy, X-Frame-Options, Referrer-Policy
+- **SASL PLAIN protection** -- refuses to send credentials over unencrypted connections
+- **Image metadata stripping** -- EXIF, GPS, camera info auto-removed from uploaded JPEG/PNG
+- **Block private messages** -- +g mode with one-time notification per sender (3-hour cooldown)
+- **Session manager** -- view and revoke active sessions across devices
+- **Message expiry** -- configurable auto-delete of local message buffers (1hr–7days)
+- **Client-side rate limiting** -- configurable flood protection (200ms–3sec between messages)
+- **Timing-safe comparisons** -- registration codes use constant-time comparison with no length oracle
+- **XSS hardened** -- no inline onclick injection, prototype-pollution-safe E2E objects, comprehensive HTML escaping
+- **CSP headers** -- Content-Security-Policy, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
+- **Password complexity** -- requires uppercase, lowercase, digit, and special character
 
 ### IRC & IRCv3
 - Full IRC protocol support -- channels, DMs, modes, kicks, bans, CTCP, the works
 - **IRCv3 capabilities**: away-notify, account-notify, extended-join, server-time, multi-prefix, cap-notify, message-tags, batch, echo-message, invite-notify, setname, account-tag, userhost-in-names, chghost, labeled-response, typing indicators, standard-replies, MONITOR
+- **IRCv3 CAP toggle** -- enable/disable individual capabilities per network in settings
 - **SASL PLAIN & EXTERNAL** authentication
 - Multi-network support -- connect to as many networks as you want simultaneously
 - **Nick monitoring** -- track when users come online/offline with push notifications
+- **KeepNick** -- irssi-style nick keeper with ISON polling, QUIT/NICK event detection, and auto-reclaim
+- **Auto-identify** -- automatically send NickServ IDENTIFY on connect (encrypted credential storage)
+- **Auto-rejoin on kick** -- automatically rejoin channels after being kicked (with saved channel keys)
+- **Channel key manager** -- store and auto-send channel keys (+k) when joining
 - **Multi-device sync** -- messages you send on one device appear on all your other devices
 - **Typing indicators** -- see when someone is typing (IRCv3 draft/typing)
 - **Server-time** -- accurate timestamps from the IRC server
-- **Auto-identify** -- automatically send NickServ IDENTIFY on connect (encrypted credential storage)
-- **Auto-rejoin on kick** -- automatically rejoin channels after being kicked
-- **Channel key manager** -- store and auto-send channel keys (+k) when joining
+- **ZNC playback detection** -- detects and batches ZNC buffer playback with summary markers
+- **Self-signed cert detection** -- popup warning with one-click fix for ZNC/bouncer TLS errors
+- **Status message condensing** -- Lounge-style grouped join/part/quit (Show All / Condense / Hide)
 - Configurable join/part/quit message filtering
 - **Infinite scroll** -- load older messages from encrypted server logs on demand
 
@@ -61,43 +77,57 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 - **iOS PWA keyboard handling** -- works perfectly with iOS keyboard accessory bar
 - **Collapsible panels** -- sidebar and nick list collapse on desktop with persistent state
 - **Nick list grouped by role** -- Owners, Admins, Operators, Half-Ops, Voiced, Users
-- **Nick context menu** -- whois, query, slap, monitor, kick/ban/voice/op based on power level
+- **Nick context menu** -- whois, query, slap, monitor, notes, kick/ban/voice/op based on power level
 - **Clickable nicks in messages** -- nick mentions in chat text are colored and clickable
+- **Smart tab completion** -- prioritizes most recent speakers, with Tab cycling
 - **@nick autocomplete** -- type `@` to search and insert channel nicks
+- **#channel autocomplete** -- type `#` to autocomplete channel names
 - **Inline media previews** -- images, videos (.mp4/.webm/.mov), YouTube rich cards with title/author
+- **Inline audio player** -- .mp3, .ogg, .flac, .wav, .m4a, .aac, .opus with playback controls
+- **Image lightbox** -- click to zoom, scroll wheel zoom, pinch-to-zoom on mobile, pan when zoomed
 - **Link previews** -- server-side metadata fetcher with admin whitelist (SSRF protected)
 - **Pastebin** -- share text snippets with password protection and expiration
-- **URL shortener** -- built-in `/shorten` command creates short redirect URLs
+- **URL shortener** -- built-in `/shorten` command creates short redirect URLs with interstitial page
 - **Smart paste** -- paste multi-line text and it auto-offers "send as pastebin?" instead of flooding
 - **Split view** -- view two channels side by side on desktop (`/split`)
 - **Read markers** -- "new messages since you were away" divider line in channels
-- **User notes** -- attach private notes to any nick (visible only to you, synced)
-- **Channel stats dashboard** -- most active users, message counts, peak hours (`/stats`)
-- **#channel autocomplete** -- type `#` to autocomplete channel names
+- **User notes** -- attach private notes to any nick (right-click menu or `/note`)
+- **Seen database** -- `/seen nick` tracks last message time and channel
+- **Channel stats dashboard** -- most active users with bar chart (`/stats`)
+- **ASCII art generator** -- `/ascii text` sends block-letter art to channel
+- **Urban Dictionary** -- `/ud word` looks up and sends definitions
 - **DND mode** -- Do Not Disturb with scheduled quiet hours (`/dnd`)
 - **Encrypted notepad** -- private auto-saving notes, encrypted with vault key
 - **mIRC color formatting** -- Ctrl+K color picker, Ctrl+B/U/I/O for bold/underline/italic/reset
 - **Topic bar** with mIRC color rendering and edit/copy/view menu
 - **Emoji picker** with colon autocomplete (`:wave:` style)
-- **Slash command autocomplete** -- type `/` to see available commands
+- **Slash command autocomplete** -- type `/` to see all 100+ commands
 - **Search** -- search messages in current channel with highlighted results
-- **File uploads** -- drag-and-drop or paperclip, link placed in input bar for you to send
-- **Desktop & mobile push notifications** -- iOS PWA support, suppressed when app is focused
+- **File uploads** -- drag-and-drop or paperclip, with automatic EXIF/GPS metadata stripping
+- **My Uploads panel** -- view, manage, and delete your uploaded files
+- **Desktop & mobile push notifications** -- iOS PWA support, suppressed when app is focused or DND active
 - **Smart unread badges** -- gray for regular messages, red for mentions and DMs
 - **Mentions panel** -- chat bubble icon with red dot badge for unseen mentions
-- **Persistent state** -- everything syncs server-side (themes, favorites, unread, mentions, etc.)
-- **Channel drag-and-drop reorder** -- reorder channels in the sidebar
+- **Custom highlight words** -- tag-based UI to add/remove trigger words for notifications
+- **Persistent state** -- everything syncs server-side (themes, favorites, unread, mentions, notes, keys, etc.)
+- **Network drag-and-drop** -- reorder networks with all their channels (desktop drag + mobile hold-to-drag)
+- **Channel drag-and-drop** -- reorder channels within a network
+- **Favorites filter** -- funnel icon filter bar to show only favorited channels
+- **Encryption indicators** -- SVG lock/unlock icons on every channel and DM in the sidebar
 - **Mobile lag indicator** -- ping time shown next to channel name in topbar
-- **85 fonts** -- choose from 36 monospace, 25 sans-serif, 10 serif, 7 display, and 7 cursive/handwriting fonts
+- **SVG icon settings menu** -- clean Lucide-style line icons, scrollable on small screens
+- **Standalone security panel** -- vault auto-lock, message expiry, rate limit, PM blocking, spellcheck, link previews
+- **85 fonts** -- 36 monospace, 25 sans-serif, 10 serif, 7 display, 7 cursive/handwriting from Google Fonts
 - **Clear all data** -- one-click deletion of logs, notepad, and pastes with confirmation
 
-### Themes (70)
+### Themes (71)
 
-**54 static themes** and **16 animated themes** with real-time canvas effects.
+**54 static themes** and **17 animated themes** with real-time canvas effects.
 
 | Theme | Description |
 |-------|-------------|
-| Midnight | Deep dark blue (default) |
+| Starfield Warp | Stars zooming toward you (default) |
+| Midnight | Deep dark blue |
 | Dracula | Classic purple-accented dark |
 | Monokai | Warm syntax-inspired dark |
 | Nord | Cool Arctic blue palette |
@@ -112,50 +142,33 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 | Tokyo Night | Vibrant purple-blue cityscape |
 | Cyberpunk | Neon pink and cyan |
 | Matrix | Green-on-black terminal |
-| Ocean | Deep sea blue |
+| Ocean / Ocean Deep | Sea blue depths |
 | Sunset | Warm purple-orange dusk |
 | Blumhouse | Horror-inspired dark red |
 | Scream | Ghostface neon green |
-| Ocean Deep | Abyssal blue depths |
 | Neon Tokyo | Hot pink neon cityscape |
 | Vaporwave | Retro pastel purple-pink |
 | Blood Moon | Deep crimson dark |
-| Arctic | Icy blue-white |
+| Arctic / Frost | Icy blue-white |
 | Golden Hour | Warm amber tones |
 | Midnight Purple | Deep violet darkness |
-| Terminal Green | Classic green terminal |
+| Terminal Green / Retro Terminal / Hacker | Green CRT styles |
 | Neon Mint | Bright teal-cyan |
-| Stealth | Neutral monochrome |
-| Lava | Molten orange-red |
-| Frost | Cool blue ice |
+| Stealth / Charcoal / Graphite / Slate | Monochrome/gray tones |
+| Lava / Ember / Copper / Coffee | Warm earth tones |
 | Cyberdeck | Dark with neon green |
-| Phantom | Ghostly gray-blue |
-| Hacker | Bright green on black |
-| Coffee | Warm brown tones |
-| Emerald | Rich green gemstone |
-| Ruby | Deep red gemstone |
-| Sapphire | Deep blue gemstone |
-| Amethyst | Purple gemstone |
-| Coral | Warm red-orange |
-| Obsidian | Dark volcanic glass |
+| Phantom / Obsidian / Darkwave | Dark mysterious |
+| Emerald / Ruby / Sapphire / Amethyst / Coral | Gemstone colors |
 | Rose Gold | Warm pink metallic |
-| Retro Terminal | Phosphor green CRT |
-| Blade Runner | Moody orange-purple |
-| Outrun | Synthwave neon purple-pink |
-| Hotline Miami | Neon pink vice |
+| Blade Runner / Outrun / Hotline Miami | Retro neon |
 | Lo-fi | Warm muted vintage |
-| Darkwave | Deep dark blue-purple |
-| Copper | Warm metallic brown |
-| Slate | Cool blue-gray stone |
-| Charcoal | Neutral dark gray |
-| Graphite | Cool dark gray |
-| Indigo Night | Deep blue-violet |
-| Twilight | Soft purple dusk |
+| Indigo Night / Twilight | Evening purples |
 
 **Animated themes** (canvas overlay effects):
 
 | Theme | Effect |
 |-------|--------|
+| Starfield Warp | Stars zooming from center toward you |
 | Forest Rain | Rain drops with lightning flashes |
 | Deep Space | Drifting stars with shooting stars |
 | Snowfall | Gentle falling snowflakes |
@@ -165,76 +178,176 @@ CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Ev
 | Neon Grid | 80s Tron perspective grid |
 | Underwater | Rising bubbles |
 | Cherry Blossom | Pink petals falling |
-| Starfield Warp | Stars zooming toward you |
 | Ember | Floating orange sparks |
 | Nebula | Colorful drifting gas clouds |
 | Confetti | Colorful falling confetti |
-| Campfire | Warm embers rising |
+| Campfire | Warm embers rising with glow |
 | Ocean Waves | Gentle wave motion |
 | Plasma | Morphing color gradients |
+| Alien | UFOs with tractor beams abducting eSheep |
 
-| **Separate mobile theme** | Independent colors, accents, and font sizes for phone vs desktop |
+**Separate mobile theme** -- independent colors, accents, and font sizes for phone vs desktop.
 
 ### Admin
 - **Admin panel** -- user management, stats, registration settings
 - **Link preview whitelist** -- admin controls which domains get metadata fetched
 - **Registration modes** -- open, invite-code, or closed (persists across reboots)
 - **User management** -- disable, delete, promote to admin
-- **All admin settings persist** to disk (survives server restarts)
+- **All admin settings persist** to disk with mutex protection (survives server restarts)
 
 ### Commands
 
-All commands show in the `/` autocomplete dropdown. Type `/` to browse.
+All 100+ commands show in the `/` autocomplete dropdown. Type `/` to browse.
+
+**Channel:**
 
 | Command | Description |
 |---------|-------------|
-| `/join` | Join a channel (auto-adds # if missing) |
-| `/part` | Leave a channel |
-| `/msg` | Send private message |
-| `/query` | Open a DM window |
-| `/me` | Send action |
-| `/nick` | Change nickname |
-| `/topic` | View or set channel topic |
-| `/whois` | Look up user info |
-| `/kick` | Kick a user |
-| `/ban` | Ban a user |
-| `/kickban` | Kick and ban |
-| `/unban` | Remove a ban |
-| `/unbanall` | Remove all bans from channel |
-| `/unexemptall` | Remove all ban exempts (+e) |
-| `/mode` | Set channel/user modes |
-| `/op` `/deop` | Give/remove operator |
-| `/voice` `/devoice` | Give/remove voice |
-| `/halfop` | Give half-op |
-| `/owner` | Give owner |
-| `/opall` | Op everyone |
-| `/voiceall` | Voice everyone |
-| `/kickall` | Kick everyone except yourself |
-| `/mdop` | Mass deop all ops except yourself |
-| `/drop` | Strip ALL status (~&@%+) from everyone except yourself |
-| `/ignore` | Ignore a user (supports wildcard masks) |
-| `/unignore` | Stop ignoring a user |
-| `/away` `/back` | Set/clear away status |
-| `/invite` | Invite user to channel |
-| `/list` | List all channels |
-| `/links` | Show server links |
+| `/join #channel [key]` | Join a channel (auto-adds # if missing) |
+| `/part [#channel] [reason]` | Leave a channel |
 | `/cycle` | Part and rejoin channel |
-| `/ns` `/cs` | NickServ/ChanServ commands |
-| `/identify` | Identify with NickServ |
-| `/encrypt` | Manage E2E encryption (keygen, add, rotate, on, off) |
-| `/quote` | Send raw IRC command |
-| `/clear` | Clear current buffer |
-| `/help` | Show help or help for a command |
-| `/ascii` | Generate ASCII art text |
-| `/ud` | Urban Dictionary lookup (sends definition to channel) |
-| `/shorten` | Shorten a URL with built-in shortener |
-| `/stats` | Channel statistics dashboard |
-| `/note` | Set or view private notes on a nick |
-| `/dnd` | Do Not Disturb mode (on/off/schedule) |
-| `/split` | Toggle split view (two channels side by side) |
-| `/key` | Save or clear a channel key (+k) |
+| `/topic [text]` | View or set channel topic |
+| `/list` | List all channels on the server |
+| `/links` | Show server links |
+| `/invite nick` | Invite user to channel |
+| `/names` | Refresh the nick list |
+| `/key #channel [key]` | Save or clear a channel key (+k) |
 
-**Fun Commands:**
+**Messaging:**
+
+| Command | Description |
+|---------|-------------|
+| `/msg nick text` | Send a private message |
+| `/query nick [text]` | Open a DM window |
+| `/me text` | Send an action |
+| `/say text` | Send raw text to current target |
+| `/notice nick text` | Send a notice |
+| `/ctcp nick command` | Send a CTCP command |
+| `/slap nick` | Slap someone with a large trout |
+
+**Identity & Info:**
+
+| Command | Description |
+|---------|-------------|
+| `/nick newnick` | Change your nickname |
+| `/away [message]` | Set away status |
+| `/back` | Remove away status |
+| `/whois nick` | Look up user info |
+| `/whowas nick` | Look up offline user |
+| `/who #channel` | List users in a channel |
+
+**User Modes:**
+
+| Command | Description |
+|---------|-------------|
+| `/mode +mode [args]` | Set channel or user mode |
+| `/op` `/deop` | Give/remove operator (+o) |
+| `/voice` `/devoice` | Give/remove voice (+v) |
+| `/halfop` `/dehalfop` | Give/remove half-op (+h) |
+| `/admin` `/deadmin` | Give/remove admin (+a) |
+| `/owner` `/deowner` | Give/remove owner (+q) |
+
+**Mass Operations:**
+
+| Command | Description |
+|---------|-------------|
+| `/opall` | Op everyone in the channel |
+| `/deopall` | Deop everyone |
+| `/mdop` | Mass deop all except yourself |
+| `/drop` | Strip ALL status (~&@%+) from everyone except you |
+| `/voiceall` `/devoiceall` | Voice/devoice everyone |
+| `/kickall` | Kick everyone except yourself |
+
+**Moderation:**
+
+| Command | Description |
+|---------|-------------|
+| `/kick nick [reason]` | Kick a user |
+| `/ban nick` | Ban a user (nick!*@*) |
+| `/unban mask` | Remove a ban |
+| `/kickban nick [reason]` | Kick and ban |
+| `/tban nick seconds` | Temporary ban with auto-unban |
+| `/banlist` | View the ban list |
+| `/unbanall` | Remove ALL bans from channel |
+| `/unexemptall` | Remove all ban exempts (+e) |
+| `/ignore nick\|mask` | Ignore a user (supports wildcards) |
+| `/unignore nick\|mask` | Stop ignoring a user |
+| `/ignorelist` | Show your ignore list |
+
+**Services:**
+
+| Command | Description |
+|---------|-------------|
+| `/ns command` | Send to NickServ |
+| `/cs command` | Send to ChanServ |
+| `/identify password` | Identify with NickServ |
+| `/register password email` | Register with NickServ |
+| `/ghost nick` | Ghost a nick |
+| `/regain nick` | Recover/regain a nick |
+
+**IRCOp:**
+
+| Command | Description |
+|---------|-------------|
+| `/oper login password` | Authenticate as IRCOp |
+| `/kill nick reason` | Kill a user from the network |
+| `/shun` `/gline` `/zline` `/kline` | Server bans with duration/reason |
+| `/rehash` | Reload server configuration |
+| `/squit server reason` | Disconnect a linked server |
+
+**Encryption:**
+
+| Command | Description |
+|---------|-------------|
+| `/encrypt keygen` | Generate Signal protocol identity |
+| `/encrypt on` | Enable E2E for current DM |
+| `/encrypt off` | Disable E2E for current DM |
+| `/encrypt add #channel` | Set a channel encryption key |
+| `/encrypt rotate` | Rotate your E2E keys |
+
+**Tools:**
+
+| Command | Description |
+|---------|-------------|
+| `/ascii text` | Generate ASCII block-letter art |
+| `/ud word` | Urban Dictionary lookup (sends to channel) |
+| `/shorten url` | Shorten a URL with built-in shortener |
+| `/stats` | Channel statistics dashboard (top talkers) |
+| `/note nick [text]` | Set or view private notes on a nick |
+| `/seen nick` | When a nick was last seen and where |
+| `/dnd on\|off` | Toggle Do Not Disturb mode |
+| `/dnd schedule HH:MM HH:MM` | Schedule quiet hours |
+| `/split` | Toggle split view (two channels side by side) |
+| `/keepnick [nick]` | Keep a nick (auto-reclaim via ISON + events) |
+| `/unkeepnick` | Stop keeping a nick |
+| `/listnick` | List all kept nicks with status |
+| `/ratelimit ms` | Set message rate limit (default 500ms) |
+| `/expire hours` | Auto-delete old messages (0 = off) |
+| `/autolock minutes` | Vault auto-lock after inactivity (0 = off) |
+
+**Connection:**
+
+| Command | Description |
+|---------|-------------|
+| `/connect` | Connect to the current server |
+| `/disconnect` | Disconnect from the current server |
+| `/quote text` | Send a raw IRC command |
+
+**Client:**
+
+| Command | Description |
+|---------|-------------|
+| `/close` | Close the current DM or channel tab |
+| `/clear` | Clear current chat history |
+| `/clearall` | Clear ALL chat buffers |
+| `/help` | Show help panel with all commands |
+| `/ping nick` | CTCP ping a user |
+| `/version nick` | CTCP version a user |
+| `/time nick` | CTCP time a user |
+| `/monitor nick` | Monitor nick online/offline |
+| `/unmonitor nick` | Stop monitoring |
+
+**Fun & Emotes:**
 
 | Command | Output |
 |---------|--------|
@@ -246,7 +359,7 @@ All commands show in the `/` autocomplete dropdown. Type `/` to browse.
 | `/disapprove` | ಠ\_ಠ |
 | `/rage` | (ノಠ益ಠ)ノ彡┻━┻ |
 | `/bear` | ʕ•ᴥ•ʔ |
-| `/sparkle text` | ✧･ﾟ: \*✧･ﾟ:\* text \*:･ﾟ✧\*:･ﾟ✧ |
+| `/sparkle text` | ✧･ﾟ: \*✧ text ✧\*:･ﾟ✧ |
 | `/finger` | ╭∩╮(︶︿︶)╭∩╮ |
 | `/dance` | ♪┏(・o・)┛♪┗(・o・)┓♪ |
 | `/rip name` | ⚰️ R.I.P. name ⚰️ |
@@ -261,9 +374,34 @@ All commands show in the `/` autocomplete dropdown. Type `/` to browse.
 | `Ctrl+U` | Underline text |
 | `Ctrl+I` | Italic text |
 | `Ctrl+O` | Reset formatting |
-| `Tab` | Nick tab completion |
+| `Tab` | Smart nick completion (most recent speaker first, cycles) |
 | `@` | Nick autocomplete dropdown |
+| `#` | Channel autocomplete dropdown |
 | `:` | Emoji autocomplete |
+| `/` | Slash command autocomplete (100+ commands) |
+| `Escape` | Close autocomplete / overlays |
+| `↑` / `↓` | Input history navigation |
+| `Enter` | Send message |
+
+### Settings
+
+Accessible from the sidebar gear menu:
+
+| Panel | Contents |
+|-------|----------|
+| Notifications | Push alerts, desktop popups, sounds, trigger rules, custom highlight words (tag UI), per-network mute |
+| Theme | 71 themes (17 animated), 85 fonts, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
+| Security | Vault auto-lock timer, message expiry, rate limit, block PMs (+g), auto-rejoin, link previews, spellcheck |
+| Monitor | Nick online/offline tracking with push notifications |
+| Notepad | Private encrypted auto-saving notes |
+| Certs | Client TLS certificate management for SASL EXTERNAL |
+| IRCv3 Caps | Toggle individual IRCv3 capabilities per network |
+| Ignored Users | Manage ignore list (nick and wildcard mask support) |
+| My Uploads | View, manage, and delete uploaded files with thumbnails |
+| Sessions | View and revoke active sessions across devices |
+| Vault Password | Change vault passphrase (re-encrypts all data) |
+| Help | Complete command reference, features list, keyboard shortcuts |
+| Admin | User management, registration settings, link preview whitelist |
 
 ### Deployment
 - **Single binary** -- one `cargo build` and you're done
@@ -303,7 +441,9 @@ Browser (PWA)
                       |-- Per-user encrypted log storage
                       |-- Push notifications (Web Push / VAPID)
                       |-- Pastebin with password protection
-                      |-- File uploads
+                      |-- URL shortener with interstitial page
+                      |-- File uploads with metadata stripping
+                      |-- Session management
                       '-- Email verification (Postfix)
 ```
 
@@ -312,11 +452,11 @@ Browser (PWA)
 | Layer | Technology |
 |-------|-----------|
 | Backend | Rust, Tokio, Axum |
-| Encryption | AES-256-GCM, Argon2id, HKDF-SHA256, Signal Protocol (X3DH + Double Ratchet) |
+| Encryption | AES-256-GCM, Argon2id, HKDF-SHA256, Signal Protocol (X3DH + Double Ratchet + Authenticated Headers) |
 | TLS | OpenSSL (client certs), native-tls (server connections) |
-| Frontend | Vanilla JS, Web Crypto API, SVG icons, CSS custom properties |
+| Frontend | Vanilla JS, Web Crypto API, SVG icons (Lucide), CSS custom properties |
 | Push | Web Push with VAPID (RFC 8292), iOS PWA support |
-| IRC | IRCv3.2 with CAP negotiation (20+ capabilities) |
+| IRC | IRCv3.2 with CAP negotiation (17 capabilities, user-toggleable) |
 | Reverse Proxy | Caddy or Nginx (automatic HTTPS) |
 | Mail | Postfix (local relay) |
 
