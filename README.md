@@ -27,6 +27,25 @@
 
 CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Every message, log, and credential is encrypted before it ever touches disk. Connect to any IRC network through a clean, modern interface -- no plugins, no Electron, no telemetry.
 
+## Quick Start
+
+```bash
+# Clone
+git clone https://github.com/gh0st68/CryptIRC.git
+cd CryptIRC
+
+# Deploy (Debian/Ubuntu) — single command, sets up everything
+sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
+```
+
+That's it. Visit `https://yourdomain.com`, register an account, unlock your vault, and connect.
+
+**Install as a PWA** for a native app experience with push notifications:
+
+- **iPhone/iPad**: Safari → Share → Add to Home Screen
+- **Android**: Chrome → Menu → Add to Home Screen
+- **Desktop**: Chrome/Edge → Install icon in address bar
+
 ## Features
 
 ### Encryption & Security
@@ -408,27 +427,6 @@ Accessible from the sidebar gear menu:
 - Interactive deploy script for Debian/Ubuntu with Caddy, Postfix, and systemd
 - Automatic HTTPS via Caddy + Let's Encrypt
 - Hardened systemd unit with full sandboxing
-
-## Quick Start
-
-```bash
-# Clone
-git clone https://github.com/gh0st68/CryptIRC.git
-cd CryptIRC
-
-# Deploy (Debian/Ubuntu)
-sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
-```
-
-Visit `https://yourdomain.com`, register an account, unlock your vault, and connect.
-
-## Install as a PWA
-
-CryptIRC is a Progressive Web App -- install it and it runs like a native app with push notifications.
-
-- **iPhone/iPad**: Safari > Share > Add to Home Screen
-- **Android**: Chrome > Menu > Add to Home Screen
-- **Desktop**: Chrome/Edge > Install icon in address bar
 
 ## Architecture
 
