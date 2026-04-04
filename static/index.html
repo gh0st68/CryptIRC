@@ -846,8 +846,8 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .nick-away { opacity:0.5; }
 .nick-group-hdr { padding:8px 10px 3px; font-size:11px; font-weight:600; color:var(--text3); text-transform:capitalize; letter-spacing:.03em; }
 .away-dot { font-size:10px; margin-right:2px; }
-#typing-indicator { position:absolute; bottom:100%; left:0; right:0; font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; z-index:2; pointer-events:none; text-align:left; }
-#typing-indicator.visible { height:14px; border-top-color:var(--border); }
+#typing-indicator { font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; pointer-events:none; text-align:left; flex-shrink:0; }
+#typing-indicator.visible { height:18px; padding-top:2px; border-top-color:var(--border); }
 
 /* ── WELCOME ───────────────────────────────────────────────────────────────── */
 #welcome { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--text3); padding:40px; text-align:center; }
@@ -1896,8 +1896,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <span id="lag-pill-val"></span>
     </div>
     <div id="reply-bar"><span id="reply-bar-nick"></span><span id="reply-bar-text"></span><span id="reply-bar-close" onclick="cancelReply()">✕</span></div>
-    <div id="input-wrap" style="position:relative">
-      <div id="typing-indicator"></div>
+    <div id="typing-indicator"></div>
+    <div id="input-wrap">
       <div id="input-inner">
         <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore spellcheck="true" autocorrect="on" autocapitalize="off" enterkeyhint="send" type="search">
         <button id="send-btn" onclick="doSend()" title="Send">
