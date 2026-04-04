@@ -219,7 +219,7 @@ pub fn encrypt_with_key(key_bytes: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<S
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
     let nonce      = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher.encrypt(nonce, plaintext)
-        .map_err(|e| anyhow::anyhow!("Encrypt failed: {:?}", e))?;
+        .map_err(|_| anyhow::anyhow!("Encryption failed"))?;
     let mut out = nonce_bytes.to_vec();
     out.extend_from_slice(&ciphertext);
     Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, out))
@@ -231,7 +231,7 @@ pub fn decrypt_with_key(key_bytes: &[u8; KEY_LEN], encoded: &str) -> Result<Vec<
     if data.len() < NONCE_LEN + 16 { bail!("Ciphertext too short"); }
     let nonce = Nonce::from_slice(&data[..NONCE_LEN]);
     let pt    = cipher.decrypt(nonce, &data[NONCE_LEN..])
-        .map_err(|e| anyhow::anyhow!("Decrypt failed: {:?}", e))?;
+        .map_err(|_| anyhow::anyhow!("Decryption failed"))?;
     Ok(pt)
 }
 

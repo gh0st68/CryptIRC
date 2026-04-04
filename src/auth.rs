@@ -238,6 +238,13 @@ impl AuthManager {
         if new_password.len() < 10 {
             bail!("Password must be at least 10 characters");
         }
+        let has_upper = new_password.chars().any(|c| c.is_uppercase());
+        let has_lower = new_password.chars().any(|c| c.is_lowercase());
+        let has_digit = new_password.chars().any(|c| c.is_ascii_digit());
+        let has_special = new_password.chars().any(|c| !c.is_alphanumeric());
+        if !has_upper || !has_lower || !has_digit || !has_special {
+            bail!("Password must contain uppercase, lowercase, number, and special character");
+        }
 
         let reset_path = PathBuf::from(&self.data_dir)
             .join("resets")

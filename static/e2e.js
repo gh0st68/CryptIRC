@@ -227,9 +227,7 @@ async function x3dhInitiate(bundle) {
   }
 
   const ikm          = concat(dh1, dh2, dh3, dh4);
-  console.log('[E2E] X3DH INITIATE ikm:', bytesToBase64(ikm).slice(0,24), 'dh1:', bytesToBase64(dh1).slice(0,16), 'dh2:', bytesToBase64(dh2).slice(0,16), 'dh3:', bytesToBase64(dh3).slice(0,16), 'dh4:', bytesToBase64(dh4).slice(0,16));
   const sharedSecret = await hkdf(ikm, 'X3DH-CryptIRC-v1', 64);
-  console.log('[E2E] X3DH INITIATE sharedSecret:', bytesToBase64(sharedSecret).slice(0,24));
   const ephPub       = await exportPub(ephPair.publicKey, 'ECDH');
   return { sharedSecret, ephemeralPub: ephPub, usedOTPKId };
 }
@@ -278,9 +276,7 @@ async function x3dhRespond(x3dhHeader) {
   }
 
   const ikm = concat(dh1, dh2, dh3, dh4);
-  console.log('[E2E] X3DH RESPOND ikm:', bytesToBase64(ikm).slice(0,24), 'dh1:', bytesToBase64(dh1).slice(0,16), 'dh2:', bytesToBase64(dh2).slice(0,16), 'dh3:', bytesToBase64(dh3).slice(0,16), 'dh4:', bytesToBase64(dh4).slice(0,16));
   const ss = await hkdf(ikm, 'X3DH-CryptIRC-v1', 64);
-  console.log('[E2E] X3DH RESPOND sharedSecret:', bytesToBase64(ss).slice(0,24));
   return ss;
 }
 
@@ -388,12 +384,10 @@ async function _ratchetEncryptInner(nick, plaintext) {
     // ECDH(our current DHs = SPK, their DHr = initiator's DH pub) → derive CKr (unused now) and CKs
     await dhRatchetStep(session, session.DHr);
     // dhRatchetStep derived CKr (for receiving next from initiator) and CKs (for sending now)
-    console.log('[E2E] Responder first send: ratchet step done');
     await saveSession(nick, session);
   }
 
   const [mk, newCKs] = await chainKeyStep(base64ToBytes(session.CKs));
-  console.log('[E2E] ENCRYPT mk:', bytesToBase64(mk).slice(0,16), 'CKs was:', session.CKs.slice(0,16));
   session.CKs        = bytesToBase64(newCKs);
 
   const header = {
@@ -453,7 +447,6 @@ async function ratchetDecrypt(nick, envelope) {
   await skipMessageKeys(session, nick, header.n);
 
   const [mk, newCKr] = await chainKeyStep(base64ToBytes(session.CKr));
-  console.log('[E2E] DECRYPT mk:', bytesToBase64(mk).slice(0,16), 'CKr was:', session.CKr.slice(0,16));
   session.CKr = bytesToBase64(newCKr);
   session.Nr++;
 
@@ -941,7 +934,7 @@ async function e2eDecryptIncoming(from, target, text) {
         await ratchetInitRecv(from, sharedSecret);
         console.log('[E2E] ratchetInitRecv OK, calling ratchetDecrypt...');
         const pt = await ratchetDecrypt(from, envelope);
-        console.log('[E2E] Decrypt OK:', pt.slice(0, 50));
+        console.log('[E2E] Decrypt OK');
 
         if (savedSession && savedSession.CKs) {
           const newSession = E2E.dmSessions[from];

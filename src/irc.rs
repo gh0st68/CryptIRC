@@ -257,7 +257,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
             send(ServerEvent::IrcMessage {
                 conn_id: conn_id.to_string(), from: "*".into(), target: "status".into(),
                 text: "⚠ SASL PLAIN disabled — cannot send credentials over an unencrypted connection. Enable TLS or use SASL EXTERNAL.".into(),
-                ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, prefix: None,
+                ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, msg_id: 0, prefix: None,
             });
             None
         } else {
@@ -588,8 +588,8 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         } else { (MessageKind::Privmsg, text) };
                         // Route PMs to sender's nick, not our own nick
                         let display_target = if target.starts_with(['#','&']) { target.clone() } else { from.clone() };
-                        state.logger.append(username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind, prefix: p.prefix.clone() });
+                        let msg_id = state.logger.append(username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind, msg_id, prefix: p.prefix.clone() });
                         // Push notification for DMs and mentions
                         if from != user_nick {
                             state.notifier.maybe_notify(
@@ -611,8 +611,8 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         } else {
                             from.clone()
                         };
-                        state.logger.append(username, conn_id, &display_target, ts, &from, &text, "notice").await;
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from, target: display_target, text, ts, kind: MessageKind::Notice, prefix: None });
+                        let msg_id = state.logger.append(username, conn_id, &display_target, ts, &from, &text, "notice").await;
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from, target: display_target, text, ts, kind: MessageKind::Notice, msg_id, prefix: None });
                     }
 
                     "JOIN" => {
@@ -671,7 +671,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             send(ServerEvent::IrcMessage {
                                 conn_id: conn_id.to_string(), from: "*".into(), target: ch.clone(),
                                 text: format!("*** {} has changed hostname to {}", nick, new_host),
-                                ts, kind: MessageKind::Notice,
+                                ts, kind: MessageKind::Notice, msg_id: 0,
                                 prefix: None,
                             });
                         }
@@ -679,7 +679,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             send(ServerEvent::IrcMessage {
                                 conn_id: conn_id.to_string(), from: "*".into(), target: "status".into(),
                                 text: format!("*** {} has changed hostname to {}", nick, new_host),
-                                ts, kind: MessageKind::Notice,
+                                ts, kind: MessageKind::Notice, msg_id: 0,
                                 prefix: None,
                             });
                         }
@@ -764,7 +764,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         send(ServerEvent::IrcMessage {
                             conn_id: conn_id.to_string(), from: "*".into(),
                             target: "status".into(), text: msg, ts,
-                            kind: MessageKind::Notice,
+                            kind: MessageKind::Notice, msg_id: 0,
                             prefix: None,
                         });
                     }
@@ -798,7 +798,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         send(ServerEvent::IrcMessage {
                             conn_id: conn_id.to_string(), from: "*".into(),
                             target: "status".into(), text, ts,
-                            kind: MessageKind::Notice,
+                            kind: MessageKind::Notice, msg_id: 0,
                             prefix: None,
                         });
                     }
@@ -808,7 +808,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         send(ServerEvent::IrcMessage {
                             conn_id: conn_id.to_string(), from: "*".into(),
                             target: "status".into(), text, ts,
-                            kind: MessageKind::Notice,
+                            kind: MessageKind::Notice, msg_id: 0,
                             prefix: None,
                         });
                     }
@@ -882,17 +882,17 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let user = p.params.get(2).cloned().unwrap_or_default();
                         let host = p.params.get(3).cloned().unwrap_or_default();
                         let real = p.params.get(5).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("{}!{}@{} ({})", p.params.get(1).cloned().unwrap_or_default(), user, host, real), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("{}!{}@{} ({})", p.params.get(1).cloned().unwrap_or_default(), user, host, real), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "312" => { // RPL_WHOISSERVER
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let text = p.params[2..].join(" ");
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Server: {}", text), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Server: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "313" => { // RPL_WHOISOPERATOR
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let text = p.params.get(2).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "317" => { // RPL_WHOISIDLE
                         let nick = p.params.get(1).cloned().unwrap_or_default();
@@ -900,61 +900,61 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let signon: i64 = p.params.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
                         let idle_str = if idle >= 3600 { format!("{}h {}m {}s", idle/3600, (idle%3600)/60, idle%60) } else if idle >= 60 { format!("{}m {}s", idle/60, idle%60) } else { format!("{}s", idle) };
                         let signon_str = chrono::DateTime::from_timestamp(signon, 0).map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Idle: {} | Signon: {}", idle_str, signon_str), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Idle: {} | Signon: {}", idle_str, signon_str), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "318" => { // RPL_ENDOFWHOIS
                         let nick = p.params.get(1).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "End of WHOIS".into(), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "End of WHOIS".into(), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "319" => { // RPL_WHOISCHANNELS
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let chans = p.params.get(2).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Channels: {}", chans), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Channels: {}", chans), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "330" => { // RPL_WHOISACCOUNT (logged in as)
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let account = p.params.get(2).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Logged in as: {}", account), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Logged in as: {}", account), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "338" => { // RPL_WHOISACTUALLY (actual host/IP)
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let text = p.params[2..].join(" ");
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Actually: {}", text), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Actually: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "671" => { // RPL_WHOISSECURE
                         let nick = p.params.get(1).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "Using secure connection (TLS)".into(), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "Using secure connection (TLS)".into(), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     // Additional WHOIS numerics — route to nick's query buffer
                     "301" => { // RPL_AWAY
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let msg = p.params.get(2).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Away: {}", msg), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Away: {}", msg), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "307" => { // RPL_WHOISREGNICK
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let text = p.params.get(2).cloned().unwrap_or("is a registered nick".into());
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "378" => { // RPL_WHOISHOST (connecting from)
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let text = p.params.get(2).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "379" => { // RPL_WHOISMODES
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let text = p.params.get(2).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "320" => { // RPL_WHOISSPECIAL (identified, bot, etc)
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let text = p.params.get(2).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "275" | "276" => { // RPL_WHOISCERTFP — TLS certificate fingerprint
                         let nick = p.params.get(1).cloned().unwrap_or_default();
                         let text = p.params.get(2).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Certificate: {}", text), ts, kind: MessageKind::Notice, prefix: None });
+                        send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Certificate: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     // 367 = RPL_BANLIST — one entry in the ban list
                     "367" => {
@@ -1008,7 +1008,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             conn_id: conn_id.to_string(), from: "links".into(),
                             target: "status".into(),
                             text: format!("\x02{}\x02 → {} ({})", server, hub, info),
-                            ts, kind: MessageKind::Notice,
+                            ts, kind: MessageKind::Notice, msg_id: 0,
                             prefix: None,
                         });
                     }
@@ -1018,7 +1018,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             conn_id: conn_id.to_string(), from: "links".into(),
                             target: "status".into(),
                             text: "End of /LINKS".into(),
-                            ts, kind: MessageKind::Notice,
+                            ts, kind: MessageKind::Notice, msg_id: 0,
                             prefix: None,
                         });
                     }
@@ -1030,7 +1030,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             p.params.join(" ")
                         };
                         if !text.is_empty() {
-                            state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await;
+                            let msg_id = state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await;
                             send(ServerEvent::IrcMessage {
                                 conn_id: conn_id.to_string(),
                                 from: "*".to_string(),
@@ -1038,6 +1038,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                 text,
                                 ts,
                                 kind: MessageKind::Notice,
+                                msg_id,
                                 prefix: None,
                             });
                         }
@@ -1059,6 +1060,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                 text,
                                 ts,
                                 kind: MessageKind::Notice,
+                                msg_id: 0,
                                 prefix: None,
                             });
                         }

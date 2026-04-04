@@ -116,6 +116,7 @@ pub enum ClientMessage {
     JoinChannel      { conn_id: String, channel: String, key: Option<String> },
     PartChannel      { conn_id: String, channel: String },
     GetLogs          { conn_id: String, target: String, limit: Option<usize>, before: Option<i64> },
+    Sync             { conn_id: String, target: String, after_id: u64 },
     GetState         {},
     // Certificate management
     GenerateCert     { conn_id: String },
@@ -166,6 +167,9 @@ pub enum ClientMessage {
     // Notepad (encrypted per-user)
     SaveNotepad       { content: String },
     LoadNotepad       {},
+    // Channel stats (encrypted)
+    SaveStats         { data: String },
+    LoadStats         {},
     // Clear all user data (logs, notepad, pastes)
     ClearAllData      {},
     // Channel order
@@ -183,9 +187,9 @@ pub enum ServerEvent {
     /// base64-encoded. The client uses it to encrypt/decrypt private E2E key blobs.
     VaultUnlocked    { e2e_enc_key: String },
     VaultError       { message: String },
-    IrcMessage       { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String> },
+    IrcMessage       { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind, msg_id: u64, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String> },
     /// Echo of user's own sent message — for multi-device sync
-    IrcEcho          { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind },
+    IrcEcho          { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind, msg_id: u64 },
     IrcJoin          { conn_id: String, nick: String,  channel: String, ts: i64 },
     /// IRCv3 extended-join: includes account and realname
     IrcJoinEx        { conn_id: String, nick: String,  channel: String, account: String, realname: String, ts: i64 },
@@ -226,6 +230,7 @@ pub enum ServerEvent {
     Reconnecting     { conn_id: String, attempt: u32, delay_secs: u64, reason: String },
     State            { networks: Vec<NetworkState>, vault_unlocked: bool },
     LogLines         { conn_id: String, target: String, lines: Vec<LogLine> },
+    SyncLines        { conn_id: String, target: String, lines: Vec<LogLine> },
     CertInfo         { conn_id: String, fingerprint: String, cert_pem: String },
     // ── E2E events — explicit renames because snake_case turns E2E into e2_e
     #[serde(rename = "e2e_bundle")]
@@ -247,6 +252,7 @@ pub enum ServerEvent {
     Appearance       { settings: String },
     Preferences      { prefs: String },
     Notepad          { content: String },
+    StatsData        { data: String },
     AccountDeleted   {},
     DataCleared      {},
     Error            { message: String },
@@ -324,7 +330,7 @@ pub struct NetworkState {
 pub struct ChannelState { pub name: String, pub topic: String, pub names: Vec<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogLine { pub ts: i64, pub from: String, pub text: String, pub kind: String }
+pub struct LogLine { pub id: u64, pub ts: i64, pub from: String, pub text: String, pub kind: String }
 
 // ─── HTTP types ───────────────────────────────────────────────────────────────
 
@@ -417,13 +423,14 @@ async fn main() -> Result<()> {
     { let a = state.auth.clone(); let s = state.clone();
       tokio::spawn(async move {
           let mut iv = tokio::time::interval(tokio::time::Duration::from_secs(3600));
-          loop { iv.tick().await; a.purge_expired_sessions(); s.prune_user_events(); }
+          loop { iv.tick().await; a.purge_expired_sessions(); s.prune_user_events(); s.paste_store.cleanup_expired().await; }
       });
     }
 
     let base_path = std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into());
     let inner = Router::new()
         .route("/",                      get(serve_index))
+        .route("/Sortable.min.js",       get(serve_sortable_js))
         .route("/e2e.js",                get(serve_e2e_js))
         .route("/manifest.json",         get(serve_manifest))
         .route("/sw.js",                 get(serve_sw))
@@ -491,6 +498,7 @@ async fn serve_icon()     -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/
 async fn serve_icon_192() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-192.png").as_slice()) }
 async fn serve_icon_512() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-512.png").as_slice()) }
 async fn serve_e2e_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/e2e.js")) }
+async fn serve_sortable_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/Sortable.min.js")) }
 
 async fn serve_file_public(Path(name): Path<String>, State(state): State<AppState>) -> impl IntoResponse {
     let name: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.').collect();
@@ -591,6 +599,9 @@ async fn route_admin_disable_user(State(state): State<AppState>, headers: Header
     };
     if !state.auth.is_admin(&user).await {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if target.to_lowercase() == user.to_lowercase() {
+        return (StatusCode::BAD_REQUEST, Json(Msg { message: "Cannot disable yourself.".into() })).into_response();
     }
     match state.auth.disable_user(&target).await {
         Ok(_) => (StatusCode::OK, Json(Msg { message: format!("User '{}' disabled.", target) })).into_response(),
@@ -1455,7 +1466,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                                 target.clone()  // PM: target is the recipient nick
                             };
                             // Log our own sent messages so they appear in history
-                            state.logger.append(username, &conn_id, &display_target, ts, &nick, &clean, match &kind {
+                            let msg_id = state.logger.append(username, &conn_id, &display_target, ts, &nick, &clean, match &kind {
                                 MessageKind::Privmsg => "privmsg",
                                 MessageKind::Notice => "notice",
                                 MessageKind::Action => "action",
@@ -1467,6 +1478,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                                 text: clean,
                                 ts,
                                 kind,
+                                msg_id,
                             });
                         }
                     }
@@ -1544,6 +1556,11 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             let start = filtered.len().saturating_sub(lim);
             let lines = filtered[start..].to_vec();
             send(ServerEvent::LogLines { conn_id, target, lines });
+        }
+        ClientMessage::Sync { conn_id, target, after_id } => {
+            if !state.owns_network(username, &conn_id).await { return; }
+            let lines = state.logger.read_logs_since(username, &conn_id, &target, after_id).await.unwrap_or_default();
+            send(ServerEvent::SyncLines { conn_id, target, lines });
         }
         ClientMessage::GetState {} => {
             send(ServerEvent::State {
@@ -1794,6 +1811,8 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                     .join("users").join(&safe_username(username));
                 let _ = tokio::fs::create_dir_all(&dir).await;
                 let _ = tokio::fs::write(dir.join("appearance.json"), &settings).await;
+                // Broadcast to all sessions so other devices update instantly
+                state.send_to_user(username, ServerEvent::Appearance { settings });
             }
         }
         ClientMessage::LoadAppearance {} => {
@@ -1809,6 +1828,8 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                     .join("users").join(&safe_username(username));
                 let _ = tokio::fs::create_dir_all(&dir).await;
                 let _ = tokio::fs::write(dir.join("preferences.json"), &prefs).await;
+                // Broadcast to all sessions so other devices update instantly
+                state.send_to_user(username, ServerEvent::Preferences { prefs });
             }
         }
         ClientMessage::LoadPreferences {} => {
@@ -1841,6 +1862,32 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                     }
                 } else {
                     send(ServerEvent::Notepad { content: String::new() });
+                }
+            } else { send(ServerEvent::Error { message: "Vault locked".into() }); }
+        }
+        ClientMessage::SaveStats { data } => {
+            if data.len() > 2_000_000 { send(ServerEvent::Error { message: "Stats too large (max 2MB)".into() }); }
+            else if state.crypto.is_unlocked(username).await {
+                match state.crypto.encrypt(username, data.as_bytes()).await {
+                    Ok(enc) => {
+                        let dir = std::path::PathBuf::from(&state.data_dir).join("users").join(&safe_username(username));
+                        let _ = tokio::fs::create_dir_all(&dir).await;
+                        let _ = tokio::fs::write(dir.join("stats.enc"), &enc).await;
+                    }
+                    Err(e) => send(ServerEvent::Error { message: format!("Save failed: {}", e) }),
+                }
+            } else { send(ServerEvent::Error { message: "Vault locked".into() }); }
+        }
+        ClientMessage::LoadStats {} => {
+            if state.crypto.is_unlocked(username).await {
+                let path = std::path::PathBuf::from(&state.data_dir).join("users").join(&safe_username(username)).join("stats.enc");
+                if let Ok(enc) = tokio::fs::read_to_string(&path).await {
+                    match state.crypto.decrypt(username, enc.trim()).await {
+                        Ok(pt) => send(ServerEvent::StatsData { data: String::from_utf8_lossy(&pt).to_string() }),
+                        Err(_) => send(ServerEvent::StatsData { data: String::new() }),
+                    }
+                } else {
+                    send(ServerEvent::StatsData { data: String::new() });
                 }
             } else { send(ServerEvent::Error { message: "Vault locked".into() }); }
         }
