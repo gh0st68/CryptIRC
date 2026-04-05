@@ -1343,9 +1343,24 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       </div>
     </div>
 
+    <div class="notif-section">
+      <div class="notif-section-title">Diagnostic</div>
+      <div id="notif-diag-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        <button onclick="notifDiagTest('basic')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Basic Popup</button>
+        <button onclick="notifDiagTest('tagged')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">With Tag</button>
+        <button onclick="notifDiagTest('sticky')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Sticky</button>
+        <button onclick="notifDiagTest('silent')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Silent</button>
+        <button onclick="notifDiagTest('sw')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">SW Notif</button>
+        <button onclick="notifDiagTest('sound-pm')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">PM Sound</button>
+        <button onclick="notifDiagTest('sound-mention')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Mention Sound</button>
+      </div>
+      <div id="notif-diag-log" style="margin-top:8px;font-family:var(--mono);font-size:11px;max-height:150px;overflow-y:auto;background:var(--bg1);border-radius:6px;padding:8px;display:none;white-space:pre-wrap"></div>
+    </div>
+
     <div class="modal-actions" style="margin-top:0">
       <button class="btn-cancel" style="flex:none;min-width:80px" onclick="closeNotifModal()">Done</button>
-      <button class="btn-save" id="notif-test-btn" onclick="sendTestNotification()" style="flex:none">📨 Send Test</button>
+      <button class="btn-save" id="notif-test-btn" onclick="sendTestNotification()" style="flex:none">📨 Push Test</button>
     </div>
   </div>
 </div>
@@ -2915,21 +2930,19 @@ function addMessage(conn_id,target,msg){
       const soundCfg=loadAppearance();
       if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
       else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
-      // Browser desktop notification (popup bubble) when tab not focused
+      // Browser desktop notification (popup bubble)
       if(soundCfg.desktopNotif!==false && (isDM || msg.mentioned) && !isDndActive()){
-        if(Notification?.permission==='granted'){
+        const title=isDM?`DM from ${msg.from}`:`${msg.from} in ${target}`;
+        const body=msg.text?.slice(0,120)||'';
+        if(window.electronAPI?.isElectron){
+          window.electronAPI.showNotification(title,body);
+        } else if(Notification?.permission==='granted'){
           try{
-            const title=isDM?`DM from ${msg.from}`:`${msg.from} in ${target}`;
-            const body=msg.text?.slice(0,120)||'';
-            if(swRegistration){
-              swRegistration.showNotification(title,{body,icon:'/cryptirc/icon-192.png',badge:'/cryptirc/icon-192.png',tag:conn_id+'/'+target,silent:true,requireInteraction:true,data:{conn_id,target,url:location.href}});
-            } else {
-              const n=new Notification(title,{body,icon:'/cryptirc/icon.svg',tag:conn_id+'/'+target,silent:true});
-              n.onclick=()=>{window.focus();setActive(conn_id,target);n.close();};
-              setTimeout(()=>n.close(),30000);
-            }
-          }catch(e){}
-        } else if(Notification?.permission==='default'){
+            const n=new Notification(title,{body,icon:'/cryptirc/icon-192.png',tag:conn_id+'/'+target,requireInteraction:true,silent:true});
+            n.onclick=()=>{window.focus();setActive(conn_id,target);n.close();};
+            setTimeout(()=>n.close(),60000);
+          }catch(e){console.error('Notification error:',e);}
+        } else if(Notification?.permission!=='denied'){
           Notification.requestPermission?.();
         }
       }
@@ -7733,6 +7746,22 @@ async function showNotifModal() {
   if(spm){cfg.soundPM!==false?spm.classList.add('on'):spm.classList.remove('on');}
   if(smn){cfg.soundMention!==false?smn.classList.add('on'):smn.classList.remove('on');}
   if(dnt){cfg.desktopNotif!==false?dnt.classList.add('on'):dnt.classList.remove('on');}
+  // Diagnostic status
+  const ds=document.getElementById('notif-diag-status');
+  if(ds){
+    const perm=typeof Notification!=='undefined'?Notification.permission:'unavailable';
+    const parts=[
+      `API: ${typeof Notification!=='undefined'?'yes':'NO'}`,
+      `Permission: ${perm}`,
+      `SW: ${swRegistration?'yes':'no'}`,
+      `Electron: ${window.electronAPI?.isElectron?'yes':'no'}`,
+      `DND: ${isDndActive()?'ON':'off'}`,
+      `Desktop popups: ${cfg.desktopNotif!==false?'on':'OFF'}`,
+    ];
+    ds.textContent=parts.join(' | ');
+    ds.style.color=perm==='granted'?'var(--text3)':'#f87171';
+  }
+  const dl=document.getElementById('notif-diag-log');if(dl){dl.innerHTML='';dl.style.display='none';}
 }
 function saveHighlightWords(){
   const words=getHighlightWords();
@@ -7926,6 +7955,82 @@ async function reregisterPushSubscription(subJSON) {
   } catch(e) {}
 }
 
+function notifDiagLog(msg,ok){
+  const el=document.getElementById('notif-diag-log');
+  if(!el)return;
+  el.style.display='block';
+  const line=document.createElement('div');
+  line.style.color=ok===true?'#4ade80':ok===false?'#f87171':'var(--text3)';
+  line.textContent=(ok===true?'OK ':'ERR ')+msg;
+  el.appendChild(line);
+  el.scrollTop=el.scrollHeight;
+}
+function notifDiagClear(){
+  const el=document.getElementById('notif-diag-log');if(el){el.innerHTML='';el.style.display='block';}
+}
+async function notifDiagTest(type){
+  notifDiagClear();
+  const log=notifDiagLog;
+  // Status
+  log(`Notification API: ${typeof Notification!=='undefined'?'yes':'NO'}`);
+  if(typeof Notification==='undefined'){log('FATAL: Notification API not available',false);return;}
+  log(`Permission: ${Notification.permission}`,Notification.permission==='granted');
+  if(Notification.permission==='denied'){log('Notifications BLOCKED by browser/OS — go to browser settings to allow',false);return;}
+  if(Notification.permission==='default'){
+    log('Permission not granted — requesting...');
+    try{const r=await Notification.requestPermission();log(`Permission result: ${r}`,r==='granted');if(r!=='granted')return;}catch(e){log(`Request failed: ${e}`,false);return;}
+  }
+  log(`SW registered: ${swRegistration?'yes':'no'}`);
+  log(`Electron: ${window.electronAPI?.isElectron?'yes':'no'}`);
+  log(`DND active: ${isDndActive()}`);
+  const cfg=loadAppearance();
+  log(`desktopNotif setting: ${cfg.desktopNotif!==false?'on':'OFF'}`,cfg.desktopNotif!==false);
+
+  if(type==='sound-pm'){log('Playing PM sound...');_lastSoundAt=0;playNotifSound('pm');log('Sound played',true);return;}
+  if(type==='sound-mention'){log('Playing mention sound...');_lastSoundAt=0;playNotifSound('mention');log('Sound played',true);return;}
+
+  if(type==='sw'){
+    if(!swRegistration){log('No service worker registration',false);return;}
+    log('Calling swRegistration.showNotification...');
+    try{
+      await swRegistration.showNotification('CryptIRC — SW Test',{body:'Service Worker notification',icon:'/cryptirc/icon-192.png',tag:'diag-sw-'+Date.now(),renotify:true,requireInteraction:true});
+      log('SW showNotification resolved — check if popup appeared',true);
+    }catch(e){log(`SW showNotification FAILED: ${e}`,false);}
+    return;
+  }
+
+  const opts={body:'Test notification from CryptIRC',icon:'/cryptirc/icon-192.png'};
+  let label='';
+  if(type==='basic'){label='Basic (no options)';}
+  if(type==='tagged'){opts.tag='diag-tag-'+Date.now();label='With tag';}
+  if(type==='sticky'){opts.tag='diag-sticky-'+Date.now();opts.requireInteraction=true;label='Sticky (requireInteraction:true)';}
+  if(type==='silent'){opts.tag='diag-silent-'+Date.now();opts.silent=true;label='Silent (silent:true)';}
+
+  log(`Testing: ${label}...`);
+  log(`Options: ${JSON.stringify(opts)}`);
+
+  // Electron: use native IPC notification
+  if(window.electronAPI?.isElectron){
+    log('Using Electron native notification via IPC...');
+    try{
+      window.electronAPI.showNotification('CryptIRC — '+label,opts.body);
+      log('IPC sent — check if popup appeared',true);
+    }catch(e){log(`Electron IPC failed: ${e}`,false);}
+    return;
+  }
+
+  // Browser: use Web Notification API
+  try{
+    const n=new Notification('CryptIRC — '+label,opts);
+    n.onshow=()=>log('onshow fired — notification VISIBLE',true);
+    n.onerror=(e)=>log(`onerror fired: ${e.type||e}`,false);
+    n.onclick=()=>{log('Clicked!',true);n.close();};
+    setTimeout(()=>{
+      if(type!=='sticky')n.close();
+      log('Test complete — did you see a popup?');
+    },10000);
+  }catch(e){log(`new Notification THREW: ${e}`,false);}
+}
 async function sendTestNotification() {
   if (!sessionToken) return;
   if (!pushSubscription) {
