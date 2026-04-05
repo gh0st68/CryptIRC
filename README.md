@@ -94,6 +94,92 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 
 ## Features
 
+### Themes (121)
+
+**89 static themes** and **32 animated themes** with real-time canvas effects.
+
+| Theme | Description |
+|-------|-------------|
+| Starfield Warp | Stars zooming toward you (default) |
+| Midnight | Deep dark blue |
+| Dracula | Classic purple-accented dark |
+| Monokai | Warm syntax-inspired dark |
+| Nord | Cool Arctic blue palette |
+| Solarized Dark | Ethan Schoonover's classic |
+| Gruvbox Dark | Retro warm brown tones |
+| Abyss | Pure black void |
+| Light | Clean light theme |
+| Cobalt | Rich blue editor |
+| One Dark | Atom editor inspired |
+| Catppuccin Mocha | Pastel dark with lavender accents |
+| Rose Pine | Soft muted rose |
+| Tokyo Night | Vibrant purple-blue cityscape |
+| Cyberpunk | Neon pink and cyan |
+| Matrix | Green-on-black terminal |
+| Ocean / Ocean Deep / Deep Sea | Sea blue depths |
+| Sunset | Warm purple-orange dusk |
+| Blumhouse | Horror-inspired dark red |
+| Scream | Ghostface neon green |
+| Neon Tokyo / Neon Blue / Neon Mint | Neon cityscape / glow themes |
+| Vaporwave | Retro pastel purple-pink |
+| Blood Moon | Deep crimson dark |
+| Arctic / Frost / Glacier / Winterfell / Tundra | Icy cold tones |
+| Golden Hour / Solar Flare / Sunflower | Warm amber / golden |
+| Midnight Purple / Ultraviolet / Indigo Night | Deep violet / purple |
+| Terminal Green / Retro Terminal / Hacker | Green CRT styles |
+| Stealth / Charcoal / Graphite / Slate / Zinc / Ash / Noir | Monochrome / gray |
+| Lava / Copper / Coffee / Oxide / Pumpkin Spice | Warm earth tones |
+| Cyberdeck / Cybernetic | Dark with neon accents |
+| Phantom / Obsidian / Darkwave / Storm | Dark mysterious |
+| Emerald / Ruby / Sapphire / Amethyst / Coral | Gemstone colors |
+| Rose Gold / Sakura / Bubblegum / Candy / Salmon | Pink / rose tones |
+| Blade Runner / Outrun / Hotline Miami | Retro neon |
+| Lo-fi / Sepia / Desert / Warm Gray | Warm muted vintage |
+| Twilight / Dusk / Mauve | Evening purples / soft |
+| Wine / Burgundy | Deep red elegance |
+| Teal / Spearmint / Verdant / Pine Forest / Wasabi | Green / teal tones |
+| Petrol / Mango / Volcanic | Bold accent colors |
+| Ivory Tower | Light warm theme |
+
+**Animated themes** (32 with canvas overlay effects):
+
+| Theme | Effect |
+|-------|--------|
+| Starfield Warp | Stars zooming from center toward you |
+| Forest Rain | Rain drops with lightning flashes |
+| Deep Space | Drifting stars with shooting stars |
+| Snowfall | Gentle falling snowflakes |
+| Fireflies | Pulsing, drifting glow dots |
+| Aurora | Wavy green/purple light bands |
+| Digital Rain | Matrix-style falling characters |
+| Neon Grid | 80s Tron perspective grid |
+| Underwater | Rising bubbles |
+| Cherry Blossom | Pink petals falling |
+| Ember | Floating orange sparks |
+| Nebula | Colorful drifting gas clouds |
+| Confetti | Colorful falling confetti |
+| Campfire | Warm embers rising with glow |
+| Ocean Waves | Gentle wave motion |
+| Plasma | Morphing color gradients |
+| Alien | UFOs with tractor beams abducting eSheep |
+| Lightning | Storm with zigzag lightning bolts and rain |
+| Sandstorm | Desert sand particles blowing across |
+| Hologram | Cyan scan lines with shimmer effect |
+| Meteors | Streaking meteors across starry sky |
+| Pixel Rain | Retro pixel blocks falling |
+| Synthwave | Retro sun with perspective grid |
+| Toxic Rain | Green acid rain droplets |
+| Fairy Dust | Sparkly particles that pulse and drift |
+| Comets | Glowing comets with trailing tails |
+| Lava Lamp | Soft morphing color blobs |
+| Electric | Arcing electric bolts between nodes |
+| Galaxy | Spiral galaxy with orbiting stars |
+| Glitch | Random colored static and offset glitches |
+| Firewall | Scrolling amber hex characters |
+| Northern | Vivid multi-color aurora curtains |
+
+**Separate mobile theme** -- independent colors, accents, and font sizes for phone vs desktop.
+
 ### Encryption & Security
 - **Per-user vaults** -- each user has their own passphrase and encryption key (Argon2id KDF + AES-256-GCM)
 - **Signal-protocol E2E** for direct messages -- X3DH key agreement + Double Ratchet with authenticated headers
@@ -184,92 +270,6 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 - **Standalone security panel** -- vault auto-lock, message expiry, rate limit, PM blocking, spellcheck, link previews
 - **135 fonts** -- 41 monospace, 45 sans-serif, 20 serif, 17 display, 12 cursive/handwriting from Google Fonts
 - **Clear all data** -- one-click deletion of logs, notepad, and pastes with confirmation
-
-### Themes (121)
-
-**89 static themes** and **32 animated themes** with real-time canvas effects.
-
-| Theme | Description |
-|-------|-------------|
-| Starfield Warp | Stars zooming toward you (default) |
-| Midnight | Deep dark blue |
-| Dracula | Classic purple-accented dark |
-| Monokai | Warm syntax-inspired dark |
-| Nord | Cool Arctic blue palette |
-| Solarized Dark | Ethan Schoonover's classic |
-| Gruvbox Dark | Retro warm brown tones |
-| Abyss | Pure black void |
-| Light | Clean light theme |
-| Cobalt | Rich blue editor |
-| One Dark | Atom editor inspired |
-| Catppuccin Mocha | Pastel dark with lavender accents |
-| Rose Pine | Soft muted rose |
-| Tokyo Night | Vibrant purple-blue cityscape |
-| Cyberpunk | Neon pink and cyan |
-| Matrix | Green-on-black terminal |
-| Ocean / Ocean Deep / Deep Sea | Sea blue depths |
-| Sunset | Warm purple-orange dusk |
-| Blumhouse | Horror-inspired dark red |
-| Scream | Ghostface neon green |
-| Neon Tokyo / Neon Blue / Neon Mint | Neon cityscape / glow themes |
-| Vaporwave | Retro pastel purple-pink |
-| Blood Moon | Deep crimson dark |
-| Arctic / Frost / Glacier / Winterfell / Tundra | Icy cold tones |
-| Golden Hour / Solar Flare / Sunflower | Warm amber / golden |
-| Midnight Purple / Ultraviolet / Indigo Night | Deep violet / purple |
-| Terminal Green / Retro Terminal / Hacker | Green CRT styles |
-| Stealth / Charcoal / Graphite / Slate / Zinc / Ash / Noir | Monochrome / gray |
-| Lava / Copper / Coffee / Oxide / Pumpkin Spice | Warm earth tones |
-| Cyberdeck / Cybernetic | Dark with neon accents |
-| Phantom / Obsidian / Darkwave / Storm | Dark mysterious |
-| Emerald / Ruby / Sapphire / Amethyst / Coral | Gemstone colors |
-| Rose Gold / Sakura / Bubblegum / Candy / Salmon | Pink / rose tones |
-| Blade Runner / Outrun / Hotline Miami | Retro neon |
-| Lo-fi / Sepia / Desert / Warm Gray | Warm muted vintage |
-| Twilight / Dusk / Mauve | Evening purples / soft |
-| Wine / Burgundy | Deep red elegance |
-| Teal / Spearmint / Verdant / Pine Forest / Wasabi | Green / teal tones |
-| Petrol / Mango / Volcanic | Bold accent colors |
-| Ivory Tower | Light warm theme |
-
-**Animated themes** (32 with canvas overlay effects):
-
-| Theme | Effect |
-|-------|--------|
-| Starfield Warp | Stars zooming from center toward you |
-| Forest Rain | Rain drops with lightning flashes |
-| Deep Space | Drifting stars with shooting stars |
-| Snowfall | Gentle falling snowflakes |
-| Fireflies | Pulsing, drifting glow dots |
-| Aurora | Wavy green/purple light bands |
-| Digital Rain | Matrix-style falling characters |
-| Neon Grid | 80s Tron perspective grid |
-| Underwater | Rising bubbles |
-| Cherry Blossom | Pink petals falling |
-| Ember | Floating orange sparks |
-| Nebula | Colorful drifting gas clouds |
-| Confetti | Colorful falling confetti |
-| Campfire | Warm embers rising with glow |
-| Ocean Waves | Gentle wave motion |
-| Plasma | Morphing color gradients |
-| Alien | UFOs with tractor beams abducting eSheep |
-| Lightning | Storm with zigzag lightning bolts and rain |
-| Sandstorm | Desert sand particles blowing across |
-| Hologram | Cyan scan lines with shimmer effect |
-| Meteors | Streaking meteors across starry sky |
-| Pixel Rain | Retro pixel blocks falling |
-| Synthwave | Retro sun with perspective grid |
-| Toxic Rain | Green acid rain droplets |
-| Fairy Dust | Sparkly particles that pulse and drift |
-| Comets | Glowing comets with trailing tails |
-| Lava Lamp | Soft morphing color blobs |
-| Electric | Arcing electric bolts between nodes |
-| Galaxy | Spiral galaxy with orbiting stars |
-| Glitch | Random colored static and offset glitches |
-| Firewall | Scrolling amber hex characters |
-| Northern | Vivid multi-color aurora curtains |
-
-**Separate mobile theme** -- independent colors, accents, and font sizes for phone vs desktop.
 
 ### Admin
 - **Admin panel** -- user management, stats, registration settings
