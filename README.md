@@ -30,7 +30,50 @@
 
 ---
 
-CryptIRC is a self-hosted, privacy-first IRC client that runs in the browser. Every message, log, and credential is encrypted before it ever touches disk. Connect to any IRC network through a clean, modern interface -- no plugins, no Electron, no telemetry.
+## What is CryptIRC?
+
+CryptIRC is a **self-hosted, encrypted IRC client** that keeps you connected to IRC **24/7** from any device. Your server maintains persistent connections to all your IRC networks — so you never miss a message, even when all your devices are off. When you come back, your full history is waiting, encrypted and synced.
+
+No plugins. No telemetry. No third parties. **You own everything.**
+
+### Available Everywhere
+
+| Platform | How to Get It |
+|----------|---------------|
+| **Windows** | [Download installer](https://github.com/gh0st68/CryptIRC/releases) — native desktop app with system tray |
+| **Linux** | [Download AppImage](https://github.com/gh0st68/CryptIRC/releases) — `chmod +x` and run |
+| **macOS** | [Download zip](https://github.com/gh0st68/CryptIRC/releases) — extract and drag to Applications |
+| **Android** | Open in Chrome/Brave → Menu → **Add to Home Screen** (PWA) |
+| **iPhone / iPad** | Open in Safari → Share → **Add to Home Screen** (PWA) |
+| **Any browser** | Just visit your server URL — nothing to install |
+
+The desktop apps and PWA give you push notifications, offline caching, and a native app feel. The web version works anywhere with a browser.
+
+### Encryption — Everything is Encrypted
+
+CryptIRC encrypts **everything** before it touches disk. The server cannot read your messages, logs, or credentials.
+
+- **Encrypted logs** — every message stored on the server is encrypted with your personal vault key (AES-256-GCM). Even the server admin can't read them.
+- **Signal Protocol E2E for DMs** — private messages use the same encryption as Signal: X3DH key agreement + Double Ratchet with authenticated headers. Forward secrecy and deniability built in.
+- **Channel encryption** — set a pre-shared AES-256-GCM key on any channel. Only people with the key can read messages.
+- **Encrypted credentials** — IRC passwords, NickServ passwords, SASL secrets are all encrypted at rest with your vault key. Never stored in plaintext.
+- **Encrypted notepad** — private notes encrypted server-side with your vault key.
+- **Vault system** — your master passphrase derives an encryption key via Argon2id. Lock the vault and the key is zeroed from memory. Auto-lock after configurable idle time.
+- **Zero-knowledge architecture** — the server is a dumb relay. It cannot decrypt anything.
+
+### Key Features
+
+- **24/7 connectivity** — your server stays connected to IRC around the clock, logs everything encrypted, and syncs across all your devices
+- **Multi-network** — connect to as many IRC networks as you want simultaneously
+- **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
+- **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
+- **121 themes** (32 with animations like starfields, rain, aurora, matrix rain) and **135 fonts**
+- **Full IRCv3 support** — 17 capabilities including typing indicators, away-notify, SASL, MONITOR
+- **100+ slash commands** — everything from `/ascii` art to `/ud` Urban Dictionary lookups
+- **Nick monitoring** — track when specific users come online/offline with push alerts
+- **Inline media** — images, videos, YouTube rich cards, audio player, link previews
+- **Mobile-first PWA** — swipe gestures, safe-area support, works perfectly on iOS and Android
+- **Single Rust binary** — deploy in one command on any Linux server
 
 ## Quick Start
 
@@ -44,12 +87,6 @@ sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
 ```
 
 That's it. Visit `https://yourdomain.com`, register an account, unlock your vault, and connect.
-
-**Install as a PWA** for a native app experience with push notifications:
-
-- **iPhone/iPad**: Safari → Share → Add to Home Screen
-- **Android**: Chrome → Menu → Add to Home Screen
-- **Desktop**: Chrome/Edge → Install icon in address bar
 
 ## Features
 
