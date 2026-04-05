@@ -1815,6 +1815,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     </div>
     <div id="sidebar-scroll">
       <div id="favorites-list"></div>
+      <div id="pm-list" style="padding:0"></div>
       <div id="network-list"></div>
     </div>
     <div id="sidebar-footer">
@@ -3084,6 +3085,7 @@ function _renderSidebarNow(){
   }
   updateCertBtn();
   renderFavorites();
+  renderPMList();
   applyFavsOnly();
 }
 function setNetDot(conn_id,state){
@@ -7185,6 +7187,41 @@ function toggleFavMenu(btn,connId,target,isChannel){
     dd.appendChild(b);
   }
   ci.appendChild(dd);
+}
+
+function renderPMList(){
+  const el=document.getElementById('pm-list');
+  if(!el)return;
+  el.innerHTML='';
+  // Only show when favorites-only mode is active
+  if(localStorage.getItem('cryptirc_favs_only')!=='true')return;
+  const pms=[];
+  for(const net of networks){
+    const id=net.config.id;
+    if(!queryBufs[id])continue;
+    for(const [lc,display] of queryBufs[id]){
+      if(isFavorite(id,lc))continue; // already in favorites section
+      pms.push({conn_id:id,lc,display,net});
+    }
+  }
+  if(!pms.length)return;
+  const hdr=document.createElement('div');hdr.className='fav-header';hdr.textContent='Private Messages';
+  el.appendChild(hdr);
+  for(const pm of pms){
+    const k=bk(pm.conn_id,pm.lc),isA=isActive(pm.conn_id,pm.lc)||isActive(pm.conn_id,pm.display),uc=unread.get(k)||0;
+    const muted=isMuted(pm.conn_id+'/'+pm.lc)||isMuted('net:'+pm.conn_id);
+    const ci=document.createElement('div');
+    ci.className=`chan-item${isA?' active':''}`;
+    ci.dataset.target=pm.lc;
+    ci.dataset.connId=pm.conn_id;
+    ci.style.fontStyle='italic';
+    ci.style.position='relative';
+    const netLabel=esc(pm.net.config.label||pm.net.config.server);
+    ci.innerHTML=`${esc(pm.display)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span><span class="chan-right">${uc&&!muted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${muted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
+    ((cid,lc2)=>{ci.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,cid,lc2,'pm');});})(pm.conn_id,pm.lc);
+    ((cid,disp)=>{ci.onclick=()=>{setActive(cid,disp);closeSidebar();};})(pm.conn_id,pm.display);
+    el.appendChild(ci);
+  }
 }
 
 function toggleFavsOnly(){
