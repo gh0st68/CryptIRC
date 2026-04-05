@@ -17,7 +17,7 @@ use axum::{
 use dashmap::{DashMap, DashSet};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::{Arc, atomic::{AtomicUsize, Ordering}}};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{error, info};
 use uuid::Uuid;
@@ -60,6 +60,8 @@ pub struct AppState {
     pub paste_store:         Arc<paste::PasteStore>,
     pub preview_service:     Arc<preview::PreviewService>,
     pub user_events:         UserEventMap,
+    /// Count of non-idle WS sessions per user. Push fires when this is 0.
+    pub active_sessions:     Arc<DashMap<String, Arc<AtomicUsize>>>,
     pub upload_dir:          String,
     pub base_url:            String,
     pub from_email:          String,
@@ -86,6 +88,19 @@ impl AppState {
             .map(|e| e.key().clone())
             .collect();
         for k in stale { self.user_events.remove(&k); }
+    }
+    /// Get the active-session counter for a user (creates if needed).
+    pub fn active_counter(&self, username: &str) -> Arc<AtomicUsize> {
+        self.active_sessions
+            .entry(username.to_string())
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone()
+    }
+    /// Returns true if the user has zero active (non-idle) WS sessions.
+    pub fn user_is_idle(&self, username: &str) -> bool {
+        self.active_sessions
+            .get(username)
+            .map_or(true, |c| c.load(Ordering::Acquire) == 0)
     }
     pub fn disconnect_requested(&self, conn_id: &str) -> bool {
         self.disconnect_requests.contains(conn_id)
@@ -174,6 +189,9 @@ pub enum ClientMessage {
     ClearAllData      {},
     // Channel order
     SaveChannelOrder  { conn_id: String, order: Vec<String> },
+    // Idle/active status for push notification gating
+    Idle              {},
+    Active            {},
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +430,7 @@ async fn main() -> Result<()> {
         disconnect_requests: Arc::new(DashSet::new()),
         crypto, certs, logger, auth, notifier, e2e_store, paste_store, preview_service,
         user_events:         Arc::new(DashMap::new()),
+        active_sessions:     Arc::new(DashMap::new()),
         upload_dir, base_url, from_email,
         data_dir: data_dir.clone(),
         registration_open: Arc::new(tokio::sync::RwLock::new(registration_open)),
@@ -1241,7 +1260,13 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         }
     }
 
+    // Track this session as active (non-idle) — increment BEFORE subscribing
+    // so the IRC thread never sees receiver_count>0 with active_sessions==0
+    let active_counter = state.active_counter(&username);
+    active_counter.fetch_add(1, Ordering::Release);
+
     let mut event_rx = state.user_tx(&username).subscribe();
+    let session_is_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
     let mut send_task = tokio::spawn(async move {
         while let Ok(evt) = event_rx.recv().await {
@@ -1251,12 +1276,24 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 
     let state2 = state.clone();
     let user2  = username.clone();
+    let counter2 = active_counter.clone();
+    let active2 = session_is_active.clone();
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             // S6: reject oversized messages before parsing
             if let Message::Text(ref text) = msg {
                 if text.len() > WS_MAX_MSG_BYTES { continue; }
                 match serde_json::from_str::<ClientMessage>(text) {
+                    Ok(ClientMessage::Idle {}) => {
+                        if active2.swap(false, Ordering::Release) {
+                            counter2.fetch_sub(1, Ordering::Release);
+                        }
+                    }
+                    Ok(ClientMessage::Active {}) => {
+                        if !active2.swap(true, Ordering::Release) {
+                            counter2.fetch_add(1, Ordering::Release);
+                        }
+                    }
                     Ok(cmd) => handle_command(cmd, &user2, &state2).await,
                     Err(e) => {
                         let preview = if text.len() > 100 { &text[..100] } else { text };
@@ -1271,6 +1308,11 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         _ = &mut send_task => recv_task.abort(),
         _ = &mut recv_task => send_task.abort(),
     }
+
+    // Session disconnecting — decrement active count if this session was still active
+    if session_is_active.load(Ordering::Acquire) {
+        active_counter.fetch_sub(1, Ordering::Release);
+    }
 }
 
 // ─── Command handler ──────────────────────────────────────────────────────────
@@ -1280,6 +1322,8 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
 
     match cmd {
         ClientMessage::Auth { .. } => {}
+        // Idle/Active handled in handle_ws before reaching here
+        ClientMessage::Idle {} | ClientMessage::Active {} => {}
 
         ClientMessage::UnlockVault { passphrase } => {
             match state.crypto.unlock(username, &passphrase).await {

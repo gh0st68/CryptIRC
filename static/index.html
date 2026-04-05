@@ -406,17 +406,17 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 /* nick context menu */
 .nick-ctx {
   position:fixed; z-index:200; background:var(--bg2); border:1px solid var(--border2);
-  border-radius:8px; padding:4px 0; min-width:140px; box-shadow:0 6px 20px rgba(0,0,0,.5);
-  font-size:13px;
+  border-radius:8px; padding:4px 0; min-width:130px; max-height:min(60vh,400px);
+  overflow-y:auto; box-shadow:0 6px 20px rgba(0,0,0,.5); font-size:12px;
 }
 .nick-ctx-item {
-  padding:12px 16px; cursor:pointer; color:var(--text); display:flex; align-items:center; gap:8px;
-  transition:background .1s; min-height:44px;
+  padding:6px 12px; cursor:pointer; color:var(--text); display:flex; align-items:center; gap:6px;
+  transition:background .1s; min-height:28px; white-space:nowrap;
 }
 .nick-ctx-item:hover, .nick-ctx-item:active { background:var(--bg4); }
 .nick-ctx-item:first-child { border-radius:8px 8px 0 0; }
 .nick-ctx-item:last-child { border-radius:0 0 8px 8px; }
-.nick-ctx-sep { height:1px; background:var(--border); margin:4px 0; pointer-events:none; }
+.nick-ctx-sep { height:1px; background:var(--border); margin:2px 0; pointer-events:none; }
 /* channel list modal */
 #chanlist-overlay {
   position:fixed; inset:0; background:rgba(0,0,0,.7); display:none; align-items:center; justify-content:center;
@@ -2219,12 +2219,33 @@ function _onResume(){
   scrollForce();
 }
 document.addEventListener('visibilitychange',()=>{
-  if(!document.hidden) _onResume();
+  if(!document.hidden){_onResume();_resetIdleTimer();}
+  else{
+    // Tab backgrounded — go idle after 60s instead of full 20min
+    clearTimeout(_idleTimer);
+    _idleTimer=setTimeout(()=>{
+      if(!_isIdle){_isIdle=true;if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'idle'}));}
+    },60000);
+  }
 });
 window.addEventListener('pageshow',e=>{
   if(e.persisted) _onResume();
 });
 window.addEventListener('focus',_onResume);
+// ─── Idle detection for push notification gating ──────────────────────────────
+let _idleTimer=null, _isIdle=false;
+const IDLE_TIMEOUT_MS=20*60*1000; // 20 minutes
+function _resetIdleTimer(){
+  if(_isIdle){_isIdle=false;if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'active'}));}
+  clearTimeout(_idleTimer);
+  _idleTimer=setTimeout(()=>{
+    if(!_isIdle){_isIdle=true;if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'idle'}));}
+  },IDLE_TIMEOUT_MS);
+}
+['mousemove','mousedown','keydown','touchstart','scroll','wheel'].forEach(evt=>
+  document.addEventListener(evt,_resetIdleTimer,{passive:true,capture:true})
+);
+_resetIdleTimer();
 // ─── Starfield (Ubiquiti-style) ───────────────────────────────────────────────
 let _starBurst=0,_txBytes=0,_rxBytes=0,_txCount=0,_rxCount=0;
 try{const sc=JSON.parse(localStorage.getItem('cryptirc_stats')||'{}');_txBytes=sc.tx||0;_rxBytes=sc.rx||0;_txCount=sc.tc||0;_rxCount=sc.rc||0;}catch(e){}
@@ -2303,6 +2324,8 @@ function handleEvent(ev) {
     case 'auth_required': wsend({type:'auth',token:sessionToken||''}); break;
     case 'auth_ok':
       currentUser=ev.username;
+      // If idle on reconnect, tell server immediately after auth
+      if(_isIdle&&ws&&ws.readyState===1)ws.send(JSON.stringify({type:'idle'}));
       wsend({type:'load_appearance'}); wsend({type:'load_preferences'});
       // Re-check push subscription after auth
       setTimeout(async()=>{
@@ -2838,8 +2861,9 @@ function getBuf(c,t){const k=bk(c,t);if(!buffers[k])buffers[k]=[];return buffers
 const _lastMsgId={};
 function trackMsgId(conn_id,target,id){if(id>0){const k=bk(conn_id,target);if(!_lastMsgId[k]||id>_lastMsgId[k])_lastMsgId[k]=id;}}
 // ─── Notification sound ───────────────────────────────────────────────────────
-let _audioCtx=null;
+let _audioCtx=null,_lastSoundAt=0;
 function playNotifSound(type){
+  const now=Date.now();if(now-_lastSoundAt<500)return;_lastSoundAt=now;
   try{
     if(!_audioCtx) _audioCtx=new(window.AudioContext||window.webkitAudioContext)();
     const osc=_audioCtx.createOscillator();
@@ -2891,17 +2915,17 @@ function addMessage(conn_id,target,msg){
       if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
       else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
       // Browser desktop notification (popup bubble) when tab not focused
-      if(!document.hasFocus() && soundCfg.desktopNotif!==false && (isDM || msg.mentioned) && !isDndActive()){
+      if(soundCfg.desktopNotif!==false && (isDM || msg.mentioned) && !isDndActive()){
         if(Notification?.permission==='granted'){
           try{
             const title=isDM?`DM from ${msg.from}`:`${msg.from} in ${target}`;
             const body=msg.text?.slice(0,120)||'';
             if(swRegistration){
-              swRegistration.showNotification(title,{body,icon:'/cryptirc/icon-192.png',badge:'/cryptirc/icon-192.png',tag:conn_id+'/'+target,silent:true,data:{conn_id,target,url:location.href}});
+              swRegistration.showNotification(title,{body,icon:'/cryptirc/icon-192.png',badge:'/cryptirc/icon-192.png',tag:conn_id+'/'+target,silent:true,requireInteraction:true,data:{conn_id,target,url:location.href}});
             } else {
               const n=new Notification(title,{body,icon:'/cryptirc/icon.svg',tag:conn_id+'/'+target,silent:true});
               n.onclick=()=>{window.focus();setActive(conn_id,target);n.close();};
-              setTimeout(()=>n.close(),8000);
+              setTimeout(()=>n.close(),30000);
             }
           }catch(e){}
         } else if(Notification?.permission==='default'){
@@ -3019,8 +3043,8 @@ function _renderSidebarNow(){
     chanContainer.className='chan-list';
     chanContainer.dataset.connId=id;
     for(const ch of sorted){
+      if(isFavorite(id,ch.name)) continue; // shown in favorites section
       const k=bk(id,ch.name),isA=isActive(id,ch.name),uc=unread.get(k)||0;
-      const fav=isFavorite(id,ch.name);
       const ci=document.createElement('div');
       ci.className=`chan-item${isA?' active':''}`;
       ci.dataset.target=ch.name;
@@ -3040,8 +3064,8 @@ function _renderSidebarNow(){
     // Render query/PM buffers (NickServ, private messages, etc.)
     if(queryBufs[id]){
       for(const [lc, display] of queryBufs[id]){
+        if(isFavorite(id,lc)) continue; // shown in favorites section
         const k=bk(id,lc),isA=isActive(id,lc),uc=unread.get(k)||0;
-        const pmFav=loadFavorites().some(f=>f.key===id+'/'+lc);
         const qi=document.createElement('div');
         qi.className=`chan-item${isA?' active':''}`;
         qi.dataset.target=lc;
@@ -7083,19 +7107,6 @@ let _sortableFavorites=null;
 function renderFavorites(){
   const el=document.getElementById('favorites-list');
   let favs=loadFavorites();
-  // Clean stale favorites — only if network is connected and has channels loaded
-  const before=favs.length;
-  favs=favs.filter(f=>{
-    const net=networks.find(n=>n.config.id===f.conn_id);
-    if(!net) return true; // Keep if network not loaded yet
-    if(!net.connected) return true; // Keep if not connected yet
-    if(f.target.startsWith('#')||f.target.startsWith('&')){
-      if(!net.channels||!net.channels.length) return true; // Keep if channels not loaded yet
-      return net.channels.some(c=>c.name===f.target);
-    }
-    return true; // Keep PM favorites
-  });
-  if(favs.length!==before) saveFavorites(favs);
   // Destroy old sortable before rebuilding DOM
   if(_sortableFavorites){_sortableFavorites.destroy();_sortableFavorites=null;}
   el.innerHTML='';
@@ -7110,7 +7121,14 @@ function renderFavorites(){
     ci.dataset.favKey=f.key;
     const netLabel=net?esc(net.config.label||net.config.server):'?';
     const fmc=mentionUnread.get(k)||0;
-    ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span>${uc?`<span class="chan-unread-badge${fmc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}`;
+    const isChan=f.target.startsWith('#')||f.target.startsWith('&')||f.target.startsWith('+')||f.target.startsWith('!');
+    const muteKey=f.conn_id+'/'+f.target;
+    const muted=isMuted(muteKey);
+    ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span><span class="chan-right">${uc?`<span class="chan-unread-badge${fmc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${muted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
+    ci.style.position='relative';
+    ((connId,target,isChannel)=>{
+      ci.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleFavMenu(e.currentTarget,connId,target,isChannel);});
+    })(f.conn_id,f.target,isChan);
     ci.onclick=()=>{setActive(f.conn_id,f.target);closeSidebar();};
     el.appendChild(ci);
   }
@@ -7137,6 +7155,36 @@ function renderFavorites(){
       },
     });
   }
+}
+function toggleFavMenu(btn,connId,target,isChannel){
+  closeChanMenus();
+  const ci=btn.closest('.fav-item');
+  if(!ci)return;
+  let dd=ci.querySelector('.chan-dropdown');
+  if(dd){dd.remove();return;}
+  dd=document.createElement('div');
+  dd.className='chan-dropdown';
+  const muteKey=connId+'/'+target;
+  const muted=isMuted(muteKey);
+  const items=[
+    {text:'★ Unfavorite',action:()=>{toggleFavorite(connId,target);closeChanMenus();}},
+    {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>{toggleMute(muteKey);closeChanMenus();}},
+    {text:'🗑 Clear History',action:()=>{clearBufHistory(connId,target);closeChanMenus();}},
+  ];
+  if(isChannel){
+    items.push({text:'Leave',action:()=>{wsend({type:'part_channel',conn_id:connId,channel:target});closeChanMenus();},style:'color:#f87171'});
+  } else {
+    items.push({text:'Close',action:()=>{toggleFavorite(connId,target);closeQuery(connId,target.toLowerCase());closeChanMenus();},style:'color:#f87171'});
+  }
+  for(const it of items){
+    const b=document.createElement('button');
+    b.className='chan-dropdown-item';
+    b.textContent=it.text;
+    if(it.style)b.style.cssText=it.style;
+    b.addEventListener('click',e=>{e.stopPropagation();it.action();});
+    dd.appendChild(b);
+  }
+  ci.appendChild(dd);
 }
 
 function toggleFavsOnly(){
@@ -7422,10 +7470,10 @@ function showNickMenu(e,nick){
     overlay.addEventListener('click',()=>{closeNickMenu();});
     // Add nick name header
     const hdr=document.createElement('div');
-    hdr.style.cssText='padding:10px 16px;font-weight:700;color:var(--accent);border-bottom:1px solid var(--border);font-size:14px;';
+    hdr.style.cssText='padding:8px 12px;font-weight:700;color:var(--accent);border-bottom:1px solid var(--border);font-size:13px;';
     hdr.textContent=nick;
     menu.insertBefore(hdr,menu.firstChild);
-    menu.style.cssText='position:fixed;z-index:200;background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:4px 0;min-width:200px;max-width:min(280px,85vw);max-height:70vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.6);font-size:14px;';
+    menu.style.cssText='position:fixed;z-index:200;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:4px 0;min-width:180px;max-width:min(260px,85vw);max-height:min(65vh,400px);overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.6);font-size:13px;';
     document.body.appendChild(overlay);
     document.body.appendChild(menu);
     // Center after DOM insertion

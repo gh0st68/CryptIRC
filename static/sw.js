@@ -77,7 +77,7 @@ self.addEventListener('push', e => {
     renotify:          true,
     vibrate:           [150, 50, 150],
     silent:            false,
-    requireInteraction: false,
+    requireInteraction: true,
     data: {
       conn_id: payload.conn_id || '',
       target:  payload.target  || '',

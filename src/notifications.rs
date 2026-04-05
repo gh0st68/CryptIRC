@@ -205,7 +205,7 @@ impl NotificationManager {
             "target":   target,
             "from":     from,
             "is_dm":    is_dm,
-            "tag":      format!("{}-{}", conn_id, target),
+            "tag":      format!("{}/{}", conn_id, target),
         });
 
         let subs = self.load_subscriptions(username).await;
