@@ -25,6 +25,10 @@
 </p>
 
 <p align="center">
+  👻 <b>Developed by gh0st</b>
+</p>
+
+<p align="center">
   <img src="screenshots/client.png" width="900" alt="CryptIRC — Desktop Client">
 </p>
 
