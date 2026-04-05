@@ -594,7 +594,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         // Fires when: no WS connected at all, OR all connected sessions are idle (20m timeout)
                         if from != user_nick && (state.user_events.get(username).map_or(true, |tx| tx.receiver_count() == 0) || state.user_is_idle(username)) {
                             state.notifier.maybe_notify(
-                                username, &user_nick, conn_id, &cfg.label, &display_target, &from, &clean
+                                username, &user_nick, conn_id, &cfg.label, &display_target, &from, &clean, ts
                             ).await;
                         }
                     }

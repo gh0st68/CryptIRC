@@ -168,6 +168,7 @@ impl NotificationManager {
         target:    &str,
         from:      &str,
         text:      &str,
+        ts:        i64,
     ) {
         let prefs = self.load_prefs(username).await;
         if !prefs.enabled { return; }
@@ -204,6 +205,7 @@ impl NotificationManager {
             "conn_id":  conn_id,
             "target":   target,
             "from":     from,
+            "ts":       ts,
             "is_dm":    is_dm,
             "tag":      format!("{}/{}", conn_id, target),
         });

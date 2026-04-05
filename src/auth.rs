@@ -36,6 +36,9 @@ pub struct User {
     pub created_at:    i64,
     #[serde(default)]
     pub admin:         bool,
+    /// Whether the user is allowed to upload files. Off by default — admin must grant it.
+    #[serde(default)]
+    pub can_upload:    bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +164,7 @@ impl AuthManager {
             verified:      false,
             created_at:    Utc::now().timestamp(),
             admin:         false,
+            can_upload:    false,
         };
         let json = serde_json::to_string_pretty(&user)?;
 
@@ -456,6 +460,17 @@ impl AuthManager {
         false
     }
 
+    /// Returns true if the user is allowed to upload files. Admins can always upload.
+    pub async fn can_upload(&self, username: &str) -> bool {
+        let path = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", username.to_lowercase()));
+        if let Ok(json) = tokio::fs::read_to_string(&path).await {
+            if let Ok(user) = serde_json::from_str::<User>(&json) {
+                return user.admin || user.can_upload;
+            }
+        }
+        false
+    }
+
     pub async fn list_users(&self) -> Vec<serde_json::Value> {
         let dir = PathBuf::from(&self.data_dir).join("users");
         let mut users = vec![];
@@ -474,6 +489,7 @@ impl AuthManager {
                                 "email": user.email,
                                 "verified": user.verified,
                                 "admin": user.admin,
+                                "can_upload": user.can_upload,
                                 "created_at": user.created_at,
                                 "sessions": session_count,
                             }));
@@ -490,6 +506,15 @@ impl AuthManager {
         let json = tokio::fs::read_to_string(&path).await?;
         let mut user: User = serde_json::from_str(&json)?;
         user.admin = is_admin;
+        tokio::fs::write(&path, serde_json::to_string_pretty(&user)?).await?;
+        Ok(())
+    }
+
+    pub async fn set_can_upload(&self, username: &str, can_upload: bool) -> Result<()> {
+        let path = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", username.to_lowercase()));
+        let json = tokio::fs::read_to_string(&path).await?;
+        let mut user: User = serde_json::from_str(&json)?;
+        user.can_upload = can_upload;
         tokio::fs::write(&path, serde_json::to_string_pretty(&user)?).await?;
         Ok(())
     }

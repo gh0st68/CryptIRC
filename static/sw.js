@@ -1,7 +1,7 @@
 // CryptIRC Service Worker v9
 // Handles: offline caching, push notifications, notification click actions
 
-const CACHE = 'cryptirc-v201';
+const CACHE = 'cryptirc-v202';
 const STATIC = ['/cryptirc/manifest.json', '/cryptirc/icon.svg', '/cryptirc/icon-192.png', '/cryptirc/icon-512.png'];
 
 // ─── Install ──────────────────────────────────────────────────────────────────
@@ -82,6 +82,7 @@ self.addEventListener('push', e => {
       conn_id: payload.conn_id || '',
       target:  payload.target  || '',
       from:    payload.from    || '',
+      ts:      payload.ts      || 0,
       url:     self.location.origin + '/cryptirc/',
     },
     actions: [
@@ -109,24 +110,47 @@ self.addEventListener('notificationclick', e => {
 
   const data    = e.notification.data || {};
   const target  = encodeURIComponent(data.conn_id + '/' + data.target);
-  const openUrl = data.url + (data.conn_id ? `?open=${target}` : '');
+  const qs      = [];
+  if (data.conn_id) qs.push(`open=${target}`);
+  if (data.ts)      qs.push(`ts=${encodeURIComponent(data.ts)}`);
+  if (data.from)    qs.push(`from=${encodeURIComponent(data.from)}`);
+  const openUrl = data.url + (qs.length ? `?${qs.join('&')}` : '');
 
-  e.waitUntil(
-    self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-      .then(clients => {
-        // Focus an existing tab if one is open
-        for (const client of clients) {
-          if (client.url.startsWith(self.location.origin) && 'focus' in client) {
-            client.postMessage({ type: 'notification_click', conn_id: data.conn_id, target: data.target });
-            return client.focus();
-          }
+  const payload = {
+    type:    'notification_click',
+    conn_id: data.conn_id,
+    target:  data.target,
+    ts:      data.ts,
+    from:    data.from,
+  };
+
+  e.waitUntil((async () => {
+    // Write intent to Cache API as a fallback bridge — client reads this on
+    // startup in case postMessage is lost (iOS PWA wake races, etc.)
+    try {
+      const cache = await caches.open('cryptirc-notif-intent');
+      const body = JSON.stringify({ ...payload, t: Date.now() });
+      await cache.put('/__notif_click__', new Response(body, {
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    } catch (err) { /* non-fatal */ }
+
+    const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+
+    // Try to focus an existing same-origin client
+    for (const client of clientsList) {
+      if (client.url.startsWith(self.location.origin)) {
+        try { client.postMessage(payload); } catch (err) {}
+        if ('focus' in client) {
+          try { return await client.focus(); } catch (err) {}
         }
-        // Otherwise open a new window
-        if (self.clients.openWindow) {
-          return self.clients.openWindow(openUrl);
-        }
-      })
-  );
+      }
+    }
+    // No existing client — open a new window at the URL with nav params
+    if (self.clients.openWindow) {
+      try { return await self.clients.openWindow(openUrl); } catch (err) {}
+    }
+  })());
 });
 
 // ─── Push subscription change (browser revoked permission) ───────────────────

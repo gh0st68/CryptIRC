@@ -461,6 +461,7 @@ async fn main() -> Result<()> {
         .route("/admin/users",           get(route_admin_users))
         .route("/admin/user/:username",  axum::routing::delete(route_admin_delete_user))
         .route("/admin/user/:username/disable", post(route_admin_disable_user))
+        .route("/admin/user/:username/upload-permission", post(route_admin_toggle_upload))
         .route("/admin/settings",        get(route_admin_get_settings).put(route_admin_put_settings))
         .route("/admin/adduser",         post(route_admin_add_user).layer(DefaultBodyLimit::max(4_096)))
         .route("/auth/login",            post(route_login).layer(DefaultBodyLimit::max(8_192)))
@@ -624,6 +625,22 @@ async fn route_admin_disable_user(State(state): State<AppState>, headers: Header
     }
     match state.auth.disable_user(&target).await {
         Ok(_) => (StatusCode::OK, Json(Msg { message: format!("User '{}' disabled.", target) })).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(Msg { message: e.to_string() })).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ToggleUpload { allow: bool }
+
+async fn route_admin_toggle_upload(State(state): State<AppState>, headers: HeaderMap, Path(target): Path<String>, Json(body): Json<ToggleUpload>) -> impl IntoResponse {
+    let Some(user) = extract_session_user(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match state.auth.set_can_upload(&target, body.allow).await {
+        Ok(_) => (StatusCode::OK, Json(Msg { message: format!("Upload permission for '{}' set to {}.", target, body.allow) })).into_response(),
         Err(e) => (StatusCode::NOT_FOUND, Json(Msg { message: e.to_string() })).into_response(),
     }
 }
@@ -885,13 +902,18 @@ async fn route_me(State(state): State<AppState>, headers: HeaderMap) -> impl Int
 async fn route_upload(State(state): State<AppState>, headers: HeaderMap, multipart: Multipart) -> impl IntoResponse {
     match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
         None    => (StatusCode::UNAUTHORIZED, Json(Msg { message: "Not authenticated".into() })).into_response(),
-        Some(user) => match upload::handle_upload(&state.upload_dir, multipart).await {
-            Ok(r)  => {
-                // Track upload for the user
-                let _ = upload::record_upload(&state.data_dir, &user, &r).await;
-                (StatusCode::OK, Json(r)).into_response()
+        Some(user) => {
+            if !state.auth.can_upload(&user).await {
+                return (StatusCode::FORBIDDEN, Json(Msg { message: "Upload permission not granted. Contact an admin.".into() })).into_response();
             }
-            Err(e) => (StatusCode::BAD_REQUEST, Json(Msg { message: e.to_string() })).into_response(),
+            match upload::handle_upload(&state.upload_dir, multipart).await {
+                Ok(r)  => {
+                    // Track upload for the user
+                    let _ = upload::record_upload(&state.data_dir, &user, &r).await;
+                    (StatusCode::OK, Json(r)).into_response()
+                }
+                Err(e) => (StatusCode::BAD_REQUEST, Json(Msg { message: e.to_string() })).into_response(),
+            }
         }
     }
 }

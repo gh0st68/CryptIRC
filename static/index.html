@@ -635,16 +635,14 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   min-height:44px; display:flex; align-items:center; gap:8px;
 }
 .topic-menu-item:hover { background:var(--bg4); color:var(--text); }
-/* Desktop: floating pill bottom-right of chat area */
-#lag-pill {
-  position:absolute; bottom:calc(var(--input-bar-h,48px) + 8px); right:12px; z-index:5;
-  display:flex; align-items:center; gap:4px;
-  background:var(--bg2); border:1px solid var(--border); border-radius:12px;
-  padding:3px 10px 3px 8px; font-size:10px; color:var(--text3); opacity:.7;
-  pointer-events:none;
+/* Lag indicator lives in the topbar on both desktop and mobile */
+#lag-mobile {
+  display:inline-flex; align-items:center; gap:3px;
+  font-size:10px; color:var(--text3); flex-shrink:0; opacity:.75;
+  padding:2px 6px; border:1px solid var(--border); border-radius:10px;
+  background:var(--bg2);
 }
-/* Mobile: inline in topbar, hidden on desktop */
-#lag-mobile { display:none; }
+#lag-mobile:empty, #lag-mobile[data-empty="1"] { display:none; }
 .lag-dot { width:7px; height:7px; border-radius:50%; background:var(--text3); flex-shrink:0; }
 .lag-dot.good { background:var(--join); }
 .lag-dot.ok   { background:var(--warn); }
@@ -1105,8 +1103,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   }
   #nick-toggle .toggle-icon { display:none; }
   #nick-toggle .toggle-mobile { display:inline; }
-  #lag-pill     { display:none !important; }
-  #lag-mobile   { display:flex; }
+  #lag-mobile   { font-size:9px; padding:1px 5px; }
   #lag-mobile .lag-dot { width:5px; height:5px; }
   #mentions-btn { display:flex; font-size:16px; }
   #input-nick  { display:none; }
@@ -1866,7 +1863,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <button id="sidebar-toggle-btn" onclick="toggleSidebarCollapse()" title="Toggle channel list"><svg id="sidebar-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
       <button id="hamburger" onclick="toggleSidebar()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
       <span id="chan-title" style="color:var(--text3)">—</span>
-      <span id="lag-mobile" style="align-items:center;gap:2px;font-size:9px;color:var(--text3);flex-shrink:0;opacity:.7">
+      <span id="lag-mobile" data-empty="1" title="Server lag (ping time)">
         <span class="lag-dot" id="lag-mobile-dot"></span>
         <span id="lag-mobile-val"></span>
       </span>
@@ -1907,10 +1904,6 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <span class="badge">Auto-reconnect</span>
         <span class="badge">PWA</span>
       </div>
-    </div>
-    <div id="lag-pill" style="display:none">
-      <span class="lag-dot" id="lag-pill-dot"></span>
-      <span id="lag-pill-val"></span>
     </div>
     <div id="reply-bar"><span id="reply-bar-nick"></span><span id="reply-bar-text"></span><span id="reply-bar-close" onclick="cancelReply()">✕</span></div>
     <div id="typing-indicator"></div>
@@ -2195,13 +2188,21 @@ function showApp() {
   document.getElementById('app').style.display='flex';
   connectWs();
   checkAdmin();
-  // Check for notification_click from SW
+  // Check for notification_click from SW (URL params path)
   const params=new URLSearchParams(location.search);
   const openTarget=params.get('open');
   if(openTarget) {
     const [cid,tgt]=decodeURIComponent(openTarget).split('/');
-    setTimeout(()=>setActive(cid,tgt),800);
+    const ts=params.get('ts');
+    const from=params.get('from');
+    // Stash as pending nav — will execute once networks load via the state handler.
+    // (jumpToMessage re-stashes if networks aren't ready yet.)
+    _pendingNotifNav={conn_id:cid, target:tgt, ts:ts?parseInt(ts):null, from:from||null};
+    // Clean the URL so a refresh doesn't re-trigger the nav
+    try{history.replaceState(null,'',location.pathname+location.hash);}catch(e){}
   }
+  // Also check the SW cache bridge (in case SW wrote intent but postMessage was missed)
+  _readNotifClickCache();
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
@@ -2230,6 +2231,11 @@ function _onResume(){
       wsend({type:'sync',conn_id:active.conn_id,target:active.target,after_id:lastId});
     } else {
       wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
+    }
+    // Refresh the nick list for the active channel — we may have missed JOIN/PART/QUIT
+    // events while the tab was frozen (common on mobile PWA when backgrounded).
+    if(active.target.startsWith('#')||active.target.startsWith('&')){
+      wsend({type:'send',conn_id:active.conn_id,raw:`NAMES ${active.target}`});
     }
   }
   scrollForce();
@@ -2399,6 +2405,8 @@ function handleEvent(ev) {
         if(active&&getBuf(active.conn_id,active.target).length===0)
           wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
       }
+      // Drain any pending notification-click nav now that networks are loaded
+      _drainPendingNotifNav();
       break;
     case 'connecting':   sysMsg(ev.conn_id,'status',`Connecting to ${ev.server}…`,'system'); setNetDot(ev.conn_id,'connecting'); break;
     case 'connected':    sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); keepnickStartPoll(ev.conn_id); break;
@@ -2493,29 +2501,50 @@ function handleEvent(ev) {
         // Suppress x3dh header messages (handled internally, not displayed)
         if (plaintext === null && !encrypted && ev.text.startsWith('[e2ex3dh]')) return;
         const displayText = plaintext !== null ? plaintext : ev.text;
-        // Block PMs if enabled — deliver first message, auto-reply notice, then silently drop for 24h
+        // Block PMs if enabled — per-network settings with global fallback; allow list bypasses
         const _isDmIncoming=ev.target!=='status'&&!ev.target.startsWith('#')&&!ev.target.startsWith('&')&&ev.from!==getNick(ev.conn_id)&&ev.from!=='*';
-        if(_isDmIncoming&&localStorage.getItem('cryptirc_block_pms')==='true'){
-          const _bpKey='bp:'+ev.conn_id+':'+ev.from.toLowerCase();
-          const _bpLast=parseInt(localStorage.getItem(_bpKey)||'0');
-          const _bpFirst=Date.now()-_bpLast>24*3600*1000;
-          if(_bpFirst){
-            localStorage.setItem(_bpKey,String(Date.now()));
-            // Notify the sender — first message is delivered, rest dropped for 24h
-            wsend({type:'send',conn_id:ev.conn_id,raw:`NOTICE ${ev.from} :This CryptIRC user has their private messages turned off. They will receive your first message and if they feel like it they will get back to you. All further messages from you will be silently dropped for the next 24 hours.`});
-            // Let the first message through — don't return
-          } else {
-            return; // silently drop all further messages for 24 hours
+        if(_isDmIncoming){
+          const _pm=getPmSettings(ev.conn_id);
+          if(_pm.enabled&&!isPmAllowedFor(ev.conn_id,ev.from)){
+            const cooldownHrs=_pm.cooldown;
+            const notify=_pm.notify;
+            const deliverFirst=_pm.deliverFirst;
+            const _bpKey='bp:'+ev.conn_id+':'+ev.from.toLowerCase();
+            const _bpLast=parseInt(localStorage.getItem(_bpKey)||'0');
+            const _bpFirst=Date.now()-_bpLast>cooldownHrs*3600*1000;
+            if(_bpFirst){
+              localStorage.setItem(_bpKey,String(Date.now()));
+              if(notify){
+                const hrTxt=cooldownHrs===1?'hour':cooldownHrs<24?cooldownHrs+' hours':cooldownHrs===24?'24 hours':Math.round(cooldownHrs/24)+' days';
+                wsend({type:'send',conn_id:ev.conn_id,raw:`NOTICE ${ev.from} :This CryptIRC user has their private messages turned off.${deliverFirst?' They will receive your first message and if they feel like it they will get back to you.':''} All${deliverFirst?' further':''} messages from you will be silently dropped for the next ${hrTxt}.`});
+              }
+              if(!deliverFirst){
+                recordBlockedPm(ev.conn_id, ev.from, displayText, ev.ts);
+                return; // drop even the first message
+              }
+              // Let the first message through — don't return
+            } else {
+              recordBlockedPm(ev.conn_id, ev.from, displayText, ev.ts);
+              return; // silently drop all further messages during cooldown
+            }
           }
         }
         const mentioned=checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts);
         // ZNC playback detection — batch old messages silently
         const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg',encrypted,mentioned,prefix:ev.prefix||null};
         if(zncDetectBatch(ev.conn_id,ev.target,zncMsg)){
-          // Still add to buffer but don't trigger notifications/sounds
-          const buf=getBuf(ev.conn_id,ev.target);buf.push(zncMsg);if(buf.length>2000)buf.splice(0,buf.length-2000);
+          // Still add to buffer but don't trigger notifications/sounds — dedup by msg_id
+          const _zbuf=getBuf(ev.conn_id,ev.target);
+          let _zdup=false;
+          if(zncMsg.id){
+            const _zts=Math.max(0,_zbuf.length-30);
+            for(let _zi=_zts;_zi<_zbuf.length;_zi++){
+              if(_zbuf[_zi].id===zncMsg.id){_zdup=true;break;}
+            }
+          }
+          if(!_zdup){_zbuf.push(zncMsg);if(_zbuf.length>2000)_zbuf.splice(0,_zbuf.length-2000);}
           trackSeen(ev.from,ev.target,ev.ts);trackStat(ev.conn_id,ev.target,ev.from);
-          if(isActive(ev.conn_id,ev.target))appendMsgRow(zncMsg);
+          if(!_zdup&&isActive(ev.conn_id,ev.target))appendMsgRow(zncMsg);
           return;
         }
         addMessage(ev.conn_id, ev.target, {
@@ -2905,7 +2934,21 @@ function playNotifSound(type){
 }
 
 function addMessage(conn_id,target,msg){
-  const buf=getBuf(conn_id,target); buf.push(msg);
+  const buf=getBuf(conn_id,target);
+  // Dedup by msg_id only. Server-delivered messages carry a unique ID — if
+  // we see the same ID twice in the tail, it's a genuine duplicate (multiple
+  // delivery paths, broadcast glitch, etc.) and should be dropped.
+  // Self-sent local additions have no ID and are always pushed (rapid-fire
+  // identical messages like sending "lol" twice must still appear twice).
+  // irc_echo / echo-message reconciliation is handled separately in its own
+  // handler via _sentMsgs, not here.
+  if(msg&&msg.id&&msg.from!=='*'&&msg.kind!=='system'&&msg.kind!=='error'){
+    const tailStart=Math.max(0,buf.length-30);
+    for(let i=tailStart;i<buf.length;i++){
+      if(buf[i].id===msg.id) return;
+    }
+  }
+  buf.push(msg);
   if(buf.length>2000)buf.splice(0,buf.length-2000);
   // Track channel stats and seen database
   if(msg.kind==='privmsg'||msg.kind==='action'){trackStat(conn_id,target,msg.from);trackSeen(msg.from,target,msg.ts);trackLastSpoke(conn_id,target,msg.from,msg.ts);}
@@ -2934,12 +2977,13 @@ function addMessage(conn_id,target,msg){
       if(soundCfg.desktopNotif!==false && (isDM || msg.mentioned) && !isDndActive()){
         const title=isDM?`DM from ${msg.from}`:`${msg.from} in ${target}`;
         const body=msg.text?.slice(0,120)||'';
+        const notifMeta={conn_id, target, ts:msg.ts, from:msg.from};
         if(window.electronAPI?.isElectron){
-          window.electronAPI.showNotification(title,body);
+          window.electronAPI.showNotification(title, body, notifMeta);
         } else if(Notification?.permission==='granted'){
           try{
             const n=new Notification(title,{body,icon:'/cryptirc/icon-192.png',tag:conn_id+'/'+target,requireInteraction:true,silent:true});
-            n.onclick=()=>{window.focus();setActive(conn_id,target);n.close();};
+            n.onclick=()=>{window.focus();jumpToMessage(conn_id,target,msg.ts,msg.from);n.close();};
             setTimeout(()=>n.close(),60000);
           }catch(e){console.error('Notification error:',e);}
         } else if(Notification?.permission!=='denied'){
@@ -3123,22 +3167,19 @@ function updateLagDisplay(){
   if(!active)return;
   const ms=lagMap[active.conn_id];
   const cls='lag-dot'+(ms!=null?(ms<100?' good':ms<300?' ok':' bad'):'');
-  const txt=ms!=null?ms+'ms':'';
-  // Desktop pill
-  const pill=document.getElementById('lag-pill');
-  const pd=document.getElementById('lag-pill-dot');
-  const pv=document.getElementById('lag-pill-val');
-  if(pill&&pd&&pv){
-    if(ms==null){pill.style.display='none';}
-    else{pill.style.display='';pd.className=cls;pv.textContent=txt;}
-  }
-  // Mobile inline — always show next to channel name
+  // Topbar lag indicator (both desktop and mobile)
   const ml=document.getElementById('lag-mobile');
   const md=document.getElementById('lag-mobile-dot');
   const mv=document.getElementById('lag-mobile-val');
   if(ml&&md&&mv){
-    md.className=cls;
-    mv.textContent=ms!=null?ms+'ms':'';
+    if(ms==null){
+      ml.setAttribute('data-empty','1');
+      mv.textContent='';
+    } else {
+      ml.removeAttribute('data-empty');
+      md.className=cls;
+      mv.textContent=ms+'ms';
+    }
   }
 }
 function setActive(conn_id,target){
@@ -3594,8 +3635,31 @@ document.addEventListener('DOMContentLoaded',()=>{
   });
   // SW messages
   navigator.serviceWorker?.addEventListener('message',e=>{
-    if(e.data?.type==='notification_click'){setActive(e.data.conn_id,e.data.target);}
+    if(e.data?.type==='notification_click'){
+      // jumpToMessage auto-stashes to _pendingNotifNav if state isn't ready
+      if(e.data.ts){ jumpToMessage(e.data.conn_id, e.data.target, parseInt(e.data.ts)||e.data.ts, e.data.from); }
+      else if(networks&&networks.length){ setActive(e.data.conn_id, e.data.target); }
+      else { _pendingNotifNav={conn_id:e.data.conn_id, target:e.data.target, ts:null, from:null}; }
+    }
     if(e.data?.type==='push_resubscribe'&&e.data.subscription){reregisterPushSubscription(e.data.subscription);}
+  });
+  // Electron notification click
+  if(window.electronAPI?.onNotificationClick){
+    window.electronAPI.onNotificationClick(meta=>{
+      if(!meta)return;
+      if(meta.ts) jumpToMessage(meta.conn_id, meta.target, meta.ts, meta.from);
+      else if(networks&&networks.length) setActive(meta.conn_id, meta.target);
+      else _pendingNotifNav={conn_id:meta.conn_id, target:meta.target, ts:null, from:null};
+    });
+  }
+  // Also drain pending nav when the window becomes visible (in case SW message
+  // arrived while page was in bfcache or hidden). Also re-read the SW cache
+  // bridge — iOS PWA wake-ups often miss postMessage but the cache entry persists.
+  document.addEventListener('visibilitychange',()=>{
+    if(!document.hidden){
+      _readNotifClickCache();
+      if(networks && networks.length) _drainPendingNotifNav();
+    }
   });
 });
 
@@ -3987,6 +4051,28 @@ async function handleInput(raw){
       case 'IGNORELIST': case 'IGNORES': {
         const list=[...ignoreList];
         sysMsg(conn_id,target,list.length?`Ignored: ${list.join(', ')}`:'Ignore list is empty','system'); break;
+      }
+      case 'PMALLOW': case 'PMADD': {
+        if(!args[0]){sysMsg(conn_id,target,'Usage: /pmallow <nick>','error');break;}
+        addPmAllow(args[0],conn_id);
+        const _pn=loadPmNet();const _scope=(_pn[conn_id]&&_pn[conn_id].override)?'this network':'global';
+        sysMsg(conn_id,target,`PMs from ${args[0]} will bypass protection (${_scope})`,'system'); break;
+      }
+      case 'PMREMOVE': case 'PMDEL': {
+        if(!args[0]){sysMsg(conn_id,target,'Usage: /pmremove <nick>','error');break;}
+        removePmAllow(args[0],conn_id);
+        const _pn=loadPmNet();const _scope=(_pn[conn_id]&&_pn[conn_id].override)?'this network':'global';
+        sysMsg(conn_id,target,`${args[0]} removed from PM allow list (${_scope})`,'system'); break;
+      }
+      case 'PMALLOWLIST': case 'PMLIST': {
+        const _pn=loadPmNet();
+        const _n=_pn[conn_id];
+        const list=(_n&&_n.override&&Array.isArray(_n.allowList))?[..._n.allowList].sort():[...pmAllowList].sort();
+        const scope=(_n&&_n.override)?'Network':'Global';
+        sysMsg(conn_id,target,list.length?`${scope} PM allow list: ${list.join(', ')}`:`${scope} PM allow list is empty`,'system'); break;
+      }
+      case 'PMPROTECTION': case 'PMSETTINGS': {
+        showPmProtectionPanel(); break;
       }
 
       // ── NickServ / Services shortcuts ────────────────────────────────
@@ -5702,6 +5788,10 @@ document.addEventListener('click',e=>{
     {cmd:'ignore',desc:'Ignore user or mask',usage:'/ignore nick|mask'},
     {cmd:'unignore',desc:'Remove ignore',usage:'/unignore nick|mask'},
     {cmd:'ignorelist',desc:'Show ignored users',usage:'/ignorelist'},
+    {cmd:'pmallow',desc:'Allow PMs from user (bypass protection)',usage:'/pmallow nick'},
+    {cmd:'pmremove',desc:'Remove from PM allow list',usage:'/pmremove nick'},
+    {cmd:'pmallowlist',desc:'Show PM allow list',usage:'/pmallowlist'},
+    {cmd:'pmprotection',desc:'Open PM protection settings',usage:'/pmprotection'},
     // ── Services ──
     {cmd:'ns',desc:'NickServ command',usage:'/ns identify password'},
     {cmd:'cs',desc:'ChanServ command',usage:'/cs op #chan nick'},
@@ -6904,6 +6994,13 @@ function gatherPreferences(){
     lastActive: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_active'));}catch{return null;}})(),
     stats: {tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount},
     ignoreList: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_ignore')||'[]');}catch{return[];}})(),
+    pmAllow: [...pmAllowList],
+    pmBlock: localStorage.getItem('cryptirc_block_pms')==='true',
+    pmCooldown: parseInt(localStorage.getItem('cryptirc_pm_cooldown')||'24'),
+    pmNotify: localStorage.getItem('cryptirc_pm_notify')!=='false',
+    pmDeliverFirst: localStorage.getItem('cryptirc_pm_deliver_first')!=='false',
+    pmNet: loadPmNet(),
+    pmBlocked: loadPmBlocked(),
     highlightWords: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}})(),
     favsOnly: localStorage.getItem('cryptirc_favs_only')==='true',
     sidebarCollapsed: localStorage.getItem('cryptirc_sidebar_collapsed')==='1',
@@ -6969,6 +7066,13 @@ function restorePreferences(p){
     if(p.lastActive) localStorage.setItem('cryptirc_active',JSON.stringify(p.lastActive));
     if(p.stats){_txBytes=p.stats.tx||0;_rxBytes=p.stats.rx||0;_txCount=p.stats.tc||0;_rxCount=p.stats.rc||0;}
     if(p.ignoreList) localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));
+    if(Array.isArray(p.pmAllow)){pmAllowList=new Set(p.pmAllow.map(s=>String(s).toLowerCase()));localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));}
+    if(p.pmBlock!=null) localStorage.setItem('cryptirc_block_pms',p.pmBlock?'true':'false');
+    if(p.pmCooldown!=null) localStorage.setItem('cryptirc_pm_cooldown',String(p.pmCooldown));
+    if(p.pmNotify!=null) localStorage.setItem('cryptirc_pm_notify',p.pmNotify?'true':'false');
+    if(p.pmDeliverFirst!=null) localStorage.setItem('cryptirc_pm_deliver_first',p.pmDeliverFirst?'true':'false');
+    if(p.pmNet&&typeof p.pmNet==='object') localStorage.setItem('cryptirc_pm_net',JSON.stringify(p.pmNet));
+    if(Array.isArray(p.pmBlocked)) localStorage.setItem('cryptirc_pm_blocked',JSON.stringify(p.pmBlocked.slice(-PM_BLOCKED_MAX)));
     if(p.highlightWords) localStorage.setItem('cryptirc_highlight_words',JSON.stringify(p.highlightWords));
     if(p.userNotes) localStorage.setItem('cryptirc_user_notes',JSON.stringify(p.userNotes));
     if(p.channelKeys) localStorage.setItem('cryptirc_chankeys',JSON.stringify(p.channelKeys));
@@ -7478,6 +7582,7 @@ function showNickMenu(e,nick){
     {label:'📝 Note', action:()=>{const notes=loadUserNotes();const existing=notes[nick.toLowerCase()]||'';const n=prompt(`Note for ${nick}:`,existing);if(n!==null){if(n.trim())notes[nick.toLowerCase()]=n.trim();else delete notes[nick.toLowerCase()];saveUserNotes(notes);showToast(n.trim()?`Note saved for ${nick}`:`Note removed for ${nick}`);}}},
     {label:isIgnored(nick)?'Unignore':'Ignore nick', action:()=>{if(isIgnored(nick)){removeIgnore(nick);showToast(`Unignored ${nick}`);}else{addIgnore(nick);showToast(`Ignoring ${nick}`);}}},
     {label:'Ignore by mask', action:()=>{const mask=prompt(`Ignore mask for ${nick}:\n\nExamples:\n  ${nick}!*@*  (nick only)\n  *!*@*.host.com  (by host)\n  *!user@*  (by username)`,`${nick}!*@*`);if(mask&&mask.trim()){addIgnore(mask.trim());showToast(`Ignoring ${mask.trim()}`);}}},
+    {label:(active&&isPmAllowedFor(active.conn_id,nick))?'🛡 Remove PM allow':'🛡 Allow PMs', action:()=>{const cid=active?.conn_id;if(cid&&isPmAllowedFor(cid,nick)){removePmAllow(nick,cid);showToast(`${nick} removed from PM allow list`);}else{addPmAllow(nick,cid);showToast(`PMs from ${nick} will now bypass protection`);}}},
   ];
   // Channel power options — only show if we have sufficient power and in a channel
   if(isChan&&myPower>=2){
@@ -8138,6 +8243,168 @@ function getChannelNonVoiced(conn_id, channel) {
     .filter(n => n !== self);
 }
 
+// ── Jump to a specific message (used by notification clicks, search, mentions) ────
+// Pending nav intent from a notification click — executed when networks are loaded.
+let _pendingNotifNav = null;
+
+function jumpToMessage(conn_id, target, ts, from){
+  if(!conn_id || !target) return;
+  // If networks haven't loaded yet (cold start from notification), stash the
+  // intent and let the state handler retry once state arrives.
+  if(!networks || networks.length === 0){
+    _pendingNotifNav = {conn_id, target, ts, from};
+    return;
+  }
+  const net = networks.find(n => n.config.id === conn_id);
+  if(!net){
+    // Network not available — stash and retry later
+    _pendingNotifNav = {conn_id, target, ts, from};
+    return;
+  }
+  setActive(conn_id, target);
+  // Wait for setActive to render + logs to stream in, then scan for the row
+  let attempts = 0;
+  const tryFind = ()=>{
+    attempts++;
+    const rows = document.querySelectorAll('.msg-row');
+    for(const r of rows){
+      if(r.dataset.ts === String(ts)){
+        if(!from || r.dataset.from === from){
+          r.scrollIntoView({behavior:'smooth', block:'center'});
+          r.classList.add('flash');
+          setTimeout(()=>r.classList.remove('flash'), 3000);
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  // Try immediately, then retry as logs stream in (up to 15 seconds for slow networks/cold start)
+  if(tryFind()) return;
+  const interval = setInterval(()=>{
+    if(tryFind() || attempts > 60){ clearInterval(interval); }
+  }, 250);
+}
+
+// Called by the state handler once networks are loaded, to drain any pending nav.
+function _drainPendingNotifNav(){
+  if(!_pendingNotifNav) return;
+  const p = _pendingNotifNav;
+  _pendingNotifNav = null;
+  jumpToMessage(p.conn_id, p.target, p.ts, p.from);
+}
+
+// Reads SW-cached notification click intent (fallback for when postMessage is
+// lost due to iOS PWA wake races / Electron reloads). Safe to call repeatedly.
+async function _readNotifClickCache(){
+  if(!('caches' in self)) return;
+  try{
+    const cache = await caches.open('cryptirc-notif-intent');
+    const resp = await cache.match('/__notif_click__');
+    if(!resp) return;
+    const data = await resp.json();
+    // Only honor recent intents (within 60 seconds) to avoid stale navigation
+    if(!data.t || Date.now()-data.t > 60000){ await cache.delete('/__notif_click__'); return; }
+    await cache.delete('/__notif_click__');
+    if(data.conn_id && data.target){
+      _pendingNotifNav = {conn_id:data.conn_id, target:data.target, ts:data.ts?parseInt(data.ts)||data.ts:null, from:data.from||null};
+      if(networks && networks.length) _drainPendingNotifNav();
+    }
+  }catch(e){}
+}
+
+// ── PM allow list + per-network settings ─────────────────────────────────────
+let pmAllowList = new Set((()=>{try{return JSON.parse(localStorage.getItem('cryptirc_pm_allow')||'[]');}catch{return[];}})());
+function savePmAllow(){localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));savePrefsToServer();}
+
+// Per-network overrides: {[conn_id]: {override:bool, enabled, cooldown, notify, deliverFirst, allowList:[]}}
+function loadPmNet(){try{return JSON.parse(localStorage.getItem('cryptirc_pm_net')||'{}');}catch{return{};}}
+function savePmNet(obj){localStorage.setItem('cryptirc_pm_net',JSON.stringify(obj));savePrefsToServer();}
+
+// Blocked PMs log — capped at 100 most recent to prevent flood
+const PM_BLOCKED_MAX = 100;
+function loadPmBlocked(){try{const a=JSON.parse(localStorage.getItem('cryptirc_pm_blocked')||'[]');return Array.isArray(a)?a:[];}catch{return[];}}
+function savePmBlocked(arr){
+  if(arr.length>PM_BLOCKED_MAX) arr=arr.slice(-PM_BLOCKED_MAX);
+  localStorage.setItem('cryptirc_pm_blocked',JSON.stringify(arr));
+  savePrefsToServer();
+}
+function recordBlockedPm(conn_id, from, text, ts){
+  const arr=loadPmBlocked();
+  arr.push({
+    conn_id: String(conn_id||''),
+    from:    String(from||''),
+    text:    String(text||'').slice(0,500),
+    ts:      ts||Math.floor(Date.now()/1000),
+  });
+  savePmBlocked(arr);
+}
+function clearPmBlocked(){localStorage.setItem('cryptirc_pm_blocked','[]');savePrefsToServer();}
+
+// Returns effective PM protection settings for a network (network override OR global)
+function getPmSettings(conn_id){
+  const net=loadPmNet();
+  const n=conn_id?net[conn_id]:null;
+  if(n&&n.override){
+    return {
+      enabled:       !!n.enabled,
+      cooldown:      parseInt(n.cooldown||24),
+      notify:        n.notify!==false,
+      deliverFirst:  n.deliverFirst!==false,
+      source:        'network',
+    };
+  }
+  return {
+    enabled:      localStorage.getItem('cryptirc_block_pms')==='true',
+    cooldown:     parseInt(localStorage.getItem('cryptirc_pm_cooldown')||'24'),
+    notify:       localStorage.getItem('cryptirc_pm_notify')!=='false',
+    deliverFirst: localStorage.getItem('cryptirc_pm_deliver_first')!=='false',
+    source:       'global',
+  };
+}
+// Returns true if the nick is allowed for this network.
+// Network override allow list takes priority; otherwise falls through to global list.
+function isPmAllowedFor(conn_id, nick){
+  const ln=String(nick).toLowerCase();
+  const net=loadPmNet();
+  const n=conn_id?net[conn_id]:null;
+  if(n&&n.override&&Array.isArray(n.allowList)){
+    return n.allowList.some(x=>String(x).toLowerCase()===ln);
+  }
+  return pmAllowList.has(ln);
+}
+// Adds/removes nick from the effective list (network override if present, else global)
+function addPmAllow(nick, conn_id){
+  const ln=String(nick).toLowerCase();
+  if(conn_id){
+    const net=loadPmNet();
+    const n=net[conn_id];
+    if(n&&n.override){
+      n.allowList=Array.isArray(n.allowList)?n.allowList:[];
+      if(!n.allowList.includes(ln)) n.allowList.push(ln);
+      savePmNet(net);
+      return;
+    }
+  }
+  pmAllowList.add(ln);
+  savePmAllow();
+}
+function removePmAllow(nick, conn_id){
+  const ln=String(nick).toLowerCase();
+  if(conn_id){
+    const net=loadPmNet();
+    const n=net[conn_id];
+    if(n&&n.override){
+      if(Array.isArray(n.allowList)) n.allowList=n.allowList.filter(x=>String(x).toLowerCase()!==ln);
+      savePmNet(net);
+      return;
+    }
+  }
+  pmAllowList.delete(ln);
+  savePmAllow();
+}
+function isPmAllowed(nick){return pmAllowList.has(String(nick).toLowerCase());}
+
 // ── Client-side ignore list ───────────────────────────────────────────────────
 
 let ignoreList = new Set(JSON.parse(localStorage.getItem('cryptirc_ignore') || '[]'));
@@ -8204,6 +8471,320 @@ function showIgnorePanel(){
     }
   },100);
 }
+
+// Tracks which "scope" the PM Protection panel is currently showing: null = Global, or conn_id
+let _pmPanelScope = null;
+
+// Mutates the per-network override for a conn_id, creating it if needed
+function pmNetPatch(conn_id, patch){
+  const net=loadPmNet();
+  if(!net[conn_id]) net[conn_id]={override:false,enabled:false,cooldown:24,notify:true,deliverFirst:true,allowList:[]};
+  Object.assign(net[conn_id], patch);
+  savePmNet(net);
+}
+
+function showPmProtectionPanel(){
+  const ov=document.createElement('div');
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1100;display:flex;align-items:center;justify-content:center;padding:16px;';
+  const box=document.createElement('div');
+  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(460px,94vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
+
+  function render(){
+    // Determine scope values
+    const scope=_pmPanelScope; // null = global, else conn_id
+    const isGlobal=scope===null;
+    const pmNet=loadPmNet();
+    const netData=(!isGlobal&&pmNet[scope])?pmNet[scope]:null;
+    const overriding=!isGlobal&&!!(netData&&netData.override);
+
+    // Values being edited
+    let enabled, cooldown, notify, deliverFirst, list;
+    if(isGlobal){
+      enabled=localStorage.getItem('cryptirc_block_pms')==='true';
+      cooldown=parseInt(localStorage.getItem('cryptirc_pm_cooldown')||'24');
+      notify=localStorage.getItem('cryptirc_pm_notify')!=='false';
+      deliverFirst=localStorage.getItem('cryptirc_pm_deliver_first')!=='false';
+      list=[...pmAllowList].sort();
+    } else if(overriding){
+      enabled=!!netData.enabled;
+      cooldown=parseInt(netData.cooldown||24);
+      notify=netData.notify!==false;
+      deliverFirst=netData.deliverFirst!==false;
+      list=(Array.isArray(netData.allowList)?[...netData.allowList]:[]).sort();
+    } else {
+      enabled=false;cooldown=24;notify=true;deliverFirst=true;list=[];
+    }
+
+    // Build network selector options
+    let selOpts=`<option value="__global__">🌐 Global (default)</option>`;
+    for(const n of networks){
+      const id=n.config.id;
+      const label=n.config.label||n.config.server||id;
+      const hasOverride=pmNet[id]&&pmNet[id].override;
+      selOpts+=`<option value="${esc(id)}"${scope===id?' selected':''}>${esc(label)}${hasOverride?' ✱':''}</option>`;
+    }
+
+    let html=`<div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
+      <span style="font-weight:700;font-size:14px;color:var(--text)">🛡 PM Protection</span>
+      <span onclick="this.closest('[style*=fixed]').remove()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+    </div>
+    <div style="padding:14px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch">
+
+      <div style="margin-bottom:14px">
+        <label style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;display:block;margin-bottom:6px">Settings Scope</label>
+        <select id="pm-prot-scope" style="width:100%;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none">
+          ${selOpts}
+        </select>
+        <div style="font-size:10px;color:var(--text3);margin-top:4px">${isGlobal?'Default rules applied to all networks unless overridden.':'Per-network rules — overrides Global when enabled.'}</div>
+      </div>`;
+
+    if(!isGlobal){
+      html+=`<div style="margin-bottom:14px;padding:12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <div style="font-size:13px;color:var(--text);font-weight:600">Override global for this network</div>
+            <div style="font-size:11px;color:var(--text3);margin-top:2px">${overriding?'Using custom settings below':'Using global defaults'}</div>
+          </div>
+          <button class="appear-toggle${overriding?' on':''}" id="pm-prot-override"></button>
+        </div>
+      </div>`;
+    }
+
+    if(isGlobal || overriding){
+      html+=`<div style="margin-bottom:14px;padding:12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+          <span style="font-size:13px;color:var(--text);font-weight:600">Enable PM Protection</span>
+          <button class="appear-toggle${enabled?' on':''}" id="pm-prot-enable"></button>
+        </div>
+        <div style="font-size:11px;color:var(--text3)">When enabled, strangers DMing you will be blocked based on the rules below.</div>
+      </div>
+
+      <div style="margin-bottom:14px">
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">Options</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:8px 8px 0 0;border-bottom:none">
+          <div>
+            <div style="font-size:12px;color:var(--text);font-weight:500">Cooldown</div>
+            <div style="font-size:10px;color:var(--text3)">How long to block repeat DMs from the same user</div>
+          </div>
+          <select id="pm-prot-cooldown" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:11px;padding:4px 6px;font-family:var(--mono)">
+            <option value="1">1 hour</option>
+            <option value="6">6 hours</option>
+            <option value="12">12 hours</option>
+            <option value="24">24 hours</option>
+            <option value="72">3 days</option>
+            <option value="168">7 days</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-bottom:none">
+          <div>
+            <div style="font-size:12px;color:var(--text);font-weight:500">Notify sender</div>
+            <div style="font-size:10px;color:var(--text3)">Send a NOTICE explaining why they were blocked</div>
+          </div>
+          <button class="appear-toggle${notify?' on':''}" id="pm-prot-notify"></button>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:0 0 8px 8px">
+          <div>
+            <div style="font-size:12px;color:var(--text);font-weight:500">Deliver first message</div>
+            <div style="font-size:10px;color:var(--text3)">Let the first message through, drop the rest during cooldown</div>
+          </div>
+          <button class="appear-toggle${deliverFirst?' on':''}" id="pm-prot-deliver"></button>
+        </div>
+      </div>
+
+      <div>
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px">${isGlobal?'Global Allow List':'Network Allow List'} <span style="color:var(--text3);font-weight:400;text-transform:none;font-size:10px">— these users bypass protection</span></div>
+        <div style="display:flex;gap:6px;margin-bottom:10px">
+          <input id="pm-allow-input" placeholder="nick" style="flex:1;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none">
+          <button id="pm-allow-add-btn" style="padding:8px 14px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px">+ Add</button>
+        </div>`;
+      if(!list.length){
+        html+=`<div style="color:var(--text3);text-align:center;padding:20px 0;font-size:13px;background:var(--bg2);border:1px dashed var(--border);border-radius:6px">No users in allow list</div>`;
+      } else {
+        html+=`<div id="pm-allow-list" style="max-height:220px;overflow-y:auto;-webkit-overflow-scrolling:touch;background:var(--bg2);border:1px solid var(--border);border-radius:6px">`;
+        for(const nick of list){
+          html+=`<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border)" data-pm-nick="${esc(nick)}">
+            <span style="font-size:13px;color:var(--text);font-family:var(--mono)">✓ ${esc(nick)}</span>
+            <button class="pm-allow-remove" data-nick="${esc(nick)}" style="padding:3px 10px;background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;cursor:pointer;font-size:11px">Remove</button>
+          </div>`;
+        }
+        html+=`</div>`;
+      }
+      html+=`</div>`;
+    } else {
+      html+=`<div style="padding:24px;background:var(--bg2);border:1px dashed var(--border);border-radius:8px;text-align:center;color:var(--text3);font-size:12px">
+        <div style="margin-bottom:6px;font-size:24px">🌐</div>
+        This network is using <b style="color:var(--text)">Global</b> settings.<br>
+        Toggle "Override global" above to customize.
+      </div>`;
+    }
+
+    // ── Recent Blocked Messages (always visible, read-only audit log) ──
+    const blocked=loadPmBlocked();
+    // Filter by scope: Global shows all, Network shows only its own
+    const blockedFiltered=isGlobal?blocked:blocked.filter(b=>b.conn_id===scope);
+    // Show most recent first
+    const blockedShow=[...blockedFiltered].reverse();
+    html+=`<div style="margin-top:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.08em">Recent Blocked Messages <span style="color:var(--text3);font-weight:400;text-transform:none;font-size:10px">— max ${PM_BLOCKED_MAX}, scrollable</span></div>
+        ${blockedShow.length?`<button id="pm-blocked-clear" style="padding:3px 8px;background:none;border:1px solid var(--border);color:var(--text3);border-radius:4px;cursor:pointer;font-size:10px">Clear</button>`:''}
+      </div>`;
+    if(!blockedShow.length){
+      html+=`<div style="color:var(--text3);text-align:center;padding:20px 0;font-size:12px;background:var(--bg2);border:1px dashed var(--border);border-radius:6px">No blocked messages${isGlobal?'':' on this network'}</div>`;
+    } else {
+      html+=`<div id="pm-blocked-list" style="max-height:260px;overflow-y:auto;-webkit-overflow-scrolling:touch;background:var(--bg2);border:1px solid var(--border);border-radius:6px">`;
+      for(let _bi=0;_bi<blockedShow.length;_bi++){
+        const b=blockedShow[_bi];
+        const d=new Date((b.ts||0)*1000);
+        const when=(d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
+        const net=networks.find(n=>n.config.id===b.conn_id);
+        const netLabel=net?esc(net.config.label||net.config.server):'(unknown)';
+        html+=`<div style="padding:10px 12px;border-bottom:1px solid var(--border)">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
+            <div style="display:flex;align-items:center;gap:6px;min-width:0;flex:1">
+              <span style="font-size:12px;color:var(--accent);font-family:var(--mono);font-weight:600">${esc(b.from)}</span>
+              <span style="font-size:9px;color:var(--text3)">·</span>
+              <span style="font-size:10px;color:var(--text3)">${netLabel}</span>
+              <span style="font-size:9px;color:var(--text3)">·</span>
+              <span style="font-size:10px;color:var(--text3)">${when}</span>
+            </div>
+            <button class="pm-blocked-allow" data-nick="${esc(b.from)}" data-conn="${esc(b.conn_id)}" style="padding:3px 10px;background:rgba(0,212,170,.15);border:1px solid var(--accent);color:var(--accent);border-radius:4px;cursor:pointer;font-size:11px;flex-shrink:0;font-weight:600">✓ Allow</button>
+          </div>
+          <div style="font-size:12px;color:var(--text);word-break:break-word;line-height:1.4">${esc(b.text||'')}</div>
+        </div>`;
+      }
+      html+=`</div>`;
+    }
+    html+=`</div>`;
+
+    html+=`</div>`;
+    box.innerHTML=html;
+
+    // All queries are scoped to `box` so they work whether box is attached
+    // to the document or not (first render happens before appendChild).
+    // Set current cooldown value after innerHTML
+    const cd=box.querySelector('#pm-prot-cooldown');
+    if(cd){const opts=[1,6,12,24,72,168];cd.value=opts.includes(cooldown)?String(cooldown):'24';}
+
+    // ── Wire up scope selector ──
+    const sel=box.querySelector('#pm-prot-scope');
+    if(sel) sel.addEventListener('change',()=>{_pmPanelScope=sel.value==='__global__'?null:sel.value;render();});
+
+    // ── Wire up override toggle ──
+    const ovBtn=box.querySelector('#pm-prot-override');
+    if(ovBtn) ovBtn.addEventListener('click',()=>{
+      const willOverride=!overriding;
+      pmNetPatch(_pmPanelScope,{override:willOverride});
+      render();
+    });
+
+    // ── Wire up enable toggle ──
+    const enBtn=box.querySelector('#pm-prot-enable');
+    if(enBtn) enBtn.addEventListener('click',()=>{
+      enBtn.classList.toggle('on');
+      const v=enBtn.classList.contains('on');
+      if(isGlobal){
+        localStorage.setItem('cryptirc_block_pms',v?'true':'false');
+        savePrefsToServer();
+        const sb=document.getElementById('sec-block-pms');
+        if(sb){v?sb.classList.add('on'):sb.classList.remove('on');}
+      } else {
+        pmNetPatch(_pmPanelScope,{enabled:v});
+      }
+    });
+
+    // ── Wire up cooldown select ──
+    if(cd) cd.addEventListener('change',()=>{
+      if(isGlobal){localStorage.setItem('cryptirc_pm_cooldown',cd.value);savePrefsToServer();}
+      else pmNetPatch(_pmPanelScope,{cooldown:parseInt(cd.value)});
+    });
+
+    // ── Wire up notify toggle ──
+    const ntBtn=box.querySelector('#pm-prot-notify');
+    if(ntBtn) ntBtn.addEventListener('click',()=>{
+      ntBtn.classList.toggle('on');
+      const v=ntBtn.classList.contains('on');
+      if(isGlobal){localStorage.setItem('cryptirc_pm_notify',v?'true':'false');savePrefsToServer();}
+      else pmNetPatch(_pmPanelScope,{notify:v});
+    });
+
+    // ── Wire up deliver toggle ──
+    const dvBtn=box.querySelector('#pm-prot-deliver');
+    if(dvBtn) dvBtn.addEventListener('click',()=>{
+      dvBtn.classList.toggle('on');
+      const v=dvBtn.classList.contains('on');
+      if(isGlobal){localStorage.setItem('cryptirc_pm_deliver_first',v?'true':'false');savePrefsToServer();}
+      else pmNetPatch(_pmPanelScope,{deliverFirst:v});
+    });
+
+    // ── Wire up allow list add/remove ──
+    const addBtn=box.querySelector('#pm-allow-add-btn');
+    const addInp=box.querySelector('#pm-allow-input');
+    const doAdd=()=>{
+      const v=(addInp.value||'').trim();
+      if(!v)return;
+      if(isGlobal){pmAllowList.add(v.toLowerCase());savePmAllow();}
+      else {
+        const pn=loadPmNet();
+        if(!pn[_pmPanelScope]) pn[_pmPanelScope]={override:true,enabled:false,cooldown:24,notify:true,deliverFirst:true,allowList:[]};
+        if(!Array.isArray(pn[_pmPanelScope].allowList)) pn[_pmPanelScope].allowList=[];
+        if(!pn[_pmPanelScope].allowList.includes(v.toLowerCase())) pn[_pmPanelScope].allowList.push(v.toLowerCase());
+        savePmNet(pn);
+      }
+      addInp.value='';
+      render();
+    };
+    if(addBtn) addBtn.addEventListener('click',doAdd);
+    if(addInp) addInp.addEventListener('keydown',e=>{if(e.key==='Enter')doAdd();});
+
+    box.querySelectorAll('.pm-allow-remove').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        const n=btn.dataset.nick;
+        if(isGlobal){pmAllowList.delete(n.toLowerCase());savePmAllow();}
+        else {
+          const pn=loadPmNet();
+          if(pn[_pmPanelScope]&&Array.isArray(pn[_pmPanelScope].allowList)){
+            pn[_pmPanelScope].allowList=pn[_pmPanelScope].allowList.filter(x=>String(x).toLowerCase()!==n.toLowerCase());
+            savePmNet(pn);
+          }
+        }
+        render();
+      });
+    });
+
+    // ── Wire up "Allow" buttons in the blocked messages list ──
+    box.querySelectorAll('.pm-blocked-allow').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        const nick=btn.dataset.nick;
+        const conn=btn.dataset.conn;
+        if(!nick) return;
+        // Add to the current scope's allow list (network if override, else global)
+        addPmAllow(nick, isGlobal?null:_pmPanelScope);
+        // Also remove all entries for this nick+conn from blocked list
+        const arr=loadPmBlocked().filter(b=>!(b.from.toLowerCase()===nick.toLowerCase()&&b.conn_id===conn));
+        savePmBlocked(arr);
+        // Clear the cooldown BP key so if the user messages again, they come through
+        try{localStorage.removeItem('bp:'+conn+':'+nick.toLowerCase());}catch(e){}
+        showToast(`${nick} allowed — they can PM you now`);
+        render();
+      });
+    });
+
+    // ── Wire up "Clear" button for blocked messages list ──
+    const clrBtn=box.querySelector('#pm-blocked-clear');
+    if(clrBtn) clrBtn.addEventListener('click',()=>{
+      if(!confirm('Clear all blocked message history?')) return;
+      clearPmBlocked();
+      render();
+    });
+  }
+
+  render();
+  ov.appendChild(box);
+  ov.onclick=e=>{if(e.target===ov){ov.remove();_pmPanelScope=null;}};
+  document.body.appendChild(ov);
+}
+
 function isIgnored(nick, prefix) {
   const lnick = nick.toLowerCase();
   const lpfx = (prefix||'').toLowerCase();
@@ -8311,6 +8892,11 @@ const HELP_TEXT = {
   ignore:      '/ignore <nick>              — Ignore a user (client-side)',
   unignore:    '/unignore <nick>            — Stop ignoring a user',
   ignorelist:  '/ignorelist                 — Show ignore list',
+  // PM protection
+  pmallow:      '/pmallow <nick>             — Allow PMs from user (bypass protection)',
+  pmremove:     '/pmremove <nick>            — Remove user from PM allow list',
+  pmallowlist:  '/pmallowlist                — Show PM allow list',
+  pmprotection: '/pmprotection               — Open PM protection settings',
   // Services
   ns:          '/ns <command>               — Send to NickServ',
   cs:          '/cs <command>               — Send to ChanServ',
@@ -8663,10 +9249,12 @@ async function showAdminPanel(){
       const row=document.createElement('div');
       row.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);';
       const online=u.sessions>0;
+      const uploadOn=u.admin||u.can_upload;
       row.innerHTML=`
         <span style="font-size:10px">${online?'🟢':'⚫'}</span>
         <span style="flex:1;font-size:13px;color:var(--text);font-weight:${u.admin?'700':'400'}">${esc(u.username)}${u.admin?' 👑':''}</span>
         <span style="font-size:10px;color:var(--text3)">${u.sessions} session${u.sessions!==1?'s':''}</span>
+        ${u.admin?'<span style="font-size:10px;color:var(--text3);padding:3px 8px">📎 always</span>':`<button onclick="adminToggleUpload('${esc(u.username)}',${!uploadOn})" title="${uploadOn?'Revoke':'Grant'} upload permission" style="background:${uploadOn?'rgba(0,212,170,.15)':'none'};border:1px solid ${uploadOn?'var(--accent)':'var(--border)'};color:${uploadOn?'var(--accent)':'var(--text3)'};border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">📎 ${uploadOn?'On':'Off'}</button>`}
         ${u.admin?'':`<button onclick="adminDisableUser('${esc(u.username)}')" style="background:none;border:1px solid var(--warn);color:var(--warn);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Disable</button>
         <button onclick="adminDeleteUser('${esc(u.username)}')" style="background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Delete</button>`}
       `;
@@ -8731,6 +9319,18 @@ async function adminDisableUser(username){
   }catch(e){}
 }
 
+async function adminToggleUpload(username,allow){
+  try{
+    const r=await fetch(`/cryptirc/admin/user/${username}/upload-permission`,{
+      method:'POST',
+      headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
+      body:JSON.stringify({allow})
+    });
+    if(r.ok){showToast(`${username} upload: ${allow?'enabled':'disabled'}`);showAdminPanel();}
+    else{showToast('Failed to update upload permission');}
+  }catch(e){showToast('Failed to update upload permission');}
+}
+
 async function adminAddUser(){
   const username=document.getElementById('admin-add-user').value.trim();
   const password=document.getElementById('admin-add-pass').value;
@@ -8778,6 +9378,7 @@ function showHelp(conn_id, target, specific) {
     ['Mass ops',       ['voiceall','devoiceall','opall','deopall','mdop','drop','kickall']],
     ['Kick/Ban',       ['kick','ban','unban','kickban','tban','invite','banlist','unbanall','unexemptall']],
     ['Ignore',         ['ignore','unignore','ignorelist']],
+    ['PM Protection',  ['pmallow','pmremove','pmallowlist','pmprotection']],
     ['Services',       ['ns','cs','identify','ghost','regain']],
     ['Oper',           ['oper','kill','shun','gline','kline','rehash']],
     ['Encryption',     ['encrypt']],
@@ -9355,8 +9956,11 @@ function timeAgo(ts){
       <div class="appear-section">
         <div class="appear-section-title">Privacy</div>
         <div class="appear-row">
-          <div><span class="appear-label">Block private messages</span><div style="font-size:10px;color:var(--text3)">Deliver first message, notify sender, then silently drop for 24h</div></div>
-          <button class="appear-toggle" id="sec-block-pms" onclick="this.classList.toggle('on');localStorage.setItem('cryptirc_block_pms',this.classList.contains('on')?'true':'false')"></button>
+          <div><span class="appear-label">Block private messages</span><div style="font-size:10px;color:var(--text3)">Protect yourself from unwanted DMs with an allow list, cooldown, and optional notice</div></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button onclick="showPmProtectionPanel()" style="background:var(--bg4);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">⚙ Manage</button>
+            <button class="appear-toggle" id="sec-block-pms" onclick="this.classList.toggle('on');localStorage.setItem('cryptirc_block_pms',this.classList.contains('on')?'true':'false');savePrefsToServer()"></button>
+          </div>
         </div>
       </div>
 
