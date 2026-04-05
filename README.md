@@ -29,6 +29,12 @@
 </p>
 
 <p align="center">
+  <b>Don't feel like setting up your own? Use ours — free.</b><br>
+  Register at <a href="https://client.twistednet.org/cryptirc"><code>https://client.twistednet.org/cryptirc</code></a><br>
+  <sub>Your vault key is derived from your passphrase on your device. The passphrase is <b>never</b> sent to the server or stored anywhere. All your logs, DMs, credentials, and notes are encrypted with that key before they touch disk — even we can't read them.</sub>
+</p>
+
+<p align="center">
   <img src="screenshots/client.png" width="900" alt="CryptIRC — Desktop Client">
 </p>
 
