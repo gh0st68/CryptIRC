@@ -20,6 +20,11 @@
 </p>
 
 <p align="center">
+  <b>For support, bugs, or just want to stop by:</b><br>
+  <code>irc.twistednet.org</code> — <b>#dev</b> &amp; <b>#twisted</b>
+</p>
+
+<p align="center">
   <img src="screenshots/client.png" width="900" alt="CryptIRC — Desktop Client">
 </p>
 
