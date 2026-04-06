@@ -1909,7 +1909,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     <div id="typing-indicator"></div>
     <div id="input-wrap">
       <div id="input-inner">
-        <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore spellcheck="true" autocorrect="on" autocapitalize="off" enterkeyhint="send" type="search">
+        <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="nope" data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore data-form-type="other" spellcheck="true" autocorrect="on" autocapitalize="none" enterkeyhint="send" type="search" name="msg-input-irc">
         <button id="send-btn" onclick="doSend()" title="Send">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
@@ -2365,7 +2365,7 @@ function handleEvent(ev) {
       document.getElementById('vault-overlay').classList.remove('show'); renderSidebar();
       {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
       if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key);
-      loadStatsFromServer();
+      if(!_chanStatsLoaded) loadStatsFromServer();
       // Load logs for current channel now that vault is unlocked
       if(active&&getBuf(active.conn_id,active.target).length===0&&active.target!=='status')
         wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
@@ -8596,20 +8596,10 @@ function showPmProtectionPanel(){
         <div style="display:flex;gap:6px;margin-bottom:10px">
           <input id="pm-allow-input" placeholder="nick" style="flex:1;padding:8px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none">
           <button id="pm-allow-add-btn" style="padding:8px 14px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px">+ Add</button>
-        </div>`;
-      if(!list.length){
-        html+=`<div style="color:var(--text3);text-align:center;padding:20px 0;font-size:13px;background:var(--bg2);border:1px dashed var(--border);border-radius:6px">No users in allow list</div>`;
-      } else {
-        html+=`<div id="pm-allow-list" style="max-height:220px;overflow-y:auto;-webkit-overflow-scrolling:touch;background:var(--bg2);border:1px solid var(--border);border-radius:6px">`;
-        for(const nick of list){
-          html+=`<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border)" data-pm-nick="${esc(nick)}">
-            <span style="font-size:13px;color:var(--text);font-family:var(--mono)">✓ ${esc(nick)}</span>
-            <button class="pm-allow-remove" data-nick="${esc(nick)}" style="padding:3px 10px;background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;cursor:pointer;font-size:11px">Remove</button>
-          </div>`;
-        }
-        html+=`</div>`;
-      }
-      html+=`</div>`;
+        </div>
+        <!-- allow list items rendered via DOM API below -->
+        <div id="pm-allow-list-holder"></div>
+      </div>`;
     } else {
       html+=`<div style="padding:24px;background:var(--bg2);border:1px dashed var(--border);border-radius:8px;text-align:center;color:var(--text3);font-size:12px">
         <div style="margin-bottom:6px;font-size:24px">🌐</div>
@@ -8620,45 +8610,130 @@ function showPmProtectionPanel(){
 
     // ── Recent Blocked Messages (always visible, read-only audit log) ──
     const blocked=loadPmBlocked();
-    // Filter by scope: Global shows all, Network shows only its own
     const blockedFiltered=isGlobal?blocked:blocked.filter(b=>b.conn_id===scope);
-    // Show most recent first
     const blockedShow=[...blockedFiltered].reverse();
     html+=`<div style="margin-top:16px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
         <div style="font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.08em">Recent Blocked Messages <span style="color:var(--text3);font-weight:400;text-transform:none;font-size:10px">— max ${PM_BLOCKED_MAX}, scrollable</span></div>
         ${blockedShow.length?`<button id="pm-blocked-clear" style="padding:3px 8px;background:none;border:1px solid var(--border);color:var(--text3);border-radius:4px;cursor:pointer;font-size:10px">Clear</button>`:''}
-      </div>`;
-    if(!blockedShow.length){
-      html+=`<div style="color:var(--text3);text-align:center;padding:20px 0;font-size:12px;background:var(--bg2);border:1px dashed var(--border);border-radius:6px">No blocked messages${isGlobal?'':' on this network'}</div>`;
-    } else {
-      html+=`<div id="pm-blocked-list" style="max-height:260px;overflow-y:auto;-webkit-overflow-scrolling:touch;background:var(--bg2);border:1px solid var(--border);border-radius:6px">`;
-      for(let _bi=0;_bi<blockedShow.length;_bi++){
-        const b=blockedShow[_bi];
-        const d=new Date((b.ts||0)*1000);
-        const when=(d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
-        const net=networks.find(n=>n.config.id===b.conn_id);
-        const netLabel=net?esc(net.config.label||net.config.server):'(unknown)';
-        html+=`<div style="padding:10px 12px;border-bottom:1px solid var(--border)">
-          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">
-            <div style="display:flex;align-items:center;gap:6px;min-width:0;flex:1">
-              <span style="font-size:12px;color:var(--accent);font-family:var(--mono);font-weight:600">${esc(b.from)}</span>
-              <span style="font-size:9px;color:var(--text3)">·</span>
-              <span style="font-size:10px;color:var(--text3)">${netLabel}</span>
-              <span style="font-size:9px;color:var(--text3)">·</span>
-              <span style="font-size:10px;color:var(--text3)">${when}</span>
-            </div>
-            <button class="pm-blocked-allow" data-nick="${esc(b.from)}" data-conn="${esc(b.conn_id)}" style="padding:3px 10px;background:rgba(0,212,170,.15);border:1px solid var(--accent);color:var(--accent);border-radius:4px;cursor:pointer;font-size:11px;flex-shrink:0;font-weight:600">✓ Allow</button>
-          </div>
-          <div style="font-size:12px;color:var(--text);word-break:break-word;line-height:1.4">${esc(b.text||'')}</div>
-        </div>`;
-      }
-      html+=`</div>`;
-    }
-    html+=`</div>`;
+      </div>
+      <!-- blocked list rendered via DOM API below -->
+      <div id="pm-blocked-list-holder"></div>
+    </div>`;
 
     html+=`</div>`;
     box.innerHTML=html;
+
+    // ── DOM-API render of the allow list (safe for any character) ──
+    if(isGlobal || overriding){
+      const allowHolder=box.querySelector('#pm-allow-list-holder');
+      if(allowHolder){
+        allowHolder.innerHTML='';
+        if(!list.length){
+          const empty=document.createElement('div');
+          empty.style.cssText='color:var(--text3);text-align:center;padding:20px 0;font-size:13px;background:var(--bg2);border:1px dashed var(--border);border-radius:6px';
+          empty.textContent='No users in allow list';
+          allowHolder.appendChild(empty);
+        } else {
+          const listWrap=document.createElement('div');
+          listWrap.id='pm-allow-list';
+          listWrap.style.cssText='max-height:220px;overflow-y:auto;-webkit-overflow-scrolling:touch;background:var(--bg2);border:1px solid var(--border);border-radius:6px';
+          for(const nick of list){
+            const row=document.createElement('div');
+            row.style.cssText='display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border)';
+            const label=document.createElement('span');
+            label.style.cssText='font-size:13px;color:var(--text);font-family:var(--mono);word-break:break-all';
+            label.textContent='✓ '+nick;
+            const rm=document.createElement('button');
+            rm.style.cssText='padding:3px 10px;background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;cursor:pointer;font-size:11px;flex-shrink:0';
+            rm.textContent='Remove';
+            ((n)=>{
+              rm.addEventListener('click',()=>{
+                if(isGlobal){pmAllowList.delete(n.toLowerCase());savePmAllow();}
+                else {
+                  const pn=loadPmNet();
+                  if(pn[_pmPanelScope]&&Array.isArray(pn[_pmPanelScope].allowList)){
+                    pn[_pmPanelScope].allowList=pn[_pmPanelScope].allowList.filter(x=>String(x).toLowerCase()!==n.toLowerCase());
+                    savePmNet(pn);
+                  }
+                }
+                render();
+              });
+            })(nick);
+            row.appendChild(label);
+            row.appendChild(rm);
+            listWrap.appendChild(row);
+          }
+          allowHolder.appendChild(listWrap);
+        }
+      }
+    }
+
+    // ── DOM-API render of the blocked messages list ──
+    const blockedHolder=box.querySelector('#pm-blocked-list-holder');
+    if(blockedHolder){
+      blockedHolder.innerHTML='';
+      if(!blockedShow.length){
+        const empty=document.createElement('div');
+        empty.style.cssText='color:var(--text3);text-align:center;padding:20px 0;font-size:12px;background:var(--bg2);border:1px dashed var(--border);border-radius:6px';
+        empty.textContent='No blocked messages'+(isGlobal?'':' on this network');
+        blockedHolder.appendChild(empty);
+      } else {
+        const listWrap=document.createElement('div');
+        listWrap.id='pm-blocked-list';
+        listWrap.style.cssText='max-height:260px;overflow-y:auto;-webkit-overflow-scrolling:touch;background:var(--bg2);border:1px solid var(--border);border-radius:6px';
+        for(const b of blockedShow){
+          const d=new Date((b.ts||0)*1000);
+          const when=(d.getMonth()+1)+'/'+d.getDate()+' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
+          const net=networks.find(n=>n.config.id===b.conn_id);
+          const netLabel=net?(net.config.label||net.config.server):'(unknown)';
+
+          const row=document.createElement('div');
+          row.style.cssText='padding:10px 12px;border-bottom:1px solid var(--border)';
+
+          const head=document.createElement('div');
+          head.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px';
+
+          const meta=document.createElement('div');
+          meta.style.cssText='display:flex;align-items:center;gap:6px;min-width:0;flex:1;flex-wrap:wrap';
+          const nickEl=document.createElement('span');
+          nickEl.style.cssText='font-size:12px;color:var(--accent);font-family:var(--mono);font-weight:600;word-break:break-all';
+          nickEl.textContent=b.from||'';
+          const dot1=document.createElement('span');dot1.style.cssText='font-size:9px;color:var(--text3)';dot1.textContent='·';
+          const netEl=document.createElement('span');netEl.style.cssText='font-size:10px;color:var(--text3)';netEl.textContent=netLabel;
+          const dot2=document.createElement('span');dot2.style.cssText='font-size:9px;color:var(--text3)';dot2.textContent='·';
+          const timeEl=document.createElement('span');timeEl.style.cssText='font-size:10px;color:var(--text3)';timeEl.textContent=when;
+          meta.appendChild(nickEl);meta.appendChild(dot1);meta.appendChild(netEl);meta.appendChild(dot2);meta.appendChild(timeEl);
+
+          const allowBtn=document.createElement('button');
+          allowBtn.style.cssText='padding:3px 10px;background:rgba(0,212,170,.15);border:1px solid var(--accent);color:var(--accent);border-radius:4px;cursor:pointer;font-size:11px;flex-shrink:0;font-weight:600';
+          allowBtn.textContent='✓ Allow';
+          ((nick,conn)=>{
+            allowBtn.addEventListener('click',()=>{
+              if(!nick) return;
+              addPmAllow(nick, isGlobal?null:_pmPanelScope);
+              const arr=loadPmBlocked().filter(bb=>!(bb.from.toLowerCase()===nick.toLowerCase()&&bb.conn_id===conn));
+              savePmBlocked(arr);
+              try{localStorage.removeItem('bp:'+conn+':'+nick.toLowerCase());}catch(e){}
+              showToast(`${nick} allowed — they can PM you now`);
+              render();
+            });
+          })(b.from||'', b.conn_id||'');
+
+          head.appendChild(meta);
+          head.appendChild(allowBtn);
+
+          const textEl=document.createElement('div');
+          textEl.style.cssText='font-size:12px;color:var(--text);word-break:break-word;line-height:1.4';
+          textEl.textContent=b.text||'';
+
+          row.appendChild(head);
+          row.appendChild(textEl);
+          listWrap.appendChild(row);
+        }
+        blockedHolder.appendChild(listWrap);
+      }
+    }
 
     // All queries are scoped to `box` so they work whether box is attached
     // to the document or not (first render happens before appendChild).
@@ -8717,58 +8792,30 @@ function showPmProtectionPanel(){
       else pmNetPatch(_pmPanelScope,{deliverFirst:v});
     });
 
-    // ── Wire up allow list add/remove ──
+    // ── Wire up allow list add input/button (remove buttons are wired inline during DOM build) ──
     const addBtn=box.querySelector('#pm-allow-add-btn');
     const addInp=box.querySelector('#pm-allow-input');
     const doAdd=()=>{
       const v=(addInp.value||'').trim();
       if(!v)return;
-      if(isGlobal){pmAllowList.add(v.toLowerCase());savePmAllow();}
-      else {
+      const vl=v.toLowerCase();
+      if(isGlobal){
+        if(pmAllowList.has(vl)){showToast(`${v} is already allowed`);addInp.value='';return;}
+        pmAllowList.add(vl);savePmAllow();
+      } else {
         const pn=loadPmNet();
         if(!pn[_pmPanelScope]) pn[_pmPanelScope]={override:true,enabled:false,cooldown:24,notify:true,deliverFirst:true,allowList:[]};
         if(!Array.isArray(pn[_pmPanelScope].allowList)) pn[_pmPanelScope].allowList=[];
-        if(!pn[_pmPanelScope].allowList.includes(v.toLowerCase())) pn[_pmPanelScope].allowList.push(v.toLowerCase());
+        if(pn[_pmPanelScope].allowList.includes(vl)){showToast(`${v} is already allowed`);addInp.value='';return;}
+        pn[_pmPanelScope].allowList.push(vl);
         savePmNet(pn);
       }
+      showToast(`✓ ${v} added to allow list`);
       addInp.value='';
       render();
     };
     if(addBtn) addBtn.addEventListener('click',doAdd);
-    if(addInp) addInp.addEventListener('keydown',e=>{if(e.key==='Enter')doAdd();});
-
-    box.querySelectorAll('.pm-allow-remove').forEach(btn=>{
-      btn.addEventListener('click',()=>{
-        const n=btn.dataset.nick;
-        if(isGlobal){pmAllowList.delete(n.toLowerCase());savePmAllow();}
-        else {
-          const pn=loadPmNet();
-          if(pn[_pmPanelScope]&&Array.isArray(pn[_pmPanelScope].allowList)){
-            pn[_pmPanelScope].allowList=pn[_pmPanelScope].allowList.filter(x=>String(x).toLowerCase()!==n.toLowerCase());
-            savePmNet(pn);
-          }
-        }
-        render();
-      });
-    });
-
-    // ── Wire up "Allow" buttons in the blocked messages list ──
-    box.querySelectorAll('.pm-blocked-allow').forEach(btn=>{
-      btn.addEventListener('click',()=>{
-        const nick=btn.dataset.nick;
-        const conn=btn.dataset.conn;
-        if(!nick) return;
-        // Add to the current scope's allow list (network if override, else global)
-        addPmAllow(nick, isGlobal?null:_pmPanelScope);
-        // Also remove all entries for this nick+conn from blocked list
-        const arr=loadPmBlocked().filter(b=>!(b.from.toLowerCase()===nick.toLowerCase()&&b.conn_id===conn));
-        savePmBlocked(arr);
-        // Clear the cooldown BP key so if the user messages again, they come through
-        try{localStorage.removeItem('bp:'+conn+':'+nick.toLowerCase());}catch(e){}
-        showToast(`${nick} allowed — they can PM you now`);
-        render();
-      });
-    });
+    if(addInp) addInp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();doAdd();}});
 
     // ── Wire up "Clear" button for blocked messages list ──
     const clrBtn=box.querySelector('#pm-blocked-clear');
@@ -9541,7 +9588,7 @@ function renderMentionsList(){
   }
 }
 function clearMentions(){mentionsList=[];_unseenMentions=0;saveMentions();updateMentionsBadge();renderMentionsList();}
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\\/g,'&#92;');}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\\/g,'&#92;').replace(/`/g,'&#96;');}
 const MIRC_COLORS=['#fff','#000','#00007f','#009300','#ff0000','#7f0000','#9c009c','#fc7f00','#ffff00','#00fc00','#009393','#00ffff','#0000fc','#ff00ff','#7f7f7f','#d2d2d2'];
 function parseMircColors(s){
   // Process mIRC formatting: \x03fg[,bg] \x02bold \x1Funderline \x1Ditalic \x0F reset \x16 reverse

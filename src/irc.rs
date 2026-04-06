@@ -864,6 +864,45 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let setter = nick_from_prefix(&p.prefix);
                         let target = p.params.get(0).cloned().unwrap_or_default();
                         let modes  = p.params[1..].join(" ");
+                        // Update nick prefixes in server-side names list so reconnecting
+                        // clients get accurate op/voice/etc. status from the State event.
+                        if target.starts_with(['#','&','+','!']) {
+                            let mode_map: &[(char,char)] = &[('o','@'),('v','+'),('h','%'),('a','&'),('q','~')];
+                            let parts: Vec<&str> = modes.split_whitespace().collect();
+                            let mode_str = parts.first().copied().unwrap_or("");
+                            let mut arg_idx = 1usize;
+                            let mut adding = true;
+                            let mut c = conn.lock().await;
+                            if let Some(ch) = c.channels.get_mut(&target) {
+                                for mc in mode_str.chars() {
+                                    if mc == '+' { adding = true; continue; }
+                                    if mc == '-' { adding = false; continue; }
+                                    if let Some(&(_, pfx)) = mode_map.iter().find(|(m,_)| *m == mc) {
+                                        if let Some(&t_nick) = parts.get(arg_idx) {
+                                            arg_idx += 1;
+                                            if let Some(entry) = ch.names.iter_mut().find(|n| strip_pfx(n).eq_ignore_ascii_case(t_nick)) {
+                                                let old_pfx: String = entry.chars().take_while(|c| "~&@%+".contains(*c)).collect();
+                                                let bare = strip_pfx(entry).to_string();
+                                                if adding {
+                                                    if !old_pfx.contains(pfx) {
+                                                        let all_pfx: String = old_pfx.chars().chain(std::iter::once(pfx)).collect();
+                                                        let mut new_pfx = String::new();
+                                                        for ch_c in "~&@%+".chars() {
+                                                            if all_pfx.contains(ch_c) { new_pfx.push(ch_c); }
+                                                        }
+                                                        *entry = format!("{}{}", new_pfx, bare);
+                                                    }
+                                                } else {
+                                                    let new_pfx: String = old_pfx.chars().filter(|c| *c != pfx).collect();
+                                                    *entry = format!("{}{}", new_pfx, bare);
+                                                }
+                                            }
+                                        }
+                                    } else if "beIkl".contains(mc) { arg_idx += 1; }
+                                }
+                            }
+                            drop(c);
+                        }
                         // Route non-channel modes (user modes) to status window
                         let display_target = if target.starts_with(['#','&','+','!']) {
                             target.clone()
