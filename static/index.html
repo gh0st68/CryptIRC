@@ -9441,7 +9441,7 @@ function showHelp(conn_id, target, specific) {
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
 function scrollBottom(){const a=document.getElementById('chat-area');if(!a)return;const nearBottom=a.scrollHeight-a.scrollTop-a.clientHeight<200;if(nearBottom){a.scrollTop=a.scrollHeight;requestAnimationFrame(()=>a.scrollTop=a.scrollHeight);}updateScrollBtn();}
-function scrollForce(){const a=document.getElementById('chat-area');if(!a)return;a.scrollTop=a.scrollHeight;requestAnimationFrame(()=>a.scrollTop=a.scrollHeight);[50,150,300,600].forEach(ms=>setTimeout(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();},ms));}
+function scrollForce(){const a=document.getElementById('chat-area');if(!a)return;a.scrollTop=a.scrollHeight;requestAnimationFrame(()=>{a.scrollTop=a.scrollHeight;});[50,150,300,600,1200,2000].forEach(ms=>setTimeout(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();},ms));if(typeof ResizeObserver!=='undefined'){let _so=new ResizeObserver(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();_so.disconnect();});_so.observe(a);setTimeout(()=>_so.disconnect(),3000);}}
 function updateScrollBtn(){const a=document.getElementById('chat-area'),b=document.getElementById('scroll-bottom-btn');if(!a||!b)return;const far=a.scrollHeight-a.scrollTop-a.clientHeight>200;b.classList.toggle('show',far);}
 // Attach scroll listener once DOM ready
 document.addEventListener('DOMContentLoaded',()=>{document.getElementById('chat-area')?.addEventListener('scroll',updateScrollBtn);});
