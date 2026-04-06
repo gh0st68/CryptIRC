@@ -3499,6 +3499,7 @@ function buildMediaEl(url){
     const wrap=document.createElement('div');wrap.className='msg-media';
     const img=document.createElement('img');img.className='msg-img';img.src=authedUrl;img.alt='image';img.loading='lazy';
     img.onclick=e=>{e.stopPropagation();openLightbox(authedUrl);};
+    img.onload=()=>scrollBottom();
     img.onerror=()=>wrap.style.display='none';
     wrap.appendChild(img);
     return wrap;
@@ -3513,7 +3514,7 @@ function buildMediaEl(url){
   // Videos
   if(VID_EXTS.test(url)){
     const wrap=document.createElement('div');wrap.className='msg-media';
-    const vid=document.createElement('video');vid.src=authedUrl;vid.controls=true;vid.preload='metadata';
+    const vid=document.createElement('video');vid.src=authedUrl;vid.controls=true;vid.preload='metadata';vid.onloadedmetadata=()=>scrollBottom();
     wrap.appendChild(vid);
     return wrap;
   }
@@ -3525,6 +3526,7 @@ function buildMediaEl(url){
     wrap.href=url;wrap.target='_blank';wrap.rel='noopener noreferrer';
     wrap.className='msg-yt';
     wrap.innerHTML=`<div class="msg-yt-thumb"><img src="https://img.youtube.com/vi/${ytId}/hqdefault.jpg" alt="YouTube" loading="lazy"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${_ytUid}">Loading...</div><div class="msg-yt-meta" id="yt-m-${_ytUid}"><span>YouTube</span></div></div>`;
+    wrap.querySelector('img').onload=()=>scrollBottom();
     wrap.querySelector('img').onerror=()=>wrap.style.display='none';
     // Fetch video info via noembed (no API key needed, privacy-friendly)
     const _ac=new AbortController();const _to=setTimeout(()=>_ac.abort(),10000);
@@ -3562,9 +3564,10 @@ function buildMediaEl(url){
         let html=`<div class="msg-link-preview-domain">${esc(d.site_name||d.domain)}</div>`;
         html+=`<div class="msg-link-preview-title">${esc(d.title)}</div>`;
         if(d.description) html+=`<div class="msg-link-preview-desc">${esc(d.description)}</div>`;
-        if(d.image&&d.image.startsWith('https://')) html+=`<img class="msg-link-preview-img" src="${esc(d.image)}" loading="lazy" onerror="this.remove()">`;
+        if(d.image&&d.image.startsWith('https://')) html+=`<img class="msg-link-preview-img" src="${esc(d.image)}" loading="lazy" onload="scrollBottom()" onerror="this.remove()">`;
         el.innerHTML=html;
         el.style.display='';
+        scrollBottom();
       }).catch(()=>card.remove());
     return card;
   }
