@@ -3443,10 +3443,12 @@ function updateTypingIndicator(){
     }
   }
   if(typers.length===0){el.className='';el.textContent='';return;}
+  const wasHidden=el.className!=='visible';
   el.className='visible';
   if(typers.length===1) el.textContent=typers[0]+' is typing…';
   else if(typers.length===2) el.textContent=typers.join(' and ')+' are typing…';
   else el.textContent=typers.slice(0,-1).join(', ')+' and '+typers[typers.length-1]+' are typing…';
+  if(wasHidden) scrollBottom();
 }
 function updateTopbar(){
   if(!active)return;
