@@ -679,16 +679,17 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .msg-img { display:block; max-width:100%; max-height:140px; cursor:pointer; transition:opacity .15s; border-radius:4px; border:none; }
 .msg-img:hover { opacity:.85; }
 .msg-media video { display:block; max-width:100%; max-height:140px; border-radius:4px; }
-.msg-yt { display:block; margin-top:4px; max-width:min(220px,60%); text-decoration:none; border-radius:4px; overflow:hidden; border-left:2px solid #f00; background:var(--bg2); transition:border-color .15s; }
+.msg-yt { display:block; margin-top:4px; max-width:min(300px,75%); text-decoration:none; border-radius:4px; overflow:hidden; border-left:2px solid #f00; background:var(--bg2); transition:border-color .15s; }
 .msg-yt:hover { border-color:#f44; }
 .msg-yt-thumb { position:relative; }
 .msg-yt-thumb img { display:block; width:100%; aspect-ratio:16/9; object-fit:cover; }
 .yt-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:30px; height:22px; background:rgba(0,0,0,.7); border-radius:4px; display:flex; align-items:center; justify-content:center; pointer-events:none; }
 .yt-play::after { content:''; border-style:solid; border-width:5px 0 5px 9px; border-color:transparent transparent transparent #fff; }
 .msg-yt:hover .yt-play { background:rgba(255,0,0,.9); }
-.msg-yt-info { padding:4px 8px; }
-.msg-yt-title { font-size:10px; font-weight:600; color:var(--text); line-height:1.2; display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; }
-.msg-yt-meta { font-size:9px; color:var(--text3); margin-top:1px; display:flex; gap:6px; }
+.msg-yt-info { padding:6px 8px; }
+.msg-yt-title { font-size:11px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.msg-yt-meta { font-size:9px; color:var(--text3); margin-top:2px; display:flex; gap:6px; }
+.msg-yt-desc { font-size:10px; color:var(--text3); margin-top:3px; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .msg-link-preview { display:block; margin-top:4px; max-width:min(300px,85%); border-left:2px solid var(--accent); background:var(--bg2); border-radius:0 4px 4px 0; padding:6px 10px; font-size:11px; text-decoration:none; color:var(--text); transition:border-color .15s; overflow:hidden; }
 .msg-link-preview:hover { border-color:var(--accent2); }
 .msg-link-preview-domain { font-size:9px; color:var(--accent); margin-bottom:3px; font-weight:500; }
@@ -3527,7 +3528,7 @@ function buildMediaEl(url){
     const wrap=document.createElement('a');
     wrap.href=url;wrap.target='_blank';wrap.rel='noopener noreferrer';
     wrap.className='msg-yt';
-    wrap.innerHTML=`<div class="msg-yt-thumb"><img src="https://img.youtube.com/vi/${ytId}/hqdefault.jpg" alt="YouTube" loading="lazy"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${_ytUid}">Loading...</div><div class="msg-yt-meta" id="yt-m-${_ytUid}"><span>YouTube</span></div></div>`;
+    wrap.innerHTML=`<div class="msg-yt-thumb"><img src="https://img.youtube.com/vi/${ytId}/hqdefault.jpg" alt="YouTube" loading="lazy"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${_ytUid}">Loading...</div><div class="msg-yt-desc" id="yt-d-${_ytUid}"></div><div class="msg-yt-meta" id="yt-m-${_ytUid}"><span>YouTube</span></div></div>`;
     wrap.querySelector('img').onload=()=>scrollBottom();
     wrap.querySelector('img').onerror=()=>wrap.style.display='none';
     // Fetch video info via noembed (no API key needed, privacy-friendly)
@@ -3542,12 +3543,18 @@ function buildMediaEl(url){
         parts.push('YouTube');
         metaEl.innerHTML=parts.map(p=>`<span>${p}</span>`).join('');
       }
-      // Update link title for tooltip
       if(d.title) wrap.title=d.title+(d.author_name?' — '+d.author_name:'');
     }).catch(()=>{
-      const titleEl=document.getElementById('yt-t-'+ytId);
+      const titleEl=document.getElementById('yt-t-'+_ytUid);
       if(titleEl) titleEl.textContent='YouTube Video';
     });
+    // Fetch description via server preview endpoint (og:description from YouTube page)
+    if(sessionToken) fetch(`/cryptirc/preview?url=${encodeURIComponent(url)}`,{headers:{'Authorization':'Bearer '+sessionToken}})
+      .then(r=>r.ok?r.json():null).then(d=>{
+        if(!d||!d.description) return;
+        const descEl=document.getElementById('yt-d-'+_ytUid);
+        if(descEl){descEl.textContent=d.description;scrollBottom();}
+      }).catch(()=>{});
     return wrap;
   }
   // Link preview — fetch metadata from server for non-media HTTPS links
