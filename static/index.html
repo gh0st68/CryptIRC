@@ -2462,9 +2462,13 @@ function handleEvent(ev) {
     }
     case 'irc_message':
       trackMsgId(ev.conn_id,ev.target,ev.msg_id||0);
-      // Route user notices to the active channel instead of opening a PM
+      // Route incoming user notices to the active channel instead of opening a PM
+      // (e.g. NickServ, ChanServ replies) — but let our OWN outgoing notices
+      // go to the target's PM window (e.g. PM protection responses)
       if(ev.kind==='Notice'&&ev.target&&ev.target!=='status'&&!ev.target.startsWith('#')&&!ev.target.startsWith('&')&&ev.from!=='*'&&!ev.from.includes('.')){
-        ev.target=active&&active.conn_id===ev.conn_id?active.target:'status';
+        if(ev.from!==getNick(ev.conn_id)){
+          ev.target=active&&active.conn_id===ev.conn_id?active.target:'status';
+        }
       }
       // Suppress noisy 401 "No such nick/channel" errors
       // Suppress noisy server errors (typing on unsupported networks, offline nicks, etc)
@@ -3561,13 +3565,25 @@ function buildMediaEl(url){
       const titleEl=document.getElementById('yt-t-'+_ytUid);
       if(titleEl) titleEl.textContent='YouTube Video';
     });
-    // Fetch description via server preview endpoint (og:description from YouTube page)
-    if(sessionToken) fetch(`/cryptirc/preview?url=${encodeURIComponent(url)}`,{headers:{'Authorization':'Bearer '+sessionToken}})
-      .then(r=>r.ok?r.json():null).then(d=>{
-        if(!d||!d.description) return;
-        const descEl=document.getElementById('yt-d-'+_ytUid);
-        if(descEl){descEl.textContent=d.description;scrollBottom();}
-      }).catch(()=>{});
+    // Fetch views/likes via Return YouTube Dislike API (no API key needed)
+    fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${ytId}`).then(r=>r.ok?r.json():null).then(d=>{
+      if(!d) return;
+      const metaEl=document.getElementById('yt-m-'+_ytUid);
+      if(metaEl){
+        const parts=[];
+        const existing=metaEl.textContent;
+        if(existing&&!existing.includes('views')) {
+          // Preserve author + YouTube label, append stats
+          const author=metaEl.querySelector('span')?.textContent;
+          if(author&&author!=='YouTube') parts.push(esc(author));
+          parts.push('YouTube');
+          if(d.viewCount) parts.push(d.viewCount.toLocaleString()+' views');
+          if(d.likes) parts.push(d.likes.toLocaleString()+' likes');
+          metaEl.innerHTML=parts.map(p=>`<span>${p}</span>`).join('');
+          scrollBottom();
+        }
+      }
+    }).catch(()=>{});
     return wrap;
   }
   // Link preview — fetch metadata from server for non-media HTTPS links
