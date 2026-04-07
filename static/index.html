@@ -847,11 +847,6 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .away-dot { font-size:10px; margin-right:2px; }
 #typing-indicator { font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; pointer-events:none; text-align:left; flex-shrink:0; }
 #typing-indicator.visible { height:18px; padding-top:2px; border-top-color:var(--border); }
-.typing-dots { letter-spacing:1px; }
-.typing-dots span { animation:typingDot 1.2s infinite; opacity:0.2; }
-.typing-dots span:nth-child(2) { animation-delay:0.2s; }
-.typing-dots span:nth-child(3) { animation-delay:0.4s; }
-@keyframes typingDot { 0%,60%,100%{opacity:0.2} 30%{opacity:1} }
 
 /* ── WELCOME ───────────────────────────────────────────────────────────────── */
 #welcome { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--text3); padding:40px; text-align:center; }
@@ -3451,15 +3446,24 @@ function updateTypingIndicator(){
       typers.push(k.slice(prefix.length));
     }
   }
-  if(typers.length===0){el.className='';el.textContent='';return;}
+  if(typers.length===0){
+    el.className='';el.textContent='';el._typingBase='';
+    return;
+  }
   const wasHidden=el.className!=='visible';
   el.className='visible';
-  const dots='<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>';
-  if(typers.length===1) el.innerHTML=esc(typers[0])+' is typing'+dots;
-  else if(typers.length===2) el.innerHTML=esc(typers[0])+' and '+esc(typers[1])+' are typing'+dots;
-  else el.innerHTML=typers.slice(0,-1).map(n=>esc(n)).join(', ')+' and '+esc(typers[typers.length-1])+' are typing'+dots;
-  if(wasHidden){scrollBottom();requestAnimationFrame(()=>scrollBottom());}
+  if(typers.length===1) el._typingBase=typers[0]+' is typing';
+  else if(typers.length===2) el._typingBase=typers[0]+' and '+typers[1]+' are typing';
+  else el._typingBase=typers.slice(0,-1).join(', ')+' and '+typers[typers.length-1]+' are typing';
+  if(wasHidden){el._dc=0;el.textContent=el._typingBase+'.';scrollForce();}
 }
+// Global typing dot ticker — cycles . .. ... on the indicator whenever visible
+setInterval(()=>{
+  const el=document.getElementById('typing-indicator');
+  if(!el||el.className!=='visible'||!el._typingBase)return;
+  el._dc=((el._dc||0)%3)+1;
+  el.textContent=el._typingBase+'.'.repeat(el._dc);
+},400);
 function updateTopbar(){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
