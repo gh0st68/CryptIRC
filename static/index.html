@@ -847,6 +847,11 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .away-dot { font-size:10px; margin-right:2px; }
 #typing-indicator { font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; pointer-events:none; text-align:left; flex-shrink:0; }
 #typing-indicator.visible { height:18px; padding-top:2px; border-top-color:var(--border); }
+.typing-dots { letter-spacing:1px; }
+.typing-dots span { animation:typingDot 1.2s infinite; opacity:0.2; }
+.typing-dots span:nth-child(2) { animation-delay:0.2s; }
+.typing-dots span:nth-child(3) { animation-delay:0.4s; }
+@keyframes typingDot { 0%,60%,100%{opacity:0.2} 30%{opacity:1} }
 
 /* ── WELCOME ───────────────────────────────────────────────────────────────── */
 #welcome { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; color:var(--text3); padding:40px; text-align:center; }
@@ -2240,6 +2245,7 @@ function _onResume(){
     }
   }
   scrollForce();
+  updateTypingIndicator();
 }
 document.addEventListener('visibilitychange',()=>{
   if(!document.hidden){_onResume();_resetIdleTimer();}
@@ -2534,6 +2540,8 @@ function handleEvent(ev) {
         // ZNC playback detection — batch old messages silently
         const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg',encrypted,mentioned,prefix:ev.prefix||null};
         if(zncDetectBatch(ev.conn_id,ev.target,zncMsg)){
+          // Filter ignored users in ZNC batch path too
+          if(isIgnored(ev.from, ev.prefix)) return;
           // Still add to buffer but don't trigger notifications/sounds — dedup by msg_id
           const _zbuf=getBuf(ev.conn_id,ev.target);
           let _zdup=false;
@@ -3446,10 +3454,11 @@ function updateTypingIndicator(){
   if(typers.length===0){el.className='';el.textContent='';return;}
   const wasHidden=el.className!=='visible';
   el.className='visible';
-  if(typers.length===1) el.textContent=typers[0]+' is typing…';
-  else if(typers.length===2) el.textContent=typers.join(' and ')+' are typing…';
-  else el.textContent=typers.slice(0,-1).join(', ')+' and '+typers[typers.length-1]+' are typing…';
-  if(wasHidden) scrollBottom();
+  const dots='<span class="typing-dots"><span>.</span><span>.</span><span>.</span></span>';
+  if(typers.length===1) el.innerHTML=esc(typers[0])+' is typing'+dots;
+  else if(typers.length===2) el.innerHTML=esc(typers[0])+' and '+esc(typers[1])+' are typing'+dots;
+  else el.innerHTML=typers.slice(0,-1).map(n=>esc(n)).join(', ')+' and '+esc(typers[typers.length-1])+' are typing'+dots;
+  if(wasHidden){scrollBottom();requestAnimationFrame(()=>scrollBottom());}
 }
 function updateTopbar(){
   if(!active)return;
@@ -8884,7 +8893,7 @@ setInterval(()=>{
 const _origAddMessage = addMessage;
 // Wrap addMessage to filter ignores
 window.addMessage = function(conn_id, target, msg) {
-  if (msg.kind === 'privmsg' || msg.kind === 'action') {
+  if (msg.kind === 'privmsg' || msg.kind === 'action' || msg.kind === 'notice') {
     if (isIgnored(msg.from, msg.prefix)) return; // silently drop
     monitorUpdate(msg.from, conn_id, target, msg.text);
   }
