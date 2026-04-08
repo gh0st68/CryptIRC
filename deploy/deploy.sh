@@ -283,6 +283,9 @@ caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1
 echo -e "  ${GREEN}✓ Caddy configured${NC}"
 
 # ── Systemd service ───────────────────────────────────────────────────────────
+CRYPTIRC_REG_VALUE="closed"
+if [[ "$ENABLE_EMAIL" == "true" ]]; then CRYPTIRC_REG_VALUE="open"; fi
+
 cat > /etc/systemd/system/cryptirc.service << UNIT
 [Unit]
 Description=CryptIRC — Encrypted IRC Client
@@ -308,7 +311,7 @@ Environment=CRYPTIRC_BASE_URL=https://$DOMAIN
 Environment=CRYPTIRC_BASE_PATH=/
 Environment=CRYPTIRC_PORT=9001
 Environment=CRYPTIRC_FROM_EMAIL=$EMAIL
-Environment=CRYPTIRC_REGISTRATION=$(if [[ "$ENABLE_EMAIL" == "true" ]]; then echo "open"; else echo "closed"; fi)
+Environment=CRYPTIRC_REGISTRATION=${CRYPTIRC_REG_VALUE}
 Environment=CRYPTIRC_REG_CODE=$REG_CODE
 Environment=RUST_LOG=info
 
@@ -386,11 +389,12 @@ if [[ "$CREATE_USER" =~ ^[Yy] ]]; then
             USER_FILE="$DATA_DIR/users/$(echo "$NEW_USER" | tr '[:upper:]' '[:lower:]').json"
             if [[ -f "$USER_FILE" ]]; then
                 python3 -c "
-import json
-with open('$USER_FILE','r') as f: d=json.load(f)
+import json, sys
+p = sys.argv[1]
+with open(p,'r') as f: d=json.load(f)
 d['admin']=True
-with open('$USER_FILE','w') as f: json.dump(d,f,indent=2)
-" 2>/dev/null && echo -e "  ${GREEN}✓ ${NEW_USER} is now admin.${NC}"
+with open(p,'w') as f: json.dump(d,f,indent=2)
+" "$USER_FILE" 2>/dev/null && echo -e "  ${GREEN}✓ ${NEW_USER} is now admin.${NC}"
             fi
         } || echo -e "  ${RED}✗ Failed to create user. Try manually: sudo bash adduser.sh ${NEW_USER} ${NEW_EMAIL} <password>${NC}"
     fi
