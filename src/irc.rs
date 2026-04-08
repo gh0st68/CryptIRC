@@ -170,9 +170,31 @@ async fn do_connect(
                 info!("[{}] Cert files found, loading identity...", conn_id);
                 match store.load_identity(username, cert_id).await {
                     Ok(id) => { info!("[{}] Client cert loaded successfully", conn_id); Some(id) }
-                    Err(e) => { warn!("[{}] Client cert load FAILED: {}", conn_id, e); None }
+                    Err(e) => {
+                        warn!("[{}] Client cert load FAILED: {} — vault may be locked", conn_id, e);
+                        if cfg.sasl_external {
+                            state.send_to_user(username, ServerEvent::IrcMessage {
+                                conn_id: conn_id.to_string(), from: "*".into(), target: "status".into(),
+                                text: format!("⚠ SASL EXTERNAL cert could not load ({}). Unlock your vault and reconnect.", e),
+                                ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, msg_id: 0, prefix: None,
+                            });
+                            return Err(anyhow::anyhow!("Client cert unavailable for SASL EXTERNAL — vault locked?"));
+                        }
+                        None
+                    }
                 }
-            } else { warn!("[{}] Cert files NOT found for {}", conn_id, cert_id); None }
+            } else {
+                warn!("[{}] Cert files NOT found for {}", conn_id, cert_id);
+                if cfg.sasl_external {
+                    state.send_to_user(username, ServerEvent::IrcMessage {
+                        conn_id: conn_id.to_string(), from: "*".into(), target: "status".into(),
+                        text: "⚠ SASL EXTERNAL cert not found. Generate a certificate in network settings.".into(),
+                        ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, msg_id: 0, prefix: None,
+                    });
+                    return Err(anyhow::anyhow!("Client cert not found for SASL EXTERNAL"));
+                }
+                None
+            }
         } else { info!("[{}] No client_cert_id configured", conn_id); None };
 
         if identity.is_some() {
@@ -428,11 +450,14 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                     };
                                     conn.lock().await.send_raw(&format!("AUTHENTICATE {}\r\n", method)).await?;
                                     sasl_state = SaslState::AuthenticateSent;
-                                } else if !caps.contains("sasl") && !use_sasl {
-                                    // Non-SASL caps ACKed and no SASL needed
-                                    conn.lock().await.send_raw("CAP END\r\n").await?;
+                                } else if !caps.contains("sasl") {
+                                    // Non-SASL caps ACKed — send CAP END only if SASL is
+                                    // not pending (already done/failed/not used)
+                                    let sasl_pending = matches!(sasl_state, SaslState::CapLsSent | SaslState::CapReqSent | SaslState::AuthenticateSent);
+                                    if !sasl_pending {
+                                        conn.lock().await.send_raw("CAP END\r\n").await?;
+                                    }
                                 }
-                                // If SASL is pending (CapReqSent/AuthenticateSent), don't send CAP END yet
                             }
                             "NAK" => {
                                 warn!("[{}] CAP NAK: {}", conn_id, caps);
