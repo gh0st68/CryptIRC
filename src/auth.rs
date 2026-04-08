@@ -519,6 +519,48 @@ impl AuthManager {
         Ok(())
     }
 
+    pub async fn change_password(&self, username: &str, old_password: &str, new_password: &str) -> Result<()> {
+        let uname = username.trim().to_lowercase();
+        self.check_rate_limit(&format!("chpass:{}", uname))?;
+
+        // Verify old password
+        let user_path = PathBuf::from(&self.data_dir)
+            .join("users")
+            .join(format!("{}.json", uname));
+        let json = tokio::fs::read_to_string(&user_path)
+            .await
+            .map_err(|_| anyhow::anyhow!("Account not found"))?;
+        let mut user: User = serde_json::from_str(&json)?;
+
+        let parsed = PasswordHash::new(&user.password_hash)
+            .map_err(|_| anyhow::anyhow!("Invalid password hash"))?;
+        Argon2::default()
+            .verify_password(old_password.as_bytes(), &parsed)
+            .map_err(|_| anyhow::anyhow!("Current password is incorrect"))?;
+
+        // Validate new password
+        if new_password.len() < 10 {
+            bail!("New password must be at least 10 characters");
+        }
+        let has_upper = new_password.chars().any(|c| c.is_uppercase());
+        let has_lower = new_password.chars().any(|c| c.is_lowercase());
+        let has_digit = new_password.chars().any(|c| c.is_ascii_digit());
+        let has_special = new_password.chars().any(|c| !c.is_alphanumeric());
+        if !has_upper || !has_lower || !has_digit || !has_special {
+            bail!("New password must contain uppercase, lowercase, number, and special character");
+        }
+
+        // Hash new password
+        let salt = SaltString::generate(&mut OsRng);
+        user.password_hash = Argon2::default()
+            .hash_password(new_password.as_bytes(), &salt)
+            .map_err(|_| anyhow::anyhow!("Password hashing failed"))?
+            .to_string();
+
+        tokio::fs::write(&user_path, serde_json::to_string_pretty(&user)?).await?;
+        Ok(())
+    }
+
     pub async fn disable_user(&self, username: &str) -> Result<()> {
         let path = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", username.to_lowercase()));
         let json = tokio::fs::read_to_string(&path).await?;

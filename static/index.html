@@ -675,27 +675,28 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .msg-body { flex:1; min-width:0; word-break:break-word; overflow-wrap:anywhere; }
 .msg-body a { color:var(--accent2); text-decoration:none; }
 .msg-body a:hover { text-decoration:underline; }
-.msg-media { display:block; margin-top:4px; max-width:min(200px,55%); }
-.msg-img { display:block; max-width:100%; max-height:140px; cursor:pointer; transition:opacity .15s; border-radius:4px; border:none; }
-.msg-img:hover { opacity:.85; }
-.msg-media video { display:block; max-width:100%; max-height:140px; border-radius:4px; }
-.msg-yt { display:block; margin-top:4px; max-width:min(300px,75%); text-decoration:none; border-radius:4px; overflow:hidden; border-left:2px solid #f00; background:var(--bg2); transition:border-color .15s; }
-.msg-yt:hover { border-color:#f44; }
-.msg-yt-thumb { position:relative; }
+.msg-media { display:block; margin-top:6px; max-width:min(320px,70%); }
+.msg-img { display:block; max-width:100%; max-height:280px; cursor:pointer; transition:opacity .15s, transform .15s; border-radius:10px; border:none; }
+.msg-img:hover { opacity:.9; transform:scale(1.01); }
+.msg-media video { display:block; max-width:100%; max-height:280px; border-radius:10px; }
+.msg-yt { display:block; margin-top:6px; max-width:min(360px,80%); text-decoration:none; border-radius:10px; overflow:hidden; background:var(--bg2); border:1px solid var(--border); transition:border-color .15s, box-shadow .15s; }
+.msg-yt:hover { border-color:var(--accent); box-shadow:0 4px 16px rgba(0,0,0,.3); }
+.msg-yt-thumb { position:relative; cursor:pointer; }
 .msg-yt-thumb img { display:block; width:100%; aspect-ratio:16/9; object-fit:cover; }
-.yt-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:30px; height:22px; background:rgba(0,0,0,.7); border-radius:4px; display:flex; align-items:center; justify-content:center; pointer-events:none; }
-.yt-play::after { content:''; border-style:solid; border-width:5px 0 5px 9px; border-color:transparent transparent transparent #fff; }
+.msg-yt-thumb iframe { display:block; width:100%; aspect-ratio:16/9; border:none; }
+.yt-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:48px; height:34px; background:rgba(0,0,0,.75); border-radius:8px; display:flex; align-items:center; justify-content:center; pointer-events:none; transition:background .15s; }
+.yt-play::after { content:''; border-style:solid; border-width:7px 0 7px 12px; border-color:transparent transparent transparent #fff; }
 .msg-yt:hover .yt-play { background:rgba(255,0,0,.9); }
-.msg-yt-info { padding:6px 8px; }
-.msg-yt-title { font-size:11px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.msg-yt-meta { font-size:9px; color:var(--text3); margin-top:2px; display:flex; gap:6px; }
+.msg-yt-info { padding:8px 10px; }
+.msg-yt-title { font-size:12px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.msg-yt-meta { font-size:9px; color:var(--text3); margin-top:3px; display:flex; gap:6px; flex-wrap:wrap; }
 .msg-yt-desc { font-size:10px; color:var(--text3); margin-top:3px; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.msg-link-preview { display:block; margin-top:4px; max-width:min(300px,85%); border-left:2px solid var(--accent); background:var(--bg2); border-radius:0 4px 4px 0; padding:6px 10px; font-size:11px; text-decoration:none; color:var(--text); transition:border-color .15s; overflow:hidden; }
-.msg-link-preview:hover { border-color:var(--accent2); }
-.msg-link-preview-domain { font-size:9px; color:var(--accent); margin-bottom:3px; font-weight:500; }
-.msg-link-preview-title { font-size:12px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; }
-.msg-link-preview-desc { font-size:10px; color:var(--text3); margin-top:2px; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.msg-link-preview-img { display:none; }
+.msg-link-preview { display:block; margin-top:6px; max-width:min(340px,85%); border-left:3px solid var(--accent); background:var(--bg2); border-radius:0 10px 10px 0; padding:8px 12px; font-size:11px; text-decoration:none; color:var(--text); transition:border-color .15s, box-shadow .15s; overflow:hidden; }
+.msg-link-preview:hover { border-color:var(--accent2); box-shadow:0 2px 12px rgba(0,0,0,.2); }
+.msg-link-preview-domain { font-size:9px; color:var(--accent); margin-bottom:4px; font-weight:500; }
+.msg-link-preview-title { font-size:12px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.msg-link-preview-desc { font-size:10px; color:var(--text3); margin-top:3px; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.msg-link-preview-img { display:block; width:100%; max-height:160px; object-fit:cover; border-radius:6px; margin-top:6px; }
 .row-action .msg-body { color:var(--action); font-style:italic; }
 .row-action .msg-nick { color:var(--action); }
 .row-notice .msg-body { color:var(--notice); }
@@ -1051,8 +1052,8 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .hl-tag-x { background:none; border:none; color:var(--text3); cursor:pointer; font-size:14px; padding:0 2px; line-height:1; }
 .hl-tag-x:hover { color:var(--error); }
 /* ── Audio player ── */
-.msg-audio { margin-top:4px; display:block; }
-.msg-audio audio { max-width:320px; width:100%; height:36px; border-radius:6px; }
+.msg-audio { margin-top:6px; display:block; }
+.msg-audio audio { max-width:360px; width:100%; height:40px; border-radius:10px; }
 /* ── Lightbox zoom ── */
 #lightbox img { cursor:grab; transition:transform .2s; }
 #lightbox img.zoomed { cursor:move; max-width:none; max-height:none; }
@@ -1847,7 +1848,10 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <button class="settings-menu-item" onclick="showIgnorePanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>Ignored Users</button>
           <button class="settings-menu-item" onclick="showUploadsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>My Uploads</button>
           <button class="settings-menu-item" onclick="showSessionManager();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>Sessions</button>
-          <button class="settings-menu-item" onclick="showChangePass();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>Vault Password</button>
+          <div style="padding:6px 14px 2px;font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-weight:600">Password Management</div>
+          <button class="settings-menu-item" onclick="showPasswordSafe();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>Password Safe</button>
+          <button class="settings-menu-item" onclick="showChangePass();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>Change Vault Passphrase</button>
+          <button class="settings-menu-item" onclick="showChangeClientPassword();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Change Login Password</button>
           <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Help</button>
           <button class="settings-menu-item" onclick="showOperPanel();closeSettingsMenu()" style="color:#f0c040"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRC Oper</button>
           <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Admin</button>
@@ -2368,9 +2372,8 @@ function handleEvent(ev) {
       {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
       if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key);
       if(!_chanStatsLoaded) loadStatsFromServer();
-      // Load logs for current channel now that vault is unlocked
-      if(active&&getBuf(active.conn_id,active.target).length===0&&active.target!=='status')
-        wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
+      // Note: log loading is handled by the 'state' event handler which fires
+      // before vault_unlocked — no need to request logs here (avoids double delivery)
       break;
     case 'vault_error': document.getElementById('vault-err').textContent=ev.message; break;
     case 'state':
@@ -2541,13 +2544,19 @@ function handleEvent(ev) {
         if(zncDetectBatch(ev.conn_id,ev.target,zncMsg)){
           // Filter ignored users in ZNC batch path too
           if(isIgnored(ev.from, ev.prefix)) return;
-          // Still add to buffer but don't trigger notifications/sounds — dedup by msg_id
+          // Still add to buffer but don't trigger notifications/sounds — dedup by msg_id + fuzzy
           const _zbuf=getBuf(ev.conn_id,ev.target);
           let _zdup=false;
+          const _zts=Math.max(0,_zbuf.length-30);
           if(zncMsg.id){
-            const _zts=Math.max(0,_zbuf.length-30);
             for(let _zi=_zts;_zi<_zbuf.length;_zi++){
               if(_zbuf[_zi].id===zncMsg.id){_zdup=true;break;}
+            }
+          }
+          if(!_zdup){
+            const _zfk=zncMsg.ts+'|'+zncMsg.from+'|'+(zncMsg.text||'').slice(0,50);
+            for(let _zi=_zts;_zi<_zbuf.length;_zi++){
+              if(_zbuf[_zi].ts+'|'+_zbuf[_zi].from+'|'+(_zbuf[_zi].text||'').slice(0,50)===_zfk){_zdup=true;break;}
             }
           }
           if(!_zdup){_zbuf.push(zncMsg);if(_zbuf.length>2000)_zbuf.splice(0,_zbuf.length-2000);}
@@ -2874,6 +2883,7 @@ function handleEvent(ev) {
     case 'log_lines':  prependLogs(ev.conn_id,ev.target,ev.lines); break;
     case 'sync_lines': appendSyncLines(ev.conn_id,ev.target,ev.lines); break;
     case 'stats_data': handleStatsData(ev.data); break;
+    case 'password_safe': handlePasswordSafeData(ev.data); break;
     case 'cert_info':  onCertInfo(ev); break;
     case 'appearance':
       try{
@@ -3443,11 +3453,14 @@ function updateTypingIndicator(){
   if(!el||!window._typingState)return;
   if(!active){el.className='';el.textContent='';return;}
   const prefix=(active.conn_id+'/'+active.target+'/').toLowerCase();
+  const myNick=(getNick(active.conn_id)||'').toLowerCase();
   const typers=[];
   const now=Date.now();
   for(const[k,t]of Object.entries(window._typingState)){
     if(k.toLowerCase().startsWith(prefix)&&now-t<6000){
-      typers.push(k.slice(prefix.length));
+      const nick=k.slice(prefix.length);
+      if(nick.toLowerCase()===myNick) continue;
+      typers.push(nick);
     }
   }
   if(typers.length===0){
@@ -3542,12 +3555,19 @@ function buildMediaEl(url){
   const ytId=extractYouTubeId(url);
   if(ytId){
     const _ytUid=ytId+'_'+(Date.now()%1000000);
-    const wrap=document.createElement('a');
-    wrap.href=url;wrap.target='_blank';wrap.rel='noopener noreferrer';
+    const wrap=document.createElement('div');
     wrap.className='msg-yt';
     wrap.innerHTML=`<div class="msg-yt-thumb"><img src="https://img.youtube.com/vi/${ytId}/hqdefault.jpg" alt="YouTube" loading="lazy"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${_ytUid}">Loading...</div><div class="msg-yt-desc" id="yt-d-${_ytUid}"></div><div class="msg-yt-meta" id="yt-m-${_ytUid}"><span>YouTube</span></div></div>`;
     wrap.querySelector('img').onload=()=>scrollBottom();
     wrap.querySelector('img').onerror=()=>wrap.style.display='none';
+    // Click thumbnail to play inline — click title/info to open in browser
+    wrap.querySelector('.msg-yt-thumb').addEventListener('click',(e)=>{
+      e.preventDefault();e.stopPropagation();
+      const thumb=wrap.querySelector('.msg-yt-thumb');
+      thumb.innerHTML=`<iframe src="https://www.youtube-nocookie.com/embed/${ytId}?autoplay=1&rel=0" allow="autoplay; encrypted-media" allowfullscreen></iframe>`;
+      scrollBottom();
+    });
+    wrap.querySelector('.msg-yt-info').addEventListener('click',()=>window.open(url,'_blank'));
     // Fetch video info via noembed (no API key needed, privacy-friendly)
     const _ac=new AbortController();const _to=setTimeout(()=>_ac.abort(),10000);
     fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${ytId}`,{signal:_ac.signal}).then(r=>{clearTimeout(_to);return r.json();}).then(d=>{
@@ -4677,7 +4697,124 @@ function doUnlock(){
   wsend({type:'unlock_vault',passphrase:p});
 }
 function lockVault(){if(!confirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.'))return;wsend({type:'lock_vault'});for(const n of networks)wsend({type:'disconnect',id:n.config.id});document.getElementById('vault-overlay').classList.add('show');const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔒';vb.title='Lock vault';}}
-function showChangePass(){const old=prompt('Current passphrase:');if(!old)return;const nw=prompt('New passphrase:');if(!nw)return;if(nw!==prompt('Confirm new passphrase:')){alert('Passphrases do not match');return;}wsend({type:'change_passphrase',old,new:nw});}
+function showChangePass(){const old=prompt('Current vault passphrase:');if(!old)return;const nw=prompt('New vault passphrase:');if(!nw)return;if(nw!==prompt('Confirm new vault passphrase:')){alert('Passphrases do not match');return;}wsend({type:'change_passphrase',old,new:nw});}
+async function showChangeClientPassword(){
+  const old=prompt('Current login password:');if(!old)return;
+  const nw=prompt('New login password (min 10 chars, upper+lower+number+special):');if(!nw)return;
+  if(nw!==prompt('Confirm new login password:')){alert('Passwords do not match');return;}
+  try{
+    const r=await fetch('/cryptirc/auth/change-password',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({old_password:old,new_password:nw})});
+    const d=await r.json();
+    if(r.ok){alert('Login password changed successfully.');}
+    else{alert(d.message||'Password change failed');}
+  }catch(e){alert('Network error — try again');}
+}
+// ─── Password Safe ───────────────────────────────────────────────────────────
+let _pwSafe=[];  // [{id,name,username,password,notes}]
+let _pwSafeLoaded=false;
+let _pwSafeDirty=false;
+
+function handlePasswordSafeData(data){
+  if(!data){_pwSafeLoaded=true;return;}
+  try{const d=JSON.parse(data);if(Array.isArray(d))_pwSafe=d;}catch(e){}
+  _pwSafeLoaded=true;
+  _pwSafeDirty=false;
+  // Re-render if panel is open
+  const ov=document.getElementById('pwsafe-overlay');
+  if(ov&&ov.classList.contains('show')) renderPasswordSafe();
+}
+function savePasswordSafe(){
+  if(!sessionToken)return;
+  wsend({type:'save_passwords',data:JSON.stringify(_pwSafe)});
+  _pwSafeDirty=false;
+}
+function showPasswordSafe(){
+  if(!_pwSafeLoaded) wsend({type:'load_passwords'});
+  let ov=document.getElementById('pwsafe-overlay');
+  if(!ov){
+    ov=document.createElement('div');ov.id='pwsafe-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1000;display:none;align-items:center;justify-content:center;padding:16px;';
+    ov.innerHTML=`<div id="pwsafe-box" style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(500px,94vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+      <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
+        <span style="font-weight:700;font-size:14px;color:var(--text)">🔐 Password Safe</span>
+        <span onclick="document.getElementById('pwsafe-overlay').classList.remove('show');document.getElementById('pwsafe-overlay').style.display='none'" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+      </div>
+      <div id="pwsafe-body" style="padding:14px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch"></div>
+    </div>`;
+    document.body.appendChild(ov);
+  }
+  ov.style.display='flex';ov.classList.add('show');
+  renderPasswordSafe();
+}
+function renderPasswordSafe(){
+  const body=document.getElementById('pwsafe-body');
+  if(!body)return;
+  let html=`<div style="display:flex;gap:6px;margin-bottom:14px">
+    <button onclick="pwSafeAdd()" style="padding:8px 14px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;font-family:var(--mono)">+ Add Entry</button>
+  </div>`;
+  if(!_pwSafe.length){
+    html+=`<div style="color:var(--text3);text-align:center;padding:40px 0;font-size:13px;background:var(--bg2);border:1px dashed var(--border);border-radius:8px">
+      <div style="font-size:28px;margin-bottom:8px">🔐</div>
+      No saved passwords.<br>Click "Add Entry" to store your first password.
+      <div style="font-size:10px;color:var(--text3);margin-top:8px">Encrypted with your vault key — only accessible when unlocked.</div>
+    </div>`;
+    body.innerHTML=html;return;
+  }
+  for(let i=0;i<_pwSafe.length;i++){
+    const e=_pwSafe[i];
+    const safeId='pw-'+i;
+    html+=`<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-weight:600;font-size:13px;color:var(--text)">${esc(e.name||'Untitled')}</span>
+        <div style="display:flex;gap:4px">
+          <button onclick="pwSafeEdit(${i})" style="padding:3px 8px;background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer;font-size:10px">Edit</button>
+          <button onclick="pwSafeDelete(${i})" style="padding:3px 8px;background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;cursor:pointer;font-size:10px">Delete</button>
+        </div>
+      </div>`;
+    if(e.username) html+=`<div style="font-size:11px;color:var(--text3);margin-bottom:3px">User: <span style="color:var(--text);font-family:var(--mono)">${esc(e.username)}</span>
+      <span onclick="navigator.clipboard?.writeText('${esc(e.username.replace(/'/g,"\\'"))}');showToast('Username copied')" style="cursor:pointer;margin-left:4px;opacity:.5">📋</span></div>`;
+    html+=`<div style="font-size:11px;color:var(--text3);margin-bottom:3px">Pass: <span id="${safeId}" style="color:var(--text);font-family:var(--mono)">••••••••</span>
+      <span onclick="const s=document.getElementById('${safeId}');if(s.textContent==='••••••••'){s.textContent=atob(s.dataset.v);s.style.color='var(--accent)';setTimeout(()=>{s.textContent='••••••••';s.style.color='var(--text)';},5000);}else{s.textContent='••••••••';s.style.color='var(--text)';}" style="cursor:pointer;margin-left:4px;opacity:.5">👁</span>
+      <span onclick="navigator.clipboard?.writeText(atob(document.getElementById('${safeId}').dataset.v));showToast('Password copied')" style="cursor:pointer;margin-left:2px;opacity:.5">📋</span></div>`;
+    if(e.notes) html+=`<div style="font-size:10px;color:var(--text3);margin-top:4px;line-height:1.3">${esc(e.notes)}</div>`;
+    html+=`</div>`;
+    // Store password as base64 in data attribute (not visible in DOM text)
+    setTimeout(()=>{const el=document.getElementById(safeId);if(el)el.dataset.v=btoa(e.password||'');},0);
+  }
+  body.innerHTML=html;
+  // Set password data attributes after innerHTML render
+  for(let i=0;i<_pwSafe.length;i++){
+    const el=document.getElementById('pw-'+i);
+    if(el) el.dataset.v=btoa(_pwSafe[i].password||'');
+  }
+}
+function pwSafeAdd(){
+  const name=prompt('Entry name (e.g. "Gmail", "GitHub"):');if(!name)return;
+  const username=prompt('Username / email (optional):');
+  const password=prompt('Password:');if(!password)return;
+  const notes=prompt('Notes (optional):');
+  _pwSafe.push({id:Date.now(),name,username:username||'',password,notes:notes||''});
+  savePasswordSafe();
+  renderPasswordSafe();
+}
+function pwSafeEdit(idx){
+  const e=_pwSafe[idx];if(!e)return;
+  const name=prompt('Entry name:',e.name);if(name===null)return;
+  const username=prompt('Username / email:',e.username);if(username===null)return;
+  const password=prompt('Password:',e.password);if(password===null)return;
+  const notes=prompt('Notes:',e.notes);if(notes===null)return;
+  e.name=name;e.username=username;e.password=password;e.notes=notes;
+  savePasswordSafe();
+  renderPasswordSafe();
+}
+function pwSafeDelete(idx){
+  const e=_pwSafe[idx];if(!e)return;
+  if(!confirm(`Delete "${e.name}"?`))return;
+  _pwSafe.splice(idx,1);
+  savePasswordSafe();
+  renderPasswordSafe();
+}
+
 function clearAllLogs(){
   if(!confirm('Clear ALL data? This will delete:\n• Chat history & logs (server + local)\n• Your notepad\n• Your paste posts\n\nThis cannot be undone.'))return;
   // Clear local buffers
@@ -7716,6 +7853,7 @@ function showTopicMenu(e){
     const muteKey=conn_id+'/'+target;
     const muted=isMuted(muteKey);
     m.innerHTML+=`<button class="topic-menu-item" onclick="toggleMute('${esc(muteKey)}');closeTopicMenu()">${muted?'🔔 Unmute':'🔇 Mute'}</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="chanListData=[];chanListConnId='${esc(conn_id)}';document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';document.getElementById('chanlist-count').textContent='';document.getElementById('chanlist-search').value='';document.getElementById('chanlist-overlay').classList.add('show');wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'LIST'});closeTopicMenu()">📋 Channel list</button>`;
     m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">🚪 Leave channel</button>`;
   } else if(isPM){
     m.innerHTML+=`<button class="topic-menu-item" onclick="wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'WHOIS ${esc(target)}'});closeTopicMenu()">🔍 Whois</button>`;
@@ -7726,6 +7864,7 @@ function showTopicMenu(e){
     m.innerHTML+=`<button class="topic-menu-item" onclick="toggleMute('${esc(muteKey)}');closeTopicMenu()">${muted?'🔔 Unmute':'🔇 Mute conversation'}</button>`;
     const fav=isFavorite(conn_id,target);
     m.innerHTML+=`<button class="topic-menu-item" onclick="toggleFavorite('${esc(conn_id)}','${esc(target)}');closeTopicMenu()">${fav?'★ Unfavorite':'☆ Favorite'}</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="chanListData=[];chanListConnId='${esc(conn_id)}';document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';document.getElementById('chanlist-count').textContent='';document.getElementById('chanlist-search').value='';document.getElementById('chanlist-overlay').classList.add('show');wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'LIST'});closeTopicMenu()">📋 Channel list</button>`;
     m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">✕ Close PM</button>`;
   } else if(target==='status'){
     // Status window — network management options

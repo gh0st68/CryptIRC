@@ -185,6 +185,9 @@ pub enum ClientMessage {
     // Channel stats (encrypted)
     SaveStats         { data: String },
     LoadStats         {},
+    // Password safe (encrypted with vault key)
+    SavePasswords     { data: String },
+    LoadPasswords     {},
     // Clear all user data (logs, notepad, pastes)
     ClearAllData      {},
     // Channel order
@@ -271,6 +274,7 @@ pub enum ServerEvent {
     Preferences      { prefs: String },
     Notepad          { content: String },
     StatsData        { data: String },
+    PasswordSafe     { data: String },
     AccountDeleted   {},
     DataCleared      {},
     Error            { message: String },
@@ -379,7 +383,8 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
         "default-src 'self'; script-src 'self' 'unsafe-inline'; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          font-src https://fonts.gstatic.com; img-src 'self' data: https:; \
-         connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com; frame-ancestors 'none';"
+         connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com; \
+         frame-src https://www.youtube-nocookie.com; frame-ancestors 'none';"
     ));
     response
 }
@@ -471,6 +476,7 @@ async fn main() -> Result<()> {
         .route("/auth/reset",            get(route_reset_page))
         .route("/auth/reset",            post(route_reset_password).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/me",               get(route_me))
+        .route("/auth/change-password",  post(route_change_password).layer(DefaultBodyLimit::max(8_192)))
         .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(26_214_400)))
         .route("/uploads",               get(route_uploads_list))
         .route("/uploads/delete",        post(route_uploads_delete).layer(DefaultBodyLimit::max(4_096)))
@@ -896,6 +902,24 @@ async fn route_me(State(state): State<AppState>, headers: HeaderMap) -> impl Int
     match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
         Some(u) => (StatusCode::OK, Json(MeOk { username: u })).into_response(),
         None    => (StatusCode::UNAUTHORIZED, Json(Msg { message: "Not authenticated".into() })).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordBody { old_password: String, new_password: String }
+
+async fn route_change_password(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<ChangePasswordBody>) -> impl IntoResponse {
+    let user = match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
+        Some(u) => u,
+        None => return (StatusCode::UNAUTHORIZED, Json(Msg { message: "Not authenticated".into() })).into_response(),
+    };
+    match state.auth.change_password(&user, &body.old_password, &body.new_password).await {
+        Ok(_) => (StatusCode::OK, Json(Msg { message: "Password changed successfully.".into() })).into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            let safe = if ["incorrect","10 characters","uppercase","lowercase","number","special"].iter().any(|w| msg.contains(w)) { msg } else { "Password change failed".into() };
+            (StatusCode::BAD_REQUEST, Json(Msg { message: safe })).into_response()
+        }
     }
 }
 
@@ -1954,6 +1978,32 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                     }
                 } else {
                     send(ServerEvent::StatsData { data: String::new() });
+                }
+            } else { send(ServerEvent::Error { message: "Vault locked".into() }); }
+        }
+        ClientMessage::SavePasswords { data } => {
+            if data.len() > 1_000_000 { send(ServerEvent::Error { message: "Password safe too large (max 1MB)".into() }); }
+            else if state.crypto.is_unlocked(username).await {
+                match state.crypto.encrypt(username, data.as_bytes()).await {
+                    Ok(enc) => {
+                        let dir = std::path::PathBuf::from(&state.data_dir).join("users").join(&safe_username(username));
+                        let _ = tokio::fs::create_dir_all(&dir).await;
+                        let _ = tokio::fs::write(dir.join("passwords.enc"), &enc).await;
+                    }
+                    Err(e) => send(ServerEvent::Error { message: format!("Save failed: {}", e) }),
+                }
+            } else { send(ServerEvent::Error { message: "Vault locked".into() }); }
+        }
+        ClientMessage::LoadPasswords {} => {
+            if state.crypto.is_unlocked(username).await {
+                let path = std::path::PathBuf::from(&state.data_dir).join("users").join(&safe_username(username)).join("passwords.enc");
+                if let Ok(enc) = tokio::fs::read_to_string(&path).await {
+                    match state.crypto.decrypt(username, enc.trim()).await {
+                        Ok(pt) => send(ServerEvent::PasswordSafe { data: String::from_utf8_lossy(&pt).to_string() }),
+                        Err(_) => send(ServerEvent::PasswordSafe { data: String::new() }),
+                    }
+                } else {
+                    send(ServerEvent::PasswordSafe { data: String::new() });
                 }
             } else { send(ServerEvent::Error { message: "Vault locked".into() }); }
         }
