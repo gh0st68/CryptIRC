@@ -2323,9 +2323,15 @@ function updateStarfieldTitle(){
   }
   draw();
 })();
+// Track pending log/sync requests so we ignore responses from other sessions
+const _pendingLogs=new Set();
+const _pendingSyncs=new Set();
 function wsend(obj){
   if(ws&&ws.readyState===1){
     const s=JSON.stringify(obj);_txBytes+=s.length;_txCount++;ws.send(s);flashLed('tx');updateStarfieldTitle();
+    // Track log/sync requests from THIS session
+    if(obj.type==='get_logs') _pendingLogs.add(obj.conn_id+'/'+obj.target);
+    if(obj.type==='sync') _pendingSyncs.add(obj.conn_id+'/'+obj.target);
     // Track sent PRIVMSG/NOTICE for irc_echo dedup
     if(obj.type==='send'&&obj.raw){
       const upper=obj.raw.toUpperCase();
@@ -2877,8 +2883,20 @@ function handleEvent(ev) {
       }
       break;
     }
-    case 'log_lines':  prependLogs(ev.conn_id,ev.target,ev.lines); break;
-    case 'sync_lines': appendSyncLines(ev.conn_id,ev.target,ev.lines); break;
+    case 'log_lines': {
+      const _lk=ev.conn_id+'/'+ev.target;
+      if(!_pendingLogs.has(_lk)) break; // Response from another session — ignore
+      _pendingLogs.delete(_lk);
+      prependLogs(ev.conn_id,ev.target,ev.lines);
+      break;
+    }
+    case 'sync_lines': {
+      const _sk=ev.conn_id+'/'+ev.target;
+      if(!_pendingSyncs.has(_sk)) break; // Response from another session — ignore
+      _pendingSyncs.delete(_sk);
+      appendSyncLines(ev.conn_id,ev.target,ev.lines);
+      break;
+    }
     case 'stats_data': handleStatsData(ev.data); break;
     case 'password_safe': handlePasswordSafeData(ev.data); break;
     case 'cert_info':  onCertInfo(ev); break;
