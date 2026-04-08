@@ -9216,6 +9216,23 @@ const HELP_TEXT = {
 function showHelpPanel(){
   const body=document.getElementById('help-body');
   body.innerHTML='';
+  // ── About / TwistedNet header ──
+  const about=document.createElement('div');about.className='help-section';
+  about.innerHTML=`<div style="text-align:center;padding:12px 0 16px">
+    <div style="font-size:22px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px">CryptIRC</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:2px">End-to-end encrypted IRC client</div>
+    <div style="font-size:11px;color:var(--text3);line-height:1.8;margin-top:6px">
+      Designed &amp; developed by <span style="color:var(--accent);font-weight:600">gh0st</span><br>
+      <span style="color:var(--text2);font-weight:500">Hallucimate</span> <span style="color:var(--text3)">— co-designer, QA testing &amp; feature ideas</span>
+    </div>
+    <div style="margin-top:12px;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--text3);line-height:1.7">
+      <span style="color:var(--accent);font-weight:600">irc.twistednet.org</span><br>
+      <span style="color:var(--accent2);font-weight:500">#dev</span> · <span style="color:var(--accent2);font-weight:500">#twisted</span><br>
+      <span style="font-size:10px">Join us — support, feedback, and development chat</span>
+    </div>
+  </div>`;
+  body.appendChild(about);
+
   const sections=[
     ['Channel',
       'join #channel [key] — Join a channel (auto-adds # if missing)',
@@ -9425,7 +9442,7 @@ function showHelpPanel(){
     <div class="help-support-text">
       Join us on <span class="help-support-server">irc.twistednet.org</span><br>
       Channels: <span class="help-support-chan">#dev</span> and <span class="help-support-chan">#twisted</span><br><br>
-      <span style="font-size:11px;color:var(--text3)">CryptIRC v0.9 — End-to-end encrypted IRC · 121 themes · 135 fonts · 90+ commands</span>
+      <span style="font-size:11px;color:var(--text3)">CryptIRC v0.3 — Created by gh0st with Hallucimate</span>
     </div>`;
   body.appendChild(sup);
   document.getElementById('help-overlay').classList.add('show');
