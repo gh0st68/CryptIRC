@@ -384,7 +384,7 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          font-src https://fonts.gstatic.com; img-src 'self' data: https:; \
          connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com; \
-         frame-src https://www.youtube-nocookie.com; frame-ancestors 'none';"
+         frame-src https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';"
     ));
     response
 }

@@ -3561,7 +3561,7 @@ function buildMediaEl(url){
     wrap.querySelector('.msg-yt-thumb').addEventListener('click',(e)=>{
       e.preventDefault();e.stopPropagation();
       const thumb=wrap.querySelector('.msg-yt-thumb');
-      thumb.innerHTML=`<iframe src="https://www.youtube-nocookie.com/embed/${ytId}?autoplay=1&rel=0" allow="autoplay; encrypted-media" allowfullscreen></iframe>`;
+      thumb.innerHTML=`<iframe src="https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0&modestbranding=1" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="no-referrer-when-downgrade"></iframe>`;
       scrollBottom();
     });
     wrap.querySelector('.msg-yt-info').addEventListener('click',()=>window.open(url,'_blank'));
