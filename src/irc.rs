@@ -351,6 +351,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                 }
 
                 let p  = parse_irc(&line);
+                // Log raw lines during SASL negotiation for debugging
+                if !matches!(sasl_state, SaslState::Done | SaslState::Idle) || matches!(p.command.as_str(), "900" | "902" | "903" | "904" | "905" | "906" | "907" | "AUTHENTICATE") {
+                    info!("[{}] RAW(sasl): {}", conn_id, line);
+                }
                 // Prefer IRCv3 server-time tag when available
                 let ts = p.tags.get("time")
                     .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
@@ -527,12 +531,14 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: true, message: format!("Logged in as {}", account) });
                     }
                     "903" => {
+                        info!("[{}] SASL 903: authentication successful", conn_id);
                         sasl_state = SaslState::Done;
                         conn.lock().await.send_raw("CAP END\r\n").await?;
                         send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: true, message: "SASL authentication successful".into() });
                     }
                     "902" | "904" | "905" | "906" | "907" => {
                         let reason = p.params.last().cloned().unwrap_or_else(|| "SASL failed".into());
+                        warn!("[{}] SASL {} FAILED: {}", conn_id, p.command, reason);
                         sasl_state = SaslState::Failed(reason.clone());
                         conn.lock().await.send_raw("CAP END\r\n").await?;
                         send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: reason });
@@ -627,15 +633,24 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let from   = nick_from_prefix(&p.prefix);
                         let target = p.params.get(0).cloned().unwrap_or_default();
                         let text   = p.params.get(1).cloned().unwrap_or_default();
+                        let user_nick = { conn.lock().await.nick.clone() };
                         info!("[{}] NOTICE: from={} target={} text={}", conn_id, from, target, &text[..text.len().min(120)]);
-                        // Route notices to sender's nick (e.g. NickServ), not our own nick
-                        // Server notices (no prefix or from server hostname) go to status
+                        // Suppress echo-message echoes of our own NOTICEs (same as PRIVMSG)
+                        if echo_message_enabled && from == user_nick {
+                            if let Some(ref pfx) = p.prefix {
+                                if pfx.contains('!') { continue; }
+                            }
+                        }
+                        // Route notices: channel → channel, server → status,
+                        // our own outgoing → keep target (recipient), incoming → sender's nick
                         let display_target = if target.starts_with(['#','&']) {
                             target.clone()
                         } else if from == "*" || from.contains('.') || p.prefix.is_none() {
                             "status".to_string()
+                        } else if from == user_nick {
+                            target.clone() // Our own NOTICE — route to recipient's PM window
                         } else {
-                            from.clone()
+                            from.clone() // Incoming NOTICE — route to sender's nick
                         };
                         let msg_id = state.logger.append(username, conn_id, &display_target, ts, &from, &text, "notice").await;
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from, target: display_target, text, ts, kind: MessageKind::Notice, msg_id, prefix: None });

@@ -635,6 +635,19 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   min-height:44px; display:flex; align-items:center; gap:8px;
 }
 .topic-menu-item:hover { background:var(--bg4); color:var(--text); }
+/* Custom prompt modal (replaces window.prompt which doesn't work in Electron) */
+#custom-prompt-overlay { display:none; position:fixed; inset:0; z-index:10000; background:rgba(0,0,0,.6); align-items:center; justify-content:center; }
+#custom-prompt-overlay.open { display:flex; }
+#custom-prompt-box { background:var(--bg2); border:1px solid var(--border2); border-radius:10px; padding:20px; width:min(420px,90vw); box-shadow:0 8px 30px rgba(0,0,0,.5); }
+#custom-prompt-msg { color:var(--text); font-size:13px; margin-bottom:12px; white-space:pre-wrap; line-height:1.5; }
+#custom-prompt-input { width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:13px; font-family:var(--mono); outline:none; box-sizing:border-box; }
+#custom-prompt-input:focus { border-color:var(--accent); }
+#custom-prompt-btns { display:flex; gap:8px; justify-content:flex-end; margin-top:14px; }
+#custom-prompt-btns button { padding:8px 20px; border-radius:8px; border:none; cursor:pointer; font-size:12px; font-weight:500; font-family:var(--mono); }
+#custom-prompt-cancel { background:var(--bg4); color:var(--text2); }
+#custom-prompt-cancel:hover { background:var(--border); }
+#custom-prompt-ok { background:var(--accent); color:#fff; }
+#custom-prompt-ok:hover { opacity:.85; }
 /* Lag indicator lives in the topbar on both desktop and mobile */
 #lag-mobile {
   display:inline-flex; align-items:center; gap:3px;
@@ -2209,17 +2222,34 @@ function showApp() {
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 let _wsRetries=0;
+let _lastWsActivity=Date.now();
 function connectWs() {
   if(!sessionToken) return;
   // Close any existing connection to prevent duplicate event streams
   if(ws){try{ws.onclose=null;ws.onerror=null;ws.onmessage=null;ws.close();}catch(e){}}
   const proto=location.protocol==='https:'?'wss':'ws';
   ws=new WebSocket(`${proto}://${location.host}/cryptirc/ws`);
-  ws.onopen=()=>{_wsRetries=0;};
-  ws.onmessage=e=>{_rxBytes+=(e.data||'').length;_rxCount++;flashLed('rx');updateStarfieldTitle();try{handleEvent(JSON.parse(e.data));}catch(err){console.error('WS parse error:',err);}};
+  ws.onopen=()=>{_wsRetries=0;_lastWsActivity=Date.now();};
+  ws.onmessage=e=>{_lastWsActivity=Date.now();_rxBytes+=(e.data||'').length;_rxCount++;flashLed('rx');updateStarfieldTitle();try{handleEvent(JSON.parse(e.data));}catch(err){console.error('WS parse error:',err);}};
   ws.onclose=()=>{_rateQueue=[];if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}const d=Math.min(1000*Math.pow(2,_wsRetries),60000);setTimeout(connectWs,d+Math.random()*1000);_wsRetries++;};
   ws.onerror=()=>ws.close();
 }
+// iOS PWA WebSocket-zombie watchdog: iOS Safari throttles backgrounded JS and
+// silently drops WS messages without firing onclose, so the connection looks
+// alive but no events arrive. Periodically poll for missed messages on the
+// active channel, and force-reconnect if the WS has been quiet for too long.
+setInterval(()=>{
+  if(!sessionToken||!ws||ws.readyState!==1)return;
+  // Background sync: re-fetch any messages we might have missed on the active channel
+  if(active?.conn_id && active?.target && active.target!=='status'){
+    const _sk=bk(active.conn_id,active.target),_lid=_lastMsgId[_sk];
+    if(_lid>0) wsend({type:'sync',conn_id:active.conn_id,target:active.target,after_id:_lid});
+  }
+  // Staleness check: if WS hasn't had activity in 90s, it's likely a zombie — reconnect
+  if(Date.now()-_lastWsActivity > 90000){
+    try{ws.close();}catch(e){} // onclose will trigger reconnect via the handler chain
+  }
+},15000);
 // Reconnect + catch up when app comes back from background (iOS PWA, minimized desktop, etc.)
 function _onResume(){
   if(!sessionToken)return;
@@ -4895,8 +4925,8 @@ function clearAllLogs(){
   wsend({type:'clear_all_data'});
   showToast('All data cleared');
 }
-function showDeleteAccount(){
-  const pw=prompt('To delete your account permanently, enter your password:');
+async function showDeleteAccount(){
+  const pw=await customPrompt('To delete your account permanently, enter your password:');
   if(!pw)return;
   if(!confirm('This will permanently delete your account, all connections, logs, and settings. This cannot be undone. Are you sure?'))return;
   wsend({type:'delete_account',password:pw});
@@ -5217,7 +5247,7 @@ async function copyChannelKey(){
   const raw=await crypto.subtle.exportKey('raw',key);
   const words=bytesToMnemonic(new Uint8Array(raw));
   try{await navigator.clipboard.writeText(words.join(' '));alert('Key copied to clipboard!');}
-  catch(e){prompt('Copy this key:',words.join(' '));}
+  catch(e){await customPrompt('Copy this key:',words.join(' '));}
   closeEncryptPanel();
 }
 
@@ -7826,15 +7856,15 @@ function showNickMenu(e,nick){
     {label:'Mention',   action:()=>insertNick(nick)},
     {label:'Slap',      action:async()=>{if(!active)return;const st=`slaps ${nick} around a bit with a large trout`;const sw=(window.E2E?.ready||window.E2E?.channelKeys?.[active.target])?await e2eEncryptOutgoing(active.target,`\x01ACTION ${st}\x01`):null;if(sw)wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :${sw}`});else wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :\x01ACTION ${st}\x01`});addMessage(active.conn_id,active.target,{ts:Date.now()/1000|0,from:getNick(active.conn_id),text:st,kind:'action'});}},
     {label:loadMonitor()[nick.toLowerCase()]?'Unmonitor':'Monitor', action:()=>{const k=nick.toLowerCase();if(loadMonitor()[k]){monitorRemove(nick);showToast(`Removed ${nick} from monitor`);}else{monitorAdd(nick);showToast(`Added ${nick} to monitor`);}}},
-    {label:'📝 Note', action:()=>{const notes=loadUserNotes();const existing=notes[nick.toLowerCase()]||'';const n=prompt(`Note for ${nick}:`,existing);if(n!==null){if(n.trim())notes[nick.toLowerCase()]=n.trim();else delete notes[nick.toLowerCase()];saveUserNotes(notes);showToast(n.trim()?`Note saved for ${nick}`:`Note removed for ${nick}`);}}},
+    {label:'📝 Note', action:async()=>{const notes=loadUserNotes();const existing=notes[nick.toLowerCase()]||'';const n=await customPrompt(`Note for ${nick}:`,existing);if(n!==null){if(n.trim())notes[nick.toLowerCase()]=n.trim();else delete notes[nick.toLowerCase()];saveUserNotes(notes);showToast(n.trim()?`Note saved for ${nick}`:`Note removed for ${nick}`);}}},
     {label:isIgnored(nick)?'Unignore':'Ignore nick', action:()=>{if(isIgnored(nick)){removeIgnore(nick);showToast(`Unignored ${nick}`);}else{addIgnore(nick);showToast(`Ignoring ${nick}`);}}},
-    {label:'Ignore by mask', action:()=>{const mask=prompt(`Ignore mask for ${nick}:\n\nExamples:\n  ${nick}!*@*  (nick only)\n  *!*@*.host.com  (by host)\n  *!user@*  (by username)`,`${nick}!*@*`);if(mask&&mask.trim()){addIgnore(mask.trim());showToast(`Ignoring ${mask.trim()}`);}}},
+    {label:'Ignore by mask', action:async()=>{const mask=await customPrompt(`Ignore mask for ${nick}:\n\nExamples:\n  ${nick}!*@*  (nick only)\n  *!*@*.host.com  (by host)\n  *!user@*  (by username)`,`${nick}!*@*`);if(mask&&mask.trim()){addIgnore(mask.trim());showToast(`Ignoring ${mask.trim()}`);}}},
     {label:(active&&isPmAllowedFor(active.conn_id,nick))?'🛡 Remove PM allow':'🛡 Allow PMs', action:()=>{const cid=active?.conn_id;if(cid&&isPmAllowedFor(cid,nick)){removePmAllow(nick,cid);showToast(`${nick} removed from PM allow list`);}else{addPmAllow(nick,cid);showToast(`PMs from ${nick} will now bypass protection`);}}},
   ];
   // Channel power options — only show if we have sufficient power and in a channel
   if(isChan&&myPower>=2){
     items.push({label:'─────',action:()=>{}});
-    items.push({label:'Kick',action:()=>{const reason=prompt('Kick reason (optional):','');if(reason===null)return;sendRaw(`KICK ${ch} ${nick}${reason?' :'+reason:''}`);}});
+    items.push({label:'Kick',action:async()=>{const reason=await customPrompt('Kick reason (optional):','');if(reason===null)return;sendRaw(`KICK ${ch} ${nick}${reason?' :'+reason:''}`);}});
     items.push({label:'Ban',action:()=>sendRaw(`MODE ${ch} +b ${nick}!*@*`)});
     items.push({label:'Kick + Ban',action:()=>{sendRaw(`MODE ${ch} +b ${nick}!*@*`);setTimeout(()=>sendRaw(`KICK ${ch} ${nick} :Banned`),300);}});
   }
@@ -7940,7 +7970,7 @@ function showTopicMenu(e){
     const net=networks.find(n=>n.config.id===conn_id);
     const netLabel=net?esc(net.config.label||net.config.server):'Network';
     m.innerHTML+=`<button class="topic-menu-item" onclick="editNetwork('${esc(conn_id)}');closeTopicMenu()">✎ Edit ${netLabel}</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="closeTopicMenu();const ch=prompt('Channel name:');if(ch){let c=ch.trim();if(c&&!c.startsWith('#')&&!c.startsWith('&'))c='#'+c;if(c)wsend({type:'join_channel',conn_id:'${esc(conn_id)}',channel:c,key:null});}">📺 Join channel</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="closeTopicMenu();promptJoinChannel('${esc(conn_id)}')">📺 Join channel</button>`;
     m.innerHTML+=`<button class="topic-menu-item" onclick="chanListData=[];chanListConnId='${esc(conn_id)}';document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';document.getElementById('chanlist-count').textContent='';document.getElementById('chanlist-search').value='';document.getElementById('chanlist-overlay').classList.add('show');wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'LIST'});closeTopicMenu()">📋 List channels</button>`;
     m.innerHTML+=`<button class="topic-menu-item" onclick="showIgnorePanel();closeTopicMenu()">🚫 Ignored users</button>`;
     const netMuted=isMuted('net:'+conn_id);
@@ -7992,14 +8022,36 @@ function viewFullTopic(){
   box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Topic — ${esc(active.target)}</div>${parseMircColors(topic)}`;
   ov.innerHTML='';ov.appendChild(box);
 }
-function editTopic(){
+function customPrompt(message,defaultValue){
+  return new Promise(resolve=>{
+    const ov=document.getElementById('custom-prompt-overlay');
+    const msg=document.getElementById('custom-prompt-msg');
+    const inp=document.getElementById('custom-prompt-input');
+    const ok=document.getElementById('custom-prompt-ok');
+    const cancel=document.getElementById('custom-prompt-cancel');
+    msg.textContent=message||'';
+    inp.value=defaultValue||'';
+    ov.classList.add('open');
+    inp.focus();
+    inp.select();
+    function finish(val){ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;inp.onkeydown=null;resolve(val);}
+    ok.onclick=()=>finish(inp.value);
+    cancel.onclick=()=>finish(null);
+    inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();finish(inp.value);}else if(e.key==='Escape'){e.preventDefault();finish(null);}};
+  });
+}
+async function editTopic(){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
   const ch=net?.channels.find(c=>c.name===active.target);
   const current=ch?.topic||'';
-  const newTopic=prompt('Edit topic for '+active.target+':',current);
+  const newTopic=await customPrompt('Edit topic for '+active.target+':',current);
   if(newTopic===null)return;
   wsend({type:'send',conn_id:active.conn_id,raw:`TOPIC ${active.target} :${newTopic}`});
+}
+async function promptJoinChannel(conn_id){
+  const ch=await customPrompt('Channel name:');
+  if(ch){let c=ch.trim();if(c&&!c.startsWith('#')&&!c.startsWith('&'))c='#'+c;if(c)wsend({type:'join_channel',conn_id,channel:c,key:null});}
 }
 function copyTopic(){
   if(!active)return;
@@ -10393,6 +10445,8 @@ function timeAgo(ts){
 <div id="smart-paste-dialog"><div class="sp-info"></div><div class="sp-btns"><button class="sp-btn sp-yes" onclick="smartPasteYes()">Create Pastebin</button><button class="sp-btn sp-no" onclick="smartPasteNo()">Paste as Text</button></div></div>
 <!-- Animation overlay for animated themes -->
 <div id="anim-overlay"><canvas id="anim-canvas"></canvas></div>
+<!-- Custom prompt modal (Electron doesn't support window.prompt) -->
+<div id="custom-prompt-overlay"><div id="custom-prompt-box"><div id="custom-prompt-msg"></div><input id="custom-prompt-input" type="text" autocomplete="off" spellcheck="false"><div id="custom-prompt-btns"><button id="custom-prompt-cancel">Cancel</button><button id="custom-prompt-ok">OK</button></div></div></div>
 <!-- Cover div prevents iOS keyboard from exposing raw source below the app -->
 <div style="position:fixed;inset:-100px;background:var(--bg0,#000004);z-index:-1;pointer-events:none"></div>
 </body>
