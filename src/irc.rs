@@ -82,16 +82,21 @@ enum SaslMethod {
 
 pub async fn connect(
     conn_id:  String,
-    cfg:      NetworkConfig,
+    mut cfg:  NetworkConfig,
     username: String,
     state:    AppState,
 ) -> Result<()> {
     let mut delay   = RECONNECT_BASE;
     let mut attempt = 0u32;
+    // SASL retry tracking — local to this connect() task. Not persisted to the
+    // user's stored config; resets on successful registration or task restart.
+    let mut sasl_failures = 0u32;
+    let original_sasl_external = cfg.sasl_external;
+    const MAX_SASL_RETRIES: u32 = 3;
 
     loop {
         attempt += 1;
-        info!("[{}] Connect attempt {} → {}:{}", conn_id, attempt, cfg.server, cfg.port);
+        info!("[{}] Connect attempt {} → {}:{} (sasl_external={})", conn_id, attempt, cfg.server, cfg.port, cfg.sasl_external);
         state.send_to_user(&username, ServerEvent::Connecting {
             conn_id: conn_id.clone(),
             server:  cfg.server.clone(),
@@ -133,8 +138,28 @@ pub async fn connect(
                 warn!("[{}] Server closed connection. Reconnecting in {:?}", conn_id, RECONNECT_BASE);
                 delay = RECONNECT_BASE;
                 attempt = 0;
+                // Reset SASL retry state on a successful prior connection
+                sasl_failures = 0;
+                cfg.sasl_external = original_sasl_external;
             }
             Err(e) => {
+                let msg = e.to_string();
+                if msg.starts_with("SASL_RETRY:") {
+                    sasl_failures += 1;
+                    if sasl_failures >= MAX_SASL_RETRIES {
+                        warn!("[{}] SASL failed {} times — disabling SASL for this session, will reconnect without it", conn_id, sasl_failures);
+                        state.send_to_user(&username, ServerEvent::IrcMessage {
+                            conn_id: conn_id.clone(), from: "*".into(), target: "status".into(),
+                            text: format!("⚠ SASL EXTERNAL failed {} times. Reconnecting without SASL — identify with NickServ manually if needed.", sasl_failures),
+                            ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, msg_id: 0, prefix: None,
+                        });
+                        cfg.sasl_external = false;
+                    } else {
+                        info!("[{}] SASL failure {}/{}, reconnecting fast to try a different server", conn_id, sasl_failures, MAX_SASL_RETRIES);
+                    }
+                    // Fast retry on SASL failures — reset backoff so we cycle through DNS quickly
+                    delay = RECONNECT_BASE;
+                }
                 warn!("[{}] Connection error: {}. Reconnecting in {:?}", conn_id, e, delay);
                 state.send_to_user(&username, ServerEvent::Reconnecting {
                     conn_id:    conn_id.clone(),
@@ -351,8 +376,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                 }
 
                 let p  = parse_irc(&line);
-                // Log raw lines during SASL negotiation for debugging
-                if !matches!(sasl_state, SaslState::Done | SaslState::Idle) || matches!(p.command.as_str(), "900" | "902" | "903" | "904" | "905" | "906" | "907" | "AUTHENTICATE") {
+                // Log raw lines only during the active SASL handshake (positive match
+                // so SaslState::Failed/Done/Idle don't accidentally trigger log spam).
+                let _in_sasl_handshake = matches!(sasl_state, SaslState::CapLsSent | SaslState::CapReqSent | SaslState::AuthenticateSent);
+                let _is_sasl_resp = matches!(p.command.as_str(), "900" | "902" | "903" | "904" | "905" | "906" | "907" | "AUTHENTICATE");
+                if _in_sasl_handshake || _is_sasl_resp {
                     info!("[{}] RAW(sasl): {}", conn_id, line);
                 }
                 // Prefer IRCv3 server-time tag when available
@@ -539,9 +567,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "902" | "904" | "905" | "906" | "907" => {
                         let reason = p.params.last().cloned().unwrap_or_else(|| "SASL failed".into());
                         warn!("[{}] SASL {} FAILED: {}", conn_id, p.command, reason);
-                        sasl_state = SaslState::Failed(reason.clone());
-                        conn.lock().await.send_raw("CAP END\r\n").await?;
-                        send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: reason });
+                        send(ServerEvent::SaslStatus { conn_id: conn_id.to_string(), success: false, message: reason.clone() });
+                        // Force-disconnect to let the connect loop retry. The "SASL_RETRY:"
+                        // prefix tells the loop this is a SASL-specific failure (not a
+                        // generic network error) so it can track failures separately.
+                        return Err(anyhow::anyhow!("SASL_RETRY: {}", reason));
                     }
 
                     // ── Welcome ──────────────────────────────────────────
