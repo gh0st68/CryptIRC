@@ -2558,7 +2558,16 @@ function handleEvent(ev) {
               localStorage.setItem(_bpKey,String(Date.now()));
               if(notify){
                 const hrTxt=cooldownHrs===1?'hour':cooldownHrs<24?cooldownHrs+' hours':cooldownHrs===24?'24 hours':Math.round(cooldownHrs/24)+' days';
-                wsend({type:'send',conn_id:ev.conn_id,raw:`NOTICE ${ev.from} :This CryptIRC user has their private messages turned off.${deliverFirst?' They will receive your first message and if they feel like it they will get back to you.':''} All${deliverFirst?' further':''} messages from you will be silently dropped for the next ${hrTxt}.`});
+                const _pmOffText=`This CryptIRC user has their private messages turned off.${deliverFirst?' They will receive your first message and if they feel like it they will get back to you.':''} All${deliverFirst?' further':''} messages from you will be silently dropped for the next ${hrTxt}.`;
+                wsend({type:'send',conn_id:ev.conn_id,raw:`NOTICE ${ev.from} :${_pmOffText}`});
+                // Echo the auto-notice into the sender's PM window so the user
+                // can see what their client replied with.
+                addMessage(ev.conn_id, ev.from, {
+                  ts: Math.floor(Date.now()/1000),
+                  from: getNick(ev.conn_id),
+                  text: _pmOffText,
+                  kind: 'notice',
+                });
               }
               if(!deliverFirst){
                 recordBlockedPm(ev.conn_id, ev.from, displayText, ev.ts);
@@ -7567,6 +7576,17 @@ function toggleFavMenu(btn,connId,target,isChannel){
     {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>{toggleMute(muteKey);closeChanMenus();}},
     {text:'🗑 Clear History',action:()=>{clearBufHistory(connId,target);closeChanMenus();}},
   ];
+  if(!isChannel){
+    const pmAllowed=isPmAllowedFor(connId,target);
+    items.push({
+      text: pmAllowed?'🛡 Remove PM allow':'🛡 Allow PMs',
+      action: ()=>{
+        if(pmAllowed){removePmAllow(target,connId); showToast(`${target} removed from PM allow list`);}
+        else {addPmAllow(target,connId); showToast(`PMs from ${target} will now bypass protection`);}
+        closeChanMenus();
+      },
+    });
+  }
   if(isChannel){
     items.push({text:'Leave',action:()=>{wsend({type:'part_channel',conn_id:connId,channel:target});closeChanMenus();},style:'color:#f87171'});
   } else {
@@ -7581,6 +7601,7 @@ function toggleFavMenu(btn,connId,target,isChannel){
     dd.appendChild(b);
   }
   ci.appendChild(dd);
+  _flipChanDropdownIfNeeded(dd);
 }
 
 function renderPMList(){
@@ -7783,6 +7804,17 @@ function toggleChanMenu(btn,connId,target,kind){
     {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>{toggleMute(muteKey);closeChanMenus();}},
     {text:'🗑 Clear History',action:()=>{clearBufHistory(connId,target);closeChanMenus();}},
   ];
+  if(kind==='pm'){
+    const pmAllowed=isPmAllowedFor(connId,target);
+    items.push({
+      text: pmAllowed?'🛡 Remove PM allow':'🛡 Allow PMs',
+      action: ()=>{
+        if(pmAllowed){removePmAllow(target,connId); showToast(`${target} removed from PM allow list`);}
+        else {addPmAllow(target,connId); showToast(`PMs from ${target} will now bypass protection`);}
+        closeChanMenus();
+      },
+    });
+  }
   if(kind==='channel') items.push({text:'Leave',action:()=>{wsend({type:'part_channel',conn_id:connId,channel:target});closeChanMenus();},style:'color:#f87171'});
   else items.push({text:'Close',action:()=>{closeQuery(connId,target);closeChanMenus();},style:'color:#f87171'});
   for(const it of items){
@@ -7794,8 +7826,20 @@ function toggleChanMenu(btn,connId,target,kind){
     dd.appendChild(b);
   }
   ci.appendChild(dd);
+  _flipChanDropdownIfNeeded(dd);
 }
 function closeChanMenus(){document.querySelectorAll('.chan-dropdown').forEach(d=>d.remove());}
+// Flip the sidebar kebab dropdown upward if its default downward position would
+// overflow the viewport bottom. Called after the dropdown is appended so
+// getBoundingClientRect() reflects the actual rendered size.
+function _flipChanDropdownIfNeeded(dd){
+  if(!dd) return;
+  const r=dd.getBoundingClientRect();
+  if(r.bottom>window.innerHeight-8){
+    dd.style.top='auto';
+    dd.style.bottom='100%';
+  }
+}
 document.addEventListener('click',e=>{
   if(!e.target.closest('.net-kebab')&&!e.target.closest('.net-dropdown'))closeNetMenus();
   if(!e.target.closest('.chan-kebab')&&!e.target.closest('.chan-dropdown'))closeChanMenus();
@@ -7956,6 +8000,8 @@ function showTopicMenu(e){
     m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">🚪 Leave channel</button>`;
   } else if(isPM){
     m.innerHTML+=`<button class="topic-menu-item" onclick="wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'WHOIS ${esc(target)}'});closeTopicMenu()">🔍 Whois</button>`;
+    const pmAllowed=isPmAllowedFor(conn_id,target);
+    m.innerHTML+=`<button class="topic-menu-item" onclick="${pmAllowed?'removePmAllow':'addPmAllow'}('${esc(target)}','${esc(conn_id)}');showToast('${pmAllowed?esc(target)+' removed from PM allow list':'PMs from '+esc(target)+' will now bypass protection'}');closeTopicMenu()">${pmAllowed?'🛡 Remove PM allow':'🛡 Allow PMs'}</button>`;
     const ignored=isIgnored(target);
     m.innerHTML+=`<button class="topic-menu-item" onclick="${ignored?'removeIgnore':'addIgnore'}('${esc(target)}');closeTopicMenu()">${ignored?'👂 Unignore':'🚫 Ignore user'}</button>`;
     const muteKey=conn_id+'/'+target;

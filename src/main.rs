@@ -51,6 +51,11 @@ pub struct AppState {
     pub conn_owners:         Arc<DashMap<String, String>>,
     /// Set of conn_ids that have been explicitly disconnected (suppresses auto-reconnect)
     pub disconnect_requests: Arc<DashSet<String>>,
+    /// JoinHandle of the currently-running connect() task per conn_id.
+    /// Aborting this handle kills the reconnect loop deterministically — replaces
+    /// the old "set flag + sleep 200ms + clear flag" race that let zombie tasks
+    /// survive a disconnect and reconnect in parallel with the new task.
+    pub connect_tasks:       Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
     pub crypto:              Arc<CryptoManager>,
     pub certs:               Arc<CertStore>,
     pub logger:              Arc<EncryptedLogger>,
@@ -110,6 +115,14 @@ impl AppState {
     }
     pub fn clear_disconnect_request(&self, conn_id: &str) {
         self.disconnect_requests.remove(conn_id);
+    }
+    /// Abort and drop the tracked connect() task for this conn_id, if any.
+    /// Callers MUST also remove state.connections / state.conn_owners since the
+    /// aborted task won't run its cleanup path.
+    pub fn abort_connect_task(&self, conn_id: &str) {
+        if let Some((_, handle)) = self.connect_tasks.remove(conn_id) {
+            handle.abort();
+        }
     }
 }
 
@@ -433,6 +446,7 @@ async fn main() -> Result<()> {
         connections:         Arc::new(DashMap::new()),
         conn_owners:         Arc::new(DashMap::new()),
         disconnect_requests: Arc::new(DashSet::new()),
+        connect_tasks:       Arc::new(DashMap::new()),
         crypto, certs, logger, auth, notifier, e2e_store, paste_store, preview_service,
         user_events:         Arc::new(DashMap::new()),
         active_sessions:     Arc::new(DashMap::new()),
@@ -1472,8 +1486,10 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 let mut c = conn.lock().await;
                 let _ = c.send_raw("QUIT :CryptIRC\r\n").await;
             }
+            state.abort_connect_task(&id);
             state.connections.remove(&id);
             state.conn_owners.remove(&id);
+            state.clear_disconnect_request(&id);
             state.remove_network(&id, username).await;
             send(ServerEvent::State {
                 networks: state.user_network_states(username).await,
@@ -1482,34 +1498,39 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
         }
         ClientMessage::Connect { id } => {
             if !state.owns_network(username, &id).await { return; }
-            // Kill any existing connection first to prevent ghost sessions
-            state.request_disconnect(&id);
+            // Kill any existing connection first to prevent ghost sessions.
+            // Order matters: send QUIT while the socket is still alive, then abort
+            // the task so its reconnect loop can't resurrect itself.
             if let Some(conn) = state.connections.get(&id) {
                 let mut c = conn.lock().await;
                 let _ = c.send_raw("QUIT :CryptIRC\r\n").await;
             }
+            state.abort_connect_task(&id);
             state.connections.remove(&id);
             state.conn_owners.remove(&id);
-            // Small delay to let the old reconnect loop see the disconnect flag
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             state.clear_disconnect_request(&id);
             if let Some(cfg) = state.get_network_config(&id, username).await {
-                send(ServerEvent::Connecting { conn_id: id.clone(), server: cfg.server.clone() });
+                // irc::connect() emits Connecting at the top of each attempt — don't double-emit here.
                 let (s2, u2) = (state.clone(), username.to_string());
-                tokio::spawn(async move {
-                    if let Err(e) = irc::connect(id, cfg, u2, s2).await { error!("IRC: {}", e); }
+                let id2 = id.clone();
+                let handle = tokio::spawn(async move {
+                    if let Err(e) = irc::connect(id2, cfg, u2, s2).await { error!("IRC: {}", e); }
                 });
+                state.connect_tasks.insert(id, handle);
             }
         }
         ClientMessage::Disconnect { id } => {
             if !state.owns_network(username, &id).await { return; }
-            state.request_disconnect(&id);
+            // Send QUIT first (while socket is alive), then abort the reconnect loop.
+            // abort() is deterministic — no sleep/flag race.
             if let Some(conn) = state.connections.get(&id) {
                 let mut c = conn.lock().await;
                 let _ = c.send_raw("QUIT :CryptIRC\r\n").await;
             }
+            state.abort_connect_task(&id);
             state.connections.remove(&id);
             state.conn_owners.remove(&id);
+            state.clear_disconnect_request(&id);
             send(ServerEvent::Disconnected { conn_id: id, reason: "User requested".into() });
         }
         ClientMessage::Send { conn_id, raw } => {
@@ -2065,13 +2086,14 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                         .map(|e| e.key().clone())
                         .collect();
                     for cid in &conns {
-                        state.request_disconnect(cid);
                         if let Some(conn) = state.connections.get(cid) {
                             let mut c = conn.lock().await;
                             let _ = c.send_raw("QUIT :Account deleted\r\n").await;
                         }
+                        state.abort_connect_task(cid);
                         state.connections.remove(cid);
                         state.conn_owners.remove(cid);
+                        state.clear_disconnect_request(cid);
                     }
                     // Delete account data
                     state.auth.delete_account(username).await;
@@ -2149,21 +2171,22 @@ impl AppState {
     pub async fn reconnect_for_user(&self, username: &str) {
         for cfg in self.load_user_configs(username).await {
             let id = cfg.id.clone();
-            // Kill any existing connection first to prevent duplicate sessions
-            self.request_disconnect(&id);
+            // Kill any existing connection first to prevent duplicate sessions.
             if let Some(conn) = self.connections.get(&id) {
                 let mut c = conn.lock().await;
                 let _ = c.send_raw("QUIT :CryptIRC\r\n").await;
             }
+            self.abort_connect_task(&id);
             self.connections.remove(&id);
             self.conn_owners.remove(&id);
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             self.clear_disconnect_request(&id);
-            self.send_to_user(username, ServerEvent::Connecting { conn_id: id.clone(), server: cfg.server.clone() });
+            // irc::connect() emits Connecting at the top of each attempt — don't double-emit here.
             let (s, u) = (self.clone(), username.to_string());
-            tokio::spawn(async move {
-                if let Err(e) = irc::connect(id, cfg, u, s).await { error!("{}", e); }
+            let id2 = id.clone();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = irc::connect(id2, cfg, u, s).await { error!("{}", e); }
             });
+            self.connect_tasks.insert(id, handle);
         }
     }
 
