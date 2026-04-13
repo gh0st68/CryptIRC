@@ -2545,6 +2545,10 @@ function handleEvent(ev) {
       {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
       if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key);
       if(!_chanStatsLoaded) loadStatsFromServer();
+      // Prefs are server-side encrypted; the initial load_preferences fired
+      // before unlock returned empty. Re-request now that vault is open so
+      // the server can decrypt and send the real prefs blob.
+      wsend({type:'load_preferences'});
       // Note: log loading is handled by the 'state' event handler which fires
       // before vault_unlocked — no need to request logs here (avoids double delivery)
       break;
@@ -4437,6 +4441,57 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'GIPHY': case 'GIF': {
+        const sub=(args[0]||'').toLowerCase();
+        // ── Key management: /giphy key [value|clear] ────────────────────
+        if(sub==='key'){
+          const v=args[1];
+          if(!v){
+            const cur=_giphyKey();
+            if(cur) sysMsg(conn_id,target,`Giphy key set: ${_giphyMaskKey(cur)} — rating: ${_giphyRating()}. Use /giphy key clear to remove, /giphy key <newkey> to replace.`,'system');
+            else sysMsg(conn_id,target,'No Giphy key set. Get one free at https://developers.giphy.com/ → Create App → API. Then: /giphy key YOUR_KEY_HERE','system');
+            break;
+          }
+          if(v.toLowerCase()==='clear'){
+            try{localStorage.removeItem('cryptirc_giphy_key');}catch(e){}
+            flushPrefsToServer(); // push the clear to the server so other devices un-set too
+            sysMsg(conn_id,target,'Giphy key cleared (synced to your account).','system');break;
+          }
+          try{localStorage.setItem('cryptirc_giphy_key',v);}catch(e){sysMsg(conn_id,target,'Failed to save key (localStorage unavailable).','error');break;}
+          flushPrefsToServer(); // push to server so other devices pick it up on next unlock
+          sysMsg(conn_id,target,`Giphy key saved: ${_giphyMaskKey(v)} (synced to your account — other devices will pick it up on unlock). Try /giphy dog — or type /giphy dog (with a space) to see the live picker.`,'system');
+          break;
+        }
+        // ── Rating filter: /giphy rating <g|pg|pg-13|r> ─────────────────
+        if(sub==='rating'){
+          const r=(args[1]||'').toLowerCase();
+          if(!['g','pg','pg-13','r'].includes(r)){
+            sysMsg(conn_id,target,`Usage: /giphy rating <g|pg|pg-13|r>. Current: ${_giphyRating()}`,'error');break;
+          }
+          try{localStorage.setItem('cryptirc_giphy_rating',r);}catch(e){}
+          flushPrefsToServer();
+          sysMsg(conn_id,target,`Giphy rating filter set to ${r} (synced).`,'system');break;
+        }
+        // ── Bare /giphy (no args): show status + help ───────────────────
+        if(!sub){
+          const cur=_giphyKey();
+          const status=cur?`Key: ${_giphyMaskKey(cur)}, rating: ${_giphyRating()}`:'No key set — run /giphy key YOUR_KEY (get one at developers.giphy.com)';
+          sysMsg(conn_id,target,`Giphy — ${status}. Usage:\n• /giphy <query>  send top match\n• /giphy <query>  (with space, then keep typing) live picker\n• /giphy key <k>  save your API key\n• /giphy key clear  remove\n• /giphy rating <g|pg|pg-13|r>  content filter`,'system');
+          break;
+        }
+        // ── Default: search and send top match ───────────────────────────
+        const q=args.join(' ').trim();
+        if(!_giphyKey()){
+          sysMsg(conn_id,target,'No Giphy key set. Run /giphy key YOUR_KEY_HERE first. Get a free key at developers.giphy.com (Create App → API).','error');break;
+        }
+        const url=await giphyFetchTop(q);
+        if(!url){ sysMsg(conn_id,target,'Giphy search failed — invalid key, no result, or rate-limited.','error'); break; }
+        const gifWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,url):null;
+        if(gifWire)wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${gifWire}`});
+        else wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${url}`});
+        addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:url,kind:'privmsg',encrypted:!!gifWire});
+        break;
+      }
       case 'TABLEFLIP': { const t='(╯°□°)╯︵ ┻━┻'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'UNFLIP': case 'UNFLIPTABLE': { const t='┬─┬ノ( º _ ºノ)'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'LENNY': { const t='( ͡° ͜ʖ ͡°)'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
@@ -4921,7 +4976,7 @@ function doUnlock(){
   document.getElementById('vault-err').textContent='';
   wsend({type:'unlock_vault',passphrase:p});
 }
-async function lockVault(){if(!(await customConfirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.','Lock')))return;wsend({type:'lock_vault'});for(const n of networks)wsend({type:'disconnect',id:n.config.id});document.getElementById('vault-overlay').classList.add('show');const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔒';vb.title='Lock vault';}}
+async function lockVault(){if(!(await customConfirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.','Lock')))return;flushPrefsToServer();wsend({type:'lock_vault'});for(const n of networks)wsend({type:'disconnect',id:n.config.id});document.getElementById('vault-overlay').classList.add('show');const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔒';vb.title='Lock vault';}}
 async function showChangePass(){
   const old=await customPrompt('Current vault passphrase:','',true);if(!old)return;
   const nw=await customPrompt('New vault passphrase:','',true);if(!nw)return;
@@ -6696,6 +6751,9 @@ document.addEventListener('click',e=>{
     {cmd:'pmremove',desc:'Remove from PM allow list',usage:'/pmremove nick'},
     {cmd:'pmallowlist',desc:'Show PM allow list',usage:'/pmallowlist'},
     {cmd:'pmprotection',desc:'Open PM protection settings',usage:'/pmprotection'},
+    // ── Giphy ──
+    {cmd:'giphy',desc:'Search Giphy (live picker — arrow keys + Enter)',usage:'/giphy query'},
+    {cmd:'gif',desc:'Alias for /giphy',usage:'/gif query'},
     // ── Services ──
     {cmd:'ns',desc:'NickServ command',usage:'/ns identify password'},
     {cmd:'cs',desc:'ChanServ command',usage:'/cs op #chan nick'},
@@ -6802,6 +6860,187 @@ document.addEventListener('click',e=>{
   });
   // Close on click outside
   document.addEventListener('click',e=>{if(!e.target.closest('#slash-autocomplete')&&!e.target.closest('#msg-input'))slashEl.style.display='none';});
+})();
+
+// ─── Giphy live picker ──────────────────────────────────────────────────────
+// No shared key — each user stores their own free key via `/giphy key <k>`.
+// Key lives in localStorage (per-device); rating filter too.
+function _giphyKey(){try{return localStorage.getItem('cryptirc_giphy_key')||null;}catch{return null;}}
+function _giphyRating(){return localStorage.getItem('cryptirc_giphy_rating')||'pg-13';}
+function _giphyMaskKey(k){if(!k)return '(none)';if(k.length<8)return k[0]+'…';return k.slice(0,4)+'…'+k.slice(-2);}
+async function giphyFetchTop(query){
+  const key=_giphyKey(); if(!key)return null;
+  try{
+    const r=await fetch(`https://api.giphy.com/v1/gifs/search?api_key=${encodeURIComponent(key)}&q=${encodeURIComponent(query)}&limit=1&rating=${encodeURIComponent(_giphyRating())}`);
+    if(!r.ok)return null;
+    const d=await r.json();
+    const g=d?.data?.[0];
+    return g?.images?.original?.url||null;
+  }catch(e){return null;}
+}
+async function giphyFetchList(query, n){
+  const key=_giphyKey(); if(!key)return [];
+  try{
+    const r=await fetch(`https://api.giphy.com/v1/gifs/search?api_key=${encodeURIComponent(key)}&q=${encodeURIComponent(query)}&limit=${n|0}&rating=${encodeURIComponent(_giphyRating())}`);
+    if(!r.ok)return [];
+    const d=await r.json();
+    return (d?.data||[]).map(g=>({
+      preview:g?.images?.fixed_height_small?.url||g?.images?.preview_gif?.url,
+      url:g?.images?.original?.url,
+      title:g?.title||'',
+    })).filter(x=>x.url);
+  }catch(e){return [];}
+}
+(function(){
+  const inp=document.getElementById('msg-input');if(!inp)return;
+  // Picker element — floats above the input like the slash-autocomplete does.
+  // Append to #input-wrap (which slash-autocomplete sets to position:relative)
+  // so our `bottom:100%` anchors against the input bar, not against whatever
+  // position:relative ancestor the inner flex child lives inside.
+  let picker=document.createElement('div');
+  picker.id='giphy-picker';
+  picker.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:8px;display:none;z-index:102;box-shadow:0 -4px 16px rgba(0,0,0,.4);padding:6px;max-height:160px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;-webkit-overflow-scrolling:touch;';
+  const wrap=inp.closest('#input-wrap')||inp.parentNode;
+  wrap.style.position='relative';
+  wrap.appendChild(picker);
+  let items=[]; // [{preview,url,title,el}]
+  let idx=-1;
+  let debounceTimer=null;
+  let lastQuery='';
+
+  function close(){picker.style.display='none';items=[];idx=-1;picker.innerHTML='';lastQuery='';}
+  function setActive(i){
+    idx=Math.max(0,Math.min(i,items.length-1));
+    items.forEach((it,j)=>it.el.style.outline=j===idx?'2px solid var(--accent)':'2px solid transparent');
+    items[idx]?.el.scrollIntoView({block:'nearest',inline:'nearest'});
+  }
+  // Add a close (X) button in the top-right corner of the picker. Clicking
+  // it clears the input's "/giphy ..." prefix so the picker doesn't
+  // immediately reopen on the next input event.
+  function addCloseBtn(){
+    const btn=document.createElement('button');
+    btn.textContent='✕';
+    btn.title='Close';
+    btn.style.cssText='position:absolute;top:4px;right:4px;background:var(--bg3);border:1px solid var(--border);color:var(--text2);cursor:pointer;border-radius:50%;width:22px;height:22px;font-size:11px;line-height:1;padding:0;z-index:2;display:flex;align-items:center;justify-content:center;';
+    btn.addEventListener('pointerdown',e=>{
+      e.preventDefault();e.stopPropagation();
+      // Blank the /giphy command out of the input so the picker doesn't re-open
+      if(_extractQuery(inp.value)!=null) inp.value='';
+      close();
+    });
+    picker.appendChild(btn);
+  }
+  function renderLoading(q){
+    picker.innerHTML='';
+    picker.style.position='relative';
+    const msg=document.createElement('div');
+    msg.style.cssText='color:var(--text3);font-size:11px;padding:8px 28px 8px 10px;font-family:var(--mono)';
+    msg.textContent=`Searching Giphy for "${q}"…`;
+    picker.appendChild(msg);
+    addCloseBtn();
+    picker.style.display='block';
+  }
+  function renderNoKey(){
+    picker.innerHTML='';
+    picker.style.position='relative';
+    const msg=document.createElement('div');
+    msg.style.cssText='color:var(--text2);font-size:12px;padding:10px 28px 10px 12px;font-family:var(--mono);line-height:1.5';
+    msg.innerHTML='⚠ No Giphy API key set. Get a free key at <strong>developers.giphy.com</strong> → Create App → API. Then run: <code style="color:var(--accent)">/giphy key YOUR_KEY</code>';
+    picker.appendChild(msg);
+    addCloseBtn();
+    picker.style.display='block';
+    items=[];idx=-1;
+  }
+  function renderResults(list,q){
+    picker.innerHTML='';
+    picker.style.position='relative';
+    items=[];idx=-1;
+    if(!list.length){
+      const msg=document.createElement('div');
+      msg.style.cssText='color:var(--text3);font-size:11px;padding:8px 28px 8px 10px;font-family:var(--mono)';
+      msg.textContent=`No Giphy results for "${q}"`;
+      picker.appendChild(msg);
+      addCloseBtn();
+      return;
+    }
+    for(const g of list){
+      const el=document.createElement('img');
+      el.src=g.preview;
+      el.alt=g.title||'gif';
+      el.title=g.title||'';
+      el.loading='lazy';
+      el.style.cssText='display:inline-block;height:140px;width:auto;margin:0 4px;border-radius:6px;cursor:pointer;outline:2px solid transparent;transition:outline .1s;vertical-align:top;-webkit-touch-callout:none;';
+      el.addEventListener('pointerdown',e=>{e.preventDefault();pick({...g,el});});
+      picker.appendChild(el);
+      items.push({...g,el});
+    }
+    addCloseBtn();
+    setActive(0);
+  }
+  async function search(q){
+    if(q===lastQuery)return;
+    lastQuery=q;
+    if(!_giphyKey()){ renderNoKey(); return; }
+    renderLoading(q);
+    const list=await giphyFetchList(q,10);
+    const now=_extractQuery(inp.value);
+    if(now!==q)return;
+    renderResults(list,q);
+  }
+  function _extractQuery(v){
+    const m=v.match(/^\/(giphy|gif)\s+(.+)$/i);
+    if(!m)return null;
+    const rest=m[2].trim();
+    // Don't trigger the live picker when the input is actually a subcommand
+    // like `/giphy key <secret>` or `/giphy rating pg`. Otherwise the picker
+    // would search Giphy with your API KEY as the query — leaking it in the
+    // GET URL to Giphy's servers.
+    const firstWord=rest.split(/\s+/)[0].toLowerCase();
+    if(firstWord==='key'||firstWord==='rating')return null;
+    return rest;
+  }
+  inp.addEventListener('input',()=>{
+    // Cancel any pending search when input changes — even if we're about to
+    // call search() again, this prevents a stale fetch from landing after the
+    // user has started typing `/giphy key` or otherwise moved on.
+    clearTimeout(debounceTimer);
+    const q=_extractQuery(inp.value);
+    if(!q){close();return;}
+    debounceTimer=setTimeout(()=>search(q),300);
+  });
+  // Register at document CAPTURE phase so we intercept Enter BEFORE the
+  // msg-input's own bubble-phase handler (which would send "/giphy query" as
+  // a literal command). stopImmediatePropagation ensures nothing downstream
+  // sees the Enter once we've committed to a pick.
+  document.addEventListener('keydown',async e=>{
+    if(picker.style.display==='none')return;
+    if(document.activeElement!==inp)return;
+    if(!items.length){
+      // Even with an empty picker, Escape should close it
+      if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();close();}
+      return;
+    }
+    if(e.key==='ArrowRight'||e.key==='Tab'){e.preventDefault();e.stopImmediatePropagation();setActive(idx+1);}
+    else if(e.key==='ArrowLeft'){e.preventDefault();e.stopImmediatePropagation();setActive(idx-1);}
+    else if(e.key==='Enter'){
+      const sel=items[idx];
+      if(sel){e.preventDefault();e.stopImmediatePropagation();pick(sel);}
+    }
+    else if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();close();}
+  },true);
+  async function pick(sel){
+    if(!active)return;
+    const{conn_id,target}=active;
+    const url=sel.url;
+    // Clear the input and close the picker first
+    inp.value=''; close();
+    const gifWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,url):null;
+    if(gifWire) wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${gifWire}`});
+    else wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${url}`});
+    addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:url,kind:'privmsg',encrypted:!!gifWire});
+  }
+  // Close on click outside
+  document.addEventListener('click',e=>{if(!e.target.closest('#giphy-picker')&&!e.target.closest('#msg-input'))close();});
 })();
 
 // ─── Security panel ──────────────────────────────────────────────────────────
@@ -7922,6 +8161,10 @@ function gatherPreferences(){
     dndEnd: localStorage.getItem('cryptirc_dnd_end')||'',
     keepnicks: loadKeepNicks(),
     networkOrder: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_net_order')||'[]');}catch{return[];}})(),
+    // Giphy: per-user API key + content rating, synced across devices via
+    // the user's encrypted prefs blob so they only have to set it once.
+    giphyKey: localStorage.getItem('cryptirc_giphy_key')||'',
+    giphyRating: localStorage.getItem('cryptirc_giphy_rating')||'',
   };
 }
 function savePrefsToServer(){
@@ -7993,6 +8236,17 @@ function restorePreferences(p){
     if(p.favsOnly!=null) localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
     if(p.sidebarCollapsed!=null) localStorage.setItem('cryptirc_sidebar_collapsed',p.sidebarCollapsed?'1':'');
     if(p.nickCollapsed!=null) localStorage.setItem('cryptirc_nick_collapsed',p.nickCollapsed?'1':'');
+    // Giphy prefs: seed localStorage from the encrypted server prefs when the
+    // user logs in on a fresh device. Empty string = cleared; distinguish from
+    // "not present" (undefined) so we don't wipe a locally-set key if the user
+    // happens to be running an older server payload.
+    if(p.giphyKey!==undefined){
+      if(p.giphyKey) localStorage.setItem('cryptirc_giphy_key',p.giphyKey);
+      else localStorage.removeItem('cryptirc_giphy_key');
+    }
+    if(p.giphyRating){
+      localStorage.setItem('cryptirc_giphy_rating',p.giphyRating);
+    }
     // Re-apply UI state
     renderSidebar(); updateMentionsBadge(); applyFavsOnly();
     // Apply panel collapse states

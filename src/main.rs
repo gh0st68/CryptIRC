@@ -396,7 +396,7 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
         "default-src 'self'; script-src 'self' 'unsafe-inline'; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          font-src https://fonts.gstatic.com; img-src 'self' data: https:; \
-         connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com https://api.urbandictionary.com; \
+         connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com https://api.urbandictionary.com https://api.giphy.com; \
          frame-src https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';"
     ));
     response
@@ -1934,20 +1934,65 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             }
         }
         ClientMessage::SavePreferences { prefs } => {
-            if prefs.len() <= 65536 && serde_json::from_str::<serde_json::Value>(&prefs).is_ok() {
-                let dir = std::path::PathBuf::from(&state.data_dir)
-                    .join("users").join(&safe_username(username));
-                let _ = tokio::fs::create_dir_all(&dir).await;
-                let _ = tokio::fs::write(dir.join("preferences.json"), &prefs).await;
-                // Broadcast to all sessions so other devices update instantly
-                state.send_to_user(username, ServerEvent::Preferences { prefs });
+            // Encrypt at rest using the user's vault key — matches notepad.enc,
+            // stats.enc, passwords.enc, and the E2E keys. Requires the vault
+            // to be unlocked (same UX gate as other sensitive prefs).
+            if prefs.len() > 65536 {
+                send(ServerEvent::Error { message: "Preferences too large (max 64KB)".into() });
+            } else if serde_json::from_str::<serde_json::Value>(&prefs).is_err() {
+                send(ServerEvent::Error { message: "Preferences not valid JSON".into() });
+            } else if state.crypto.is_unlocked(username).await {
+                match state.crypto.encrypt(username, prefs.as_bytes()).await {
+                    Ok(enc) => {
+                        let dir = std::path::PathBuf::from(&state.data_dir)
+                            .join("users").join(&safe_username(username));
+                        let _ = tokio::fs::create_dir_all(&dir).await;
+                        // Only delete the legacy plaintext file AFTER the encrypted
+                        // write succeeds, so a failed write (disk full, etc.) can't
+                        // orphan the user's data.
+                        match tokio::fs::write(dir.join("preferences.enc"), &enc).await {
+                            Ok(_) => {
+                                let _ = tokio::fs::remove_file(dir.join("preferences.json")).await;
+                                // Broadcast to all sessions so other devices update instantly
+                                state.send_to_user(username, ServerEvent::Preferences { prefs });
+                            }
+                            Err(e) => send(ServerEvent::Error { message: format!("Prefs save failed: {}", e) }),
+                        }
+                    }
+                    Err(e) => send(ServerEvent::Error { message: format!("Prefs encrypt failed: {}", e) }),
+                }
             }
+            // Vault locked → drop silently (same policy as other encrypted prefs).
         }
         ClientMessage::LoadPreferences {} => {
-            let path = std::path::PathBuf::from(&state.data_dir)
-                .join("users").join(&safe_username(username)).join("preferences.json");
-            if let Ok(data) = tokio::fs::read_to_string(&path).await {
-                send(ServerEvent::Preferences { prefs: data });
+            if state.crypto.is_unlocked(username).await {
+                let dir = std::path::PathBuf::from(&state.data_dir)
+                    .join("users").join(&safe_username(username));
+                let enc_path = dir.join("preferences.enc");
+                // Prefer the encrypted file if present
+                if let Ok(enc) = tokio::fs::read_to_string(&enc_path).await {
+                    if let Ok(pt) = state.crypto.decrypt(username, enc.trim()).await {
+                        send(ServerEvent::Preferences { prefs: String::from_utf8_lossy(&pt).to_string() });
+                    } else {
+                        send(ServerEvent::Preferences { prefs: String::new() });
+                    }
+                } else {
+                    // Legacy plaintext migration: if an old preferences.json exists
+                    // from before prefs-encryption was added, read it, send it to
+                    // the client, and re-encrypt it on disk. The client will also
+                    // trigger a save on next prefs change which re-writes .enc too.
+                    let legacy = dir.join("preferences.json");
+                    if let Ok(data) = tokio::fs::read_to_string(&legacy).await {
+                        send(ServerEvent::Preferences { prefs: data.clone() });
+                        if let Ok(enc) = state.crypto.encrypt(username, data.as_bytes()).await {
+                            let _ = tokio::fs::write(&enc_path, &enc).await;
+                            let _ = tokio::fs::remove_file(&legacy).await;
+                        }
+                    }
+                }
+            } else {
+                // Vault locked — return empty so client can proceed with defaults.
+                send(ServerEvent::Preferences { prefs: String::new() });
             }
         }
         ClientMessage::SaveNotepad { content } => {
