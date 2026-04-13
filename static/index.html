@@ -688,16 +688,53 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .msg-body { flex:1; min-width:0; word-break:break-word; overflow-wrap:anywhere; }
 .msg-body a { color:var(--accent2); text-decoration:none; }
 .msg-body a:hover { text-decoration:underline; }
-.msg-media { display:block; margin-top:6px; max-width:min(320px,70%); }
-.msg-img { display:block; max-width:100%; max-height:280px; cursor:pointer; transition:opacity .15s, transform .15s; border-radius:10px; border:none; }
+.msg-media {
+  display:block; margin-top:6px;
+  /* --media-max-w is set by applyThemeCSS based on size preset (Small/Medium/Large/XLarge) */
+  max-width:min(var(--media-max-w, 320px), 90%);
+}
+.msg-img {
+  display:block; max-width:100%; cursor:pointer;
+  transition:opacity .15s, transform .15s;
+  /* All three vars controlled from Appearance → Media & Previews */
+  max-height:var(--media-max-h, 280px);
+  border-radius:var(--media-radius, 10px);
+  border:var(--media-border, none);
+  aspect-ratio:var(--media-aspect, auto);
+  object-fit:var(--media-fit, contain);
+  box-shadow:var(--media-shadow, none);
+}
 .msg-img:hover { opacity:.9; transform:scale(1.01); }
-.msg-media video { display:block; max-width:100%; max-height:280px; border-radius:10px; }
-.msg-yt { display:block; margin-top:6px; max-width:min(360px,80%); text-decoration:none; border-radius:10px; overflow:hidden; background:var(--bg2); border:1px solid var(--border); transition:border-color .15s, box-shadow .15s; }
+.msg-media video {
+  display:block; max-width:100%;
+  max-height:var(--media-max-h, 280px);
+  border-radius:var(--media-radius, 10px);
+  border:var(--media-border, none);
+  aspect-ratio:var(--media-aspect, auto);
+  object-fit:var(--media-fit, contain);
+  box-shadow:var(--media-shadow, none);
+}
+.msg-yt {
+  display:block; margin-top:6px;
+  max-width:min(var(--media-max-w, 360px), 90%);
+  text-decoration:none;
+  border-radius:var(--media-radius, 10px); overflow:hidden;
+  background:var(--bg2);
+  border:var(--media-border-yt, 1px solid var(--border));
+  box-shadow:var(--media-shadow, none);
+  transition:border-color .15s, box-shadow .15s;
+}
 .msg-yt:hover { border-color:var(--accent); box-shadow:0 4px 16px rgba(0,0,0,.3); }
 .msg-yt-thumb { position:relative; cursor:pointer; }
-.msg-yt-thumb img { display:block; width:100%; aspect-ratio:16/9; object-fit:cover; }
-.msg-yt-thumb iframe { display:block; width:100%; aspect-ratio:16/9; border:none; }
-.yt-play { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:48px; height:34px; background:rgba(0,0,0,.75); border-radius:8px; display:flex; align-items:center; justify-content:center; pointer-events:none; transition:background .15s; }
+/* YT thumb default is 16/9; user's Aspect override wins via --yt-aspect */
+.msg-yt-thumb img { display:block; width:100%; aspect-ratio:var(--yt-aspect, 16/9); object-fit:cover; }
+.msg-yt-thumb iframe { display:block; width:100%; aspect-ratio:var(--yt-aspect, 16/9); border:none; }
+.yt-play {
+  position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+  width:48px; height:34px; background:rgba(0,0,0,.75); border-radius:8px;
+  display:var(--yt-play-display, flex); align-items:center; justify-content:center;
+  pointer-events:none; transition:background .15s;
+}
 .yt-play::after { content:''; border-style:solid; border-width:7px 0 7px 12px; border-color:transparent transparent transparent #fff; }
 .msg-yt:hover .yt-play { background:rgba(255,0,0,.9); }
 .msg-yt-info { padding:8px 10px; }
@@ -709,7 +746,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .msg-link-preview-domain { font-size:9px; color:var(--accent); margin-bottom:4px; font-weight:500; }
 .msg-link-preview-title { font-size:12px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .msg-link-preview-desc { font-size:10px; color:var(--text3); margin-top:3px; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.msg-link-preview-img { display:block; width:100%; max-height:160px; object-fit:cover; border-radius:6px; margin-top:6px; }
+.msg-link-preview-img { display:block; width:100%; max-height:160px; object-fit:cover; border-radius:var(--media-radius-sm, 6px); margin-top:6px; }
 .row-action .msg-body { color:var(--action); font-style:italic; }
 .row-action .msg-nick { color:var(--action); }
 .row-notice .msg-body { color:var(--notice); }
@@ -1169,6 +1206,22 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 @media(max-width:360px) {
   .auth-box { padding:16px; }
 }
+/* Mobile tightening for wide modals — prevents horizontal overflow + wasted chrome on phones */
+@media(max-width:600px) {
+  #chanlist-overlay { padding:8px; }
+  .chanlist-box { max-width:100%; max-height:min(92vh, 92dvh); }
+  .chanlist-header { padding:12px 14px 10px; gap:8px; }
+  .chanlist-body { padding:4px 8px; }
+  .chanlist-row { padding:8px 4px; font-size:12px; }
+  #appearance-overlay { padding:8px; }
+  .appear-box { max-width:100%; max-height:min(92vh, 92dvh); }
+  .appear-body { padding:14px 14px 18px; }
+  .appear-header { padding:14px 14px 10px; }
+  #help-overlay > div { width:100% !important; max-width:100% !important; max-height:100dvh !important; border-radius:0 !important; }
+  #help-body { padding:14px !important; font-size:12px !important; word-wrap:break-word; }
+  #help-body pre, #help-body code { white-space:pre-wrap !important; word-wrap:break-word !important; overflow-wrap:anywhere !important; }
+  #monitor-overlay > div { width:100% !important; max-width:100% !important; max-height:100dvh !important; border-radius:0 !important; }
+}
 </style>
 <script>
 // Apply theme colors immediately — :root no longer sets theme defaults,
@@ -1594,6 +1647,61 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       </div>
 
       <div class="appear-section">
+        <div class="appear-section-title">Media &amp; Previews</div>
+        <div style="font-size:10px;color:var(--text3);margin-bottom:8px">Controls how images, videos, YouTube thumbs, and link previews render in chat.</div>
+        <div class="appear-row">
+          <span class="appear-label">Shape</span>
+          <select id="a-media-shape" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+            <option value="rounded">Rounded (default)</option>
+            <option value="square">Square (sharp)</option>
+            <option value="pronounced">Pronounced</option>
+            <option value="circle">Circle (1:1 crop)</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </div>
+        <div class="appear-row" id="a-media-radius-row" style="display:none">
+          <span class="appear-label">Radius</span>
+          <input type="range" class="appear-slider" id="a-media-radius" min="0" max="40" step="1" oninput="applyAppearance()">
+          <span class="appear-value" id="a-media-radius-val">10px</span>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Size</span>
+          <select id="a-media-size" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+            <option value="small">Small (200px)</option>
+            <option value="medium">Medium (320px)</option>
+            <option value="large">Large (400px)</option>
+            <option value="xlarge">X-Large (480px)</option>
+          </select>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Border</span>
+          <select id="a-media-border" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+            <option value="none">None</option>
+            <option value="subtle">Subtle</option>
+            <option value="accent">Accent (bold)</option>
+            <option value="glow">Accent glow</option>
+          </select>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Aspect</span>
+          <select id="a-media-aspect" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+            <option value="natural">Natural</option>
+            <option value="sixteen_nine">16:9 (crop)</option>
+            <option value="square">Square (crop)</option>
+          </select>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Max height</span>
+          <input type="range" class="appear-slider" id="a-media-max-h" min="150" max="600" step="10" oninput="applyAppearance()">
+          <span class="appear-value" id="a-media-max-h-val">280px</span>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">YouTube ▶ overlay</span>
+          <button class="appear-toggle" id="a-yt-play" onclick="this.classList.toggle('on');applyAppearance()"></button>
+        </div>
+      </div>
+
+      <div class="appear-section">
         <div class="appear-section-title">Display</div>
         <div class="appear-row">
           <span class="appear-label">Show timestamps</span>
@@ -1712,8 +1820,29 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div class="form-field"><label class="form-label">Label</label><input class="form-input" id="f-label" placeholder="TwistedNet" autocapitalize="none"></div>
     </div>
     <div class="form-row">
-      <div class="form-field" style="flex:3"><label class="form-label">Server</label><input class="form-input" id="f-server" placeholder="irc.twistednet.org" autocapitalize="none" autocorrect="off"></div>
+      <div class="form-field"><label class="form-label">Connection Type</label>
+        <select class="form-select" id="f-mode" onchange="onServerModeChange()">
+          <option value="direct" selected>Direct IRC server</option>
+          <option value="znc">ZNC bouncer</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-field" style="flex:3"><label class="form-label" id="f-server-label">Server</label><input class="form-input" id="f-server" placeholder="irc.twistednet.org" autocapitalize="none" autocorrect="off"></div>
       <div class="form-field" style="flex:1;min-width:80px"><label class="form-label">Port</label><input class="form-input" id="f-port" type="number" value="6697" inputmode="numeric"></div>
+    </div>
+    <!-- ZNC-specific fields. Shown only when Connection Type = znc. -->
+    <div id="znc-fields" style="display:none">
+      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:11px;color:var(--text2);line-height:1.7;margin-bottom:11px;">
+        ZNC bouncer mode: authenticates via PASS as <code style="color:var(--accent2)">user/network:password</code>. TLS and self-signed certs are enabled by default since most ZNC setups use them.
+      </div>
+      <div class="form-row">
+        <div class="form-field"><label class="form-label">ZNC Username</label><input class="form-input" id="f-znc-user" placeholder="your_znc_username" autocapitalize="none" autocorrect="off"></div>
+        <div class="form-field"><label class="form-label">ZNC Network Name</label><input class="form-input" id="f-znc-network" placeholder="twistednet" autocapitalize="none" autocorrect="off"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-field"><label class="form-label">ZNC Password</label><input class="form-input" type="password" id="f-znc-pass" autocomplete="new-password"></div>
+      </div>
     </div>
     <div class="form-row">
       <div class="form-field"><label class="form-label">TLS</label><select class="form-select" id="f-tls"><option value="true" selected>Yes</option><option value="false">No</option></select></div>
@@ -1723,13 +1852,13 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div class="form-field"><label class="form-label">Username</label><input class="form-input" id="f-user" placeholder="ghost" autocapitalize="none" autocorrect="off"></div>
       <div class="form-field"><label class="form-label">Realname</label><input class="form-input" id="f-real" placeholder="CryptIRC User"></div>
     </div>
-    <div class="form-row">
+    <div class="form-row" id="f-pass-row">
       <div class="form-field"><label class="form-label">Server Pass (optional)</label><input class="form-input" id="f-pass" type="password" autocomplete="new-password"></div>
     </div>
     <div class="form-row">
       <div class="form-field"><label class="form-label">Auto-Join (space-separated)</label><input class="form-input" id="f-autojoin" placeholder="#twisted #dev" autocapitalize="none" autocorrect="off"></div>
     </div>
-    <div style="border-top:1px solid var(--border);margin:14px 0 12px;padding-top:12px;">
+    <div id="f-sasl-section" style="border-top:1px solid var(--border);margin:14px 0 12px;padding-top:12px;">
       <div style="font-size:11px;color:var(--text2);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">SASL Authentication</div>
       <div class="form-row">
         <div class="form-field"><label class="form-label">Method</label>
@@ -2161,7 +2290,7 @@ async function doRegister() {
   finally{btn.disabled=false;btn.textContent='Create Account';}
 }
 async function doLogout() {
-  if(!confirm('Sign out?')) return;
+  if(!(await customConfirm('Sign out?','Sign out'))) return;
   if(sessionToken) fetch('/cryptirc/auth/logout',{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}}).catch(()=>{});
   sessionToken=null; currentUser=null;
   localStorage.removeItem('cryptirc_token'); localStorage.removeItem('cryptirc_user');
@@ -2602,7 +2731,13 @@ function handleEvent(ev) {
             }
           }
           if(!_zdup){_zbuf.push(zncMsg);if(_zbuf.length>2000)_zbuf.splice(0,_zbuf.length-2000);}
-          trackSeen(ev.from,ev.target,ev.ts);trackStat(ev.conn_id,ev.target,ev.from);
+          // Only track stats/seen for non-duplicate playback messages. Previously
+          // counted duplicates, which inflated channel stats every time ZNC replayed
+          // the same buffered history on reconnect.
+          if(!_zdup){
+            trackSeen(ev.from,ev.target,ev.ts);
+            trackStat(ev.conn_id,ev.target,ev.from);
+          }
           if(!_zdup&&isActive(ev.conn_id,ev.target))appendMsgRow(zncMsg);
           return;
         }
@@ -2962,10 +3097,11 @@ function handleEvent(ev) {
       renderSidebar();
       break;
     case 'account_deleted':
-      alert('Your account has been deleted.');
-      localStorage.clear();
-      document.cookie='cryptirc_token=;max-age=0;path=/cryptirc';document.cookie='cryptirc_token=;max-age=0;path=/';
-      location.reload();
+      customAlert('Your account has been deleted.').then(()=>{
+        localStorage.clear();
+        document.cookie='cryptirc_token=;max-age=0;path=/cryptirc';document.cookie='cryptirc_token=;max-age=0;path=/';
+        location.reload();
+      });
       break;
     case 'error':      console.error(ev.message); break;
   }
@@ -3066,15 +3202,15 @@ function addMessage(conn_id,target,msg){
   }
 }
 function sysMsg(c,t,text,kind='system'){addMessage(c,t,{ts:Date.now()/1000|0,from:'*',text,kind});}
-function clearCurrentHistory(){
+async function clearCurrentHistory(){
   if(!active)return;
-  if(!confirm('Clear chat history for '+active.target+'?'))return;
+  if(!(await customConfirm('Clear chat history for '+active.target+'?','Clear')))return;
   const k=bk(active.conn_id,active.target);
   buffers[k]=[];
   renderChat();
 }
-function clearBufHistory(connId,target){
-  if(!confirm('Clear chat history for '+target+'?'))return;
+async function clearBufHistory(connId,target){
+  if(!(await customConfirm('Clear chat history for '+target+'?','Clear')))return;
   const k=bk(connId,target);
   buffers[k]=[];
   if(active&&active.conn_id===connId&&active.target.toLowerCase()===target.toLowerCase()) renderChat();
@@ -4593,7 +4729,7 @@ function tabComplete(inp){
 function insertNick(nick){const inp=document.getElementById('msg-input');if(!inp.disabled){inp.value+=nick+': ';inp.focus();}}
 
 // ─── Upload ───────────────────────────────────────────────────────────────────
-function triggerUpload(){if(!active){alert('Select a channel first');return;}document.getElementById('file-input').click();}
+function triggerUpload(){if(!active){showToast('Select a channel first');return;}document.getElementById('file-input').click();}
 
 // ─── Encrypted Notepad ───────────────────────────────────────────────────────
 let _notepadSaveTimer=null;
@@ -4633,7 +4769,7 @@ function closeNotepad(){const ov=document.getElementById('notepad-overlay');if(o
   ov.remove();
 }}
 function showPasteModal(){
-  if(!active){alert('Select a channel first');return;}
+  if(!active){showToast('Select a channel first');return;}
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:16px;';
   const box=document.createElement('div');
@@ -4683,7 +4819,7 @@ function showPasteModal(){
 }
 async function submitPaste(btn){
   const content=document.getElementById('paste-content')?.value;
-  if(!content?.trim()){alert('Paste cannot be empty');return;}
+  if(!content?.trim()){showToast('Paste cannot be empty');return;}
   const lang=document.getElementById('paste-lang')?.value||'text';
   const expire=parseInt(document.getElementById('paste-expire')?.value||'0');
   const pw=document.getElementById('paste-password')?.value||'';
@@ -4691,15 +4827,15 @@ async function submitPaste(btn){
   try{
     const r=await fetch('/cryptirc/paste',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({content,language:lang,expires_in:expire||null,password:pw||null})});
     const d=await r.json();
-    if(!r.ok){alert(d.error||'Failed');return;}
+    if(!r.ok){showToast(d.error||'Failed');return;}
     const inp=document.getElementById('msg-input');
     if(inp){inp.value=inp.value?(inp.value+' '+d.url):d.url;inp.focus();}
     btn.closest('[style*=fixed]').remove();
-  }catch(e){alert('Error: '+e.message);}finally{btn.disabled=false;btn.textContent='Create Paste';}
+  }catch(e){showToast('Error: '+e.message);}finally{btn.disabled=false;btn.textContent='Create Paste';}
 }
 function handleFileSelect(files){if(!active)return;Array.from(files).forEach(uploadFile);}
 async function uploadFile(file){
-  if(!sessionToken){alert('Not authenticated');return;}
+  if(!sessionToken){showToast('Not authenticated');return;}
   const prog=document.getElementById('upload-progress');
   prog.textContent=`📤 Uploading ${file.name}…`; prog.classList.add('show');
   try {
@@ -4774,7 +4910,7 @@ function doUnlock(){
   document.getElementById('vault-err').textContent='';
   wsend({type:'unlock_vault',passphrase:p});
 }
-function lockVault(){if(!confirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.'))return;wsend({type:'lock_vault'});for(const n of networks)wsend({type:'disconnect',id:n.config.id});document.getElementById('vault-overlay').classList.add('show');const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔒';vb.title='Lock vault';}}
+async function lockVault(){if(!(await customConfirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.','Lock')))return;wsend({type:'lock_vault'});for(const n of networks)wsend({type:'disconnect',id:n.config.id});document.getElementById('vault-overlay').classList.add('show');const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔒';vb.title='Lock vault';}}
 async function showChangePass(){
   const old=await customPrompt('Current vault passphrase:','',true);if(!old)return;
   const nw=await customPrompt('New vault passphrase:','',true);if(!nw)return;
@@ -4915,16 +5051,16 @@ async function pwSafeEdit(idx){
   savePasswordSafe();
   renderPasswordSafe();
 }
-function pwSafeDelete(idx){
+async function pwSafeDelete(idx){
   const e=_pwSafe[idx];if(!e)return;
-  if(!confirm(`Delete "${e.name}"?`))return;
+  if(!(await customConfirm(`Delete "${e.name}"?`,'Delete')))return;
   _pwSafe.splice(idx,1);
   savePasswordSafe();
   renderPasswordSafe();
 }
 
-function clearAllLogs(){
-  if(!confirm('Clear ALL data? This will delete:\n• Chat history & logs (server + local)\n• Your notepad\n• Your paste posts\n\nThis cannot be undone.'))return;
+async function clearAllLogs(){
+  if(!(await customConfirm('Clear ALL data? This will delete:\n• Chat history & logs (server + local)\n• Your notepad\n• Your paste posts\n\nThis cannot be undone.','Clear all')))return;
   // Clear local buffers
   buffers={};
   unread.clear();
@@ -4937,7 +5073,7 @@ function clearAllLogs(){
 async function showDeleteAccount(){
   const pw=await customPrompt('To delete your account permanently, enter your password:');
   if(!pw)return;
-  if(!confirm('This will permanently delete your account, all connections, logs, and settings. This cannot be undone. Are you sure?'))return;
+  if(!(await customConfirm('This will permanently delete your account, all connections, logs, and settings. This cannot be undone. Are you sure?','Delete')))return;
   wsend({type:'delete_account',password:pw});
 }
 
@@ -4963,7 +5099,16 @@ function resetNetworkForm(){
   document.getElementById('f-oper-pass').value='';
   document.getElementById('f-auto-identify').value='false';
   document.getElementById('f-nickserv-pass').value='';
+  // Reset ZNC fields + mode
+  const modeEl=document.getElementById('f-mode');
+  if(modeEl) modeEl.value='direct';
+  const zu=document.getElementById('f-znc-user'); if(zu) zu.value='';
+  const zn=document.getElementById('f-znc-network'); if(zn) zn.value='';
+  const zp=document.getElementById('f-znc-pass'); if(zp){ zp.value=''; zp.placeholder=''; }
   onSaslMethodChange();
+  // UI-only — don't run the defaults block since we just set mode to 'direct'
+  applyServerModeUi();
+  _prevServerMode='direct';
   renderCapsGrid([]);
 }
 const _ALL_CAPS=[
@@ -5002,12 +5147,37 @@ function showAddNetwork(){
   document.getElementById('modal-title').textContent='Add Network';
   document.getElementById('modal-save-btn').textContent='Add & Connect';
   document.getElementById('modal-overlay').classList.add('open');
+  // Safety: clear any stuck drag-suppression class, and focus the first field so the
+  // user can type immediately (especially important on Electron where focus-on-open
+  // isn't automatic).
+  document.body.classList.remove('force-no-select');
+  setTimeout(()=>{document.getElementById('f-label')?.focus();},50);
 }
 function editNetwork(id){
   const net=networks.find(n=>n.config.id===id);
   if(!net)return;
   const c=net.config;
   editingNetworkId=c.id;
+  // Reset ZNC-specific fields before populating (editing a direct network after
+  // previously editing a ZNC one should not carry over the ZNC mode)
+  const modeEl=document.getElementById('f-mode'); if(modeEl) modeEl.value='direct';
+  const zu=document.getElementById('f-znc-user'); if(zu) zu.value='';
+  const zn=document.getElementById('f-znc-network'); if(zn) zn.value='';
+  const zp=document.getElementById('f-znc-pass'); if(zp) zp.value='';
+  // Detect ZNC config by the password format <user>/<network>:<password>.
+  // Require SASL to be off as an additional signal — SASL-enabled networks with
+  // exotic passwords should not be mis-detected as ZNC.
+  const zncParsed=(!c.sasl_plain && !c.sasl_external) ? parseZncPass(c.password) : null;
+  if(zncParsed){
+    if(modeEl) modeEl.value='znc';
+    if(zu) zu.value=zncParsed.user;
+    if(zn) zn.value=zncParsed.network;
+    // Password intentionally not re-populated for security. Hint the user that
+    // leaving it blank preserves the saved value.
+    if(zp){ zp.value=''; zp.placeholder='(leave blank to keep existing)'; }
+  } else {
+    if(zp) zp.placeholder='';
+  }
   document.getElementById('f-label').value=c.label||'';
   document.getElementById('f-server').value=c.server||'';
   document.getElementById('f-port').value=c.port||6697;
@@ -5036,21 +5206,97 @@ function editNetwork(id){
     document.getElementById('f-sasl-password').value='';
   }
   onSaslMethodChange();
+  // Apply ZNC mode show/hide based on the mode we set earlier from parseZncPass.
+  // Use the UI-only helper so we don't overwrite the saved TLS/port config.
+  applyServerModeUi();
+  _prevServerMode=document.getElementById('f-mode')?.value||'direct';
   document.getElementById('modal-title').textContent='Edit Network';
   document.getElementById('modal-save-btn').textContent='Save Changes';
   document.getElementById('modal-overlay').classList.add('open');
+  document.body.classList.remove('force-no-select');
+  setTimeout(()=>{document.getElementById('f-label')?.focus();},50);
 }
 function closeModal(){document.getElementById('modal-overlay').classList.remove('open');editingNetworkId=null;}
 function onSaslMethodChange(){const m=document.getElementById('f-sasl-method').value;document.getElementById('sasl-plain-fields').style.display=m==='plain'?'':'none';document.getElementById('sasl-external-info').style.display=m==='external'?'':'none';}
+// Parse a ZNC-format PASS string back into its 3 components.
+// Format: <user>/<network>:<password>. First colon separates network from password;
+// password may contain further colons. Returns null if it doesn't match.
+function parseZncPass(pass){
+  if(!pass||typeof pass!=='string')return null;
+  const m=pass.match(/^([^/\s]+)\/([^:\s]+):(.+)$/);
+  if(!m)return null;
+  return {user:m[1], network:m[2], password:m[3]};
+}
+// Pure UI: show/hide ZNC vs Direct fields and relabel the server input. Doesn't
+// mutate any user-entered values — safe to call during editNetwork without
+// clobbering a saved config.
+function applyServerModeUi(){
+  const mode=document.getElementById('f-mode')?.value||'direct';
+  const isZnc=mode==='znc';
+  const znc=document.getElementById('znc-fields'); if(znc) znc.style.display=isZnc?'':'none';
+  const passRow=document.getElementById('f-pass-row'); if(passRow) passRow.style.display=isZnc?'none':'';
+  const saslSec=document.getElementById('f-sasl-section'); if(saslSec) saslSec.style.display=isZnc?'none':'';
+  const srvLbl=document.getElementById('f-server-label'); if(srvLbl) srvLbl.textContent=isZnc?'ZNC Host':'Server';
+}
+// User-initiated mode change: apply UI toggle + ZNC-friendly defaults on the
+// direct→znc transition only. Avoids clobbering values when editNetwork flips
+// the mode programmatically with a real saved config already loaded.
+let _prevServerMode='direct';
+function onServerModeChange(){
+  const mode=document.getElementById('f-mode').value;
+  const isZnc=mode==='znc';
+  applyServerModeUi();
+  if(isZnc && _prevServerMode!=='znc'){
+    // Apply ZNC-friendly defaults on fresh transition from direct mode.
+    // Don't overwrite values the user has already set on the form.
+    const portEl=document.getElementById('f-port');
+    if(!portEl.value||portEl.value==='6667') portEl.value='6697';
+    const tlsEl=document.getElementById('f-tls');
+    if(tlsEl.value==='false') tlsEl.value='true';
+    // ZNC commonly uses self-signed TLS, so default that to Yes.
+    document.getElementById('f-tls-invalid').value='true';
+    // ZNC handles SASL to the real network itself — disable client-side SASL.
+    document.getElementById('f-sasl-method').value='none';
+    onSaslMethodChange();
+  }
+  _prevServerMode=mode;
+}
 function saveNetwork(){
-  const saslMethod=document.getElementById('f-sasl-method').value;
+  const mode=document.getElementById('f-mode')?.value||'direct';
+  const isZnc=mode==='znc';
+  let saslMethod=document.getElementById('f-sasl-method').value;
   const srv=document.getElementById('f-server').value||'irc.twistednet.org';
   const aj=document.getElementById('f-autojoin').value.trim()||(srv==='irc.twistednet.org'?'#dev #twisted':'');
+  // ZNC mode: compose PASS as <user>/<network>:<password> and stuff into the
+  // server password field. Force SASL off — ZNC handles auth to the real network.
+  let passValue=document.getElementById('f-pass').value||null;
+  if(isZnc){
+    const zu=document.getElementById('f-znc-user').value.trim();
+    const zn=document.getElementById('f-znc-network').value.trim();
+    const zp=document.getElementById('f-znc-pass').value;
+    if(!zu||!zn){showToast('ZNC mode needs a username and network');return;}
+    if(zp){
+      passValue=`${zu}/${zn}:${zp}`;
+    } else if(editingNetworkId){
+      // On edit, if password field is blank, keep the existing saved password
+      // but rebuild with any changes to user/network.
+      const existing=networks.find(n=>n.config.id===editingNetworkId);
+      const oldParsed=existing?parseZncPass(existing.config.password):null;
+      if(oldParsed){
+        passValue=`${zu}/${zn}:${oldParsed.password}`;
+      } else {
+        showToast('Enter the ZNC password to save');return;
+      }
+    } else {
+      showToast('ZNC password required');return;
+    }
+    saslMethod='none';
+  }
   const cfg={id:editingNetworkId||'',label:document.getElementById('f-label').value||srv,
     server:srv,port:parseInt(document.getElementById('f-port').value)||6697,
     tls:document.getElementById('f-tls').value==='true',tls_accept_invalid_certs:document.getElementById('f-tls-invalid').value==='true',
     nick:document.getElementById('f-nick').value||'CryptIRC',username:document.getElementById('f-user').value||'cryptirc',
-    realname:document.getElementById('f-real').value||'CryptIRC User',password:document.getElementById('f-pass').value||null,
+    realname:document.getElementById('f-real').value||'CryptIRC User',password:passValue,
     sasl_plain:saslMethod==='plain'&&document.getElementById('f-sasl-account').value?{account:document.getElementById('f-sasl-account').value,password:document.getElementById('f-sasl-password').value}:null,
     sasl_external:saslMethod==='external',client_cert_id:null,
     auto_join:aj.split(/\s+/).filter(Boolean),
@@ -5252,10 +5498,10 @@ async function doImportKey(){
 async function copyChannelKey(){
   if(!active)return;
   const key=window.E2E?.channelKeys?.[active.target];
-  if(!key){alert('No key set for this channel');return;}
+  if(!key){showToast('No key set for this channel');return;}
   const raw=await crypto.subtle.exportKey('raw',key);
   const words=bytesToMnemonic(new Uint8Array(raw));
-  try{await navigator.clipboard.writeText(words.join(' '));alert('Key copied to clipboard!');}
+  try{await navigator.clipboard.writeText(words.join(' '));showToast('Key copied to clipboard!');}
   catch(e){await customPrompt('Copy this key:',words.join(' '));}
   closeEncryptPanel();
 }
@@ -5392,6 +5638,15 @@ const APPEAR_DEFAULTS={
   font:"'JetBrains Mono',monospace", linkPreviews:true,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
+  // Media & previews: shape/size/border/radius controls for images, videos,
+  // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
+  mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
+  mediaSize:'medium',      // small | medium | large | xlarge
+  mediaBorder:'none',      // none | subtle | accent | glow
+  mediaRadius:10,          // custom-shape slider 0–40px
+  mediaAspect:'natural',   // natural | sixteen_nine | square
+  mediaMaxHeight:280,      // slider 150–600px
+  ytPlayOverlay:true,      // show ▶ overlay on YouTube thumbs
 };
 function isMobileView(){return window.innerWidth<=768;}
 let _appearCache=null,_appearCacheTs=0;
@@ -5443,7 +5698,21 @@ function applyAppearance(){
     mobileAccent:   el('a-mobile-accent-color').value||'',
     mobileAccent2:  el('a-mobile-accent2-color').value||'',
     font:           el('a-font').value||prev.font||"'JetBrains Mono',monospace",
+    mediaShape:     el('a-media-shape')?.value || prev.mediaShape || 'rounded',
+    mediaSize:      el('a-media-size')?.value || prev.mediaSize || 'medium',
+    mediaBorder:    el('a-media-border')?.value || prev.mediaBorder || 'none',
+    // Use nullish-coalescing for numeric sliders so a legitimate 0 isn't overwritten
+    // by the default (previous `+value || prev || 10` turned 0 into 10).
+    mediaRadius:    (()=>{const v=el('a-media-radius')?.value; const n=v==null||v===''?NaN:+v; return Number.isFinite(n)?n:(prev.mediaRadius??10);})(),
+    mediaAspect:    el('a-media-aspect')?.value || prev.mediaAspect || 'natural',
+    mediaMaxHeight: (()=>{const v=el('a-media-max-h')?.value; const n=v==null||v===''?NaN:+v; return Number.isFinite(n)?n:(prev.mediaMaxHeight??280);})(),
+    ytPlayOverlay:  el('a-yt-play')?.classList.contains('on') ?? true,
   };
+  // Show/hide the custom radius slider based on shape
+  const _radiusRow = el('a-media-radius-row');
+  if (_radiusRow) _radiusRow.style.display = cfg.mediaShape === 'custom' ? '' : 'none';
+  if (el('a-media-radius-val')) el('a-media-radius-val').textContent = (cfg.mediaRadius|0) + 'px';
+  if (el('a-media-max-h-val')) el('a-media-max-h-val').textContent = (cfg.mediaMaxHeight|0) + 'px';
   applyThemeCSS(cfg);
   saveAppearance(cfg);
   // Update value labels
@@ -5477,6 +5746,66 @@ function applyThemeCSS(cfg){
   r.setProperty('--accent',accent); r.setProperty('--accent2',accent2);
   r.setProperty('--sidebar-w',cfg.sidebarW+'px');
   r.setProperty('--nicks-w',cfg.nickPanelW+'px');
+  // Media & preview variables — shape/size/border/aspect/max-height/YT play overlay
+  const _sizeMap = { small: 200, medium: 320, large: 400, xlarge: 480 };
+  const _mMaxW = _sizeMap[cfg.mediaSize] || _sizeMap.medium;
+  let _mRadius;
+  switch (cfg.mediaShape) {
+    case 'square':     _mRadius = '0'; break;
+    case 'pronounced': _mRadius = '18px'; break;
+    case 'circle':     _mRadius = '50%'; break;
+    case 'custom':     _mRadius = Math.max(0, Math.min(40, cfg.mediaRadius|0)) + 'px'; break;
+    default:           _mRadius = '10px'; // 'rounded'
+  }
+  // Circle forces 1:1 aspect so we get an actual circle, not an oval
+  let _mAspect;
+  if (cfg.mediaShape === 'circle') {
+    _mAspect = '1/1';
+  } else if (cfg.mediaAspect === 'sixteen_nine') {
+    _mAspect = '16/9';
+  } else if (cfg.mediaAspect === 'square') {
+    _mAspect = '1/1';
+  } else {
+    _mAspect = 'auto'; // natural
+  }
+  // object-fit: when aspect is forced, cover crops so image fills the frame
+  const _mFit = _mAspect === 'auto' ? 'contain' : 'cover';
+  // Border / glow presets
+  let _mBorder, _mBorderYt, _mShadow;
+  switch (cfg.mediaBorder) {
+    case 'accent':
+      _mBorder = '2px solid var(--accent)';
+      _mBorderYt = '2px solid var(--accent)';
+      _mShadow = 'none';
+      break;
+    case 'glow':
+      _mBorder = '1px solid var(--accent)';
+      _mBorderYt = '1px solid var(--accent)';
+      _mShadow = '0 0 14px rgba(0,212,170,.35)';
+      break;
+    case 'subtle':
+      _mBorder = '1px solid var(--border)';
+      _mBorderYt = '1px solid var(--border)';
+      _mShadow = 'none';
+      break;
+    default: // 'none'
+      _mBorder = 'none';
+      _mBorderYt = '1px solid var(--border)'; // YT card keeps its border by default so the text info area reads
+      _mShadow = 'none';
+  }
+  const _mMaxH = Math.max(100, Math.min(800, (cfg.mediaMaxHeight|0) || 280));
+  r.setProperty('--media-max-w', _mMaxW + 'px');
+  r.setProperty('--media-max-h', _mMaxH + 'px');
+  r.setProperty('--media-radius', _mRadius);
+  r.setProperty('--media-radius-sm', cfg.mediaShape === 'square' ? '0' : (cfg.mediaShape === 'circle' ? '50%' : '6px'));
+  r.setProperty('--media-aspect', _mAspect);
+  r.setProperty('--media-fit', _mFit);
+  r.setProperty('--media-border', _mBorder);
+  r.setProperty('--media-border-yt', _mBorderYt);
+  r.setProperty('--media-shadow', _mShadow);
+  // YT-specific: honor user's aspect choice on the YT thumb too so "square" affects YT thumbs
+  r.setProperty('--yt-aspect', cfg.mediaAspect === 'square' || cfg.mediaShape === 'circle' ? '1/1' : '16/9');
+  r.setProperty('--yt-play-display', cfg.ytPlayOverlay === false ? 'none' : 'flex');
   // Dynamic styles via a stylesheet
   let ss=document.getElementById('appear-styles');
   if(!ss){ss=document.createElement('style');ss.id='appear-styles';document.head.appendChild(ss);}
@@ -5811,6 +6140,18 @@ function populateAppearanceModal(cfg){
   el('a-mobile-accent-swatch').style.background=cfg.mobileAccent||cfg.accent;
   el('a-mobile-accent2-color').value=cfg.mobileAccent2||cfg.accent2;
   el('a-mobile-accent2-swatch').style.background=cfg.mobileAccent2||cfg.accent2;
+  // Media & previews
+  if (el('a-media-shape'))  el('a-media-shape').value  = cfg.mediaShape  || 'rounded';
+  if (el('a-media-size'))   el('a-media-size').value   = cfg.mediaSize   || 'medium';
+  if (el('a-media-border')) el('a-media-border').value = cfg.mediaBorder || 'none';
+  if (el('a-media-aspect')) el('a-media-aspect').value = cfg.mediaAspect || 'natural';
+  if (el('a-media-radius')) el('a-media-radius').value = cfg.mediaRadius ?? 10;
+  if (el('a-media-max-h'))  el('a-media-max-h').value  = cfg.mediaMaxHeight ?? 280;
+  if (el('a-media-radius-val')) el('a-media-radius-val').textContent = (cfg.mediaRadius ?? 10) + 'px';
+  if (el('a-media-max-h-val'))  el('a-media-max-h-val').textContent  = (cfg.mediaMaxHeight ?? 280) + 'px';
+  if (el('a-media-radius-row')) el('a-media-radius-row').style.display = cfg.mediaShape === 'custom' ? '' : 'none';
+  const _ytp = el('a-yt-play');
+  if (_ytp) (cfg.ytPlayOverlay !== false) ? _ytp.classList.add('on') : _ytp.classList.remove('on');
   // Privacy/Security/Behavior settings are now in the standalone Security panel
   // Theme cards
   const grid=el('theme-grid'); grid.innerHTML='';
@@ -6748,7 +7089,7 @@ async function showSessionManager(){
   }catch(e){list.innerHTML='<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">Failed to load sessions.</div>';}
 }
 async function revokeSession(prefix){
-  if(!confirm('Revoke this session? The device will be logged out.'))return;
+  if(!(await customConfirm('Revoke this session? The device will be logged out.','Revoke')))return;
   await fetch(`${location.pathname}auth/sessions/revoke`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${sessionToken}`},body:JSON.stringify({prefix})});
   showSessionManager();
 }
@@ -6857,12 +7198,12 @@ async function showUploadsPanel(){
 }
 function closeUploadsPanel(){document.getElementById('uploads-overlay').classList.remove('show');}
 async function deleteUpload(filename){
-  if(!confirm('Delete this file?'))return;
+  if(!(await customConfirm('Delete this file?','Delete')))return;
   await fetch(`${location.pathname}uploads/delete`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${sessionToken}`},body:JSON.stringify({filename})});
   showUploadsPanel();
 }
 async function clearAllUploads(){
-  if(!confirm('Delete ALL your uploaded files? This cannot be undone.'))return;
+  if(!(await customConfirm('Delete ALL your uploaded files? This cannot be undone.','Delete all')))return;
   await fetch(`${location.pathname}uploads/clear`,{method:'POST',headers:{'Authorization':`Bearer ${sessionToken}`}});
   showUploadsPanel();
 }
@@ -6976,33 +7317,38 @@ function saveStatsToServer(){
   _chanStatsDirty=false;
 }
 let _statsRefreshing=false;
-function loadStatsFromServer(){wsend({type:'load_stats'});}
+let _statsLoadPending=false;
+function loadStatsFromServer(){
+  // Coalesce in-flight load requests. Previously, two near-simultaneous triggers
+  // (vault_unlocked + state events) could both fire wsend before the first
+  // response arrived, and the response handler's merge-branch would double-count
+  // the server's stats into an already-populated local table.
+  if(_statsLoadPending) return;
+  _statsLoadPending=true;
+  wsend({type:'load_stats'});
+}
 function refreshStats(){
   saveStatsToServer();
   _statsRefreshing=true;
+  _statsLoadPending=false; // allow the refresh request to go through
   loadStatsFromServer();
 }
 function handleStatsData(data){
+  _statsLoadPending=false;
   if(!data){_chanStatsLoaded=true;_statsRefreshing=false;return;}
   try{
     const d=JSON.parse(data);
     _chanStatsEnabled=!!d.enabled;
     const server=d.channels||{};
+    // Always replace local with server's stored state. Any in-session increments
+    // since the last auto-save would be lost here, but that window is at most
+    // 30s (save timer) and the alternative — merging — double-counts the server
+    // data into already-synced local state when handleStatsData runs twice.
+    _chanStats=server;
+    _chanStatsDirty=false;
     if(_statsRefreshing){
-      // Replace local with server data (refresh from other devices)
-      _chanStats=server;
       _statsRefreshing=false;
-      _chanStatsDirty=false;
-      // Re-render if panel is open
       if(document.getElementById('chanstats-overlay').classList.contains('show')) renderStatsChannelList();
-    } else {
-      // Initial load — merge server stats with any session stats
-      for(const[k,nicks] of Object.entries(server)){
-        if(!_chanStats[k])_chanStats[k]={};
-        for(const[n,c] of Object.entries(nicks)){
-          _chanStats[k][n]=(_chanStats[k][n]||0)+c;
-        }
-      }
     }
     _chanStatsLoaded=true;
   }catch(e){_chanStatsLoaded=true;_statsRefreshing=false;}
@@ -7068,7 +7414,7 @@ function renderStatsChannelList(){
   }
   html+='</div>';
   // Clear all button
-  html+='<div style="text-align:center;padding:8px 0"><button onclick="if(confirm(\'Clear all channel stats? This cannot be undone.\')){_chanStats={};_chanStatsDirty=true;saveStatsToServer();renderStatsChannelList();}" style="background:none;border:1px solid var(--border);color:var(--text3);padding:6px 16px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">Clear All Stats</button></div>';
+  html+='<div style="text-align:center;padding:8px 0"><button onclick="customConfirm(\'Clear all channel stats? This cannot be undone.\',\'Clear all\').then(ok=>{if(ok){_chanStats={};_chanStatsDirty=true;saveStatsToServer();renderStatsChannelList();}})" style="background:none;border:1px solid var(--border);color:var(--text3);padding:6px 16px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">Clear All Stats</button></div>';
   body.innerHTML=html;
 }
 function renderStatsDetail(key){
@@ -7100,7 +7446,7 @@ function renderStatsDetail(key){
   }
   if(sorted.length>50) html+=`<div style="font-size:11px;color:var(--text3);text-align:center;padding:8px">...and ${sorted.length-50} more nicks</div>`;
   // Clear channel button
-  html+=`<div style="text-align:center;padding:12px 0"><button onclick="if(confirm('Clear stats for ${esc(chanName)}?')){delete _chanStats['${key.replace(/'/g,"\\'")}'];_chanStatsDirty=true;saveStatsToServer();renderStatsChannelList();}" style="background:none;border:1px solid var(--border);color:var(--text3);padding:6px 16px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">Clear Channel Stats</button></div>`;
+  html+=`<div style="text-align:center;padding:12px 0"><button onclick="customConfirm('Clear stats for ${esc(chanName)}?','Clear').then(ok=>{if(ok){delete _chanStats['${key.replace(/'/g,"\\'")}'];_chanStatsDirty=true;saveStatsToServer();renderStatsChannelList();}})" style="background:none;border:1px solid var(--border);color:var(--text3);padding:6px 16px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">Clear Channel Stats</button></div>`;
   body.innerHTML=html;
 }
 
@@ -7483,11 +7829,23 @@ function initSortable(){
     });
     _sortableChannels.push(s);
   });
-  // Lounge-style touch handlers: force-no-select on touchstart, context menu cancel on touchmove
+  // Lounge-style touch handlers: force-no-select on touchstart, context menu cancel on touchmove.
+  // Defensive cleanups on pointerup/mouseup/blur too — Electron doesn't fire touchend on
+  // mouse-based drags, which previously could leave force-no-select stuck on <body>.
   netList.addEventListener('touchstart',e=>{if(e.touches.length===1)document.body.classList.add('force-no-select');},{passive:true});
   netList.addEventListener('touchmove',e=>{if(_dragStartPos&&e.touches.length>0){const t=e.touches[0];if(_distPts(_dragStartPos,[t.clientX,t.clientY])>10){/* cancel context menu */}}},{passive:true});
   netList.addEventListener('touchend',e=>{if(e.touches.length===0)document.body.classList.remove('force-no-select');},{passive:true});
   netList.addEventListener('touchcancel',()=>{document.body.classList.remove('force-no-select');},{passive:true});
+}
+// Dead-man switch: if force-no-select is somehow stuck on <body>, clear it the
+// moment any pointer-up or blur happens. Registered once — repeated initSortable
+// calls don't re-register because _forceNoSelectGuardInstalled is idempotent.
+if(!window._forceNoSelectGuardInstalled){
+  window._forceNoSelectGuardInstalled=true;
+  const _clearFns=()=>{document.body.classList.remove('force-no-select');};
+  document.addEventListener('pointerup',_clearFns,{passive:true});
+  document.addEventListener('mouseup',_clearFns,{passive:true});
+  window.addEventListener('blur',_clearFns,{passive:true});
 }
 function destroySortable(){
   if(_sortableNetworks){_sortableNetworks.destroy();_sortableNetworks=null;}
@@ -7845,8 +8203,8 @@ document.addEventListener('click',e=>{
   if(!e.target.closest('.chan-kebab')&&!e.target.closest('.chan-dropdown'))closeChanMenus();
 });
 
-function removeNetwork(id,label){
-  if(!confirm(`Remove server "${label}"? This will disconnect and delete its config.`))return;
+async function removeNetwork(id,label){
+  if(!(await customConfirm(`Remove server "${label}"? This will disconnect and delete its config.`,'Remove')))return;
   wsend({type:'remove_network',id});
   // Clean up favorites for this network
   let favs=loadFavorites().filter(f=>!f.key.startsWith(id+'/'));
@@ -8038,12 +8396,12 @@ function showTopicMenu(e){
 function closeTopicMenu(){
   document.getElementById('topic-menu').classList.remove('open');
 }
-function leaveCurrentChannel(){
+async function leaveCurrentChannel(){
   if(!active)return;
   const{conn_id,target}=active;
   const isChan=target.startsWith('#')||target.startsWith('&');
   if(isChan){
-    if(!confirm(`Leave ${target}?`))return;
+    if(!(await customConfirm(`Leave ${target}?`,'Leave')))return;
     wsend({type:'part_channel',conn_id,channel:target});
   } else if(target!=='status'){
     // Close PM
@@ -8084,6 +8442,69 @@ function customPrompt(message,defaultValue){
     ok.onclick=()=>finish(inp.value);
     cancel.onclick=()=>finish(null);
     inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();finish(inp.value);}else if(e.key==='Escape'){e.preventDefault();finish(null);}};
+  });
+}
+// customConfirm — Promise-based replacement for window.confirm(), which is
+// unreliable in Electron. Resolves true on OK, false on Cancel/Escape/backdrop click.
+function customConfirm(message, okLabel, cancelLabel){
+  okLabel = okLabel || 'OK';
+  cancelLabel = cancelLabel || 'Cancel';
+  return new Promise(resolve=>{
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px;';
+    const box=document.createElement('div');
+    box.style.cssText='background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:20px;width:min(420px,92vw);max-height:80vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.5);';
+    const msgDiv=document.createElement('div');
+    msgDiv.style.cssText='color:var(--text);font-size:13px;white-space:pre-wrap;line-height:1.5;margin-bottom:14px;word-break:break-word;';
+    msgDiv.textContent=message||'';
+    const btnRow=document.createElement('div');
+    btnRow.style.cssText='display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;';
+    const cancelBtn=document.createElement('button');
+    cancelBtn.textContent=cancelLabel;
+    cancelBtn.style.cssText='padding:8px 20px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:500;font-family:var(--mono);background:var(--bg4);color:var(--text2);min-height:36px;';
+    const okBtn=document.createElement('button');
+    okBtn.textContent=okLabel;
+    okBtn.style.cssText='padding:8px 20px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:500;font-family:var(--mono);background:var(--accent);color:#000;min-height:36px;';
+    btnRow.appendChild(cancelBtn); btnRow.appendChild(okBtn);
+    box.appendChild(msgDiv); box.appendChild(btnRow);
+    ov.appendChild(box); document.body.appendChild(ov);
+    const keyH=(e)=>{
+      if(e.key==='Escape'){e.preventDefault();done(false);}
+      else if(e.key==='Enter'){e.preventDefault();done(true);}
+    };
+    function done(val){document.removeEventListener('keydown',keyH,true);ov.remove();resolve(val);}
+    cancelBtn.onclick=()=>done(false);
+    okBtn.onclick=()=>done(true);
+    ov.onclick=(e)=>{if(e.target===ov)done(false);};
+    document.addEventListener('keydown',keyH,true);
+    setTimeout(()=>okBtn.focus(),50);
+  });
+}
+// customAlert — Promise-based replacement for window.alert(). Non-blocking to
+// outside callers but awaitable if they want to wait for dismissal.
+function customAlert(message){
+  return new Promise(resolve=>{
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px;';
+    const box=document.createElement('div');
+    box.style.cssText='background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:20px;width:min(420px,92vw);max-height:80vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.5);';
+    const msgDiv=document.createElement('div');
+    msgDiv.style.cssText='color:var(--text);font-size:13px;white-space:pre-wrap;line-height:1.5;margin-bottom:14px;word-break:break-word;';
+    msgDiv.textContent=message||'';
+    const btnRow=document.createElement('div');
+    btnRow.style.cssText='display:flex;justify-content:flex-end;';
+    const okBtn=document.createElement('button');
+    okBtn.textContent='OK';
+    okBtn.style.cssText='padding:8px 24px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:500;font-family:var(--mono);background:var(--accent);color:#000;min-height:36px;';
+    btnRow.appendChild(okBtn);
+    box.appendChild(msgDiv); box.appendChild(btnRow);
+    ov.appendChild(box); document.body.appendChild(ov);
+    const keyH=(e)=>{if(e.key==='Escape'||e.key==='Enter'){e.preventDefault();done();}};
+    function done(){document.removeEventListener('keydown',keyH,true);ov.remove();resolve();}
+    okBtn.onclick=done;
+    ov.onclick=(e)=>{if(e.target===ov)done();};
+    document.addEventListener('keydown',keyH,true);
+    setTimeout(()=>okBtn.focus(),50);
   });
 }
 async function editTopic(){
@@ -8169,7 +8590,7 @@ function showCertModal(){
 }
 function closeCertModal(){document.getElementById('cert-modal-overlay').classList.remove('open');}
 function generateCert(){if(!_certConnId)return;document.getElementById('cert-none-state').style.display='none';document.getElementById('cert-has-state').style.display='none';document.getElementById('cert-loading').style.display='';wsend({type:'generate_cert',conn_id:_certConnId});}
-function deleteCert(){if(!_certConnId||!confirm('Delete this certificate?\n\nMake sure to run: /msg NickServ CERT DEL <fingerprint> first.'))return;wsend({type:'delete_cert',conn_id:_certConnId});document.getElementById('cert-none-state').style.display='';document.getElementById('cert-has-state').style.display='none';const net=networks.find(n=>n.config.id===_certConnId);if(net){net.has_cert=false;net.cert_fingerprint=null;}updateCertBtn();}
+async function deleteCert(){if(!_certConnId)return;if(!(await customConfirm('Delete this certificate?\n\nMake sure to run: /msg NickServ CERT DEL <fingerprint> first.','Delete')))return;wsend({type:'delete_cert',conn_id:_certConnId});document.getElementById('cert-none-state').style.display='';document.getElementById('cert-has-state').style.display='none';const net=networks.find(n=>n.config.id===_certConnId);if(net){net.has_cert=false;net.cert_fingerprint=null;}updateCertBtn();}
 function copyCertFp(){const fp=document.getElementById('cert-fingerprint').textContent;if(!fp)return;navigator.clipboard?.writeText(fp).then(()=>{const el=document.getElementById('cert-fingerprint');el.style.color='var(--join)';setTimeout(()=>el.style.color='',1500);});}
 function autoCertAdd(){
   const fp=document.getElementById('cert-fingerprint').textContent;
@@ -9166,8 +9587,8 @@ function showPmProtectionPanel(){
 
     // ── Wire up "Clear" button for blocked messages list ──
     const clrBtn=box.querySelector('#pm-blocked-clear');
-    if(clrBtn) clrBtn.addEventListener('click',()=>{
-      if(!confirm('Clear all blocked message history?')) return;
+    if(clrBtn) clrBtn.addEventListener('click',async()=>{
+      if(!(await customConfirm('Clear all blocked message history?','Clear'))) return;
       clearPmBlocked();
       render();
     });
@@ -9658,14 +10079,15 @@ async function showAdminPanel(){
     userSection.innerHTML='<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Users</div>';
     for(const u of users.sort((a,b)=>b.sessions-a.sessions)){
       const row=document.createElement('div');
+      row.className='admin-user-row';
       row.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);';
       const online=u.sessions>0;
       const uploadOn=u.admin||u.can_upload;
       row.innerHTML=`
         <span style="font-size:10px">${online?'🟢':'⚫'}</span>
-        <span style="flex:1;font-size:13px;color:var(--text);font-weight:${u.admin?'700':'400'}">${esc(u.username)}${u.admin?' 👑':''}</span>
+        <span style="flex:1;font-size:13px;color:var(--text);font-weight:${u.admin?'700':'400'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(u.username)}${u.admin?' 👑':''}</span>
         <span style="font-size:10px;color:var(--text3)">${u.sessions} session${u.sessions!==1?'s':''}</span>
-        ${u.admin?'<span style="font-size:10px;color:var(--text3);padding:3px 8px">📎 always</span>':`<button onclick="adminToggleUpload('${esc(u.username)}',${!uploadOn})" title="${uploadOn?'Revoke':'Grant'} upload permission" style="background:${uploadOn?'rgba(0,212,170,.15)':'none'};border:1px solid ${uploadOn?'var(--accent)':'var(--border)'};color:${uploadOn?'var(--accent)':'var(--text3)'};border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">📎 ${uploadOn?'On':'Off'}</button>`}
+        ${u.admin?'<span class="admin-always-upload" style="font-size:10px;color:var(--text3);padding:3px 8px">📎 always</span>':`<button onclick="adminToggleUpload('${esc(u.username)}',${!uploadOn})" title="${uploadOn?'Revoke':'Grant'} upload permission" style="background:${uploadOn?'rgba(0,212,170,.15)':'none'};border:1px solid ${uploadOn?'var(--accent)':'var(--border)'};color:${uploadOn?'var(--accent)':'var(--text3)'};border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">📎 ${uploadOn?'On':'Off'}</button>`}
         ${u.admin?'':`<button onclick="adminDisableUser('${esc(u.username)}')" style="background:none;border:1px solid var(--warn);color:var(--warn);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Disable</button>
         <button onclick="adminDeleteUser('${esc(u.username)}')" style="background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Delete</button>`}
       `;
@@ -9678,10 +10100,10 @@ async function showAdminPanel(){
     addSection.style.cssText='margin-top:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;';
     addSection.innerHTML=`
       <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Add User</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Username</label><input id="admin-add-user" placeholder="username" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none"></div>
-        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Password (min 10)</label><input id="admin-add-pass" type="password" placeholder="password" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none"></div>
-        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Email (optional)</label><input id="admin-add-email" placeholder="user@example.com" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none"></div>
+      <div class="admin-add-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Username</label><input id="admin-add-user" placeholder="username" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none;box-sizing:border-box"></div>
+        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Password (min 10)</label><input id="admin-add-pass" type="password" placeholder="password" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none;box-sizing:border-box"></div>
+        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Email (optional)</label><input id="admin-add-email" placeholder="user@example.com" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none;box-sizing:border-box"></div>
         <button onclick="adminAddUser()" style="background:linear-gradient(135deg,#00d4aa,#0099ff);border:none;border-radius:6px;color:#000;font-weight:700;padding:8px 16px;cursor:pointer;min-height:38px">Add</button>
       </div>
       <div id="admin-add-err" style="font-size:11px;color:var(--error);margin-top:6px"></div>
@@ -9722,7 +10144,7 @@ async function adminSaveLinkPreview(){
 }
 
 async function adminDisableUser(username){
-  if(!confirm(`Disable user "${username}"? They won't be able to log in.`))return;
+  if(!(await customConfirm(`Disable user "${username}"? They won't be able to log in.`,'Disable')))return;
   try{
     await fetch(`/cryptirc/admin/user/${username}/disable`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
     showToast(`${username} disabled`);
@@ -9764,8 +10186,8 @@ async function adminAddUser(){
 }
 
 async function adminDeleteUser(username){
-  if(!confirm(`DELETE user "${username}"? This removes all their data permanently.`))return;
-  if(!confirm(`Are you SURE? This cannot be undone.`))return;
+  if(!(await customConfirm(`DELETE user "${username}"? This removes all their data permanently.`,'Delete')))return;
+  if(!(await customConfirm(`Are you SURE? This cannot be undone.`,'Yes, delete')))return;
   try{
     await fetch(`/cryptirc/admin/user/${username}`,{method:'DELETE',headers:{'Authorization':'Bearer '+sessionToken}});
     showToast(`${username} deleted`);
@@ -10312,7 +10734,24 @@ function timeAgo(ts){
     <div id="admin-body" style="overflow-y:auto;flex:1;padding:16px 20px;-webkit-overflow-scrolling:touch"></div>
   </div>
 </div>
-<style>#admin-overlay.show{display:flex !important;}</style>
+<style>
+#admin-overlay.show{display:flex !important;}
+/* Mobile PWA layout — stack the user rows and add-user form so nothing overflows
+   viewport width on small screens. Desktop keeps its single-line layout. */
+@media (max-width: 600px) {
+  #admin-overlay > div { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; max-height: 100dvh !important; height: 100dvh !important; }
+  #admin-body { padding: 12px !important; }
+  #admin-body .admin-user-row { flex-wrap: wrap !important; row-gap: 6px !important; }
+  #admin-body .admin-user-row > span:nth-child(1) { flex-basis: auto !important; }
+  #admin-body .admin-user-row > span:nth-child(2) { flex-basis: calc(100% - 30px) !important; min-width: 0 !important; }
+  #admin-body .admin-user-row > span:nth-child(3) { flex-basis: 100% !important; font-size: 10px !important; }
+  #admin-body .admin-user-row > button,
+  #admin-body .admin-user-row > span.admin-always-upload { flex: 1 1 auto !important; min-height: 34px !important; }
+  #admin-body .admin-add-row { flex-direction: column !important; align-items: stretch !important; }
+  #admin-body .admin-add-row > div { min-width: 0 !important; flex: 1 1 100% !important; }
+  #admin-body .admin-add-row > button { width: 100% !important; min-height: 40px !important; }
+}
+</style>
 
 <!-- IRCv3 Caps overlay -->
 <div id="caps-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeCapsPanel()">

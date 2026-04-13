@@ -146,19 +146,42 @@ pub async fn connect(
                 let msg = e.to_string();
                 if msg.starts_with("SASL_RETRY:") {
                     sasl_failures += 1;
-                    if sasl_failures >= MAX_SASL_RETRIES {
+                    if sasl_failures == 1 {
+                        // First failure: explain the failure with actionable advice, and
+                        // reset delay so the next attempt cycles DNS quickly (this helps
+                        // on networks like TwistedNet where one leaf may have a stale
+                        // cert mapping while another works).
+                        let advice = if cfg.sasl_external {
+                            "⚠ SASL EXTERNAL rejected by server. Your client certificate is not registered with this network. To fix: edit the network and set SASL to None, connect, identify with NickServ, then run /msg NickServ CERT ADD <fingerprint>. The cert fingerprint is in the 🔑 Cert panel. Retrying…"
+                        } else {
+                            "⚠ SASL authentication rejected. Check your SASL account/password. Retrying without SASL after a few more attempts…"
+                        };
+                        state.send_to_user(&username, ServerEvent::IrcMessage {
+                            conn_id: conn_id.clone(), from: "*".into(), target: "status".into(),
+                            text: advice.to_string(),
+                            ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, msg_id: 0, prefix: None,
+                        });
+                        info!("[{}] SASL failure 1/{}, fast retry for DNS cycling", conn_id, MAX_SASL_RETRIES);
+                        delay = RECONNECT_BASE;
+                    } else if sasl_failures >= MAX_SASL_RETRIES {
                         warn!("[{}] SASL failed {} times — disabling SASL for this session, will reconnect without it", conn_id, sasl_failures);
                         state.send_to_user(&username, ServerEvent::IrcMessage {
                             conn_id: conn_id.clone(), from: "*".into(), target: "status".into(),
-                            text: format!("⚠ SASL EXTERNAL failed {} times. Reconnecting without SASL — identify with NickServ manually if needed.", sasl_failures),
+                            text: format!("⚠ SASL failed {} times. Reconnecting without SASL — identify with NickServ manually if needed.", sasl_failures),
                             ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, msg_id: 0, prefix: None,
                         });
                         cfg.sasl_external = false;
+                        // Floor to 30s on final SASL failure so IP-level throttles
+                        // (e.g. UnrealIRCd's "Too many unknown connections") clear
+                        // before the no-SASL retry.
+                        delay = delay.max(Duration::from_secs(30));
                     } else {
-                        info!("[{}] SASL failure {}/{}, reconnecting fast to try a different server", conn_id, sasl_failures, MAX_SASL_RETRIES);
+                        info!("[{}] SASL failure {}/{}, backing off", conn_id, sasl_failures, MAX_SASL_RETRIES);
+                        // Subsequent failures: floor at 30s to avoid tripping server
+                        // IP throttles when the failure is permanent (wrong cert,
+                        // wrong password) rather than a flaky leaf server.
+                        delay = delay.max(Duration::from_secs(30));
                     }
-                    // Fast retry on SASL failures — reset backoff so we cycle through DNS quickly
-                    delay = RECONNECT_BASE;
                 }
                 warn!("[{}] Connection error: {}. Reconnecting in {:?}", conn_id, e, delay);
                 state.send_to_user(&username, ServerEvent::Reconnecting {
