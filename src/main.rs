@@ -327,6 +327,9 @@ pub struct NetworkConfig {
     pub auto_identify:         bool,
     #[serde(default)]
     pub disabled_caps:         Vec<String>,
+    // Perform: raw IRC (or /slash) commands fired once, after registration + NickServ, before auto-join
+    #[serde(default)]
+    pub perform_commands:      Vec<String>,
 }
 
 impl Default for NetworkConfig {
@@ -343,6 +346,7 @@ impl Default for NetworkConfig {
             channel_order: vec![],
             nickserv_pass: None, auto_identify: false,
             disabled_caps: vec![],
+            perform_commands: vec![],
         }
     }
 }
@@ -1641,17 +1645,38 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             }
         }
         ClientMessage::PartChannel { conn_id, channel } => {
-            if !state.owns_conn(username, &conn_id) { return; }
+            // Use owns_network (persistent config) instead of owns_conn (live conn)
+            // so offline parts still work — previously this bailed out when
+            // disconnected because conn_owners is cleared on disconnect.
+            if !state.owns_network(username, &conn_id).await { return; }
             let safe = strip_crlf(&channel);
             if safe.is_empty() { return; }
-            if let Some(conn) = state.connections.get(&conn_id) {
-                let _ = conn.lock().await.send_raw(&format!("PART {}\r\n", safe)).await;
+            let live = state.connections.get(&conn_id).is_some();
+            if live {
+                if let Some(conn) = state.connections.get(&conn_id) {
+                    let _ = conn.lock().await.send_raw(&format!("PART {}\r\n", safe)).await;
+                }
             }
-            // Remove channel from auto_join
+            // Always strip from auto_join so reconnect doesn't re-join it.
+            let mut user_nick = String::new();
             if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
+                user_nick = cfg.nick.clone();
                 let lc = safe.to_lowercase();
                 cfg.auto_join.retain(|c| c.to_lowercase() != lc);
                 let _ = state.save_network(&cfg, username).await;
+            }
+            // When offline, no server will echo the PART back — synthesize the
+            // event so the frontend removes the channel from the sidebar and
+            // switches away if it was active.
+            if !live {
+                let ts = chrono::Utc::now().timestamp();
+                state.send_to_user(username, ServerEvent::IrcPart {
+                    conn_id: conn_id.clone(),
+                    nick:    user_nick,
+                    channel: safe.clone(),
+                    reason:  "Left while offline".into(),
+                    ts,
+                });
             }
         }
         ClientMessage::GetLogs { conn_id, target, limit, before } => {

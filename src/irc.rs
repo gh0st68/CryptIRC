@@ -606,7 +606,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             c.connected = true;
                             c.nick.clone()
                         };
-                        send(ServerEvent::Connected { conn_id: conn_id.to_string(), server: cfg.server.clone(), nick: actual_nick });
+                        send(ServerEvent::Connected { conn_id: conn_id.to_string(), server: cfg.server.clone(), nick: actual_nick.clone() });
                         // Send OPER if configured
                         if let (Some(login), Some(pass)) = (&cfg.oper_login, &cfg.oper_pass) {
                             if !login.is_empty() && !pass.is_empty() {
@@ -620,6 +620,49 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                     conn.lock().await.send_raw(&format!("PRIVMSG NickServ :IDENTIFY {}\r\n", strip_crlf(pass))).await?;
                                 }
                             }
+                        }
+                        // Perform commands — raw IRC lines (or /slash) run after NickServ, before auto-join.
+                        // Slash shortcuts mirror the interactive frontend: /msg, /notice, /ns, /nickserv,
+                        // /cs, /chanserv, /identify, /id, /ghost, /quote, /raw. Anything else with a
+                        // leading slash is stripped and sent raw (so `/MODE me +ix` works). `$me` and
+                        // `$nick` expand to the current nickname.
+                        for line in &cfg.perform_commands {
+                            let raw = strip_crlf(line.trim());
+                            if raw.is_empty() { continue; }
+                            let to_send_opt: Option<String> = if let Some(rest) = raw.strip_prefix('/') {
+                                let mut it = rest.splitn(2, ' ');
+                                let cmd = it.next().unwrap_or("").to_ascii_uppercase();
+                                let args = it.next().unwrap_or("").trim_start();
+                                match cmd.as_str() {
+                                    "MSG" | "PRIVMSG" => {
+                                        let mut ait = args.splitn(2, ' ');
+                                        let t = ait.next().unwrap_or("");
+                                        let m = ait.next().unwrap_or("");
+                                        if t.is_empty() || m.is_empty() { None } else { Some(format!("PRIVMSG {} :{}", t, m)) }
+                                    }
+                                    "NOTICE" => {
+                                        let mut ait = args.splitn(2, ' ');
+                                        let t = ait.next().unwrap_or("");
+                                        let m = ait.next().unwrap_or("");
+                                        if t.is_empty() || m.is_empty() { None } else { Some(format!("NOTICE {} :{}", t, m)) }
+                                    }
+                                    "NS" | "NICKSERV"     => if args.is_empty() { None } else { Some(format!("PRIVMSG NickServ :{}", args)) },
+                                    "CS" | "CHANSERV"     => if args.is_empty() { None } else { Some(format!("PRIVMSG ChanServ :{}", args)) },
+                                    "IDENTIFY" | "ID"     => if args.is_empty() { None } else { Some(format!("PRIVMSG NickServ :IDENTIFY {}", args)) },
+                                    "GHOST"               => if args.is_empty() { None } else { Some(format!("PRIVMSG NickServ :GHOST {}", args)) },
+                                    "QUOTE" | "RAW"       => if args.is_empty() { None } else { Some(args.to_string()) },
+                                    _                     => Some(rest.to_string()),
+                                }
+                            } else {
+                                Some(raw.to_string())
+                            };
+                            let Some(mut to_send) = to_send_opt else { continue; };
+                            // Expand $me / $nick tokens to the current nickname. Word-boundary via
+                            // a trailing space-or-EOL isn't worth the complexity; literal replace is
+                            // fine for the common cases (MODE $me +ix, /msg NickServ GHOST $me …).
+                            if to_send.contains("$me")   { to_send = to_send.replace("$me",   &actual_nick); }
+                            if to_send.contains("$nick") { to_send = to_send.replace("$nick", &actual_nick); }
+                            conn.lock().await.send_raw(&format!("{}\r\n", to_send)).await?;
                         }
                         for ch in &cfg.auto_join {
                             let safe = strip_crlf(ch);
@@ -728,6 +771,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                 if ch.names.len() < NAMES_BUF_MAX_PER_CHAN { ch.names.push(nick.clone()); }
                             }
                         }
+                        // Persist for log replay (Lounge-style condense after refresh).
+                        let mut join_text = format!("→ {} joined", nick);
+                        if !account.is_empty() && account != "*" { join_text.push_str(&format!(" ({})", account)); }
+                        if !realname.is_empty()                  { join_text.push_str(&format!(" — {}", realname)); }
+                        let _ = state.logger.append(&username, &conn_id, &channel, ts, &nick, &join_text, "join").await;
                         send(ServerEvent::IrcJoinEx {
                             conn_id: conn_id.to_string(), nick, channel,
                             account, realname, ts,
@@ -738,18 +786,54 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let channel = p.params.get(0).cloned().unwrap_or_default();
                         let reason  = p.params.get(1).cloned().unwrap_or_default();
                         { let mut c = conn.lock().await; if nick == c.nick { c.channels.remove(&channel); } else if let Some(ch) = c.channels.get_mut(&channel) { ch.names.retain(|n| strip_pfx(n) != nick); } }
+                        let part_text = if reason.is_empty() { format!("← {} left", nick) } else { format!("← {} left ({})", nick, reason) };
+                        let _ = state.logger.append(&username, &conn_id, &channel, ts, &nick, &part_text, "part").await;
                         send(ServerEvent::IrcPart { conn_id: conn_id.to_string(), nick, channel, reason, ts });
                     }
                     "QUIT" => {
                         let nick   = nick_from_prefix(&p.prefix);
                         let reason = p.params.get(0).cloned().unwrap_or_default();
-                        { let mut c = conn.lock().await; for ch in c.channels.values_mut() { ch.names.retain(|n| strip_pfx(n) != nick); } }
+                        let affected: Vec<String> = {
+                            let mut c = conn.lock().await;
+                            let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == nick)).map(|(n, _)| n.clone()).collect();
+                            for ch in c.channels.values_mut() { ch.names.retain(|n| strip_pfx(n) != nick); }
+                            chans
+                        };
+                        let quit_text = if reason.is_empty() { format!("⊗ {} quit", nick) } else { format!("⊗ {} quit ({})", nick, reason) };
+                        if affected.is_empty() {
+                            let _ = state.logger.append(&username, &conn_id, "status", ts, &nick, &quit_text, "quit").await;
+                        } else {
+                            for ch in &affected {
+                                let _ = state.logger.append(&username, &conn_id, ch, ts, &nick, &quit_text, "quit").await;
+                            }
+                        }
                         send(ServerEvent::IrcQuit { conn_id: conn_id.to_string(), nick, reason, ts });
                     }
                     "NICK" => {
                         let old = nick_from_prefix(&p.prefix);
                         let new = p.params.get(0).cloned().unwrap_or_default();
-                        { let mut c = conn.lock().await; if old == c.nick { c.nick = new.clone(); } for ch in c.channels.values_mut() { for n in ch.names.iter_mut() { if strip_pfx(n) == old { let pfx: String = n.chars().take_while(|c| "@+~&%".contains(*c)).collect(); *n = format!("{}{}", pfx, new); } } } }
+                        let affected: Vec<String> = {
+                            let mut c = conn.lock().await;
+                            let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == old)).map(|(n, _)| n.clone()).collect();
+                            if old == c.nick { c.nick = new.clone(); }
+                            for ch in c.channels.values_mut() {
+                                for n in ch.names.iter_mut() {
+                                    if strip_pfx(n) == old {
+                                        let pfx: String = n.chars().take_while(|c| "@+~&%".contains(*c)).collect();
+                                        *n = format!("{}{}", pfx, new);
+                                    }
+                                }
+                            }
+                            chans
+                        };
+                        let nick_text = format!("• {} is now known as {}", old, new);
+                        if affected.is_empty() {
+                            let _ = state.logger.append(&username, &conn_id, "status", ts, &new, &nick_text, "nick").await;
+                        } else {
+                            for ch in &affected {
+                                let _ = state.logger.append(&username, &conn_id, ch, ts, &new, &nick_text, "nick").await;
+                            }
+                        }
                         send(ServerEvent::IrcNick { conn_id: conn_id.to_string(), old, new, ts });
                     }
                     "CHGHOST" => {
@@ -783,6 +867,12 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let nick = nick_from_prefix(&p.prefix);
                         let message = p.params.get(0).cloned().unwrap_or_default();
                         let is_away = !message.is_empty();
+                        let (kind_str, log_text) = if is_away {
+                            ("away", format!("{} is away: {}", nick, message))
+                        } else {
+                            ("back", format!("{} is back", nick))
+                        };
+                        let _ = state.logger.append(&username, &conn_id, "status", ts, &nick, &log_text, kind_str).await;
                         send(ServerEvent::IrcAway {
                             conn_id: conn_id.to_string(), nick: nick.clone(),
                             away: is_away, message: message.clone(), ts,
@@ -913,6 +1003,8 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let kicked  = p.params.get(1).cloned().unwrap_or_default();
                         let reason  = p.params.get(2).cloned().unwrap_or_default();
                         { let mut c = conn.lock().await; if kicked == c.nick { c.channels.remove(&channel); } else if let Some(ch) = c.channels.get_mut(&channel) { ch.names.retain(|n| strip_pfx(n) != kicked); } }
+                        let kick_text = if reason.is_empty() { format!("✗ {} kicked by {}", kicked, by) } else { format!("✗ {} kicked by {} ({})", kicked, by, reason) };
+                        let _ = state.logger.append(&username, &conn_id, &channel, ts, &kicked, &kick_text, "kick").await;
                         send(ServerEvent::IrcKick { conn_id: conn_id.to_string(), channel, kicked, by, reason, ts });
                     }
                     "TOPIC" => {
@@ -1007,6 +1099,14 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         } else {
                             format!("{}|{}", setter, modes)
                         };
+                        // Persist for log replay; text matches what the frontend renders.
+                        let log_text = if !setter.is_empty() && !setter.contains('.') {
+                            format!("{} sets mode {}", setter, modes)
+                        } else {
+                            format!("MODE {}", modes)
+                        };
+                        let log_from: String = if setter.is_empty() || setter.contains('.') { "*".into() } else { setter.clone() };
+                        let _ = state.logger.append(&username, &conn_id, &display_target, ts, &log_from, &log_text, "mode").await;
                         send(ServerEvent::IrcMode { conn_id: conn_id.to_string(), target: display_target, modes: display, ts });
                     }
                     // 311-318 = WHOIS replies — route to nick's query buffer

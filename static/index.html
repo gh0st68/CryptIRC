@@ -320,6 +320,21 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   border:none; background:none; text-align:left; white-space:nowrap; display:block; width:100%;
 }
 .chan-dropdown-item:hover { background:var(--bg3); color:var(--text); }
+/* Floating dropdown shared by sidebar kebabs — detached from the sidebar DOM so
+   renderSidebar rebuilds don't destroy the open menu mid-interaction. */
+#float-dropdown {
+  display:none; position:fixed; z-index:300;
+  background:var(--bg1); border:1px solid var(--border); border-radius:6px;
+  box-shadow:0 6px 20px rgba(0,0,0,.5); min-width:160px; overflow:hidden;
+  flex-direction:column;
+}
+#float-dropdown.open { display:flex; }
+.float-dropdown-item {
+  padding:10px 14px; font-size:12px; color:var(--text2); cursor:pointer;
+  border:none; background:none; text-align:left; white-space:nowrap; display:block; width:100%;
+  min-height:36px;
+}
+.float-dropdown-item:hover { background:var(--bg3); color:var(--text); }
 #favorites-list { padding:0; }
 #favorites-list:empty { display:none; }
 .fav-header { font-size:10px; color:var(--text3); letter-spacing:.07em; text-transform:uppercase; padding:8px 10px 4px; }
@@ -757,13 +772,17 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .row-topic .msg-body { color:var(--accent); }
 .row-nick .msg-body, .row-mode .msg-body, .row-kick .msg-body { color:var(--text3); }
 /* ── Condensed status messages ── */
-.status-condensed { padding:2px 12px; font-size:11px; color:var(--text3); cursor:pointer; opacity:.7; transition:opacity .15s; line-height:1.6; text-align:center; }
-.status-condensed:hover { opacity:1; }
-.status-condensed .sc-expand { display:none; font-size:11px; color:var(--text3); padding:2px 0; }
+/* The Lounge-style condensed status block: summary uses .msg-row layout so it
+   aligns column-for-column with normal chat rows; expanded view re-renders each
+   event through buildRow for full styling. */
+.status-condensed .sc-summary { color:var(--text3); cursor:pointer; user-select:none; }
+.status-condensed .sc-summary:hover .sc-summary-text { text-decoration:underline; }
+.status-condensed .sc-summary .msg-nick { color:var(--text3); cursor:pointer; }
+.status-condensed .sc-chevron { display:inline-block; opacity:.6; transition:transform .12s ease; font-weight:700; }
+.status-condensed.expanded .sc-chevron { transform:rotate(90deg); }
+.status-condensed .sc-expand { display:none; }
 .status-condensed.expanded .sc-expand { display:block; }
-.status-condensed .sc-summary { display:inline; }
-.status-condensed .sc-ts { font-size:10px; opacity:.5; margin-right:6px; }
-.status-condensed.expanded .sc-summary-text { display:none; }
+.status-condensed .sc-expand .msg-row { opacity:.92; }
 .nc-self { color:var(--accent) !important; }
 .nick-mention { border-radius:2px; padding:0 2px; }
 .nick-mention:hover { text-decoration:underline; }
@@ -1094,6 +1113,41 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 #theme-bg-layer.repeat {
   background-size: auto; background-repeat: repeat;
 }
+/* ── Giphy picker thumbnails ─────────────────────────────────────────────── */
+.giphy-thumb {
+  height: 140px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.4);
+}
+.giphy-thumb:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,.5);
+}
+/* Mobile: shorter thumbs to free vertical space and fit more per scroll */
+@media (max-width: 600px) {
+  .giphy-thumb { height: 96px; }
+  #giphy-picker { padding: 8px 10px !important; }
+}
+@media (max-width: 400px) {
+  .giphy-thumb { height: 84px; }
+}
+.giphy-thumb-active {
+  outline: 2px solid var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(0,212,170,.15), 0 4px 14px rgba(0,212,170,.25) !important;
+  transform: translateY(-1px);
+}
+.giphy-close-btn {
+  position: absolute; top: 6px; right: 8px;
+  background: rgba(20,24,32,.85); border: 1px solid var(--border2);
+  color: var(--text2); cursor: pointer;
+  border-radius: 50%; width: 24px; height: 24px;
+  font-size: 12px; line-height: 1; padding: 0;
+  z-index: 3;
+  display: flex; align-items: center; justify-content: center;
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  transition: background .12s, color .12s, transform .12s;
+}
+.giphy-close-btn:hover { background: var(--bg4); color: var(--text); transform: scale(1.08); }
+.giphy-close-btn:active { transform: scale(.94); }
 /* ── Animation overlay ─────────────────────────────────────────────────────── */
 #anim-overlay {
   display:none; position:fixed; inset:0; pointer-events:none; z-index:0; overflow:hidden;
@@ -1398,6 +1452,16 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <div class="notif-sublabel">Ping when someone mentions you</div>
         </div>
         <button class="appear-toggle" id="a-sound-mention" onclick="this.classList.toggle('on');saveNotifSoundPrefs()"></button>
+      </div>
+      <div class="notif-row">
+        <div>
+          <div class="notif-label">🎵 Sound style</div>
+          <div class="notif-sublabel">Pick the alert tone — ▶ to preview</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;flex-shrink:0">
+          <select id="a-sound-style" onchange="saveNotifSoundPrefs()" style="min-width:160px;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)"></select>
+          <button onclick="previewNotifSound(document.getElementById('a-sound-style').value)" title="Preview" style="padding:4px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">▶</button>
+        </div>
       </div>
     </div>
 
@@ -1911,6 +1975,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div class="form-field"><label class="form-label">Oper Password</label><input class="form-input" type="password" id="f-oper-pass" placeholder="(optional)" autocomplete="new-password"></div>
     </div>
     <div style="border-top:1px solid var(--border);margin:14px 0 12px;padding-top:12px;">
+      <div style="font-size:11px;color:var(--text2);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px">Perform / On-Connect Commands</div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:8px">One per line. Runs after NickServ, before auto-join. Raw IRC or <code>/msg</code>, <code>/notice</code>, <code>/mode</code>, etc.</div>
+      <textarea class="form-input" id="f-perform" rows="4" placeholder="MODE $me +ix&#10;/msg NickServ GHOST oldnick password&#10;/msg Q@CServe.quakenet.org AUTH user pass" autocapitalize="none" spellcheck="false" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;white-space:pre;resize:vertical;min-height:72px"></textarea>
+    </div>
+    <div style="border-top:1px solid var(--border);margin:14px 0 12px;padding-top:12px;">
       <div style="font-size:11px;color:var(--text2);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px">IRCv3 Capabilities</div>
       <div style="font-size:10px;color:var(--text3);margin-bottom:8px">All enabled by default. Disable if a server has issues with specific caps.</div>
       <div id="f-caps-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px"></div>
@@ -2140,12 +2209,18 @@ const VID_EXTS=/\.(mp4|webm|mov)(\?.*)?$/i;
 function initViewportFix() {
   const app = document.getElementById('app');
 
-  // Prevent body-level scrolling
+  // Prevent body-level scrolling. Walks ancestors looking for ANY scrollable
+  // container (vertical OR horizontal). Previously only checked overflowY,
+  // which killed horizontal-scroll elements like the Giphy picker — every
+  // horizontal swipe on a thumb got preventDefault'd, and iOS subsequently
+  // suppressed the synthetic click.
   document.body.addEventListener('touchmove', e => {
     let el = e.target;
     while (el && el !== document.body) {
-      const ov = getComputedStyle(el).overflowY;
-      if ((ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight) return;
+      const cs = getComputedStyle(el);
+      const scrollY = (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight;
+      const scrollX = (cs.overflowX === 'auto' || cs.overflowX === 'scroll') && el.scrollWidth  > el.clientWidth;
+      if (scrollY || scrollX) return;
       el = el.parentElement;
     }
     if (e.cancelable) e.preventDefault();
@@ -2195,6 +2270,10 @@ function initSwipeGesture() {
 
   app.addEventListener('touchstart', e=>{
     if(e.touches.length!==1) return;
+    // Ignore swipes that start inside a horizontal scroller — those are meant
+    // to scroll the picker/list, not drag the sidebar. Otherwise swipes on
+    // the leftmost Giphy thumb would open the sidebar instead of scrolling.
+    if(e.target.closest && e.target.closest('#giphy-picker')) return;
     startX=e.touches[0].clientX; startY=e.touches[0].clientY; swiping=true;
   }, {passive:true});
 
@@ -2794,7 +2873,7 @@ function handleEvent(ev) {
       let joinMsg = `→ ${ev.nick} joined`;
       if(ev.account && ev.account !== '*') joinMsg += ` (${ev.account})`;
       if(ev.realname) joinMsg += ` — ${ev.realname}`;
-      sysMsg(ev.conn_id,ev.channel,joinMsg,'join');
+      sysMsg(ev.conn_id,ev.channel,joinMsg,'join',{from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
       const jNet=networks.find(n=>n.config.id===ev.conn_id);
       const jCh=jNet?.channels.find(c=>c.name===ev.channel);
       if(jCh&&!jCh.names.some(n=>stripPfx(n)===ev.nick)) jCh.names.push(ev.nick);
@@ -2803,7 +2882,7 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_part': {
-      sysMsg(ev.conn_id,ev.channel,`← ${ev.nick} left${ev.reason?' ('+ev.reason+')':''}`,'part');
+      sysMsg(ev.conn_id,ev.channel,`← ${ev.nick} left${ev.reason?' ('+ev.reason+')':''}`,'part',{from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
       const pNet=networks.find(n=>n.config.id===ev.conn_id);
       const pCh=pNet?.channels.find(c=>c.name===ev.channel);
       if(pCh) pCh.names=pCh.names.filter(n=>stripPfx(n)!==ev.nick);
@@ -2829,12 +2908,13 @@ function handleEvent(ev) {
     case 'irc_quit': {
       const net=networks.find(n=>n.config.id===ev.conn_id);
       const quitChans=(net?.channels||[]).filter(ch=>ch.names.some(n=>stripPfx(n)===ev.nick));
+      const quitSelf=ev.nick===getNick(ev.conn_id);
       for(const ch of quitChans){
-        sysMsg(ev.conn_id,ch.name,`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit');
+        sysMsg(ev.conn_id,ch.name,`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{from:ev.nick,self:quitSelf,subject:ev.nick});
         ch.names=ch.names.filter(n=>stripPfx(n)!==ev.nick);
         refreshUserCount(ev.conn_id,ch.name);
       }
-      if(!quitChans.length) sysMsg(ev.conn_id,'status',`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit');
+      if(!quitChans.length) sysMsg(ev.conn_id,'status',`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{from:ev.nick,self:quitSelf,subject:ev.nick});
       renderSidebar(); blinkUserCount('part');
       monitorOffline(ev.nick);
       keepnickOnQuit(ev.conn_id,ev.nick);
@@ -2843,12 +2923,13 @@ function handleEvent(ev) {
     case 'irc_nick': {
       const nNet=networks.find(n=>n.config.id===ev.conn_id);
       const nickChans=(nNet?.channels||[]).filter(ch=>ch.names.some(n=>stripPfx(n)===ev.old||stripPfx(n)===ev.new));
+      const nickSelf=(ev.old===getNick(ev.conn_id)||ev.new===getNick(ev.conn_id));
       for(const ch of nickChans){
-        sysMsg(ev.conn_id,ch.name,`• ${ev.old} is now known as ${ev.new}`,'nick');
+        sysMsg(ev.conn_id,ch.name,`• ${ev.old} is now known as ${ev.new}`,'nick',{from:ev.new,self:nickSelf,subject:ev.new,subject2:ev.old});
         ch.names=ch.names.map(n=>{const pfx=n.match(/^[@+~&%]*/)[0];return stripPfx(n)===ev.old?pfx+ev.new:n;});
         refreshUserCount(ev.conn_id,ch.name);
       }
-      if(!nickChans.length) sysMsg(ev.conn_id,'status',`• ${ev.old} is now known as ${ev.new}`,'nick');
+      if(!nickChans.length) sysMsg(ev.conn_id,'status',`• ${ev.old} is now known as ${ev.new}`,'nick',{from:ev.new,self:nickSelf,subject:ev.new,subject2:ev.old});
       if(ev.old===getNick(ev.conn_id)||ev.new===getNick(ev.conn_id)){
         updateNick(ev.conn_id,ev.new);
         keepnickOnOwnNickChange(ev.conn_id,ev.old,ev.new);
@@ -2873,7 +2954,7 @@ function handleEvent(ev) {
     }
     case 'irc_names':  updateNames(ev.conn_id,ev.channel,ev.names); renderSidebar(); monitorRefreshOnline(); break;
     case 'irc_kick':
-      sysMsg(ev.conn_id,ev.channel,`✗ ${ev.kicked} kicked by ${ev.by}${ev.reason?' ('+ev.reason+')':''}`, 'error');
+      sysMsg(ev.conn_id,ev.channel,`✗ ${ev.kicked} kicked by ${ev.by}${ev.reason?' ('+ev.reason+')':''}`, 'kick',{from:ev.kicked,self:(ev.kicked===getNick(ev.conn_id)||ev.by===getNick(ev.conn_id)),subject:ev.kicked,subject2:ev.by});
       // Auto-rejoin on kick if enabled
       if(ev.kicked===getNick(ev.conn_id) && localStorage.getItem('cryptirc_autorejoin')!=='false'){
         const _rjKey=bk(ev.conn_id,ev.channel),_rjSavedKey=localStorage.getItem('cryptirc_chankeys');
@@ -2890,7 +2971,7 @@ function handleEvent(ev) {
         rawModes=ev.modes.slice(pipeIdx+1);
       }
       const modeDisplay=modeSetter?`${modeSetter} sets mode ${rawModes}`:`MODE ${rawModes}`;
-      sysMsg(ev.conn_id,ev.target,modeDisplay,'mode');
+      sysMsg(ev.conn_id,ev.target,modeDisplay,'mode',{from:modeSetter||'*',self:modeSetter===getNick(ev.conn_id),rawModes:rawModes,subject:modeSetter||''});
       // Update nick prefixes in names list when channel modes change
       const mNet=networks.find(n=>n.config.id===ev.conn_id);
       const mCh=mNet?.channels.find(c=>c.name===ev.target);
@@ -2934,10 +3015,11 @@ function handleEvent(ev) {
     case 'irc_away': {
       // Send away/back notices to status only (not every channel)
       const aNet=networks.find(n=>n.config.id===ev.conn_id);
+      const awaySelf=ev.nick===getNick(ev.conn_id);
       if(ev.away){
-        addMessage(ev.conn_id,'status',{ts:ev.ts,from:'*',text:`${ev.nick} is away: ${ev.message}`,kind:'part',noUnread:true});
+        addMessage(ev.conn_id,'status',{ts:ev.ts,from:ev.nick,text:`${ev.nick} is away: ${ev.message}`,kind:'away',noUnread:true,self:awaySelf,subject:ev.nick});
       } else {
-        addMessage(ev.conn_id,'status',{ts:ev.ts,from:'*',text:`${ev.nick} is back`,kind:'part',noUnread:true});
+        addMessage(ev.conn_id,'status',{ts:ev.ts,from:ev.nick,text:`${ev.nick} is back`,kind:'back',noUnread:true,self:awaySelf,subject:ev.nick});
       }
       // Track away state for nick panel
       if(!window._awayNicks) window._awayNicks={};
@@ -3128,31 +3210,95 @@ function getBuf(c,t){const k=bk(c,t);if(!buffers[k])buffers[k]=[];return buffers
 // Per-channel last known msg_id for ID-based sync
 const _lastMsgId={};
 function trackMsgId(conn_id,target,id){if(id>0){const k=bk(conn_id,target);if(!_lastMsgId[k]||id>_lastMsgId[k])_lastMsgId[k]=id;}}
-// ─── Notification sound ───────────────────────────────────────────────────────
+// ─── Notification sounds ──────────────────────────────────────────────────────
 let _audioCtx=null,_lastSoundAt=0;
+// Chromium (including Electron) starts AudioContexts in "suspended" state until
+// the user interacts with the page. A one-time capture listener resumes the
+// context on the first click/keydown so notification sounds fire thereafter.
+(function(){
+  const wake=()=>{try{if(_audioCtx&&_audioCtx.state==='suspended')_audioCtx.resume();}catch(e){}};
+  document.addEventListener('click',wake,{capture:true,passive:true});
+  document.addEventListener('keydown',wake,{capture:true,passive:true});
+})();
+// Catalog advertised in the notification-settings dropdown.
+const NOTIF_SOUNDS=[
+  {id:'water',    label:'Water drop (default)'},
+  {id:'imessage', label:'Crystal bell'},
+  {id:'discord',  label:'Descending ping'},
+  {id:'arp',      label:'Pluck arp'},
+  {id:'chime',    label:'Glass chime'},
+  {id:'r2d2',     label:'R2-D2 chirp'},
+  {id:'cyber',    label:'Cyberpunk blip'},
+  {id:'laser',    label:'Laser zap'},
+  {id:'packet',   label:'Data packet'},
+  {id:'knock',    label:'Soft knock'},
+  {id:'aim',      label:'AIM ding'},
+  {id:'icq',      label:'ICQ uh-oh'},
+  {id:'chirp',    label:'Classic chirp'},
+];
+// Tiny helper: schedule a single oscillator with an exponential gain decay.
+function _tone(offset,freqStart,freqEnd,dur,waveType,gainPeak){
+  const t0=_audioCtx.currentTime+offset;
+  const osc=_audioCtx.createOscillator();
+  const g=_audioCtx.createGain();
+  osc.type=waveType||'sine';
+  osc.connect(g); g.connect(_audioCtx.destination);
+  osc.frequency.setValueAtTime(freqStart,t0);
+  if(freqEnd!==freqStart) osc.frequency.exponentialRampToValueAtTime(Math.max(1,freqEnd),t0+dur);
+  g.gain.setValueAtTime(gainPeak||0.12,t0);
+  g.gain.exponentialRampToValueAtTime(0.001,t0+dur);
+  osc.start(t0);
+  osc.stop(t0+dur+0.02);
+}
+const SOUND_IMPL={
+  water:    ()=>{ _tone(0,800,400,0.15,'sine',0.14); },
+  imessage: ()=>{ _tone(0,523.25,523.25,0.55,'sine',0.12); _tone(0,1046.5,1046.5,0.55,'sine',0.07); },
+  discord:  ()=>{ _tone(0,988,988,0.10,'sine',0.12); _tone(0.07,784,784,0.10,'sine',0.12); _tone(0.14,659,659,0.20,'sine',0.12); },
+  arp:      ()=>{ _tone(0,523.25,523.25,0.09,'triangle',0.12); _tone(0.07,659.25,659.25,0.09,'triangle',0.12); _tone(0.14,783.99,783.99,0.18,'triangle',0.12); },
+  chime:    ()=>{ _tone(0,1760,1760,0.8,'sine',0.10); _tone(0,1975,1975,0.8,'sine',0.05); },
+  r2d2:     ()=>{
+    const t0=_audioCtx.currentTime;
+    const osc=_audioCtx.createOscillator();
+    const g=_audioCtx.createGain();
+    osc.type='sawtooth';
+    osc.connect(g); g.connect(_audioCtx.destination);
+    osc.frequency.setValueAtTime(400,t0);
+    osc.frequency.exponentialRampToValueAtTime(1200,t0+0.08);
+    osc.frequency.exponentialRampToValueAtTime(700,t0+0.14);
+    osc.frequency.exponentialRampToValueAtTime(1800,t0+0.22);
+    g.gain.setValueAtTime(0.08,t0);
+    g.gain.exponentialRampToValueAtTime(0.001,t0+0.26);
+    osc.start(t0); osc.stop(t0+0.28);
+  },
+  cyber:    ()=>{ _tone(0,880,880,0.06,'square',0.10); _tone(0.08,1320,1320,0.05,'square',0.08); },
+  laser:    ()=>{ _tone(0,2000,200,0.18,'triangle',0.12); },
+  packet:   ()=>{ _tone(0,1200,1200,0.05,'square',0.09); _tone(0.08,1600,1600,0.05,'square',0.09); },
+  knock:    ()=>{ _tone(0,220,150,0.04,'triangle',0.15); _tone(0.11,220,150,0.04,'triangle',0.15); },
+  aim:      ()=>{ _tone(0,700,700,0.09,'sine',0.12); _tone(0.11,1100,1100,0.14,'sine',0.12); },
+  icq:      ()=>{ _tone(0,900,700,0.08,'square',0.08); _tone(0.10,700,500,0.14,'square',0.08); },
+  chirp:    (type)=>{
+    if(type==='pm'){ _tone(0,880,880,0.08,'sine',0.15); _tone(0.08,1100,1100,0.12,'sine',0.15); }
+    else { _tone(0,660,660,0.15,'sine',0.10); }
+  },
+};
+function _ensureAudioCtx(){
+  if(!_audioCtx) _audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  if(_audioCtx.state==='suspended') _audioCtx.resume();
+}
 function playNotifSound(type){
   const now=Date.now();if(now-_lastSoundAt<500)return;_lastSoundAt=now;
   try{
-    if(!_audioCtx) _audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-    const osc=_audioCtx.createOscillator();
-    const gain=_audioCtx.createGain();
-    osc.connect(gain); gain.connect(_audioCtx.destination);
-    if(type==='pm'){
-      // PM: two-tone chirp
-      osc.frequency.setValueAtTime(880,_audioCtx.currentTime);
-      osc.frequency.setValueAtTime(1100,_audioCtx.currentTime+0.08);
-      gain.gain.setValueAtTime(0.15,_audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001,_audioCtx.currentTime+0.2);
-      osc.start(_audioCtx.currentTime);
-      osc.stop(_audioCtx.currentTime+0.2);
-    } else {
-      // Mention/highlight: single soft ping
-      osc.frequency.setValueAtTime(660,_audioCtx.currentTime);
-      gain.gain.setValueAtTime(0.1,_audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001,_audioCtx.currentTime+0.15);
-      osc.start(_audioCtx.currentTime);
-      osc.stop(_audioCtx.currentTime+0.15);
-    }
+    _ensureAudioCtx();
+    const cfg=loadAppearance();
+    const id=cfg.notifSound||'water';
+    (SOUND_IMPL[id]||SOUND_IMPL.water)(type);
+  }catch(e){}
+}
+// Preview bypasses the 500ms throttle so the ▶ button always plays.
+function previewNotifSound(id){
+  try{
+    _ensureAudioCtx();
+    (SOUND_IMPL[id]||SOUND_IMPL.water)('pm');
   }catch(e){}
 }
 
@@ -3184,15 +3330,20 @@ function addMessage(conn_id,target,msg){
   }
   if(isActive(conn_id,target)){appendMsgRow(msg);const isOwn=msg.from&&msg.from===getNick(conn_id);if(isOwn)scrollForce();else scrollBottom();}
   else{
-    if(!msg.noUnread){
+    // `_ownEcho` = locally-injected optimistic copy of a message we just sent
+    // (no server id yet). Real server-delivered messages always carry id>0, so
+    // even if from===own (multi-device echo-message), we still notify.
+    const _ownMsg=msg.from&&msg.from===getNick(conn_id);
+    const _ownEcho=_ownMsg && !(msg.id>0);
+    if(!msg.noUnread && !_ownEcho){
       const uk=bk(conn_id,target);
       unread.set(uk,(unread.get(uk)||0)+1);
       if(msg.mentioned||isDM) mentionUnread.set(uk,(mentionUnread.get(uk)||0)+1);
       saveUnread();renderSidebar();
     }
-    // Play sound for unread DMs and mentions
+    // Play sound for unread DMs and mentions — skip only our own LOCAL echo.
     const isMutedChan=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
-    if(!isMutedChan && msg.from!=='*'){
+    if(!isMutedChan && msg.from!=='*' && !_ownEcho){
       const soundCfg=loadAppearance();
       if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
       else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
@@ -3216,7 +3367,34 @@ function addMessage(conn_id,target,msg){
     }
   }
 }
-function sysMsg(c,t,text,kind='system'){addMessage(c,t,{ts:Date.now()/1000|0,from:'*',text,kind});}
+function sysMsg(c,t,text,kind='system',extras){
+  // Allow extras to override `from` (e.g. subject nick for join/part/etc so
+  // the reload path can derive `self` from msg.from === getNick).
+  const m={ts:Date.now()/1000|0,from:(extras&&extras.from)||'*',text,kind};
+  if(extras){for(const k in extras){if(k!=='from')m[k]=extras[k];}}
+  addMessage(c,t,m);
+}
+// Reconstruct `self`/`subject`/`subject2` on log replay (server stores from + text
+// + kind only; we recover the structured fields from `from` + text parsing).
+function _reconstructStatusFields(m,conn_id){
+  if(!['join','part','quit','nick','kick','mode','away','back'].includes(m.kind)) return m;
+  if(m.from && m.from!=='*'){
+    m.subject=m.from;
+    const own=getNick(conn_id);
+    if(own && m.from===own) m.self=true;
+  }
+  // For nick changes, recover subject2 (the OLD nick) by parsing "X is now known as Y"
+  if(m.kind==='nick'){
+    const mt=(m.text||'').match(/^[•·*]?\s*(\S+)\s+is now known as\s+(\S+)/);
+    if(mt){m.subject=mt[2];m.subject2=mt[1];const own=getNick(conn_id);if(own&&(mt[1]===own||mt[2]===own))m.self=true;}
+  }
+  // For kicks, recover subject2 (the kicker)
+  if(m.kind==='kick'){
+    const mt=(m.text||'').match(/^[✗*]?\s*(\S+)\s+kicked by\s+(\S+)/);
+    if(mt){m.subject=mt[1];m.subject2=mt[2];const own=getNick(conn_id);if(own&&(mt[1]===own||mt[2]===own))m.self=true;}
+  }
+  return m;
+}
 async function clearCurrentHistory(){
   if(!active)return;
   if(!(await customConfirm('Clear chat history for '+active.target+'?','Clear')))return;
@@ -3233,7 +3411,7 @@ async function clearBufHistory(connId,target){
 function prependLogs(conn_id,target,lines){
   const buf=getBuf(conn_id,target);
   const wasEmpty=buf.length===0;
-  const newMsgs=lines.map(l=>({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind}));
+  const newMsgs=lines.map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind},conn_id));
   // Track highest msg_id from log lines
   for(const m of newMsgs) trackMsgId(conn_id,target,m.id);
   // Deduplicate: use msg_id when available, fall back to ts+from+text
@@ -3274,7 +3452,7 @@ function appendSyncLines(conn_id,target,lines){
     // Fuzzy fallback for messages already in buffer without an id (locally-sent)
     const fk=l.ts+'|'+l.from+'|'+(l.text||'').slice(0,50);
     if(existingKeys.has(fk)) continue;
-    buf.push({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind});
+    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind},conn_id));
     added++;
   }
   if(added>0){
@@ -3310,7 +3488,7 @@ function _renderSidebarNow(){
     </div>`;
     // Attach net kebab listener safely (no inline onclick with user data)
     const netKebab=g.querySelector('.net-kebab');
-    if(netKebab){netKebab.addEventListener('click',e=>{e.stopPropagation();toggleNetMenu(id,net.config.label||net.config.server);});}
+    if(netKebab){netKebab.addEventListener('click',e=>{e.stopPropagation();toggleNetMenu(e.currentTarget,id,net.config.label||net.config.server);});}
     // Sort channels by saved order
     const order=net.config.channel_order||[];
     const sorted=[...(net.channels||[])].sort((a,b)=>{
@@ -3350,6 +3528,8 @@ function _renderSidebarNow(){
         const qi=document.createElement('div');
         qi.className=`chan-item${isA?' active':''}`;
         qi.dataset.target=lc;
+        qi.dataset.connId=id;
+        qi.dataset.kind='pm';
         qi.style.fontStyle='italic';
         qi.style.position='relative';
         const pmMuted=isMuted(id+'/'+lc)||isMuted('net:'+id);
@@ -3447,7 +3627,12 @@ function renderChat(){
   const lastReadTs=parseFloat(localStorage.getItem('cryptirc_lastread_'+rmKey)||'0');
   let markerInserted=false;
   const statusMsgMode=(loadAppearance().statusMsg)||'condense';
-  const isStatusKind=k=>['join','part','quit','nick','mode','kick'].includes(k);
+  // Match The Lounge's `condensedTypes` set — `chghost` excluded since CryptIRC
+  // doesn't surface it as its own event yet.
+  const isStatusKind=k=>['away','back','join','kick','mode','nick','part','quit'].includes(k);
+  // The Lounge break rule: `self`, `highlight`, or unread-marker crossing breaks
+  // a condense run so the user never misses personally-relevant context.
+  const isCondensable=m=>isStatusKind(m.kind)&&!m.self&&!m.mentioned;
   let i=0;
   while(i<buf.length){
     const msg=buf[i];
@@ -3456,10 +3641,14 @@ function renderChat(){
     if(!markerInserted && lastReadTs>0 && msg.ts>lastReadTs && msg.from!=='*'){
       const marker=document.createElement('div');marker.className='read-marker';marker.textContent='NEW MESSAGES';area.appendChild(marker);markerInserted=true;
     }
-    // Condense consecutive status messages
-    if(statusMsgMode==='condense'&&isStatusKind(msg.kind)){
+    // Condense consecutive status messages (Lounge-style)
+    if(statusMsgMode==='condense'&&isCondensable(msg)){
       const group=[msg];
-      while(i+1<buf.length&&isStatusKind(buf[i+1].kind)){i++;group.push(buf[i]);}
+      while(i+1<buf.length&&isCondensable(buf[i+1])){
+        // Also break if the next msg crosses the unread marker into "new" territory
+        if(!markerInserted && lastReadTs>0 && buf[i+1].ts>lastReadTs) break;
+        i++;group.push(buf[i]);
+      }
       if(group.length>=2){
         area.appendChild(buildCondensedRow(group));
       } else {
@@ -3485,24 +3674,27 @@ function loadOlderMessages(){
 function appendMsgRow(msg){
   const area=document.getElementById('chat-area');if(area.style.display==='none')return;
   const statusMsgMode=(loadAppearance().statusMsg)||'condense';
-  const isStatus=['join','part','quit','nick','mode','kick'].includes(msg.kind);
-  if(statusMsgMode==='condense'&&isStatus){
+  const isStatus=['away','back','join','kick','mode','nick','part','quit'].includes(msg.kind);
+  const isCondensable=isStatus&&!msg.self&&!msg.mentioned;
+  if(statusMsgMode==='condense'&&isCondensable){
     // Try to merge with an existing condensed row at the bottom
     const lastChild=area.lastElementChild;
     if(lastChild&&lastChild.classList.contains('status-condensed')){
+      // Stash the full message (so expanded view can re-render via buildRow) along with summary fields.
       const grp=JSON.parse(lastChild.dataset.msgs||'[]');
-      grp.push({kind:msg.kind,text:msg.text,from:msg.from||''});
+      grp.push(_condenseStashMsg(msg));
       lastChild.dataset.msgs=JSON.stringify(grp);
-      lastChild.querySelector('.sc-summary-text').textContent=buildCondensedSummary(grp);
-      lastChild.querySelector('.sc-expand').innerHTML=grp.map(m=>`<div style="padding:1px 0">— ${esc(m.text||'')}</div>`).join('');
+      _renderCondensed(lastChild,grp);
       scrollBottom();return;
     }
     // Previous element is a single status row — convert it + new one into condensed
-    if(lastChild&&lastChild.classList.contains('msg-row')&&['row-join','row-part','row-quit','row-nick','row-mode','row-kick'].some(c=>lastChild.classList.contains(c))){
+    // (skip if the previous was self/highlighted — Lounge keeps those standalone).
+    if(lastChild&&lastChild.classList.contains('msg-row')&&!lastChild.dataset.self&&!lastChild.dataset.mentioned&&['row-away','row-back','row-join','row-part','row-quit','row-nick','row-mode','row-kick'].some(c=>lastChild.classList.contains(c))){
       const prevKind=(lastChild.className.match(/row-(\w+)/)||[])[1]||'system';
-      const prevMsg={kind:prevKind,text:lastChild.querySelector('.msg-body')?.textContent||'',from:lastChild.dataset.from||''};
-      const grp=[prevMsg,{kind:msg.kind,text:msg.text,from:msg.from||''}];
-      const condensed=buildCondensedRow(grp.map((g,i)=>({...g,ts:msg.ts})));
+      const prevTs=parseFloat(lastChild.dataset.ts||'0')||msg.ts;
+      const prevMsg={kind:prevKind,ts:prevTs,from:lastChild.dataset.from||'*',text:lastChild.querySelector('.msg-body')?.textContent||''};
+      const grp=[prevMsg,_condenseStashMsg(msg)];
+      const condensed=buildCondensedRow(grp);
       area.replaceChild(condensed,lastChild);
       scrollBottom();return;
     }
@@ -3512,48 +3704,96 @@ function appendMsgRow(msg){
   if(msg.mentioned){r.classList.add('flash');setTimeout(()=>r.classList.remove('flash'),3000);}
   scrollBottom();
 }
+// Stash just the fields we need to (a) build the summary and (b) re-render via buildRow when expanded.
+function _condenseStashMsg(m){
+  return {kind:m.kind,ts:m.ts,from:m.from||'*',text:m.text||'',subject:m.subject||'',rawModes:m.rawModes||''};
+}
+function _renderCondensed(row,group){
+  const summary=buildCondensedSummary(group);
+  const lastTs=group[group.length-1]?.ts;
+  let tsTxt='';
+  if(lastTs){const t=new Date(lastTs*1000);const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';tsTxt=`${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}`;}
+  const tsEl=row.querySelector('.sc-summary .msg-ts');
+  if(tsEl) tsEl.textContent=tsTxt;
+  const txtEl=row.querySelector('.sc-summary .sc-summary-text');
+  if(txtEl) txtEl.textContent=summary;
+  // Expanded view re-renders each child via buildRow (full Lounge-style fidelity).
+  const expand=row.querySelector('.sc-expand');
+  expand.innerHTML='';
+  for(const m of group) expand.appendChild(buildRow(m));
+}
+// Match The Lounge's MessageCondensed phrasing exactly:
+//   "N user has joined" / "N users have joined"
+//   part includes quits ("N user has left")
+//   "N user has changed nick", "N user was kicked", "N modes were set",
+//   "marked away once" / "marked away N times" / same for back
+// Joiner: ", " between clauses, ", and " before the last.
 function buildCondensedSummary(group){
-  const joins=[],parts=[],quits=[],nicks=[],modes=[],kicks=[];
+  const c={join:0,part:0,quit:0,nick:0,kick:0,mode:0,away:0,back:0,chghost:0};
   for(const m of group){
-    const nick=m.from||m.text?.match(/^[⊕⊗✗•] ?(\S+)/)?.[1]||'?';
-    if(m.kind==='join')joins.push(nick);
-    else if(m.kind==='part')parts.push(nick);
-    else if(m.kind==='quit')quits.push(nick);
-    else if(m.kind==='nick')nicks.push(nick);
-    else if(m.kind==='mode')modes.push(nick);
-    else if(m.kind==='kick')kicks.push(nick);
+    if(m.kind==='mode'){
+      // Lounge counts the mode-letters in the first whitespace-delimited modechunk
+      // (e.g. "+vv-t" → 3). We have m.rawModes when available; fall back to
+      // parsing the displayed text or counting the event as 1.
+      let chunk=m.rawModes||'';
+      if(!chunk){
+        const t=(m.text||'').replace(/^.*?(?:sets mode|MODE)\s+/,'');
+        chunk=t.split(/\s+/)[0]||'';
+      } else {
+        chunk=chunk.split(/\s+/)[0]||'';
+      }
+      const letters=chunk.replace(/[+\-]/g,'').length;
+      c.mode+=Math.max(1,letters);
+    } else if(c[m.kind]!==undefined){
+      c[m.kind]+=1;
+    }
   }
-  const parts_arr=[];
-  if(joins.length) parts_arr.push(`${joins.length} joined`);
-  if(parts.length) parts_arr.push(`${parts.length} left`);
-  if(quits.length) parts_arr.push(`${quits.length} quit`);
-  if(nicks.length) parts_arr.push(`${nicks.length} changed nick`);
-  if(modes.length) parts_arr.push(`${modes.length} mode change${modes.length>1?'s':''}`);
-  if(kicks.length) parts_arr.push(`${kicks.length} kicked`);
-  return parts_arr.join(', ');
+  // Lounge folds quit into part to reduce clutter
+  c.part+=c.quit; c.quit=0;
+  const out=[];
+  const push=(n,sing,plur)=>{ if(n>0) out.push(n===1?sing.replace('{n}',1):plur.replace('{n}',n)); };
+  push(c.join,    '{n} user has joined',          '{n} users have joined');
+  push(c.part,    '{n} user has left',            '{n} users have left');
+  push(c.nick,    '{n} user has changed nick',    '{n} users have changed nick');
+  push(c.kick,    '{n} user was kicked',          '{n} users were kicked');
+  push(c.mode,    '{n} mode was set',             '{n} modes were set');
+  push(c.chghost, '{n} user has changed hostname','{n} users have changed hostname');
+  if(c.away===1) out.push('marked away once'); else if(c.away>1) out.push(`marked away ${c.away} times`);
+  if(c.back===1) out.push('marked back once'); else if(c.back>1) out.push(`marked back ${c.back} times`);
+  if(out.length<=1) return out[0]||'';
+  const last=out.pop();
+  return out.join(', ')+', and '+last;
 }
 function buildCondensedRow(group){
+  // Normalize each entry to the stash shape so re-renders stay consistent.
+  const stash=group.map(m=>({kind:m.kind,ts:m.ts,from:m.from||'*',text:m.text||'',subject:m.subject||'',subject2:m.subject2||'',rawModes:m.rawModes||''}));
   const row=document.createElement('div');
   row.className='status-condensed';
-  row.dataset.msgs=JSON.stringify(group.map(m=>({kind:m.kind,text:m.text,from:m.from||''})));
-  const summary=buildCondensedSummary(group.map(m=>({kind:m.kind,text:m.text,from:m.from||''})));
-  // Timestamp from the last message in the group
-  const lastTs=group[group.length-1]?.ts;
-  let tsHtml='';
-  if(lastTs){const t=new Date(lastTs*1000);const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';tsHtml=`<span class="sc-ts">${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}</span>`;}
-  row.innerHTML=`<span class="sc-summary">${tsHtml}↕ <span class="sc-summary-text">${summary}</span></span><div class="sc-expand">${group.map(m=>`<div style="padding:1px 0">— ${esc(m.text||'')}</div>`).join('')}</div>`;
-  row.onclick=()=>{row.classList.toggle('expanded');if(row.classList.contains('expanded'))requestAnimationFrame(()=>row.scrollIntoView({block:'end',behavior:'smooth'}));};
+  row.dataset.msgs=JSON.stringify(stash);
+  // Summary uses the same .msg-row column structure (ts | nick | body) so it
+  // aligns with normal chat rows. Chevron sits in the nick column.
+  row.innerHTML=`<div class="msg-row sc-summary"><span class="msg-ts"></span><span class="msg-nick"><span class="sc-chevron">›</span></span><span class="msg-body sc-summary-text"></span></div><div class="sc-expand"></div>`;
+  _renderCondensed(row,stash);
+  // Toggle only on summary click (clicks inside expanded children — like a nick
+  // → showNickMenu — must not collapse the block).
+  const summaryEl=row.querySelector('.sc-summary');
+  summaryEl.addEventListener('click',()=>{
+    row.classList.toggle('expanded');
+    if(row.classList.contains('expanded'))requestAnimationFrame(()=>row.scrollIntoView({block:'end',behavior:'smooth'}));
+  });
   return row;
 }
 function buildRow(msg){
   const row=document.createElement('div'); row.className=`msg-row row-${msg.kind}`; row.dataset.ts=msg.ts; row.dataset.from=msg.from||'';
+  if(msg.self) row.dataset.self='1';
+  if(msg.mentioned) row.dataset.mentioned='1';
   const t=new Date(msg.ts*1000);
   const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';
   const ts=`${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}`;
   const isChat=msg.kind==='privmsg'||msg.kind==='action';
   const isSelf=isChat&&active&&msg.from===getNick(active.conn_id);
   const nc=isChat?(isSelf?'nc-self':`nc${nickHash(msg.from)}`):'';
-  const isSys=['system','error','join','part','quit','nick','mode','topic','kick','notice'].includes(msg.kind)||msg.from==='*';
+  const isSys=['system','error','join','part','quit','nick','mode','topic','kick','notice','away','back'].includes(msg.kind)||msg.from==='*';
   // Get user's channel prefix (@, +, ~, &, %) for display
   let userPfx='';
   if(isChat&&active&&(active.target.startsWith('#')||active.target.startsWith('&'))){
@@ -3563,10 +3803,10 @@ function buildRow(msg){
   }
   const pfxHtml=userPfx?`<span class="nick-pfx${'~&@'.includes(userPfx)?' op':''}">${userPfx}</span>`:'';
   let nickHtml,bodyHtml;
-  if(isSys){nickHtml=`<span class="msg-nick" style="color:var(--text3)">—</span>`;bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;}
+  if(isSys){nickHtml=`<span class="msg-nick" style="color:var(--text3)">—</span>`;bodyHtml=`<span class="msg-body">${renderStatusText(msg)}</span>`;}
   else if(msg.kind==='action'){nickHtml=`<span class="msg-nick ${nc}">* ${pfxHtml}${esc(msg.from)}</span>`;bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;}
   else{
-    nickHtml=`<span class="msg-nick ${nc}" onclick="showNickMenu(event,'${esc(msg.from)}')" style="cursor:pointer">${pfxHtml}${esc(msg.from)}</span>`;
+    nickHtml=`<span class="msg-nick ${nc}" onclick="showNickMenu(event,'${esc(msg.from)}')" oncontextmenu="event.preventDefault();showNickMenu(event,'${esc(msg.from)}')" style="cursor:pointer">${pfxHtml}${esc(msg.from)}</span>`;
     bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;
   }
   row.innerHTML=`<span class="msg-ts">${ts}</span>${nickHtml}${bodyHtml}`;
@@ -3862,10 +4102,10 @@ document.addEventListener('DOMContentLoaded',()=>{
     else if(e.key==='ArrowDown') {if(historyIdx>0){historyIdx--;inp.value=inputHistory[inputHistory.length-1-historyIdx];}else{historyIdx=-1;inp.value='';}e.preventDefault();}
     else if(e.key==='Tab')       {e.preventDefault();tabComplete(inp);}
     // mIRC formatting shortcuts
-    else if(e.ctrlKey&&e.key==='b'){e.preventDefault();insertAtCursor(inp,'\x02');}       // Bold
-    else if(e.ctrlKey&&e.key==='u'){e.preventDefault();insertAtCursor(inp,'\x1F');}       // Underline
-    else if(e.ctrlKey&&e.key==='i'){e.preventDefault();insertAtCursor(inp,'\x1D');}       // Italic
-    else if(e.ctrlKey&&e.key==='o'){e.preventDefault();insertAtCursor(inp,'\x0F');}       // Reset
+    else if(e.ctrlKey&&e.key==='b'){e.preventDefault();insertAtCursor(inp,'^B');}        // Bold
+    else if(e.ctrlKey&&e.key==='u'){e.preventDefault();insertAtCursor(inp,'^U');}        // Underline
+    else if(e.ctrlKey&&e.key==='i'){e.preventDefault();insertAtCursor(inp,'^I');}        // Italic
+    else if(e.ctrlKey&&e.key==='o'){e.preventDefault();insertAtCursor(inp,'^O');}        // Reset
     else if(e.ctrlKey&&e.key==='k'){e.preventDefault();showMircColorPicker(inp);}         // Color
     else { sendTypingActive(); }
   });
@@ -4015,7 +4255,7 @@ async function handleInput(raw){
         saveQueryBufs(); renderSidebar();
         setActive(conn_id,qnick);
         if(args.slice(1).length) {
-          const qtext = args.slice(1).join(' ');
+          const qtext = toMircChars(args.slice(1).join(' '));
           // L2: route through E2E if session exists
           const qwire = (window.E2E?.ready || window.E2E?.channelKeys?.[qnick]) ? await e2eEncryptOutgoing(qnick, qtext) : null;
           if (qwire) {
@@ -4066,7 +4306,7 @@ async function handleInput(raw){
 
       // ── Messaging ───────────────────────────────────────────────────
       case 'ME': {
-        const t=args.join(' ');
+        const t=toMircChars(args.join(' '));
         // L3: /me goes through E2E if session is active for this target
         const meWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target]) ? await e2eEncryptOutgoing(target, `\x01ACTION ${t}\x01`) : null;
         if (meWire) {
@@ -4078,7 +4318,7 @@ async function handleInput(raw){
         break;
       }
       case 'SAY': {
-        const t=args.join(' ');
+        const t=toMircChars(args.join(' '));
         // L3: /say goes through E2E if active
         const sayWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target]) ? await e2eEncryptOutgoing(target, t) : null;
         if (sayWire) {
@@ -4091,7 +4331,7 @@ async function handleInput(raw){
         break;
       }
       case 'MSG': case 'PRIVMSG': {
-        const to=args[0],t=args.slice(1).join(' ');
+        const to=args[0],t=toMircChars(args.slice(1).join(' '));
         if(!to||!t){sysMsg(conn_id,target,'Usage: /msg <target> <message>','error');break;}
         // Open query window for non-channel targets
         if(!to.startsWith('#')&&!to.startsWith('&')&&!to.startsWith('+')&&!to.startsWith('!')){
@@ -4107,7 +4347,7 @@ async function handleInput(raw){
         break;
       }
       case 'NOTICE': {
-        const to=args[0],t=args.slice(1).join(' ');
+        const to=args[0],t=toMircChars(args.slice(1).join(' '));
         if(!to||!t){sysMsg(conn_id,target,'Usage: /notice <target> <message>','error');break;}
         wsend({type:'send',conn_id,raw:`NOTICE ${to} :${t}`}); break;
       }
@@ -4671,6 +4911,8 @@ async function handleInput(raw){
         wsend({type:'send',conn_id,raw:raw.slice(1)});
     }
   } else {
+    // Translate visible caret-notation formatting tokens (^B/^I/^U/^O/^R/^Cnn[,nn]) to real mIRC control chars
+    const raw2=toMircChars(raw);
     // Attempt E2E encryption for outgoing plaintext
     // Handle reply — send quote line first, then the actual message
     const replyPrefix=getReplyPrefix();
@@ -4681,14 +4923,14 @@ async function handleInput(raw){
       addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:quoteLine,kind:'privmsg',encrypted:!!quoteWire});
     }
     const e2eWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target])
-      ? await e2eEncryptOutgoing(target, raw)
+      ? await e2eEncryptOutgoing(target, raw2)
       : null;
     if (e2eWire) {
       rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${e2eWire}`});
-      addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw,kind:'privmsg',encrypted:true});
+      addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw2,kind:'privmsg',encrypted:true});
     } else {
-      rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${raw}`});
-      addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw,kind:'privmsg'});
+      rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${raw2}`});
+      addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw2,kind:'privmsg'});
     }
   }
 }
@@ -4715,15 +4957,14 @@ function showMircColorPicker(inp){
       ${colors.map((c,i)=>`<div onclick="pickMircColor(${i},'fg')" style="width:22px;height:22px;background:${c};border-radius:3px;cursor:pointer;border:1px solid var(--border)" title="${i}"></div>`).join('')}
     </div>
     <div style="display:flex;gap:2px;flex-wrap:wrap">
-      <span style="font-size:9px;color:var(--text3);width:100%">Background (optional):</span>
+      <span style="font-size:9px;color:var(--text3);width:100%">Background (optional — click after a foreground):</span>
       ${colors.map((c,i)=>`<div onclick="pickMircColor(${i},'bg')" style="width:22px;height:22px;background:${c};border-radius:3px;cursor:pointer;border:1px solid var(--border)" title="${i}"></div>`).join('')}
-      <div onclick="pickMircColor(-1,'bg')" style="width:22px;height:22px;background:var(--bg2);border-radius:3px;cursor:pointer;border:1px solid var(--border);font-size:9px;display:flex;align-items:center;justify-content:center;color:var(--text3)" title="No background">✕</div>
     </div>
     <div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap">
-      <button onclick="insertAtCursor(document.getElementById('msg-input'),'\\x02');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-weight:bold;font-size:12px">B</button>
-      <button onclick="insertAtCursor(document.getElementById('msg-input'),'\\x1D');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-style:italic;font-size:12px">I</button>
-      <button onclick="insertAtCursor(document.getElementById('msg-input'),'\\x1F');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;text-decoration:underline;font-size:12px">U</button>
-      <button onclick="insertAtCursor(document.getElementById('msg-input'),'\\x0F');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text3);border-radius:4px;cursor:pointer;font-size:10px">Reset</button>
+      <button onclick="insertAtCursor(document.getElementById('msg-input'),'^B');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-weight:bold;font-size:12px">B</button>
+      <button onclick="insertAtCursor(document.getElementById('msg-input'),'^I');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-style:italic;font-size:12px">I</button>
+      <button onclick="insertAtCursor(document.getElementById('msg-input'),'^U');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;text-decoration:underline;font-size:12px">U</button>
+      <button onclick="insertAtCursor(document.getElementById('msg-input'),'^O');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text3);border-radius:4px;cursor:pointer;font-size:10px">Reset</button>
     </div>`;
   inp.parentNode.appendChild(picker);
   // Close on outside click
@@ -4731,22 +4972,28 @@ function showMircColorPicker(inp){
     if(!e.target.closest('#mirc-color-picker')){document.getElementById('mirc-color-picker')?.remove();document.removeEventListener('click',closer);}
   }),100);
 }
-window._mircFg=null;
 function pickMircColor(num,type){
   const inp=document.getElementById('msg-input');
+  // Foreground inserts a full ^Cnn code. Background inserts ,nn — it's expected
+  // to be appended directly after a ^Cnn you just placed. Picker stays open either
+  // way; user closes via the ✕ in the picker header or by clicking outside.
   if(type==='fg'){
-    window._mircFg=num;
-    // Insert color code — user picks bg next or it auto-inserts fg only
-    return;
+    insertAtCursor(inp,'^C'+String(num).padStart(2,'0'));
+  } else {
+    insertAtCursor(inp,','+String(num).padStart(2,'0'));
   }
-  // Background picked (or no-bg)
-  const fg=window._mircFg;
-  if(fg==null) return;
-  let code='\x03'+String(fg).padStart(2,'0');
-  if(num>=0) code+=','+String(num).padStart(2,'0');
-  insertAtCursor(inp,code);
-  window._mircFg=null;
-  document.getElementById('mirc-color-picker')?.remove();
+}
+// Convert visible caret-notation tokens to real mIRC control chars
+// ^B bold, ^I italic, ^U underline, ^O reset, ^R reverse, ^C<fg>[,<bg>] color
+function toMircChars(s){
+  if(!s||typeof s!=='string')return s;
+  s=s.replace(/\^C(\d{1,2})(?:,(\d{1,2}))?/g,(_,fg,bg)=>'\x03'+fg+(bg?','+bg:''));
+  s=s.replace(/\^B/g,'\x02');
+  s=s.replace(/\^I/g,'\x1D');
+  s=s.replace(/\^U/g,'\x1F');
+  s=s.replace(/\^O/g,'\x0F');
+  s=s.replace(/\^R/g,'\x16');
+  return s;
 }
 
 // Track last-spoke timestamps per channel for smart tab completion
@@ -5165,6 +5412,7 @@ function resetNetworkForm(){
   document.getElementById('f-oper-pass').value='';
   document.getElementById('f-auto-identify').value='false';
   document.getElementById('f-nickserv-pass').value='';
+  {const fp=document.getElementById('f-perform'); if(fp) fp.value='';}
   // Reset ZNC fields + mode
   const modeEl=document.getElementById('f-mode');
   if(modeEl) modeEl.value='direct';
@@ -5259,6 +5507,7 @@ function editNetwork(id){
   document.getElementById('f-oper-pass').value=c.oper_pass||'';
   document.getElementById('f-auto-identify').value=c.auto_identify?'true':'false';
   document.getElementById('f-nickserv-pass').value='';
+  {const fp=document.getElementById('f-perform'); if(fp) fp.value=(c.perform_commands||[]).join('\n');}
   renderCapsGrid(c.disabled_caps||[]);
   if(c.sasl_plain){
     document.getElementById('f-sasl-method').value='plain';
@@ -5371,7 +5620,8 @@ function saveNetwork(){
     oper_pass:document.getElementById('f-oper-pass').value||null,
     auto_identify:document.getElementById('f-auto-identify').value==='true',
     nickserv_pass:document.getElementById('f-nickserv-pass').value||null,
-    disabled_caps:[...document.querySelectorAll('#f-caps-grid input[data-cap]:not(:checked)')].map(el=>el.dataset.cap)};
+    disabled_caps:[...document.querySelectorAll('#f-caps-grid input[data-cap]:not(:checked)')].map(el=>el.dataset.cap),
+    perform_commands:(document.getElementById('f-perform')?.value||'').split('\n').map(l=>l.trim()).filter(Boolean)};
   if(editingNetworkId){
     wsend({type:'update_network',network:cfg}); closeModal();
   } else {
@@ -5757,7 +6007,7 @@ const APPEAR_DEFAULTS={
   theme:'starwarp', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
   timestamps:true, joinpart:true, statusMsg:'condense', compact:false, coloredNicks:true,
-  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, msgGap:4,
+  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'water', msgGap:4,
   font:"'JetBrains Mono',monospace", linkPreviews:true,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
@@ -5948,7 +6198,7 @@ function applyThemeCSS(cfg){
     .chan-item { font-size:${cfg.sidebarFont}px; }
     .net-label { font-size:${Math.max(cfg.sidebarFont-1,9)}px; }
     .nick-entry { font-size:${cfg.nickFont}px; }
-    ${cfg.statusMsg==='hide'?'.row-join,.row-part,.row-quit,.row-nick,.row-mode,.row-kick,.status-condensed{display:none!important;}':''}
+    ${cfg.statusMsg==='hide'?'.row-join,.row-part,.row-quit,.row-nick,.row-mode,.row-kick,.row-away,.row-back,.status-condensed{display:none!important;}':''}
     ${cfg.compact?'.msg-row:hover{background:none;}':''}
     ${cfg.coloredNicks===false?'.nc0,.nc1,.nc2,.nc3,.nc4,.nc5,.nc6,.nc7,.nc8,.nc9{color:var(--text2)!important;}.nc-self{color:var(--accent)!important;}':''}
     ${cfg.nickList===false?'#nick-panel{display:none!important;}':''}
@@ -6899,7 +7149,10 @@ async function giphyFetchList(query, n){
   // position:relative ancestor the inner flex child lives inside.
   let picker=document.createElement('div');
   picker.id='giphy-picker';
-  picker.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:8px;display:none;z-index:102;box-shadow:0 -4px 16px rgba(0,0,0,.4);padding:6px;max-height:160px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;-webkit-overflow-scrolling:touch;';
+  // Edge fade masks the left+right edges to hint at horizontal overflow.
+  // `touch-action:pan-x` limits gesture interpretation to horizontal pan so
+  // vertical scrolls don't get captured. Height is responsive via media query.
+  picker.style.cssText='position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:linear-gradient(to bottom,var(--bg1) 0%,var(--bg2) 100%);border:1px solid var(--border2);border-radius:12px;display:none;z-index:102;box-shadow:0 -8px 28px rgba(0,0,0,.55),0 -2px 8px rgba(0,0,0,.3);padding:14px 12px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-x;';
   const wrap=inp.closest('#input-wrap')||inp.parentNode;
   wrap.style.position='relative';
   wrap.appendChild(picker);
@@ -6907,12 +7160,20 @@ async function giphyFetchList(query, n){
   let idx=-1;
   let debounceTimer=null;
   let lastQuery='';
+  // Timestamp of the most recent thumb pick. Used to suppress the stray
+  // synthetic click that iOS fires AFTER layout shift from the on-tap keyboard
+  // dismissal — that click can land on body/etc and would otherwise trigger
+  // the outside-click close() below.
+  let _giphyJustPicked=0;
 
   function close(){picker.style.display='none';items=[];idx=-1;picker.innerHTML='';lastQuery='';}
   function setActive(i){
     idx=Math.max(0,Math.min(i,items.length-1));
-    items.forEach((it,j)=>it.el.style.outline=j===idx?'2px solid var(--accent)':'2px solid transparent');
-    items[idx]?.el.scrollIntoView({block:'nearest',inline:'nearest'});
+    items.forEach((it,j)=>{
+      if(j===idx) it.el.classList.add('giphy-thumb-active');
+      else it.el.classList.remove('giphy-thumb-active');
+    });
+    items[idx]?.el.scrollIntoView({block:'nearest',inline:'nearest',behavior:'smooth'});
   }
   // Add a close (X) button in the top-right corner of the picker. Clicking
   // it clears the input's "/giphy ..." prefix so the picker doesn't
@@ -6921,12 +7182,29 @@ async function giphyFetchList(query, n){
     const btn=document.createElement('button');
     btn.textContent='✕';
     btn.title='Close';
-    btn.style.cssText='position:absolute;top:4px;right:4px;background:var(--bg3);border:1px solid var(--border);color:var(--text2);cursor:pointer;border-radius:50%;width:22px;height:22px;font-size:11px;line-height:1;padding:0;z-index:2;display:flex;align-items:center;justify-content:center;';
-    btn.addEventListener('pointerdown',e=>{
+    btn.setAttribute('aria-label','Close Giphy picker');
+    btn.type='button';
+    btn.className='giphy-close-btn';
+    btn.style.touchAction='manipulation';
+    const doClose=e=>{
       e.preventDefault();e.stopPropagation();
-      // Blank the /giphy command out of the input so the picker doesn't re-open
       if(_extractQuery(inp.value)!=null) inp.value='';
       close();
+    };
+    // Same iOS fix as thumbs: handle on touchend to avoid the blur cascade
+    // misfiring the outside-click handler in the layout-shift window.
+    let tstart=null;
+    btn.addEventListener('touchstart',ev=>{
+      const t=ev.touches[0];tstart={x:t.clientX,y:t.clientY};
+    },{passive:true});
+    btn.addEventListener('touchend',ev=>{
+      if(!tstart)return;tstart=null;
+      _giphyJustPicked=Date.now();
+      doClose(ev);
+    },{passive:false});
+    btn.addEventListener('click',ev=>{
+      if(Date.now()-_giphyJustPicked<600)return;
+      doClose(ev);
     });
     picker.appendChild(btn);
   }
@@ -6969,8 +7247,43 @@ async function giphyFetchList(query, n){
       el.alt=g.title||'gif';
       el.title=g.title||'';
       el.loading='lazy';
-      el.style.cssText='display:inline-block;height:140px;width:auto;margin:0 4px;border-radius:6px;cursor:pointer;outline:2px solid transparent;transition:outline .1s;vertical-align:top;-webkit-touch-callout:none;';
-      el.addEventListener('pointerdown',e=>{e.preventDefault();pick({...g,el});});
+      el.draggable=false;
+      el.className='giphy-thumb';
+      // `touch-action:manipulation` disables the 300ms double-tap delay on iOS
+      // and avoids the parent picker's `pan-x` gesture being inherited for the
+      // thumb itself — the thumb is tap-only; horizontal scroll happens on the
+      // picker background between thumbs.
+      el.style.cssText='display:inline-block;width:auto;margin:0 3px;border-radius:10px;cursor:pointer;outline:2px solid transparent;outline-offset:-2px;transition:outline .12s ease,transform .12s ease,box-shadow .12s ease;vertical-align:top;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;background:var(--bg3);touch-action:manipulation;';
+      // iOS tap handling: on a tap, touchend → synthetic click sequence causes
+      // input blur → keyboard dismiss → visualViewport resize → #input-wrap
+      // slides down → picker slides with it → synthetic click lands on empty
+      // space → document-level outside-click handler closes the picker. Net
+      // effect: tap does nothing, picker "just goes away". Fix: handle the
+      // tap on touchend with preventDefault to suppress the synthetic click
+      // and its blur cascade. Guard scroll-vs-tap with a small move threshold.
+      let tstart=null;
+      el.addEventListener('touchstart',ev=>{
+        const t=ev.touches[0];
+        tstart={x:t.clientX,y:t.clientY};
+      },{passive:true});
+      el.addEventListener('touchmove',ev=>{
+        if(!tstart)return;
+        const t=ev.touches[0];
+        if(Math.hypot(t.clientX-tstart.x,t.clientY-tstart.y)>10)tstart=null;
+      },{passive:true});
+      el.addEventListener('touchend',ev=>{
+        if(!tstart)return;
+        tstart=null;
+        ev.preventDefault(); // suppress synthetic click + blur on iOS
+        _giphyJustPicked=Date.now();
+        pick({...g,el});
+      },{passive:false});
+      // Mouse fallback for non-touch devices. Will not double-fire because
+      // touchend's preventDefault cancels the synthetic click on iOS.
+      el.addEventListener('click',ev=>{
+        if(Date.now()-_giphyJustPicked<600)return;
+        ev.preventDefault();pick({...g,el});
+      });
       picker.appendChild(el);
       items.push({...g,el});
     }
@@ -7039,8 +7352,14 @@ async function giphyFetchList(query, n){
     else wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${url}`});
     addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:url,kind:'privmsg',encrypted:!!gifWire});
   }
-  // Close on click outside
-  document.addEventListener('click',e=>{if(!e.target.closest('#giphy-picker')&&!e.target.closest('#msg-input'))close();});
+  // Close on click outside. The <600ms guard suppresses the stray synthetic
+  // click iOS fires after a thumb tap — at that point the picker has shifted
+  // due to keyboard dismissal layout, so the click target is likely body/html,
+  // which would otherwise incorrectly close an already-handled pick.
+  document.addEventListener('click',e=>{
+    if(Date.now()-_giphyJustPicked<600)return;
+    if(!e.target.closest('#giphy-picker')&&!e.target.closest('#msg-input'))close();
+  });
 })();
 
 // ─── Security panel ──────────────────────────────────────────────────────────
@@ -8413,9 +8732,12 @@ function renderFavorites(){
     const ci=document.createElement('div');
     ci.className=`chan-item fav-item${isA?' active':''}`;
     ci.dataset.favKey=f.key;
+    ci.dataset.connId=f.conn_id;
+    ci.dataset.target=f.target;
     const netLabel=net?esc(net.config.label||net.config.server):'?';
     const fmc=mentionUnread.get(k)||0;
     const isChan=f.target.startsWith('#')||f.target.startsWith('&')||f.target.startsWith('+')||f.target.startsWith('!');
+    ci.dataset.isChannel=isChan?'1':'0';
     const muteKey=f.conn_id+'/'+f.target;
     const muted=isMuted(muteKey);
     ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span><span class="chan-right">${uc?`<span class="chan-unread-badge${fmc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${muted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
@@ -8450,20 +8772,13 @@ function renderFavorites(){
     });
   }
 }
-function toggleFavMenu(btn,connId,target,isChannel){
-  closeChanMenus();
-  const ci=btn.closest('.fav-item');
-  if(!ci)return;
-  let dd=ci.querySelector('.chan-dropdown');
-  if(dd){dd.remove();return;}
-  dd=document.createElement('div');
-  dd.className='chan-dropdown';
+function _favMenuItems(connId,target,isChannel){
   const muteKey=connId+'/'+target;
   const muted=isMuted(muteKey);
   const items=[
-    {text:'★ Unfavorite',action:()=>{toggleFavorite(connId,target);closeChanMenus();}},
-    {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>{toggleMute(muteKey);closeChanMenus();}},
-    {text:'🗑 Clear History',action:()=>{clearBufHistory(connId,target);closeChanMenus();}},
+    {text:'★ Unfavorite',action:()=>toggleFavorite(connId,target)},
+    {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>toggleMute(muteKey)},
+    {text:'🗑 Clear History',action:()=>clearBufHistory(connId,target)},
   ];
   if(!isChannel){
     const pmAllowed=isPmAllowedFor(connId,target);
@@ -8472,26 +8787,17 @@ function toggleFavMenu(btn,connId,target,isChannel){
       action: ()=>{
         if(pmAllowed){removePmAllow(target,connId); showToast(`${target} removed from PM allow list`);}
         else {addPmAllow(target,connId); showToast(`PMs from ${target} will now bypass protection`);}
-        closeChanMenus();
       },
     });
   }
   if(isChannel){
-    items.push({text:'Leave',action:()=>{wsend({type:'part_channel',conn_id:connId,channel:target});closeChanMenus();},style:'color:#f87171'});
+    items.push({text:'Leave',action:()=>wsend({type:'part_channel',conn_id:connId,channel:target}),style:'color:#f87171'});
   } else {
-    items.push({text:'Close',action:()=>{toggleFavorite(connId,target);closeQuery(connId,target.toLowerCase());closeChanMenus();},style:'color:#f87171'});
+    items.push({text:'Close',action:()=>{toggleFavorite(connId,target);closeQuery(connId,target.toLowerCase());},style:'color:#f87171'});
   }
-  for(const it of items){
-    const b=document.createElement('button');
-    b.className='chan-dropdown-item';
-    b.textContent=it.text;
-    if(it.style)b.style.cssText=it.style;
-    b.addEventListener('click',e=>{e.stopPropagation();it.action();});
-    dd.appendChild(b);
-  }
-  ci.appendChild(dd);
-  _flipChanDropdownIfNeeded(dd);
+  return items;
 }
+function toggleFavMenu(btn,connId,target,isChannel){toggleFloatDd(btn,_favMenuItems(connId,target,isChannel));}
 
 function renderPMList(){
   const el=document.getElementById('pm-list');
@@ -8647,51 +8953,94 @@ function saveMuted(m){try{localStorage.setItem('cryptirc_muted',JSON.stringify(m
 function isMuted(key){return !!loadMuted()[key];}
 function toggleMute(key){const m=loadMuted();if(m[key])delete m[key];else m[key]=true;saveMuted(m);renderSidebar();}
 
-function toggleNetMenu(id,label){
-  document.querySelectorAll('.net-dropdown.open').forEach(d=>d.classList.remove('open'));
-  const netLabel=document.getElementById('dot-'+id)?.parentElement;
-  if(!netLabel)return;
-  let dd=netLabel.querySelector('.net-dropdown');
-  if(!dd){
-    dd=document.createElement('div');
-    dd.className='net-dropdown';
-    const muted=isMuted('net:'+id);
-    const items=[
-      {text:'⚡ Connect',action:()=>{wsend({type:'connect',id});closeNetMenus();}},
-      {text:'✕ Disconnect',action:()=>{wsend({type:'disconnect',id});closeNetMenus();}},
-      {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>{toggleMute('net:'+id);closeNetMenus();}},
-      {text:'✕ Close All PMs',action:()=>{closeAllPMs(id);closeNetMenus();}},
-      {text:'✎ Edit',action:()=>{editNetwork(id);closeNetMenus();}},
-      {text:'🗑 Remove',action:()=>{removeNetwork(id,label);closeNetMenus();},style:'color:#f87171'},
-    ];
-    for(const it of items){
-      const btn=document.createElement('button');
-      btn.className='net-dropdown-item';
-      btn.textContent=it.text;
-      if(it.style)btn.style.cssText=it.style;
-      btn.addEventListener('click',e=>{e.stopPropagation();it.action();});
-      dd.appendChild(btn);
-    }
-    netLabel.appendChild(dd);
-  }
-  dd.classList.toggle('open');
+// ── Floating kebab dropdown (shared by net/chan/fav sidebar menus) ─────────
+// Attached to <body> so it survives sidebar re-renders caused by IRC activity.
+function _floatDd(){
+  let el=document.getElementById('float-dropdown');
+  if(!el){el=document.createElement('div');el.id='float-dropdown';document.body.appendChild(el);}
+  return el;
 }
-function closeNetMenus(){document.querySelectorAll('.net-dropdown.open').forEach(d=>d.classList.remove('open'));}
-function toggleChanMenu(btn,connId,target,kind){
-  closeChanMenus();
-  const ci=btn.closest('.chan-item');
-  if(!ci)return;
-  let dd=ci.querySelector('.chan-dropdown');
-  if(dd){dd.remove();return;}
-  dd=document.createElement('div');
-  dd.className='chan-dropdown';
+function openFloatDd(anchorBtn,items){
+  const el=_floatDd();
+  el.innerHTML='';
+  for(const it of items){
+    const b=document.createElement('button');
+    b.className='float-dropdown-item';
+    b.textContent=it.text;
+    if(it.style)b.style.cssText=it.style;
+    b.addEventListener('click',e=>{e.stopPropagation();closeFloatDd();try{it.action();}catch(err){console.error(err);}});
+    el.appendChild(b);
+  }
+  el.classList.add('open');
+  el._anchorBtn=anchorBtn;
+  const r=anchorBtn.getBoundingClientRect();
+  // 0×0 anchors come from openFloatDdAt (right-click cursor); real buttons (kebabs)
+  // have non-zero size. Cursor → align menu's LEFT edge to cursor (drops down-right).
+  // Kebab → align menu's RIGHT edge to btn (matches the row's right edge).
+  const isPoint=r.width===0&&r.height===0;
+  el.style.top=(r.bottom+4)+'px';
+  el.style.bottom='auto';
+  if(isPoint){
+    el.style.left=r.left+'px';
+    el.style.right='auto';
+  } else {
+    el.style.left='auto';
+    el.style.right=Math.max(8,window.innerWidth-r.right)+'px';
+  }
+  // Then clamp to viewport: flip up if overflowing bottom, slide horizontally if overflowing sides.
+  requestAnimationFrame(()=>{
+    let dr=el.getBoundingClientRect();
+    if(dr.bottom>window.innerHeight-8){
+      el.style.top='auto';
+      el.style.bottom=Math.max(8,window.innerHeight-r.top+4)+'px';
+    }
+    dr=el.getBoundingClientRect();
+    const w=el.offsetWidth;
+    if(dr.right>window.innerWidth-8){
+      el.style.left=Math.max(8,window.innerWidth-8-w)+'px';
+      el.style.right='auto';
+    } else if(dr.left<8){
+      el.style.left='8px';
+      el.style.right='auto';
+    }
+  });
+}
+function closeFloatDd(){
+  const el=document.getElementById('float-dropdown');
+  if(el){el.classList.remove('open');el._anchorBtn=null;el.innerHTML='';}
+}
+function toggleFloatDd(anchorBtn,items){
+  const el=_floatDd();
+  if(el.classList.contains('open')&&el._anchorBtn===anchorBtn){closeFloatDd();return;}
+  openFloatDd(anchorBtn,items);
+}
+// Open the float dropdown anchored at an arbitrary viewport point (right-click).
+function openFloatDdAt(x,y,items){
+  const fake={getBoundingClientRect:()=>({top:y,bottom:y,left:x,right:x,width:0,height:0})};
+  closeFloatDd();
+  openFloatDd(fake,items);
+}
+function _netMenuItems(id,label){
+  const muted=isMuted('net:'+id);
+  return [
+    {text:'⚡ Connect',action:()=>wsend({type:'connect',id})},
+    {text:'✕ Disconnect',action:()=>wsend({type:'disconnect',id})},
+    {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>toggleMute('net:'+id)},
+    {text:'✕ Close All PMs',action:()=>closeAllPMs(id)},
+    {text:'✎ Edit',action:()=>editNetwork(id)},
+    {text:'🗑 Remove',action:()=>removeNetwork(id,label),style:'color:#f87171'},
+  ];
+}
+function toggleNetMenu(btn,id,label){toggleFloatDd(btn,_netMenuItems(id,label));}
+function closeNetMenus(){closeFloatDd();}
+function _chanMenuItems(connId,target,kind){
   const fav=isFavorite(connId,target);
   const muteKey=connId+'/'+target;
   const muted=isMuted(muteKey);
   const items=[
-    {text:fav?'★ Unfavorite':'☆ Favorite',action:()=>{toggleFavorite(connId,target);closeChanMenus();}},
-    {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>{toggleMute(muteKey);closeChanMenus();}},
-    {text:'🗑 Clear History',action:()=>{clearBufHistory(connId,target);closeChanMenus();}},
+    {text:fav?'★ Unfavorite':'☆ Favorite',action:()=>toggleFavorite(connId,target)},
+    {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>toggleMute(muteKey)},
+    {text:'🗑 Clear History',action:()=>clearBufHistory(connId,target)},
   ];
   if(kind==='pm'){
     const pmAllowed=isPmAllowedFor(connId,target);
@@ -8700,39 +9049,79 @@ function toggleChanMenu(btn,connId,target,kind){
       action: ()=>{
         if(pmAllowed){removePmAllow(target,connId); showToast(`${target} removed from PM allow list`);}
         else {addPmAllow(target,connId); showToast(`PMs from ${target} will now bypass protection`);}
-        closeChanMenus();
       },
     });
   }
-  if(kind==='channel') items.push({text:'Leave',action:()=>{wsend({type:'part_channel',conn_id:connId,channel:target});closeChanMenus();},style:'color:#f87171'});
-  else items.push({text:'Close',action:()=>{closeQuery(connId,target);closeChanMenus();},style:'color:#f87171'});
-  for(const it of items){
-    const b=document.createElement('button');
-    b.className='chan-dropdown-item';
-    b.textContent=it.text;
-    if(it.style)b.style.cssText=it.style;
-    b.addEventListener('click',e=>{e.stopPropagation();it.action();});
-    dd.appendChild(b);
-  }
-  ci.appendChild(dd);
-  _flipChanDropdownIfNeeded(dd);
+  if(kind==='channel') items.push({text:'Leave',action:()=>wsend({type:'part_channel',conn_id:connId,channel:target}),style:'color:#f87171'});
+  else items.push({text:'Close',action:()=>closeQuery(connId,target),style:'color:#f87171'});
+  return items;
 }
-function closeChanMenus(){document.querySelectorAll('.chan-dropdown').forEach(d=>d.remove());}
-// Flip the sidebar kebab dropdown upward if its default downward position would
-// overflow the viewport bottom. Called after the dropdown is appended so
-// getBoundingClientRect() reflects the actual rendered size.
-function _flipChanDropdownIfNeeded(dd){
-  if(!dd) return;
-  const r=dd.getBoundingClientRect();
-  if(r.bottom>window.innerHeight-8){
-    dd.style.top='auto';
-    dd.style.bottom='100%';
-  }
-}
+function toggleChanMenu(btn,connId,target,kind){toggleFloatDd(btn,_chanMenuItems(connId,target,kind));}
+function closeChanMenus(){closeFloatDd();}
 document.addEventListener('click',e=>{
-  if(!e.target.closest('.net-kebab')&&!e.target.closest('.net-dropdown'))closeNetMenus();
-  if(!e.target.closest('.chan-kebab')&&!e.target.closest('.chan-dropdown'))closeChanMenus();
+  if(!e.target.closest('.net-kebab')&&!e.target.closest('.chan-kebab')&&!e.target.closest('#float-dropdown'))
+    closeFloatDd();
 });
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeFloatDd();});
+// Close on sidebar scroll (kebab btn moves, floating menu would desync).
+(function(){const sb=document.getElementById('sidebar');if(sb)sb.addEventListener('scroll',()=>closeFloatDd(),{passive:true});})();
+window.addEventListener('resize',()=>closeFloatDd());
+// Right-click context menus on sidebar rows + nick list (desktop only — touch
+// devices don't fire `contextmenu`, so the kebab ⋮ remains the touch path).
+(function(){
+  const findKind=(el)=>{
+    // Favorites are also .chan-item but carry .fav-item — check first.
+    const fi=el.closest('.fav-item');
+    if(fi&&fi.dataset.connId&&fi.dataset.target){
+      return {kind:'fav', connId:fi.dataset.connId, target:fi.dataset.target, isChannel:fi.dataset.isChannel==='1'};
+    }
+    const ci=el.closest('.chan-item');
+    if(ci&&ci.dataset.target){
+      const connId=ci.dataset.connId||ci.closest('.net-group')?.dataset.netId;
+      if(!connId) return null;
+      const t=ci.dataset.target;
+      const isChannel=t.startsWith('#')||t.startsWith('&')||t.startsWith('+')||t.startsWith('!');
+      return {kind:isChannel?'channel':'pm', connId, target:t};
+    }
+    const nl=el.closest('.net-label');
+    if(nl){
+      const g=nl.closest('.net-group');
+      if(!g) return null;
+      const id=g.dataset.netId;
+      const net=networks.find(n=>n.config.id===id);
+      if(!net) return null;
+      return {kind:'net', id, label:net.config.label||net.config.server};
+    }
+    return null;
+  };
+  document.addEventListener('contextmenu',e=>{
+    // Right-click anywhere outside the float dropdown closes any open menu;
+    // matching rows then open a fresh one at the cursor.
+    if(!e.target.closest('#float-dropdown')) closeFloatDd();
+    const hit=findKind(e.target);
+    if(!hit)return;
+    e.preventDefault();
+    if(hit.kind==='channel'||hit.kind==='pm'){
+      openFloatDdAt(e.clientX,e.clientY,_chanMenuItems(hit.connId,hit.target,hit.kind));
+    } else if(hit.kind==='fav'){
+      openFloatDdAt(e.clientX,e.clientY,_favMenuItems(hit.connId,hit.target,hit.isChannel));
+    } else if(hit.kind==='net'){
+      openFloatDdAt(e.clientX,e.clientY,_netMenuItems(hit.id,hit.label));
+    }
+  });
+  // Nick list right-click → existing nick context menu (Whois/Query/Mention/etc).
+  const nl=document.getElementById('nick-list');
+  if(nl){
+    nl.addEventListener('contextmenu',e=>{
+      const entry=e.target.closest('.nick-entry');
+      if(entry&&entry.dataset.nick){
+        e.preventDefault();
+        e.stopPropagation();
+        showNickMenu(e,entry.dataset.nick);
+      }
+    });
+  }
+})();
 
 async function removeNetwork(id,label){
   if(!(await customConfirm(`Remove server "${label}"? This will disconnect and delete its config.`,'Remove')))return;
@@ -9150,6 +9539,11 @@ async function showNotifModal() {
   if(spm){cfg.soundPM!==false?spm.classList.add('on'):spm.classList.remove('on');}
   if(smn){cfg.soundMention!==false?smn.classList.add('on'):smn.classList.remove('on');}
   if(dnt){cfg.desktopNotif!==false?dnt.classList.add('on'):dnt.classList.remove('on');}
+  const sss=document.getElementById('a-sound-style');
+  if(sss){
+    sss.innerHTML=NOTIF_SOUNDS.map(s=>`<option value="${esc(s.id)}">${esc(s.label)}</option>`).join('');
+    sss.value=cfg.notifSound||'water';
+  }
   // Diagnostic status
   const ds=document.getElementById('notif-diag-status');
   if(ds){
@@ -9264,8 +9658,12 @@ function saveNotifSoundPrefs(){
   if(spm) cfg.soundPM=spm.classList.contains('on');
   if(smn) cfg.soundMention=smn.classList.contains('on');
   if(dnt) cfg.desktopNotif=dnt.classList.contains('on');
+  const sss=document.getElementById('a-sound-style');
+  if(sss) cfg.notifSound=sss.value||'water';
   saveAppearance(cfg);
   applyThemeCSS(cfg);
+  // Preview the newly-selected sound so the user hears it immediately.
+  if(sss) previewNotifSound(cfg.notifSound);
 }
 
 async function toggleDesktopNotif() {
@@ -10950,6 +11348,25 @@ function renderText(s){
   }
   return highlightNicks(linkify(parseMircColors(s)));
 }
+// Render a status (join/part/quit/nick/mode/kick/away/back) message body. The
+// channel names list is stale at sysMsg time (joins haven't been added yet,
+// nick changes have already replaced old → new), so we explicitly wrap msg.subject
+// (and subject2 for nick changes) as clickable, then run highlightNicks for any
+// other names that happen to be present in the text.
+function renderStatusText(msg){
+  let html=parseMircColors(msg.text||'');
+  html=linkify(html);
+  const explicit=[msg.subject,msg.subject2].filter(n=>typeof n==='string'&&n.length);
+  for(const nick of explicit){
+    const escaped=nick.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    const re=new RegExp('(?<![\\w])('+escaped+')(?![\\w])','g');
+    html=html.replace(/(<[^>]+>)|([^<]+)/g,(m,tag,text)=>{
+      if(tag)return tag;
+      return text.replace(re,(match)=>{const safe=match.replace(/'/g,"\\'");return `<span class="nick-mention nc${nickHash(match)}" onclick="showNickMenu(event,'${safe}')" oncontextmenu="event.preventDefault();showNickMenu(event,'${safe}')" style="cursor:pointer;font-weight:600">${match}</span>`;});
+    });
+  }
+  return highlightNicks(html);
+}
 function highlightNicks(html){
   if(!active)return html;
   const net=networks.find(n=>n.config.id===active.conn_id);
@@ -10963,7 +11380,7 @@ function highlightNicks(html){
   // Split by HTML tags to avoid replacing inside <a href> etc
   return html.replace(/(<[^>]+>)|([^<]+)/g,(m,tag,text)=>{
     if(tag)return tag;
-    return text.replace(re,(match)=>`<span class="nick-mention nc${nickHash(match)}" onclick="showNickMenu(event,'${match.replace(/'/g,"\\'")}')" style="cursor:pointer;font-weight:600">${match}</span>`);
+    return text.replace(re,(match)=>{const safe=match.replace(/'/g,"\\'");return `<span class="nick-mention nc${nickHash(match)}" onclick="showNickMenu(event,'${safe}')" oncontextmenu="event.preventDefault();showNickMenu(event,'${safe}')" style="cursor:pointer;font-weight:600">${match}</span>`;});
   });
 }
 function linkify(s){return s.replace(/(https?:\/\/[^\s<>"]+)/g,(m,url)=>{
