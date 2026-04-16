@@ -2873,7 +2873,7 @@ function handleEvent(ev) {
       let joinMsg = `→ ${ev.nick} joined`;
       if(ev.account && ev.account !== '*') joinMsg += ` (${ev.account})`;
       if(ev.realname) joinMsg += ` — ${ev.realname}`;
-      sysMsg(ev.conn_id,ev.channel,joinMsg,'join',{from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
+      sysMsg(ev.conn_id,ev.channel,joinMsg,'join',{ts:ev.ts,from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
       const jNet=networks.find(n=>n.config.id===ev.conn_id);
       const jCh=jNet?.channels.find(c=>c.name===ev.channel);
       if(jCh&&!jCh.names.some(n=>stripPfx(n)===ev.nick)) jCh.names.push(ev.nick);
@@ -2882,7 +2882,7 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_part': {
-      sysMsg(ev.conn_id,ev.channel,`← ${ev.nick} left${ev.reason?' ('+ev.reason+')':''}`,'part',{from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
+      sysMsg(ev.conn_id,ev.channel,`← ${ev.nick} left${ev.reason?' ('+ev.reason+')':''}`,'part',{ts:ev.ts,from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
       const pNet=networks.find(n=>n.config.id===ev.conn_id);
       const pCh=pNet?.channels.find(c=>c.name===ev.channel);
       if(pCh) pCh.names=pCh.names.filter(n=>stripPfx(n)!==ev.nick);
@@ -2910,11 +2910,11 @@ function handleEvent(ev) {
       const quitChans=(net?.channels||[]).filter(ch=>ch.names.some(n=>stripPfx(n)===ev.nick));
       const quitSelf=ev.nick===getNick(ev.conn_id);
       for(const ch of quitChans){
-        sysMsg(ev.conn_id,ch.name,`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{from:ev.nick,self:quitSelf,subject:ev.nick});
+        sysMsg(ev.conn_id,ch.name,`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{ts:ev.ts,from:ev.nick,self:quitSelf,subject:ev.nick});
         ch.names=ch.names.filter(n=>stripPfx(n)!==ev.nick);
         refreshUserCount(ev.conn_id,ch.name);
       }
-      if(!quitChans.length) sysMsg(ev.conn_id,'status',`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{from:ev.nick,self:quitSelf,subject:ev.nick});
+      if(!quitChans.length) sysMsg(ev.conn_id,'status',`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{ts:ev.ts,from:ev.nick,self:quitSelf,subject:ev.nick});
       renderSidebar(); blinkUserCount('part');
       monitorOffline(ev.nick);
       keepnickOnQuit(ev.conn_id,ev.nick);
@@ -2925,11 +2925,11 @@ function handleEvent(ev) {
       const nickChans=(nNet?.channels||[]).filter(ch=>ch.names.some(n=>stripPfx(n)===ev.old||stripPfx(n)===ev.new));
       const nickSelf=(ev.old===getNick(ev.conn_id)||ev.new===getNick(ev.conn_id));
       for(const ch of nickChans){
-        sysMsg(ev.conn_id,ch.name,`• ${ev.old} is now known as ${ev.new}`,'nick',{from:ev.new,self:nickSelf,subject:ev.new,subject2:ev.old});
+        sysMsg(ev.conn_id,ch.name,`• ${ev.old} is now known as ${ev.new}`,'nick',{ts:ev.ts,from:ev.new,self:nickSelf,subject:ev.new,subject2:ev.old});
         ch.names=ch.names.map(n=>{const pfx=n.match(/^[@+~&%]*/)[0];return stripPfx(n)===ev.old?pfx+ev.new:n;});
         refreshUserCount(ev.conn_id,ch.name);
       }
-      if(!nickChans.length) sysMsg(ev.conn_id,'status',`• ${ev.old} is now known as ${ev.new}`,'nick',{from:ev.new,self:nickSelf,subject:ev.new,subject2:ev.old});
+      if(!nickChans.length) sysMsg(ev.conn_id,'status',`• ${ev.old} is now known as ${ev.new}`,'nick',{ts:ev.ts,from:ev.new,self:nickSelf,subject:ev.new,subject2:ev.old});
       if(ev.old===getNick(ev.conn_id)||ev.new===getNick(ev.conn_id)){
         updateNick(ev.conn_id,ev.new);
         keepnickOnOwnNickChange(ev.conn_id,ev.old,ev.new);
@@ -2954,7 +2954,7 @@ function handleEvent(ev) {
     }
     case 'irc_names':  updateNames(ev.conn_id,ev.channel,ev.names); renderSidebar(); monitorRefreshOnline(); break;
     case 'irc_kick':
-      sysMsg(ev.conn_id,ev.channel,`✗ ${ev.kicked} kicked by ${ev.by}${ev.reason?' ('+ev.reason+')':''}`, 'kick',{from:ev.kicked,self:(ev.kicked===getNick(ev.conn_id)||ev.by===getNick(ev.conn_id)),subject:ev.kicked,subject2:ev.by});
+      sysMsg(ev.conn_id,ev.channel,`✗ ${ev.kicked} kicked by ${ev.by}${ev.reason?' ('+ev.reason+')':''}`, 'kick',{ts:ev.ts,from:ev.kicked,self:(ev.kicked===getNick(ev.conn_id)||ev.by===getNick(ev.conn_id)),subject:ev.kicked,subject2:ev.by});
       // Auto-rejoin on kick if enabled
       if(ev.kicked===getNick(ev.conn_id) && localStorage.getItem('cryptirc_autorejoin')!=='false'){
         const _rjKey=bk(ev.conn_id,ev.channel),_rjSavedKey=localStorage.getItem('cryptirc_chankeys');
@@ -2971,7 +2971,7 @@ function handleEvent(ev) {
         rawModes=ev.modes.slice(pipeIdx+1);
       }
       const modeDisplay=modeSetter?`${modeSetter} sets mode ${rawModes}`:`MODE ${rawModes}`;
-      sysMsg(ev.conn_id,ev.target,modeDisplay,'mode',{from:modeSetter||'*',self:modeSetter===getNick(ev.conn_id),rawModes:rawModes,subject:modeSetter||''});
+      sysMsg(ev.conn_id,ev.target,modeDisplay,'mode',{ts:ev.ts,from:modeSetter||'*',self:modeSetter===getNick(ev.conn_id),rawModes:rawModes,subject:modeSetter||''});
       // Update nick prefixes in names list when channel modes change
       const mNet=networks.find(n=>n.config.id===ev.conn_id);
       const mCh=mNet?.channels.find(c=>c.name===ev.target);
@@ -3330,20 +3330,20 @@ function addMessage(conn_id,target,msg){
   }
   if(isActive(conn_id,target)){appendMsgRow(msg);const isOwn=msg.from&&msg.from===getNick(conn_id);if(isOwn)scrollForce();else scrollBottom();}
   else{
-    // `_ownEcho` = locally-injected optimistic copy of a message we just sent
-    // (no server id yet). Real server-delivered messages always carry id>0, so
-    // even if from===own (multi-device echo-message), we still notify.
     const _ownMsg=msg.from&&msg.from===getNick(conn_id);
-    const _ownEcho=_ownMsg && !(msg.id>0);
-    if(!msg.noUnread && !_ownEcho){
+    // Status events (join/part/quit/nick/mode/kick/away/back) never bump unread
+    // or trigger notifications — matches The Lounge's behavior where only real
+    // chat (privmsg/action/notice) counts as unread.
+    const _isStatus=['join','part','quit','nick','mode','kick','away','back'].includes(msg.kind);
+    if(!msg.noUnread && !_ownMsg && !_isStatus){
       const uk=bk(conn_id,target);
       unread.set(uk,(unread.get(uk)||0)+1);
       if(msg.mentioned||isDM) mentionUnread.set(uk,(mentionUnread.get(uk)||0)+1);
       saveUnread();renderSidebar();
     }
-    // Play sound for unread DMs and mentions — skip only our own LOCAL echo.
+    // Play sound for unread DMs and mentions — never for own or status messages.
     const isMutedChan=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
-    if(!isMutedChan && msg.from!=='*' && !_ownEcho){
+    if(!isMutedChan && !_ownMsg && !_isStatus){
       const soundCfg=loadAppearance();
       if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
       else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
@@ -9463,7 +9463,13 @@ function showToast(msg){
 // ─── Mobile sidebar ───────────────────────────────────────────────────────────
 function toggleSidebar(){document.getElementById('sidebar').classList.contains('open')?closeSidebar():openSidebar();}
 function openSidebar(){document.getElementById('sidebar').classList.add('open');document.getElementById('sidebar-backdrop').classList.add('show');}
-function closeSidebar(){document.getElementById('sidebar').classList.remove('open');document.getElementById('sidebar-backdrop').classList.remove('show');}
+function closeSidebar(){
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebar-backdrop').classList.remove('show');
+  // Mobile: viewport settles after sidebar CSS transition. Fire an extra
+  // scrollForce once the layout is stable so the chat lands at the bottom.
+  setTimeout(()=>scrollForce(),350);
+}
 function toggleNickPanel(){
   const np=document.getElementById('nick-panel');
   const bd=document.getElementById('sidebar-backdrop');
