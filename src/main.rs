@@ -479,6 +479,8 @@ async fn main() -> Result<()> {
         .route("/icon.svg",              get(serve_icon))
         .route("/icon-192.png",          get(serve_icon_192))
         .route("/icon-512.png",          get(serve_icon_512))
+        .route("/sounds/:name",          get(serve_sound))
+        .route("/fonts/:name",           get(serve_font))
         .route("/auth/register",         post(route_register).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/status",           get(route_auth_status))
         .route("/admin/users",           get(route_admin_users))
@@ -543,6 +545,49 @@ async fn serve_icon_192() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/
 async fn serve_icon_512() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-512.png").as_slice()) }
 async fn serve_e2e_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/e2e.js")) }
 async fn serve_sortable_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/Sortable.min.js")) }
+
+// Bundled notification sounds — shipped in the binary so deploys don't need
+// external asset files. Served at /sounds/<name>.mp3.
+async fn serve_sound(Path(name): Path<String>) -> impl IntoResponse {
+    let bytes: Option<&'static [u8]> = match name.as_str() {
+        "water-drop.mp3"    => Some(include_bytes!("../static/sounds/water-drop.mp3")),
+        "ding.mp3"          => Some(include_bytes!("../static/sounds/ding.mp3")),
+        "bell.mp3"          => Some(include_bytes!("../static/sounds/bell.mp3")),
+        "pop.mp3"           => Some(include_bytes!("../static/sounds/pop.mp3")),
+        "click.mp3"         => Some(include_bytes!("../static/sounds/click.mp3")),
+        "ping.mp3"          => Some(include_bytes!("../static/sounds/ping.mp3")),
+        "alert.mp3"         => Some(include_bytes!("../static/sounds/alert.mp3")),
+        "notice.mp3"        => Some(include_bytes!("../static/sounds/notice.mp3")),
+        "correct.mp3"       => Some(include_bytes!("../static/sounds/correct.mp3")),
+        "swoosh.mp3"        => Some(include_bytes!("../static/sounds/swoosh.mp3")),
+        "door-knock.mp3"    => Some(include_bytes!("../static/sounds/door-knock.mp3")),
+        "icq-uhoh.mp3"      => Some(include_bytes!("../static/sounds/icq-uhoh.mp3")),
+        "splash.mp3"        => Some(include_bytes!("../static/sounds/splash.mp3")),
+        "thud.mp3"          => Some(include_bytes!("../static/sounds/thud.mp3")),
+        "pebble.mp3"        => Some(include_bytes!("../static/sounds/pebble.mp3")),
+        "cash-register.mp3" => Some(include_bytes!("../static/sounds/cash-register.mp3")),
+        "explosion.mp3"     => Some(include_bytes!("../static/sounds/explosion.mp3")),
+        "lightning.mp3"     => Some(include_bytes!("../static/sounds/lightning.mp3")),
+        _ => None,
+    };
+    match bytes {
+        Some(b) => ([(header::CONTENT_TYPE, "audio/mpeg"), (header::CACHE_CONTROL, "public, max-age=604800")], b).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+async fn serve_font(Path(name): Path<String>) -> impl IntoResponse {
+    let (ct, bytes): (&str, Option<&'static [u8]>) = match name.as_str() {
+        "spooky.ttf"           => ("font/ttf",  Some(include_bytes!("../static/fonts/spooky.ttf"))),
+        "spooky-halloween.ttf" => ("font/ttf",  Some(include_bytes!("../static/fonts/spooky-halloween.ttf"))),
+        "spooky-magic.ttf"     => ("font/ttf",  Some(include_bytes!("../static/fonts/spooky-magic.ttf"))),
+        "spooky-mother.otf"    => ("font/otf",  Some(include_bytes!("../static/fonts/spooky-mother.otf"))),
+        _ => ("application/octet-stream", None),
+    };
+    match bytes {
+        Some(b) => ([(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "public, max-age=604800")], b).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
 
 async fn serve_file_public(Path(name): Path<String>, State(state): State<AppState>) -> impl IntoResponse {
     let name: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.').collect();

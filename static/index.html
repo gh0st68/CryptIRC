@@ -19,10 +19,10 @@
 <script src="/cryptirc/e2e.js" defer></script>
 <style>
 /* ── Locally-hosted display fonts (dafont) ─────────────────────────────────── */
-@font-face { font-family:'Spooky';           src:url('pub/spooky.ttf') format('truetype'); font-display:swap; }
-@font-face { font-family:'Spooky Halloween'; src:url('pub/spooky-halloween.ttf') format('truetype'); font-display:swap; }
-@font-face { font-family:'Spooky Mother';    src:url('pub/spooky-mother.otf') format('opentype'); font-display:swap; }
-@font-face { font-family:'Spooky Magic';     src:url('pub/spooky-magic.ttf') format('truetype'); font-display:swap; }
+@font-face { font-family:'Spooky';           src:url('fonts/spooky.ttf') format('truetype'); font-display:swap; }
+@font-face { font-family:'Spooky Halloween'; src:url('fonts/spooky-halloween.ttf') format('truetype'); font-display:swap; }
+@font-face { font-family:'Spooky Mother';    src:url('fonts/spooky-mother.otf') format('opentype'); font-display:swap; }
+@font-face { font-family:'Spooky Magic';     src:url('fonts/spooky-magic.ttf') format('truetype'); font-display:swap; }
 /* ── CSS custom properties ─────────────────────────────────────────────────── */
 :root {
   /* Theme defaults (Starfield Warp) — overridden by applyThemeCSS() after login */
@@ -3384,12 +3384,12 @@ const NOTIF_SOUNDS=[
   {id:'icq',      label:'ICQ uh-oh (synth)'},
   {id:'chirp',    label:'Classic chirp (synth)'},
 ];
-// File-based sounds are served from the public uploads dir. `pub/` is relative
-// to the current page so it works regardless of the CryptIRC base_path.
+// File-based sounds are bundled into the binary; served at /sounds/<name>.mp3.
+// `sounds/` is relative to the current page so it works regardless of base_path.
 const _sampleCache=Object.create(null);
 function _playSample(name){
   let a=_sampleCache[name];
-  if(!a){a=new Audio('pub/'+name);a.preload='auto';_sampleCache[name]=a;}
+  if(!a){a=new Audio('sounds/'+name);a.preload='auto';_sampleCache[name]=a;}
   try{a.currentTime=0; const p=a.play(); if(p&&p.catch)p.catch(()=>{});}catch(_){}
 }
 // Tiny helper: schedule a single oscillator with an exponential gain decay.
