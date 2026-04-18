@@ -1919,6 +1919,33 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
   <div class="modal-box">
     <div class="modal-title" id="modal-title">Add Network</div>
     <div class="form-row">
+      <div class="form-field"><label class="form-label">Preset (optional)</label>
+        <select class="form-select" id="f-preset" onchange="applyNetPreset(this.value)">
+          <option value="">— Choose a network —</option>
+          <option value="twistednet">TwistedNET</option>
+          <option value="libera">Libera.Chat</option>
+          <option value="oftc">OFTC</option>
+          <option value="undernet">Undernet</option>
+          <option value="ircnet">IRCnet</option>
+          <option value="efnet">EFnet</option>
+          <option value="quakenet">QuakeNet</option>
+          <option value="rizon">Rizon</option>
+          <option value="dalnet">DALnet</option>
+          <option value="irchighway">IRCHighWay</option>
+          <option value="snoonet">Snoonet</option>
+          <option value="geekshed">GeekShed</option>
+          <option value="gamesurge">GameSurge</option>
+          <option value="slashnet">SlashNET</option>
+          <option value="n2600">2600net</option>
+          <option value="hackint">Hackint</option>
+          <option value="anonops">AnonOps</option>
+          <option value="chat4all">Chat4All</option>
+          <option value="tildechat">Tilde.chat</option>
+          <option value="esper">EsperNet</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
       <div class="form-field"><label class="form-label">Label</label><input class="form-input" id="f-label" placeholder="TwistedNet" autocapitalize="none"></div>
     </div>
     <div class="form-row">
@@ -5602,6 +5629,7 @@ async function showDeleteAccount(){
 let editingNetworkId=null;
 function resetNetworkForm(){
   editingNetworkId=null;
+  const pre=document.getElementById('f-preset'); if(pre)pre.value='';
   document.getElementById('f-label').value='';
   document.getElementById('f-server').value='';
   document.getElementById('f-port').value='6697';
@@ -5680,6 +5708,7 @@ function editNetwork(id){
   if(!net)return;
   const c=net.config;
   editingNetworkId=c.id;
+  const pre=document.getElementById('f-preset'); if(pre)pre.value='';
   // Reset ZNC-specific fields before populating (editing a direct network after
   // previously editing a ZNC one should not carry over the ZNC mode)
   const modeEl=document.getElementById('f-mode'); if(modeEl) modeEl.value='direct';
@@ -5760,6 +5789,43 @@ function applyServerModeUi(){
   const passRow=document.getElementById('f-pass-row'); if(passRow) passRow.style.display=isZnc?'none':'';
   const saslSec=document.getElementById('f-sasl-section'); if(saslSec) saslSec.style.display=isZnc?'none':'';
   const srvLbl=document.getElementById('f-server-label'); if(srvLbl) srvLbl.textContent=isZnc?'ZNC Host':'Server';
+}
+// Pre-filled server presets for common IRC networks. Selecting one fills
+// Label, Server, Port, and TLS; other fields (nick, SASL, etc.) are left
+// untouched so the user can customize.
+// Ports verified from each network's official docs. Several networks use
+// self-signed or non-standard certs, so Accept-Invalid-Cert defaults to true
+// for every preset — users can turn it off per-network if they want strict verification.
+const NET_PRESETS={
+  twistednet: {label:'TwistedNET',   server:'irc.twistednet.org',  port:6697, tls:true},
+  libera:     {label:'Libera.Chat',  server:'irc.libera.chat',     port:6697, tls:true},
+  oftc:       {label:'OFTC',         server:'irc.oftc.net',        port:6697, tls:true},
+  undernet:   {label:'Undernet',     server:'irc.undernet.org',    port:6697, tls:true},
+  ircnet:     {label:'IRCnet',       server:'irc.ircnet.net',      port:6697, tls:true},
+  efnet:      {label:'EFnet',        server:'irc.efnet.org',       port:9999, tls:true},
+  quakenet:   {label:'QuakeNet',     server:'irc.quakenet.org',    port:6697, tls:true},
+  rizon:      {label:'Rizon',        server:'irc.rizon.net',       port:6697, tls:true},
+  dalnet:     {label:'DALnet',       server:'irc.dal.net',         port:6697, tls:true},
+  irchighway: {label:'IRCHighWay',   server:'irc.irchighway.net',  port:6697, tls:true},
+  snoonet:    {label:'Snoonet',      server:'irc.snoonet.org',     port:6697, tls:true},
+  geekshed:   {label:'GeekShed',     server:'irc.geekshed.net',    port:6697, tls:true},
+  gamesurge:  {label:'GameSurge',    server:'irc.gamesurge.net',   port:6697, tls:true},
+  slashnet:   {label:'SlashNET',     server:'irc.slashnet.org',    port:6697, tls:true},
+  n2600:      {label:'2600net',      server:'irc.2600.net',        port:6697, tls:true},
+  hackint:    {label:'Hackint',      server:'irc.hackint.org',     port:6697, tls:true},
+  anonops:    {label:'AnonOps',      server:'irc.anonops.com',     port:6697, tls:true},
+  chat4all:   {label:'Chat4All',     server:'irc.chat4all.org',    port:6697, tls:true},
+  tildechat:  {label:'Tilde.chat',   server:'irc.tilde.chat',      port:6697, tls:true},
+  esper:      {label:'EsperNet',     server:'irc.esper.net',       port:6697, tls:true},
+};
+function applyNetPreset(id){
+  if(!id) return;
+  const p=NET_PRESETS[id]; if(!p) return;
+  document.getElementById('f-label').value=p.label;
+  document.getElementById('f-server').value=p.server;
+  document.getElementById('f-port').value=String(p.port);
+  document.getElementById('f-tls').value=p.tls?'true':'false';
+  const inv=document.getElementById('f-tls-invalid'); if(inv) inv.value='true';
 }
 // User-initiated mode change: apply UI toggle + ZNC-friendly defaults on the
 // direct→znc transition only. Avoids clobbering values when editNetwork flips
@@ -7320,6 +7386,7 @@ document.addEventListener('click',e=>{
       if(show[slashIdx])completeSlash(show[slashIdx]);
     }
     else if(e.key==='Escape'){slashEl.style.display='none';slashIdx=-1;}
+    else if(e.key==='Enter'){slashEl.style.display='none';slashIdx=-1;}
   });
   // Close on click outside
   document.addEventListener('click',e=>{if(!e.target.closest('#slash-autocomplete')&&!e.target.closest('#msg-input'))slashEl.style.display='none';});
