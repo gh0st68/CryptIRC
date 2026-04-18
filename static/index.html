@@ -18,6 +18,11 @@
 <script src="/cryptirc/Sortable.min.js"></script>
 <script src="/cryptirc/e2e.js" defer></script>
 <style>
+/* ── Locally-hosted display fonts (dafont) ─────────────────────────────────── */
+@font-face { font-family:'Spooky';           src:url('pub/spooky.ttf') format('truetype'); font-display:swap; }
+@font-face { font-family:'Spooky Halloween'; src:url('pub/spooky-halloween.ttf') format('truetype'); font-display:swap; }
+@font-face { font-family:'Spooky Mother';    src:url('pub/spooky-mother.otf') format('opentype'); font-display:swap; }
+@font-face { font-family:'Spooky Magic';     src:url('pub/spooky-magic.ttf') format('truetype'); font-display:swap; }
 /* ── CSS custom properties ─────────────────────────────────────────────────── */
 :root {
   /* Theme defaults (Starfield Warp) — overridden by applyThemeCSS() after login */
@@ -827,7 +832,8 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   flex:1; background:none; border:none;
   color:var(--text); font-family:var(--mono);
   font-size:16px;
-  padding:6px 10px;
+  height:var(--input-h, 36px);
+  padding:0 10px;
   outline:none; min-width:0;
   -webkit-appearance:none; appearance:none;
 }
@@ -1265,7 +1271,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   .sidebar-btn { font-size:10px; min-height:36px; padding:5px 3px; }
   #sidebar-footer { padding:4px 4px calc(4px + var(--sab)); gap:3px; }
   #input-wrap { padding:0 0 var(--sab); }
-  #msg-input { padding:4px 8px; font-size:16px; line-height:1; }
+  #msg-input { padding:0 8px; height:var(--input-h, 36px); font-size:16px; line-height:1; }
   #send-btn { width:26px; height:26px; min-width:26px; font-size:13px; padding:1px; }
   #input-wrap .upload-btn { font-size:13px; padding:1px; min-width:26px; min-height:26px; }
 }
@@ -1546,7 +1552,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <div class="appear-row">
           <span class="appear-label">Chat font</span>
           <select id="a-font" style="flex:1;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px" onchange="applyAppearance()">
-            <option value="'JetBrains Mono',monospace">JetBrains Mono (default)</option>
+            <option value="'JetBrains Mono',monospace">JetBrains Mono</option>
             <option value="'Fira Code',monospace">Fira Code</option>
             <option value="'Source Code Pro',monospace">Source Code Pro</option>
             <option value="'IBM Plex Mono',monospace">IBM Plex Mono</option>
@@ -1681,6 +1687,10 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
             <option value="'Sacramento',cursive">Sacramento</option>
             <option value="'Amatic SC',cursive">Amatic SC</option>
             <option value="'Homemade Apple',cursive">Homemade Apple</option>
+            <option value="'Spooky',cursive">Spooky</option>
+            <option value="'Spooky Halloween',cursive">Spooky Halloween</option>
+            <option value="'Spooky Mother',cursive">Spooky Mother</option>
+            <option value="'Spooky Magic',cursive">Spooky Magic (default)</option>
           </select>
         </div>
       </div>
@@ -1730,6 +1740,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           <span class="appear-label">Message gap</span>
           <input type="range" class="appear-slider" id="a-msg-gap" min="0" max="12" step="1" oninput="applyAppearance()">
           <span class="appear-value" id="a-msg-gap-val"></span>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Input bar height</span>
+          <input type="range" class="appear-slider" id="a-input-h" min="32" max="96" step="2" oninput="applyAppearance()">
+          <span class="appear-value" id="a-input-h-val"></span>
         </div>
       </div>
 
@@ -3335,20 +3350,48 @@ let _audioCtx=null,_lastSoundAt=0;
 })();
 // Catalog advertised in the notification-settings dropdown.
 const NOTIF_SOUNDS=[
-  {id:'water',    label:'Water drop (default)'},
-  {id:'imessage', label:'Crystal bell'},
-  {id:'discord',  label:'Descending ping'},
-  {id:'arp',      label:'Pluck arp'},
-  {id:'chime',    label:'Glass chime'},
-  {id:'r2d2',     label:'R2-D2 chirp'},
-  {id:'cyber',    label:'Cyberpunk blip'},
-  {id:'laser',    label:'Laser zap'},
-  {id:'packet',   label:'Data packet'},
-  {id:'knock',    label:'Soft knock'},
-  {id:'aim',      label:'AIM ding'},
-  {id:'icq',      label:'ICQ uh-oh'},
-  {id:'chirp',    label:'Classic chirp'},
+  // Real samples (CC0 community sources)
+  {id:'water-drop',    label:'Water drop (default)'},
+  {id:'ding',          label:'Ding'},
+  {id:'bell',          label:'Bell'},
+  {id:'pop',           label:'Pop'},
+  {id:'click',         label:'Click'},
+  {id:'ping',          label:'Ping'},
+  {id:'alert',         label:'Alert'},
+  {id:'notice',        label:'Notice'},
+  {id:'correct',       label:'Correct'},
+  {id:'swoosh',        label:'Swoosh'},
+  {id:'door-knock',    label:'Door knock'},
+  {id:'icq-uhoh',      label:'ICQ uh-oh'},
+  {id:'splash',        label:'Water splash'},
+  {id:'thud',          label:'Thud'},
+  {id:'pebble',        label:'Pebble'},
+  {id:'cash-register', label:'Cash register'},
+  {id:'explosion',     label:'Explosion'},
+  {id:'lightning',     label:'Lightning'},
+  // Synthesized tones (WebAudio — kept for variety / fallback)
+  {id:'water',    label:'Water drop (synth)'},
+  {id:'imessage', label:'Crystal bell (synth)'},
+  {id:'discord',  label:'Descending ping (synth)'},
+  {id:'arp',      label:'Pluck arp (synth)'},
+  {id:'chime',    label:'Glass chime (synth)'},
+  {id:'r2d2',     label:'R2-D2 chirp (synth)'},
+  {id:'cyber',    label:'Cyberpunk blip (synth)'},
+  {id:'laser',    label:'Laser zap (synth)'},
+  {id:'packet',   label:'Data packet (synth)'},
+  {id:'knock',    label:'Soft knock (synth)'},
+  {id:'aim',      label:'AIM ding (synth)'},
+  {id:'icq',      label:'ICQ uh-oh (synth)'},
+  {id:'chirp',    label:'Classic chirp (synth)'},
 ];
+// File-based sounds are served from the public uploads dir. `pub/` is relative
+// to the current page so it works regardless of the CryptIRC base_path.
+const _sampleCache=Object.create(null);
+function _playSample(name){
+  let a=_sampleCache[name];
+  if(!a){a=new Audio('pub/'+name);a.preload='auto';_sampleCache[name]=a;}
+  try{a.currentTime=0; const p=a.play(); if(p&&p.catch)p.catch(()=>{});}catch(_){}
+}
 // Tiny helper: schedule a single oscillator with an exponential gain decay.
 function _tone(offset,freqStart,freqEnd,dur,waveType,gainPeak){
   const t0=_audioCtx.currentTime+offset;
@@ -3364,6 +3407,26 @@ function _tone(offset,freqStart,freqEnd,dur,waveType,gainPeak){
   osc.stop(t0+dur+0.02);
 }
 const SOUND_IMPL={
+  // File-based samples
+  'water-drop':    ()=>_playSample('water-drop.mp3'),
+  'ding':          ()=>_playSample('ding.mp3'),
+  'bell':          ()=>_playSample('bell.mp3'),
+  'pop':           ()=>_playSample('pop.mp3'),
+  'click':         ()=>_playSample('click.mp3'),
+  'ping':          ()=>_playSample('ping.mp3'),
+  'alert':         ()=>_playSample('alert.mp3'),
+  'notice':        ()=>_playSample('notice.mp3'),
+  'correct':       ()=>_playSample('correct.mp3'),
+  'swoosh':        ()=>_playSample('swoosh.mp3'),
+  'door-knock':    ()=>_playSample('door-knock.mp3'),
+  'icq-uhoh':      ()=>_playSample('icq-uhoh.mp3'),
+  'splash':        ()=>_playSample('splash.mp3'),
+  'thud':          ()=>_playSample('thud.mp3'),
+  'pebble':        ()=>_playSample('pebble.mp3'),
+  'cash-register': ()=>_playSample('cash-register.mp3'),
+  'explosion':     ()=>_playSample('explosion.mp3'),
+  'lightning':     ()=>_playSample('lightning.mp3'),
+  // Synthesized tones
   water:    ()=>{ _tone(0,800,400,0.15,'sine',0.14); },
   imessage: ()=>{ _tone(0,523.25,523.25,0.55,'sine',0.12); _tone(0,1046.5,1046.5,0.55,'sine',0.07); },
   discord:  ()=>{ _tone(0,988,988,0.10,'sine',0.12); _tone(0.07,784,784,0.10,'sine',0.12); _tone(0.14,659,659,0.20,'sine',0.12); },
@@ -3403,15 +3466,15 @@ function playNotifSound(type){
   try{
     _ensureAudioCtx();
     const cfg=loadAppearance();
-    const id=cfg.notifSound||'water';
-    (SOUND_IMPL[id]||SOUND_IMPL.water)(type);
+    const id=cfg.notifSound||'water-drop';
+    (SOUND_IMPL[id]||SOUND_IMPL['water-drop'])(type);
   }catch(e){}
 }
 // Preview bypasses the 500ms throttle so the ▶ button always plays.
 function previewNotifSound(id){
   try{
     _ensureAudioCtx();
-    (SOUND_IMPL[id]||SOUND_IMPL.water)('pm');
+    (SOUND_IMPL[id]||SOUND_IMPL['water-drop'])('pm');
   }catch(e){}
 }
 
@@ -3720,8 +3783,11 @@ function setActive(conn_id,target){
   active={conn_id,target};
   unread.delete(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
   clearNoticesForTarget(conn_id,target);
-  // Persist active view and open queries
-  try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){} flushPrefsToServer();
+  // Persist active view and open queries — skipped in detached mode so the
+  // popup's target doesn't overwrite the main window's last-active on reload.
+  if(!_detMode){
+    try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){} flushPrefsToServer();
+  }
   saveQueryBufs();
   renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay(); scrollForce();
   if(typeof updateE2EIndicator==='function') updateE2EIndicator(target);
@@ -6149,8 +6215,8 @@ const APPEAR_DEFAULTS={
   theme:'starwarp', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
   timestamps:true, joinpart:true, statusMsg:'condense', compact:false, coloredNicks:true,
-  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'water', msgGap:4,
-  font:"'JetBrains Mono',monospace", linkPreviews:true,
+  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'water-drop', msgGap:4, inputH:36,
+  font:"'Spooky Magic',cursive", linkPreviews:true,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
   // Media & previews: shape/size/border/radius controls for images, videos,
@@ -6203,6 +6269,7 @@ function applyAppearance(){
     spellcheck: prev.spellcheck!==undefined?prev.spellcheck:true,
     linkPreviews: prev.linkPreviews!==undefined?prev.linkPreviews:true,
     msgGap:     +el('a-msg-gap').value||prev.msgGap||4,
+    inputH:     +el('a-input-h').value||prev.inputH||36,
     accent:     el('a-accent-color').value||prev.accent||'#00d4aa',
     accent2:    el('a-accent2-color').value||prev.accent2||'#0099ff',
     brightness: +el('a-brightness').value,
@@ -6212,7 +6279,7 @@ function applyAppearance(){
     mobileTheme:    el('a-mobile-theme').value||'',
     mobileAccent:   el('a-mobile-accent-color').value||'',
     mobileAccent2:  el('a-mobile-accent2-color').value||'',
-    font:           el('a-font').value||prev.font||"'JetBrains Mono',monospace",
+    font:           el('a-font').value||prev.font||"'Spooky Magic',cursive",
     mediaShape:     el('a-media-shape')?.value || prev.mediaShape || 'rounded',
     mediaSize:      el('a-media-size')?.value || prev.mediaSize || 'medium',
     mediaBorder:    el('a-media-border')?.value || prev.mediaBorder || 'none',
@@ -6240,6 +6307,7 @@ function applyAppearance(){
   el('a-line-height-val').textContent=cfg.lineHeight.toFixed(1);
   el('a-brightness-val').textContent=(cfg.brightness||100)+'%';
   el('a-msg-gap-val').textContent=(cfg.msgGap!=null?cfg.msgGap:4)+'px';
+  if(el('a-input-h-val')) el('a-input-h-val').textContent=(cfg.inputH!=null?cfg.inputH:36)+'px';
   el('a-mobile-chat-size-val').textContent=(cfg.mobileChatSize||15)+'px';
   el('a-mobile-nick-w-val').textContent=(cfg.mobileNickW||60)+'px';
   el('a-mobile-accent-swatch').style.background=cfg.mobileAccent||cfg.accent;
@@ -6261,6 +6329,7 @@ function applyThemeCSS(cfg){
   r.setProperty('--accent',accent); r.setProperty('--accent2',accent2);
   r.setProperty('--sidebar-w',cfg.sidebarW+'px');
   r.setProperty('--nicks-w',cfg.nickPanelW+'px');
+  r.setProperty('--input-h',(cfg.inputH!=null?cfg.inputH:36)+'px');
   // Picture-backdrop layer — themes with bgImage render an SVG scene at low
   // opacity behind the chat. Themes without bgImage clear the var so solid color wins.
   r.setProperty('--theme-bg-image', t.bgImage || 'none');
@@ -6332,7 +6401,7 @@ function applyThemeCSS(cfg){
   const showTs=mob?(cfg.mobileTimestamps!==undefined?cfg.mobileTimestamps:false):cfg.timestamps;
   ss.textContent=`
     body { font-size:${fontSize}px; ${cfg.brightness&&cfg.brightness!==100?`filter:brightness(${cfg.brightness/100});`:''} }
-    :root { --mono:${cfg.font||"'JetBrains Mono',monospace"}; }
+    :root { --mono:${cfg.font||"'Spooky Magic',cursive"}; }
     .msg-row { line-height:${cfg.lineHeight}; ${cfg.compact?'padding:1px 12px;':''} gap:${cfg.msgGap||4}px; }
     .msg-ts, .sc-ts { ${showTs?'':'display:none;'} font-size:${Math.max(fontSize-3,8)}px; }
     .msg-nick { width:${nickW}px; font-size:${fontSize}px; }
@@ -6818,7 +6887,7 @@ esheep(cv,ctx){
 
 function populateAppearanceModal(cfg){
   const el=id=>document.getElementById(id);
-  el('a-font').value=cfg.font||"'JetBrains Mono',monospace";
+  el('a-font').value=cfg.font||"'Spooky Magic',cursive";
   el('a-chat-size').value=cfg.chatSize;
   el('a-sidebar-font').value=cfg.sidebarFont;
   el('a-nick-font').value=cfg.nickFont;
@@ -6827,6 +6896,8 @@ function populateAppearanceModal(cfg){
   el('a-nickpanel-w').value=cfg.nickPanelW;
   el('a-line-height').value=cfg.lineHeight;
   el('a-msg-gap').value=cfg.msgGap!=null?cfg.msgGap:4;
+  el('a-input-h').value=cfg.inputH!=null?cfg.inputH:36;
+  el('a-input-h-val').textContent=(cfg.inputH!=null?cfg.inputH:36)+'px';
   cfg.timestamps ? el('a-timestamps').classList.add('on') : el('a-timestamps').classList.remove('on');
   el('a-statusmsg').value=cfg.statusMsg||'condense';
   cfg.compact ? el('a-compact').classList.add('on') : el('a-compact').classList.remove('on');
@@ -9700,7 +9771,7 @@ async function showNotifModal() {
   const sss=document.getElementById('a-sound-style');
   if(sss){
     sss.innerHTML=NOTIF_SOUNDS.map(s=>`<option value="${esc(s.id)}">${esc(s.label)}</option>`).join('');
-    sss.value=cfg.notifSound||'water';
+    sss.value=cfg.notifSound||'water-drop';
   }
   // Diagnostic status
   const ds=document.getElementById('notif-diag-status');
@@ -9817,7 +9888,7 @@ function saveNotifSoundPrefs(){
   if(smn) cfg.soundMention=smn.classList.contains('on');
   if(dnt) cfg.desktopNotif=dnt.classList.contains('on');
   const sss=document.getElementById('a-sound-style');
-  if(sss) cfg.notifSound=sss.value||'water';
+  if(sss) cfg.notifSound=sss.value||'water-drop';
   saveAppearance(cfg);
   applyThemeCSS(cfg);
   // Preview the newly-selected sound so the user hears it immediately.
@@ -11455,6 +11526,11 @@ function renderMentionsList(){
     d.innerHTML=`<div class="mention-meta">${meta}</div><div class="mention-text">${esc(m.text)}</div>`;
     d.onclick=()=>{
       document.getElementById('mentions-panel').classList.remove('show');
+      // If this target is popped out, focus the popup instead of navigating main.
+      if(!_detMode && isDetached(m.conn_id,m.target)){
+        openDetachedWindow(m.conn_id,m.target);
+        return;
+      }
       setActive(m.conn_id,m.target);
       if(isPm)return;
       setTimeout(()=>{
