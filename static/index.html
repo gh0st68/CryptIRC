@@ -348,7 +348,8 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 /* Mentions panel */
 #mentions-btn { cursor:pointer; font-size:14px; padding:4px 8px; border-radius:4px; color:var(--text2); position:relative; }
 #mentions-btn:hover { background:var(--bg3); color:var(--text); }
-#mentions-btn .mentions-count { position:absolute; top:-2px; right:-2px; background:var(--error,#e55); color:#fff; font-size:9px; font-weight:700; min-width:14px; height:14px; line-height:14px; text-align:center; border-radius:7px; padding:0 3px; display:none; }
+#mentions-btn.has-unread, #mentions-btn.has-unread:hover { color:var(--error,#e55); }
+#mentions-btn .mentions-count { display:none !important; }
 #mentions-panel { display:none; position:absolute; top:36px; left:0; width:min(360px, 90vw); max-height:400px; background:var(--bg1); border:1px solid var(--border); border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.5); z-index:100; overflow:hidden; }
 #mentions-panel.show { display:flex; flex-direction:column; }
 #mentions-panel-hdr { padding:10px 12px; font-size:12px; font-weight:600; color:var(--text); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
@@ -1287,6 +1288,17 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   #help-body pre, #help-body code { white-space:pre-wrap !important; word-wrap:break-word !important; overflow-wrap:anywhere !important; }
   #monitor-overlay > div { width:100% !important; max-width:100% !important; max-height:100dvh !important; border-radius:0 !important; }
 }
+/* Detached pop-out mode — hide channel list + welcome + hamburger; focus on one chat */
+.detached-mode #sidebar,
+.detached-mode #sidebar-backdrop,
+.detached-mode #hamburger,
+.detached-mode #sidebar-toggle-btn,
+.detached-mode #welcome {
+  display: none !important;
+}
+.detached-mode #reattach-btn { display: inline-flex !important; }
+#reattach-btn { display: none; align-items:center; gap:4px; background:var(--bg3); border:1px solid var(--border); color:var(--text2); border-radius:6px; padding:4px 10px; cursor:pointer; font-size:11px; font-family:inherit; flex-shrink:0; }
+#reattach-btn:hover { color:var(--text); border-color:var(--text3); background:var(--bg4); }
 </style>
 <script>
 // Apply theme colors immediately — :root no longer sets theme defaults,
@@ -2092,7 +2104,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <span id="lag-mobile-val"></span>
       </span>
       <span id="e2e-lock" title="Not encrypted — click to set up" style="flex-shrink:0;cursor:pointer;padding:2px;color:var(--text2)" onclick="showEncryptPanel()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9 0" fill="none"/></svg></span>
-      <span id="mentions-btn" onclick="toggleMentionsPanel()" title="Mentions"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.2L4 17.2V4h16v12z"/><circle cx="8" cy="10" r="1.5"/><circle cx="12" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg><span class="mentions-count" id="mentions-count"></span></span>
+      <span id="mentions-btn" onclick="toggleMentionsPanel()" title="Notices"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.2L4 17.2V4h16v12z"/><circle cx="8" cy="10" r="1.5"/><circle cx="12" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/></svg><span class="mentions-count" id="mentions-count"></span></span>
       <span id="search-btn" onclick="toggleSearchPanel()" title="Search" style="cursor:pointer;padding:4px;color:var(--text2);flex-shrink:0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
       <span id="topic-sep" style="display:none;color:var(--border);font-size:14px;flex-shrink:0">│</span>
       <span id="topic-inline" style="display:none;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3);font-size:11px;cursor:pointer" onclick="showTopicMenu(event)"></span>
@@ -2101,10 +2113,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <span id="led-rx" style="display:none"></span>
       <span id="usercount" style="display:none"></span>
       <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text2);cursor:pointer;padding:4px;flex-shrink:0;outline:none" onclick="showTopicMenu(event)" title="Options"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
+      <button id="reattach-btn" onclick="_detachedReattachSelf()" title="Close this popped-out window and return to main">⧉ Reattach</button>
       <button id="nick-toggle" onclick="toggleNickPanel()" title="Toggle user list"><span class="toggle-icon"><svg id="nick-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></span><span class="toggle-mobile"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span></button>
       <div id="topic-menu"></div>
       <div id="mentions-panel">
-        <div id="mentions-panel-hdr">Mentions <div style="display:flex;gap:8px;align-items:center"><span style="cursor:pointer;font-size:10px;color:var(--text3)" onclick="clearMentions()">Clear</span><span style="cursor:pointer;font-size:16px;color:var(--text3);padding:2px 4px" onclick="toggleMentionsPanel()">✕</span></div></div>
+        <div id="mentions-panel-hdr">Notices <div style="display:flex;gap:8px;align-items:center"><span style="cursor:pointer;font-size:10px;color:var(--text3)" onclick="clearMentions()">Clear</span><span style="cursor:pointer;font-size:16px;color:var(--text3);padding:2px 4px" onclick="toggleMentionsPanel()">✕</span></div></div>
         <div id="mentions-list"><div class="mention-empty">No mentions yet</div></div>
       </div>
       <div id="search-panel">
@@ -2135,7 +2148,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div id="input-inner">
         <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="nope" data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore data-form-type="other" spellcheck="true" autocorrect="on" autocapitalize="none" enterkeyhint="send" type="search" name="msg-input-irc">
         <button id="send-btn" onclick="doSend()" title="Send">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="pointer-events:none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
         <button class="upload-btn" title="Upload file" onclick="triggerUpload()">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
@@ -2190,6 +2203,97 @@ function loadLastActive(){
   try{return JSON.parse(localStorage.getItem('cryptirc_active'));}catch{return null;}
 }
 loadQueryBufs();
+
+// ─── Detached pop-out windows ────────────────────────────────────────────────
+// Detached mode loads the SAME index.html in a second window with ?detached=1.
+// That second window runs as a full CryptIRC client (own WS + state) so all
+// features (nick menus, slash commands, E2E, uploads) work without duplication.
+// This module only tracks which targets are currently "popped out" so the main
+// sidebar can show a ⧉ indicator and route clicks to focus the existing popup.
+const _qsDet = new URLSearchParams(location.search);
+const _detMode = _qsDet.get('detached') === '1';
+const _detConn = _qsDet.get('conn') || '';
+const _detTarget = _qsDet.get('target') || '';
+if(_detMode) document.documentElement.classList.add('detached-mode');
+
+const _detachedChannel = (typeof BroadcastChannel!=='undefined') ? new BroadcastChannel('cryptirc-detached') : null;
+let _detachedTargets = new Set();
+const _detachedWindows = Object.create(null);
+function _detKey(conn_id,target){return conn_id+':'+String(target||'').toLowerCase();}
+function isDetached(conn_id,target){return _detachedTargets.has(_detKey(conn_id,target));}
+function _loadDetached(){
+  try{
+    const arr=JSON.parse(localStorage.getItem('cryptirc_detached')||'[]');
+    for(const e of arr) if(e&&e.conn_id&&e.target) _detachedTargets.add(_detKey(e.conn_id,e.target));
+  }catch(e){}
+}
+function _saveDetached(){
+  const arr=[..._detachedTargets].map(k=>{const i=k.indexOf(':');return {conn_id:k.slice(0,i),target:k.slice(i+1)};});
+  try{localStorage.setItem('cryptirc_detached',JSON.stringify(arr));}catch(e){}
+}
+_loadDetached();
+function openDetachedWindow(conn_id,target){
+  const k=_detKey(conn_id,target);
+  const existing=_detachedWindows[k];
+  if(existing && !existing.closed){try{existing.focus();}catch(_){} return;}
+  const basePath=(document.location.pathname.match(/^\/[^\/]+/)||[''])[0]||'';
+  const url=basePath+'/?detached=1&conn='+encodeURIComponent(conn_id)+'&target='+encodeURIComponent(target);
+  const name='cryptirc-d-'+conn_id+'-'+target.toLowerCase().replace(/[^a-z0-9_-]/g,'_');
+  const w=window.open(url,name,'width=900,height=700,resizable=yes,scrollbars=yes');
+  if(w) _detachedWindows[k]=w;
+  else showToast('Pop-up blocked — allow popups for this site');
+}
+function detachView(conn_id,target){
+  if(_detMode){showToast('Already in a detached window');return;}
+  _detachedTargets.add(_detKey(conn_id,target));
+  _saveDetached(); renderSidebar();
+  openDetachedWindow(conn_id,target);
+  if(active && active.conn_id===conn_id && String(active.target).toLowerCase()===String(target).toLowerCase()){
+    setActive(conn_id,'status');
+  }
+}
+function reattachView(conn_id,target){
+  const k=_detKey(conn_id,target);
+  _detachedTargets.delete(k);
+  _saveDetached(); renderSidebar();
+  const w=_detachedWindows[k];
+  if(w && !w.closed){try{w.close();}catch(_){}}
+  delete _detachedWindows[k];
+  try{_detachedChannel && _detachedChannel.postMessage({type:'close',conn_id,target});}catch(_){}
+}
+if(_detachedChannel){
+  _detachedChannel.addEventListener('message',e=>{
+    const d=e.data; if(!d) return;
+    if(d.type==='bye' && !_detMode){
+      // Popup notified us it's closing — drop from detached set.
+      const k=_detKey(d.conn_id,d.target);
+      _detachedTargets.delete(k);
+      delete _detachedWindows[k];
+      _saveDetached(); renderSidebar();
+    } else if(d.type==='close' && _detMode && d.conn_id===_detConn &&
+              String(d.target||'').toLowerCase()===_detTarget.toLowerCase()){
+      try{window.close();}catch(_){}
+    }
+  });
+}
+// Detached-window bootstrap: emit `bye` on close; auto-setActive handled in state handler.
+if(_detMode && _detachedChannel){
+  window.addEventListener('beforeunload',()=>{
+    try{_detachedChannel.postMessage({type:'bye',conn_id:_detConn,target:_detTarget});}catch(_){}
+  });
+}
+function _detachedReattachSelf(){try{window.close();}catch(_){}}
+function _sidebarActivate(conn_id,target){
+  if(!_detMode && isDetached(conn_id,target)){
+    openDetachedWindow(conn_id,target);
+    closeSidebar();
+    return;
+  }
+  setActive(conn_id,target);
+  closeSidebar();
+}
+function _canPopOut(){return !_detMode && !!_detachedChannel && !window.matchMedia('(max-width: 768px)').matches;}
+
 let inputHistory=[], historyIdx=-1;
 try{inputHistory=JSON.parse(localStorage.getItem('cryptirc_input_history')||'[]');}catch(e){}
 function saveInputHistory(){
@@ -2263,6 +2367,7 @@ function initViewportFix() {
 
 // ─── M6: Swipe gesture for sidebar ───────────────────────────────────────────
 function initSwipeGesture() {
+  if(_detMode) return; // no sidebar in detached mode — gesture makes no sense
   let startX=0, startY=0, swiping=false;
   const THRESHOLD=60, EDGE_ZONE=40;
   const sidebar=document.getElementById('sidebar');
@@ -2637,17 +2742,25 @@ function handleEvent(ev) {
       if(!ev.vault_unlocked) document.getElementById('vault-overlay').classList.add('show');
       else { document.getElementById('vault-overlay').classList.remove('show'); const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';} if(!_chanStatsLoaded)loadStatsFromServer(); }
       renderSidebar();
-      // Restore last active view after page refresh
-      if(!active){
+      // Detached-mode auto-activation: force the requested target; ignore any
+      // saved last-active so the popup always lands on the chat it was opened for.
+      if(_detMode && _detConn && _detTarget){
+        const dNet=networks.find(n=>n.config.id===_detConn);
+        if(dNet){
+          active={conn_id:_detConn,target:_detTarget};
+          renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay();
+          updateInputPlaceholder();
+        }
+      }
+      // Restore last active view after page refresh (skipped in detached mode)
+      if(!_detMode && !active){
         const saved=loadLastActive();
         if(saved&&saved.conn_id&&saved.target){
           const net=networks.find(n=>n.config.id===saved.conn_id);
           if(net){
             active={conn_id:saved.conn_id,target:saved.target};
             renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay();
-            const inp=document.getElementById('msg-input');
-            inp.disabled=!net?.connected;
-            inp.placeholder=net?.connected?`Write to ${saved.target}`:'Not connected';
+            updateInputPlaceholder();
           }
         }
       }
@@ -3341,6 +3454,11 @@ function addMessage(conn_id,target,msg){
       if(msg.mentioned||isDM) mentionUnread.set(uk,(mentionUnread.get(uk)||0)+1);
       saveUnread();renderSidebar();
     }
+    // Notices inbox: one row per PM sender, first message only; only if that
+    // PM view isn't currently active (handled by the enclosing else).
+    if(isDM && !_ownMsg && !_isStatus && (msg.kind==='privmsg'||msg.kind==='action')){
+      addPmNotice(conn_id,target,msg);
+    }
     // Play sound for unread DMs and mentions — never for own or status messages.
     const isMutedChan=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
     if(!isMutedChan && !_ownMsg && !_isStatus){
@@ -3514,9 +3632,10 @@ function _renderSidebarNow(){
       const mc=mentionUnread.get(k)||0;
       const chEnc=(()=>{const ck=window.E2E?.channelKeys;if(!ck)return null;if(ck[ch.name])return ck[ch.name];const lk=ch.name.toLowerCase();for(const k in ck)if(k.toLowerCase()===lk)return ck[k];return null;})();
       const chLock=chEnc?'<svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)" stroke="var(--accent)" stroke-width="1" style="opacity:.7;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2.5"/></svg>':'<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:.2;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9 0"/></svg>';
-      ci.innerHTML=`${chLock}${esc(ch.name)}<span class="chan-right">${uc&&!chMuted?`<span class="chan-unread-badge${mc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
+      const chDet=isDetached(id,ch.name)?'<span class="chan-detached" title="Popped out" style="color:var(--accent);font-size:11px;margin-right:4px;opacity:.85">⧉</span>':'';
+      ci.innerHTML=`${chLock}${esc(ch.name)}<span class="chan-right">${chDet}${uc&&!chMuted?`<span class="chan-unread-badge${mc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
       ci.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,id,ch.name,'channel');});
-      ci.onclick=()=>{setActive(id,ch.name);closeSidebar();};
+      ci.onclick=()=>_sidebarActivate(id,ch.name);
       chanContainer.appendChild(ci);
     }
     g.appendChild(chanContainer);
@@ -3535,9 +3654,10 @@ function _renderSidebarNow(){
         const pmMuted=isMuted(id+'/'+lc)||isMuted('net:'+id);
         const dmEnc=(()=>{const ds=window.E2E?.dmSessions;if(!ds)return null;if(ds[lc])return ds[lc];if(ds[display])return ds[display];const lk=lc.toLowerCase();for(const k in ds)if(k.toLowerCase()===lk)return ds[k];return null;})();
         const dmLock=dmEnc?'<svg width="10" height="10" viewBox="0 0 24 24" fill="var(--accent)" stroke="var(--accent)" stroke-width="1" style="opacity:.7;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2.5"/></svg>':'<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:.2;margin-right:2px;flex-shrink:0;vertical-align:middle"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9 0"/></svg>';
-        qi.innerHTML=`${dmLock}${esc(display)}<span class="chan-right">${uc&&!pmMuted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${pmMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
+        const qDet=isDetached(id,display)?'<span class="chan-detached" title="Popped out" style="color:var(--accent);font-size:11px;margin-right:4px;opacity:.85">⧉</span>':'';
+        qi.innerHTML=`${dmLock}${esc(display)}<span class="chan-right">${qDet}${uc&&!pmMuted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${pmMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
         qi.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,id,lc,'pm');});
-        qi.onclick=()=>{setActive(id,display);closeSidebar();};
+        qi.onclick=()=>_sidebarActivate(id,display);
         g.appendChild(qi);
       }
     }
@@ -3548,15 +3668,26 @@ function _renderSidebarNow(){
   renderPMList();
   applyFavsOnly();
 }
+function updateInputPlaceholder(){
+  const inp=document.getElementById('msg-input');
+  if(!inp)return;
+  if(!active){inp.placeholder='Select a channel…';inp.disabled=true;return;}
+  const net=networks.find(n=>n.config.id===active.conn_id);
+  inp.disabled=!net?.connected;
+  if(!net?.connected){inp.placeholder='Not connected';return;}
+  const nick=net.nick||net.config.nick||currentUser||'me';
+  inp.placeholder=`Message ${active.target} as ${nick}…`;
+}
 function setNetDot(conn_id,state){
   const net=networks.find(n=>n.config.id===conn_id);
   if(net)net.connected=state==='online';
   renderSidebar();
+  if(active&&active.conn_id===conn_id)updateInputPlaceholder();
 }
 function updateNick(conn_id,nick){
   const net=networks.find(n=>n.config.id===conn_id);
   if(net)net.nick=nick;
-  if(active&&active.conn_id===conn_id){const _in=document.getElementById('input-nick');if(_in)_in.textContent=nick;}
+  if(active&&active.conn_id===conn_id){const _in=document.getElementById('input-nick');if(_in)_in.textContent=nick;updateInputPlaceholder();}
 }
 function updateNames(conn_id,channel,names){
   const net=networks.find(n=>n.config.id===conn_id);
@@ -3588,6 +3719,7 @@ function updateLagDisplay(){
 function setActive(conn_id,target){
   active={conn_id,target};
   unread.delete(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
+  clearNoticesForTarget(conn_id,target);
   // Persist active view and open queries
   try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){} flushPrefsToServer();
   saveQueryBufs();
@@ -3600,10 +3732,8 @@ function setActive(conn_id,target){
     const _sk=bk(conn_id,target),_lid=_lastMsgId[_sk];
     if(_lid>0) wsend({type:'sync',conn_id,target,after_id:_lid});
   }
+  updateInputPlaceholder();
   const net=networks.find(n=>n.config.id===conn_id);
-  const inp=document.getElementById('msg-input');
-  inp.disabled=!net?.connected;
-  inp.placeholder=net?.connected?`Write to ${target}`:'Not connected';
   const inpNick=document.getElementById('input-nick');if(inpNick)inpNick.textContent=net?.nick||net?.config.nick||currentUser||'—';
   updateCertBtn();
 }
@@ -4094,6 +4224,18 @@ document.addEventListener('DOMContentLoaded',()=>{
   new ResizeObserver(()=>{
     document.documentElement.style.setProperty('--input-bar-h',inputWrap.offsetHeight+'px');
   }).observe(inputWrap);
+
+  // iOS PWA: keyboard-dismiss reflow eats the click; send on pointerdown so the
+  // input stays focused. preventDefault also suppresses the compat click so the
+  // onclick fallback (for keyboard Enter/Space) doesn't double-fire.
+  const _sendBtn=document.getElementById('send-btn');
+  if(_sendBtn){
+    _sendBtn.addEventListener('pointerdown',e=>{
+      if(e.button!==0)return;
+      e.preventDefault();
+      doSend();
+    });
+  }
 
   const inp=document.getElementById('msg-input');
   inp.addEventListener('keydown', async e=>{
@@ -8740,12 +8882,13 @@ function renderFavorites(){
     ci.dataset.isChannel=isChan?'1':'0';
     const muteKey=f.conn_id+'/'+f.target;
     const muted=isMuted(muteKey);
-    ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span><span class="chan-right">${uc?`<span class="chan-unread-badge${fmc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${muted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
+    const fDet=isDetached(f.conn_id,f.target)?'<span class="chan-detached" title="Popped out" style="color:var(--accent);font-size:11px;margin-right:4px;opacity:.85">⧉</span>':'';
+    ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span><span class="chan-right">${fDet}${uc?`<span class="chan-unread-badge${fmc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${muted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
     ci.style.position='relative';
     ((connId,target,isChannel)=>{
       ci.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleFavMenu(e.currentTarget,connId,target,isChannel);});
     })(f.conn_id,f.target,isChan);
-    ci.onclick=()=>{setActive(f.conn_id,f.target);closeSidebar();};
+    ci.onclick=()=>_sidebarActivate(f.conn_id,f.target);
     el.appendChild(ci);
   }
   // Init SortableJS for favorite reordering
@@ -8780,6 +8923,10 @@ function _favMenuItems(connId,target,isChannel){
     {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>toggleMute(muteKey)},
     {text:'🗑 Clear History',action:()=>clearBufHistory(connId,target)},
   ];
+  if(_canPopOut()){
+    const det=isDetached(connId,target);
+    items.push({text: det?'⧉ Reattach':'⧉ Pop Out', action: ()=> det?reattachView(connId,target):detachView(connId,target)});
+  }
   if(!isChannel){
     const pmAllowed=isPmAllowedFor(connId,target);
     items.push({
@@ -8827,9 +8974,10 @@ function renderPMList(){
     ci.style.fontStyle='italic';
     ci.style.position='relative';
     const netLabel=esc(pm.net.config.label||pm.net.config.server);
-    ci.innerHTML=`${esc(pm.display)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span><span class="chan-right">${uc&&!muted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${muted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
+    const pmDet=isDetached(pm.conn_id,pm.display)?'<span class="chan-detached" title="Popped out" style="color:var(--accent);font-size:11px;margin-right:4px;opacity:.85">⧉</span>':'';
+    ci.innerHTML=`${esc(pm.display)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span><span class="chan-right">${pmDet}${uc&&!muted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${muted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
     ((cid,lc2)=>{ci.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,cid,lc2,'pm');});})(pm.conn_id,pm.lc);
-    ((cid,disp)=>{ci.onclick=()=>{setActive(cid,disp);closeSidebar();};})(pm.conn_id,pm.display);
+    ((cid,disp)=>{ci.onclick=()=>_sidebarActivate(cid,disp);})(pm.conn_id,pm.display);
     el.appendChild(ci);
   }
 }
@@ -9042,6 +9190,10 @@ function _chanMenuItems(connId,target,kind){
     {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>toggleMute(muteKey)},
     {text:'🗑 Clear History',action:()=>clearBufHistory(connId,target)},
   ];
+  if(_canPopOut()){
+    const det=isDetached(connId,target);
+    items.push({text: det?'⧉ Reattach':'⧉ Pop Out', action: ()=> det?reattachView(connId,target):detachView(connId,target)});
+  }
   if(kind==='pm'){
     const pmAllowed=isPmAllowedFor(connId,target);
     items.push({
@@ -11177,33 +11329,47 @@ function checkMention(conn_id,target,from,text,ts){
   const nick=getNick(conn_id);
   const t=text.toLowerCase();
   const n=nick.toLowerCase();
-  // Check nick mention
   let mentioned=false;
   if(n&&t.includes(n)){const re=new RegExp('\\b'+n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b','i');if(re.test(text))mentioned=true;}
-  // Check custom highlight words
   if(!mentioned){const words=getHighlightWords();for(const w of words){if(w&&t.includes(w.toLowerCase()))mentioned=true;}}
-  if(mentioned){
+  // Only channel mentions enter the Notices list. PMs are recorded separately
+  // via addPmNotice (one entry per sender) to avoid duplicate rows.
+  const isChan=target&&(target.startsWith('#')||target.startsWith('&')||target.startsWith('+')||target.startsWith('!'));
+  if(mentioned && isChan){
     const net=networks.find(x=>x.config.id===conn_id);
-    mentionsList.unshift({conn_id,target,from,text,ts,network:net?.config.label||net?.config.server||conn_id});
+    mentionsList.unshift({type:'mention',conn_id,target,from,text,ts,network:net?.config.label||net?.config.server||conn_id});
     if(mentionsList.length>100)mentionsList.length=100;
-    _unseenMentions++;
     saveMentions(); updateMentionsBadge();
   }
   return mentioned;
 }
+function addPmNotice(conn_id,from,msg){
+  if(!from||from==='*')return;
+  const fL=from.toLowerCase();
+  if(mentionsList.some(m=>m.type==='pm'&&m.conn_id===conn_id&&(m.from||'').toLowerCase()===fL))return;
+  const net=networks.find(x=>x.config.id===conn_id);
+  mentionsList.unshift({type:'pm',conn_id,target:from,from,text:msg.text||'',ts:msg.ts,network:net?.config.label||net?.config.server||conn_id});
+  if(mentionsList.length>100)mentionsList.length=100;
+  saveMentions(); updateMentionsBadge();
+}
+function clearNoticesForTarget(conn_id,target){
+  if(!target)return;
+  const t=target.toLowerCase();
+  const before=mentionsList.length;
+  mentionsList=mentionsList.filter(m=>{
+    if(m.conn_id!==conn_id)return true;
+    return (m.target||'').toLowerCase()!==t;
+  });
+  if(mentionsList.length!==before){
+    saveMentions(); updateMentionsBadge();
+    if(document.getElementById('mentions-panel')?.classList.contains('show'))renderMentionsList();
+  }
+}
 let _unseenMentions=0;
 function updateMentionsBadge(){
-  const el=document.getElementById('mentions-count');
   const btn=document.getElementById('mentions-btn');
-  if(!el)return;
-  if(_unseenMentions>0){
-    el.style.display='';
-    el.textContent=_unseenMentions>99?'99+':_unseenMentions;
-    if(btn)btn.style.color='var(--accent)';
-  } else {
-    el.style.display='none';
-    if(btn)btn.style.color='';
-  }
+  if(!btn)return;
+  btn.classList.toggle('has-unread', mentionsList.length>0);
 }
 // ─── Search ───────────────────────────────────────────────────────────────────
 function toggleSearchPanel(){
@@ -11273,24 +11439,24 @@ document.addEventListener('click',e=>{
 function toggleMentionsPanel(){
   const p=document.getElementById('mentions-panel');
   p.classList.toggle('show');
-  if(p.classList.contains('show')){
-    _unseenMentions=0;
-    updateMentionsBadge();
-    renderMentionsList();
-  }
+  if(p.classList.contains('show'))renderMentionsList();
 }
 function renderMentionsList(){
   const el=document.getElementById('mentions-list');
-  if(!mentionsList.length){el.innerHTML='<div class="mention-empty">No mentions yet</div>';return;}
+  if(!mentionsList.length){el.innerHTML='<div class="mention-empty">Nothing new</div>';return;}
   el.innerHTML='';
   for(const m of mentionsList){
     const d=document.createElement('div');d.className='mention-item';
     const time=new Date(m.ts*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
-    d.innerHTML=`<div class="mention-meta">${esc(m.from)} in ${esc(m.target)} · ${esc(m.network)} · ${time}</div><div class="mention-text">${esc(m.text)}</div>`;
+    const isPm=m.type==='pm';
+    const meta=isPm
+      ? `✉ PM from ${esc(m.from)} · ${esc(m.network)} · ${time}`
+      : `@ ${esc(m.from)} in ${esc(m.target)} · ${esc(m.network)} · ${time}`;
+    d.innerHTML=`<div class="mention-meta">${meta}</div><div class="mention-text">${esc(m.text)}</div>`;
     d.onclick=()=>{
       document.getElementById('mentions-panel').classList.remove('show');
       setActive(m.conn_id,m.target);
-      // Find and flash the message — delay to let chat render + logs load
+      if(isPm)return;
       setTimeout(()=>{
         const rows=document.querySelectorAll('.msg-row');
         for(const r of rows){
