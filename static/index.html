@@ -700,7 +700,8 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   /* M5: contain rubber-band */
   overscroll-behavior:contain;
 }
-.msg-row { display:flex; align-items:baseline; padding:1px 12px; line-height:1.5; transition:background .1s; }
+.msg-row { display:flex; align-items:baseline; padding:1px 12px; line-height:1.5; transition:background .1s; touch-action:manipulation; }
+.msg-row a { touch-action:manipulation; }
 
 .msg-row:hover { background:rgba(255,255,255,.03); }
 .msg-ts { color:var(--text3); font-size:11px; width:72px; flex-shrink:0; text-align:right; padding-right:8px; }
@@ -2216,6 +2217,37 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 <div class="upload-progress" id="upload-progress"></div>
 
 <script>
+// ─── Quota-exceeded guard ────────────────────────────────────────────────────
+// Safari (esp. in private mode) and some Android browsers throw QuotaExceeded
+// when localStorage fills up (~5MB). Surface that to the user exactly once so
+// they know some settings will stop persisting. Still re-throw so existing
+// try/catches around writes continue their normal fallback.
+(function(){
+  try{
+    const orig = localStorage.setItem.bind(localStorage);
+    let _lastQuotaToast = 0;
+    localStorage.setItem = function(k, v){
+      try { return orig(k, v); }
+      catch(e){
+        const isQuota = e && (e.name === 'QuotaExceededError'
+                           || e.code === 22 || e.code === 1014);
+        // Throttle to once/10s — and don't "burn" the toast attempt if
+        // showToast isn't defined yet (early-load error). Only update the
+        // timestamp when we actually show something.
+        if(isQuota && Date.now() - _lastQuotaToast > 10000){
+          try{
+            if(typeof showToast==='function'){
+              showToast('Storage full — some settings may not save. Clear browser data if this persists.');
+              _lastQuotaToast = Date.now();
+            }
+          }catch(_){}
+        }
+        throw e;
+      }
+    };
+  }catch(_){}
+})();
+
 // ─── State ────────────────────────────────────────────────────────────────────
 let ws=null, sessionToken=null, currentUser=null;
 let networks=[], active=null;
@@ -2376,9 +2408,24 @@ function initViewportFix() {
   const iw = document.getElementById('input-wrap');
   if (window.visualViewport) {
     const vv = window.visualViewport;
+    // rAF-throttle — keyboard dismiss / rotation can fire resize dozens of
+    // times in rapid succession. Coalesce into one layout per frame.
+    let _vvPending = false;
     function syncHeight() {
-      app.style.height = vv.height + 'px';
-      window.scrollTo(0, 0);
+      if (_vvPending) return;
+      _vvPending = true;
+      requestAnimationFrame(() => {
+        _vvPending = false;
+        app.style.height = vv.height + 'px';
+        window.scrollTo(0, 0);
+        // If the chat was near the bottom before the viewport resized,
+        // re-anchor it so the user doesn't lose the latest message when
+        // the keyboard opens/closes or browser chrome hides.
+        const area = document.getElementById('chat-area');
+        if (area && (area.scrollHeight - area.scrollTop - area.clientHeight < 300)) {
+          area.scrollTop = area.scrollHeight;
+        }
+      });
     }
     vv.addEventListener('resize', syncHeight);
     vv.addEventListener('scroll', () => window.scrollTo(0, 0));
@@ -2402,6 +2449,12 @@ function initViewportFix() {
       app.style.height = '';
       setTimeout(() => {
         window.scrollTo(0, 0);
+        // Chat area just grew (keyboard gone) — if the user was reading the
+        // tail before typing, put them back at the latest message.
+        const area = document.getElementById('chat-area');
+        if (area && (area.scrollHeight - area.scrollTop - area.clientHeight < 400)) {
+          scrollForce();
+        }
       }, 150);
     });
   }
@@ -2600,6 +2653,47 @@ function connectWs() {
   ws.onclose=()=>{_rateQueue=[];if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}const d=Math.min(1000*Math.pow(2,_wsRetries),60000);setTimeout(connectWs,d+Math.random()*1000);_wsRetries++;};
   ws.onerror=()=>ws.close();
 }
+// React to browser-level network state changes so the user sees a reconnect
+// happen immediately instead of waiting 30-90s for the WS to notice.
+window.addEventListener('offline', ()=>{
+  try{ showToast('Network offline — messages will queue when reconnected.'); }catch(_){}
+  if(ws && ws.readyState===1){ try{ ws.close(); }catch(_){}}
+});
+window.addEventListener('online', ()=>{
+  try{ showToast('Network restored — reconnecting…'); }catch(_){}
+  if(!ws || ws.readyState===3) { _wsRetries = 0; connectWs(); }
+  else if(ws && ws.readyState!==1){ try{ ws.close(); }catch(_){}}
+});
+
+// ─── Android hardware-back-button / popstate overlay stack ───────────────────
+// On Android PWA, pressing the hardware back button while a sidebar/modal is
+// open exits the entire app — bad UX. We push a history state when any
+// overlay opens so the next back event pops our state (closing the overlay)
+// instead of leaving the app.
+const _overlayStack = [];
+// Counter (not bool) so stacked manual-close calls don't let a real back
+// event leak through. Incremented on every _overlayClose; the popstate
+// handler decrements it and skips one event per increment.
+let _popSkipCount = 0;
+function _overlayOpen(name, closeFn){
+  if(_overlayStack.some(o => o.name === name)) return;  // already open, no-op
+  _overlayStack.push({name, closeFn});
+  try{ history.pushState({_overlay: _overlayStack.length}, ''); }catch(_){}
+}
+function _overlayClose(name){
+  const idx = _overlayStack.findIndex(o => o.name === name);
+  if(idx < 0) return;
+  _overlayStack.splice(idx, 1);
+  _popSkipCount++;
+  try{ history.back(); }catch(_){ _popSkipCount = Math.max(0, _popSkipCount-1); }
+}
+window.addEventListener('popstate', () => {
+  if(_popSkipCount > 0){ _popSkipCount--; return; }
+  if(_overlayStack.length > 0){
+    const top = _overlayStack.pop();
+    try{ top.closeFn(); }catch(_){}
+  }
+});
 // iOS PWA WebSocket-zombie watchdog: iOS Safari throttles backgrounded JS and
 // silently drops WS messages without firing onclose, so the connection looks
 // alive but no events arrive. Periodically poll for missed messages on the
@@ -2742,7 +2836,27 @@ function wsend(obj){
         }
       }
     }
+    return true;
   }
+  // Not connected. For user-initiated actions, warn the user so they don't
+  // think their action went through — throttled to once per 3 seconds.
+  // Allowlist over denylist: only clearly user-initiated operational commands
+  // get a toast; background/auto-save/query traffic stays silent.
+  const _toastTypes = new Set([
+    'send','join_channel','part_channel',
+    'connect','disconnect','add_network','remove_network','update_network',
+    'lock_vault','unlock_vault','change_passphrase',
+    'generate_cert','delete_cert',
+    'clear_all_data','delete_account',
+  ]);
+  if(obj && _toastTypes.has(obj.type)){
+    const now = Date.now();
+    if(now - (window._lastSendFailToast||0) > 3000){
+      window._lastSendFailToast = now;
+      try{ showToast('Not connected — action not sent. Waiting for reconnect…'); }catch(_){}
+    }
+  }
+  return false;
 }
 
 // ─── Events ───────────────────────────────────────────────────────────────────
@@ -3633,6 +3747,12 @@ function prependLogs(conn_id,target,lines){
   if(unique.length>0){
     buf.unshift(...unique);
     buf.sort((a,b)=>a.ts-b.ts);
+    /* Hard ceiling so repeated "Load older" clicks can't grow the buffer
+       indefinitely. 5000 = ~25 Load-older clicks at 200/page — well past any
+       reasonable scrollback need, but bounded enough to defend memory. Cap is
+       higher than addMessage's 2000 so a single Load-older isn't immediately
+       trimmed back out. */
+    if(buf.length>5000) buf.splice(0,buf.length-5000);
   }
   if(isActive(conn_id,target)){
     const area=document.getElementById('chat-area');
@@ -3642,9 +3762,17 @@ function prependLogs(conn_id,target,lines){
       // Initial load — scroll to bottom to show latest messages
       scrollForce();
     } else if(area&&unique.length>0){
-      // Loading older messages — preserve scroll position
+      // Loading older messages — preserve scroll position. iOS momentum-
+      // scroll can swallow a bare scrollTop assignment here; flush and
+      // restore webkitOverflowScrolling so the anchor sticks.
       const newHeight=area.scrollHeight;
+      const _prev=area.style.webkitOverflowScrolling;
+      area.style.webkitOverflowScrolling='auto';
       area.scrollTop=newHeight-oldHeight;
+      requestAnimationFrame(()=>{
+        area.scrollTop=newHeight-oldHeight;
+        area.style.webkitOverflowScrolling=_prev||'';
+      });
     }
   }
 }
@@ -3669,7 +3797,7 @@ function appendSyncLines(conn_id,target,lines){
     if(isActive(conn_id,target)){renderChat();scrollForce();}
   }
 }
-function isActive(c,t){return active&&active.conn_id===c&&active.target===t;}
+function isActive(c,t){return !!active&&active.conn_id===c&&typeof t==='string'&&active.target.toLowerCase()===t.toLowerCase();}
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 let _sidebarRenderTimer=null,_sidebarDragLock=false;
@@ -3885,6 +4013,24 @@ function renderChat(){
   // Update last-read timestamp
   if(buf.length>0) localStorage.setItem('cryptirc_lastread_'+rmKey,String(buf[buf.length-1].ts));
   scrollForce();
+  // iOS PWA: images/videos often finish loading AFTER scrollForce's 3s window
+  // closes, leaving the user stranded above the true bottom. For 8 seconds
+  // after render, any media that hasn't loaded yet re-scrolls to bottom on
+  // load — but only if the user hasn't deliberately scrolled up.
+  const _activeAtRender=active&&active.conn_id+'|'+active.target;
+  const _mediaScrollDeadline=Date.now()+8000;
+  const _mediaScrollFn=()=>{
+    if(!active||active.conn_id+'|'+active.target!==_activeAtRender)return;
+    if(Date.now()>_mediaScrollDeadline)return;
+    const dist=area.scrollHeight-area.scrollTop-area.clientHeight;
+    if(dist<800) scrollForce();  // user still near bottom — re-anchor
+  };
+  area.querySelectorAll('img,video').forEach(el=>{
+    if(el.tagName==='IMG'?el.complete:(el.readyState>=1))return;
+    el.addEventListener('load',_mediaScrollFn,{once:true});
+    el.addEventListener('loadedmetadata',_mediaScrollFn,{once:true});
+    el.addEventListener('error',()=>{},{once:true});
+  });
 }
 function loadOlderMessages(){
   if(!active)return;
@@ -3893,6 +4039,30 @@ function loadOlderMessages(){
   const btn=document.querySelector('.load-more-btn');
   if(btn){btn.textContent='Loading…';btn.style.opacity='.5';}
   wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200,before:oldest});
+}
+/* Cap the chat DOM at MAX rows. Buffer is bounded at 2000 (addMessage line ~3638)
+   but the DOM had no cap — appendMsgRow only ever appends, never removes, so a
+   long Electron session in a busy channel could accumulate tens of thousands of
+   rows and start freezing on layout/GC. Trim the oldest rows from the front,
+   but only when the user is near the bottom — don't yank content out from under
+   someone scrolled up reading older history. The Load-older button stays. */
+function _pruneChatDOM(area){
+  const MAX=1000;
+  const n=area.children.length;
+  if(n<=MAX)return;
+  const dist=area.scrollHeight-area.scrollTop-area.clientHeight;
+  if(dist>600)return; // user is scrolled up — don't disturb their view
+  let toRemove=n-MAX;
+  while(toRemove>0){
+    let node=area.firstChild;
+    if(!node)break;
+    if(node.classList&&node.classList.contains('load-more-btn')){
+      node=node.nextSibling;
+      if(!node)break;
+    }
+    area.removeChild(node);
+    toRemove--;
+  }
 }
 function appendMsgRow(msg){
   const area=document.getElementById('chat-area');if(area.style.display==='none')return;
@@ -3925,6 +4095,7 @@ function appendMsgRow(msg){
   const r=buildRow(msg);
   area.appendChild(r);
   if(msg.mentioned){r.classList.add('flash');setTimeout(()=>r.classList.remove('flash'),3000);}
+  _pruneChatDOM(area);
   scrollBottom();
 }
 // Stash just the fields we need to (a) build the summary and (b) re-render via buildRow when expanded.
@@ -4293,7 +4464,12 @@ function buildMediaEl(url){
         if(d.image&&d.image.startsWith('https://')) html+=`<img class="msg-link-preview-img" src="${esc(d.image)}" loading="lazy" onload="scrollBottom()" onerror="this.remove()">`;
         el.innerHTML=html;
         el.style.display='';
-        scrollBottom();
+        // Card just materialized — may have added meaningful height. If the
+        // user is near the bottom, re-anchor to the latest message. 500px
+        // threshold covers a revealed preview + small image without
+        // snapping users who deliberately scrolled up.
+        const _area=document.getElementById('chat-area');
+        if(_area && _area.scrollHeight-_area.scrollTop-_area.clientHeight<500) scrollForce();
       }).catch(()=>card.remove());
     return card;
   }
@@ -4508,6 +4684,7 @@ async function handleInput(raw){
         document.getElementById('chanlist-count').textContent='';
         document.getElementById('chanlist-search').value='';
         document.getElementById('chanlist-overlay').classList.add('show');
+        _overlayOpen('chanlist', closeChanList);
         wsend({type:'send',conn_id,raw:args[0]?`LIST ${args[0]}`:'LIST'}); break;
 
       case 'LINKS': {
@@ -5407,7 +5584,7 @@ async function uploadFile(file){
 
 // ─── User Count Update + Blink ───────────────────────────────────────────────
 function refreshUserCount(connId,channel){
-  if(!active||active.conn_id!==connId||active.target!==channel)return;
+  if(!active||active.conn_id!==connId||typeof channel!=='string'||active.target.toLowerCase()!==channel.toLowerCase())return;
   const net=networks.find(n=>n.config.id===connId);
   const ch=net?.channels.find(c=>c.name===channel);
   document.getElementById('usercount').textContent=ch?`${ch.names.length} users`:'';
@@ -5697,6 +5874,7 @@ function showAddNetwork(){
   document.getElementById('modal-title').textContent='Add Network';
   document.getElementById('modal-save-btn').textContent='Add & Connect';
   document.getElementById('modal-overlay').classList.add('open');
+  _overlayOpen('networkModal', closeModal);
   // Safety: clear any stuck drag-suppression class, and focus the first field so the
   // user can type immediately (especially important on Electron where focus-on-open
   // isn't automatic).
@@ -5765,10 +5943,15 @@ function editNetwork(id){
   document.getElementById('modal-title').textContent='Edit Network';
   document.getElementById('modal-save-btn').textContent='Save Changes';
   document.getElementById('modal-overlay').classList.add('open');
+  _overlayOpen('networkModal', closeModal);
   document.body.classList.remove('force-no-select');
   setTimeout(()=>{document.getElementById('f-label')?.focus();},50);
 }
-function closeModal(){document.getElementById('modal-overlay').classList.remove('open');editingNetworkId=null;}
+function closeModal(){
+  _overlayClose('networkModal');
+  document.getElementById('modal-overlay').classList.remove('open');
+  editingNetworkId=null;
+}
 function onSaslMethodChange(){const m=document.getElementById('f-sasl-method').value;document.getElementById('sasl-plain-fields').style.display=m==='plain'?'':'none';document.getElementById('sasl-external-info').style.display=m==='external'?'':'none';}
 // Parse a ZNC-format PASS string back into its 3 components.
 // Format: <user>/<network>:<password>. First colon separates network from password;
@@ -6036,8 +6219,9 @@ function showEncryptPanel(){
     body.innerHTML='<div class="encrypt-note" style="text-align:center;padding:20px 0;">Select a channel or DM to manage encryption.</div>';
   }
   document.getElementById('encrypt-overlay').classList.add('show');
+  _overlayOpen('encryptPanel', closeEncryptPanel);
 }
-function closeEncryptPanel(){document.getElementById('encrypt-overlay').classList.remove('show');}
+function closeEncryptPanel(){_overlayClose('encryptPanel');document.getElementById('encrypt-overlay').classList.remove('show');}
 async function encryptAction(cmd,arg){
   if(!active)return;
   const args=arg?[cmd,arg]:[cmd];
@@ -7029,8 +7213,12 @@ function showAppearanceModal(){
   const cfg=loadAppearance();
   populateAppearanceModal(cfg);
   document.getElementById('appearance-overlay').classList.add('show');
+  _overlayOpen('appearance', closeAppearanceModal);
 }
-function closeAppearanceModal(){document.getElementById('appearance-overlay').classList.remove('show');}
+function closeAppearanceModal(){
+  _overlayClose('appearance');
+  document.getElementById('appearance-overlay').classList.remove('show');
+}
 function resetAppearance(){
   saveAppearance(APPEAR_DEFAULTS);
   populateAppearanceModal(APPEAR_DEFAULTS);
@@ -7654,8 +7842,9 @@ function showSecurityPanel(){
   cfg.linkPreviews!==false?el('sec-linkpreviews').classList.add('on'):el('sec-linkpreviews').classList.remove('on');
   cfg.spellcheck!==false?el('sec-spellcheck').classList.add('on'):el('sec-spellcheck').classList.remove('on');
   document.getElementById('security-overlay').classList.add('show');
+  _overlayOpen('securityPanel', closeSecurityPanel);
 }
-function closeSecurityPanel(){document.getElementById('security-overlay').classList.remove('show');}
+function closeSecurityPanel(){_overlayClose('securityPanel');document.getElementById('security-overlay').classList.remove('show');}
 function secSaveToggle(key,val){
   invalidateAppearCache();
   const cfg=loadAppearance();
@@ -7669,9 +7858,10 @@ let _operIRCd='unrealircd';
 let _operConnId=null;
 function showOperPanel(){
   document.getElementById('oper-overlay').classList.add('show');
+  _overlayOpen('operPanel', closeOperPanel);
   renderOperMain();
 }
-function closeOperPanel(){document.getElementById('oper-overlay').classList.remove('show');}
+function closeOperPanel(){_overlayClose('operPanel');document.getElementById('oper-overlay').classList.remove('show');}
 function operSend(raw){
   if(!_operConnId){showToast('Select a network first');return;}
   wsend({type:'send',conn_id:_operConnId,raw});
@@ -8061,8 +8251,10 @@ function openLightbox(src){
   const img=document.getElementById('lightbox-img');
   img.src=src;img.classList.remove('zoomed');img.style.transform='';
   document.getElementById('lightbox').classList.add('show');
+  _overlayOpen('lightbox', closeLightbox);
 }
 function closeLightbox(){
+  _overlayClose('lightbox');
   document.getElementById('lightbox').classList.remove('show');
   const img=document.getElementById('lightbox-img');img.classList.remove('zoomed');img.style.transform='';
 }
@@ -8177,10 +8369,12 @@ function drainRateQueue(){
 }
 
 // ─── Session manager ─────────────────────────────────────────────────────────
+function closeSessionsPanel(){_overlayClose('sessionsPanel');document.getElementById('sessions-overlay').classList.remove('show');}
 async function showSessionManager(){
   const list=document.getElementById('sessions-list');
   list.innerHTML='<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">Loading...</div>';
   document.getElementById('sessions-overlay').classList.add('show');
+  _overlayOpen('sessionsPanel', closeSessionsPanel);
   try{
     const r=await fetch(`${location.pathname}auth/sessions`,{headers:{'Authorization':`Bearer ${sessionToken}`}});
     const d=await r.json();
@@ -8242,8 +8436,9 @@ function showCapsPanel(){
   if(!networks.length) sel.innerHTML='<option>No networks</option>';
   renderCapsToggles();
   document.getElementById('caps-overlay').classList.add('show');
+  _overlayOpen('capsPanel', closeCapsPanel);
 }
-function closeCapsPanel(){document.getElementById('caps-overlay').classList.remove('show');}
+function closeCapsPanel(){_overlayClose('capsPanel');document.getElementById('caps-overlay').classList.remove('show');}
 
 function renderCapsToggles(){
   const list=document.getElementById('caps-list');
@@ -8289,6 +8484,7 @@ async function showUploadsPanel(){
   const list=document.getElementById('uploads-list');
   list.innerHTML='<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">Loading...</div>';
   document.getElementById('uploads-overlay').classList.add('show');
+  _overlayOpen('uploadsPanel', closeUploadsPanel);
   try{
     const r=await fetch(`${location.pathname}uploads`,{headers:{'Authorization':`Bearer ${sessionToken}`}});
     const d=await r.json();
@@ -8311,7 +8507,7 @@ async function showUploadsPanel(){
     }
   }catch(e){list.innerHTML='<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">Failed to load uploads.</div>';}
 }
-function closeUploadsPanel(){document.getElementById('uploads-overlay').classList.remove('show');}
+function closeUploadsPanel(){_overlayClose('uploadsPanel');document.getElementById('uploads-overlay').classList.remove('show');}
 async function deleteUpload(filename){
   if(!(await customConfirm('Delete this file?','Delete')))return;
   await fetch(`${location.pathname}uploads/delete`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${sessionToken}`},body:JSON.stringify({filename})});
@@ -8479,9 +8675,11 @@ function showChannelStats(conn_id,target){
 // ─── Stats settings panel ────────────────────────────────────────────────────
 function showStatsPanel(){
   document.getElementById('chanstats-overlay').classList.add('show');
+  _overlayOpen('statsPanel', closeStatsPanel);
   renderStatsChannelList();
 }
 function closeStatsPanel(){
+  _overlayClose('statsPanel');
   document.getElementById('chanstats-overlay').classList.remove('show');
 }
 function toggleStatsEnabled(btn){
@@ -9167,7 +9365,7 @@ function openChanList(){
   document.getElementById('chanlist-overlay').classList.add('show');
   wsend({type:'send',conn_id:chanListConnId,raw:'LIST'});
 }
-function closeChanList(){document.getElementById('chanlist-overlay').classList.remove('show');chanListData=[];}
+function closeChanList(){_overlayClose('chanlist');document.getElementById('chanlist-overlay').classList.remove('show');chanListData=[];}
 
 // ─── Links overlay ───────────────────────────────────────────────────────────
 function showLinksOverlay(){
@@ -9752,8 +9950,13 @@ function showToast(msg){
 
 // ─── Mobile sidebar ───────────────────────────────────────────────────────────
 function toggleSidebar(){document.getElementById('sidebar').classList.contains('open')?closeSidebar():openSidebar();}
-function openSidebar(){document.getElementById('sidebar').classList.add('open');document.getElementById('sidebar-backdrop').classList.add('show');}
+function openSidebar(){
+  document.getElementById('sidebar').classList.add('open');
+  document.getElementById('sidebar-backdrop').classList.add('show');
+  _overlayOpen('sidebar', closeSidebar);
+}
 function closeSidebar(){
+  _overlayClose('sidebar');
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sidebar-backdrop').classList.remove('show');
   // Mobile: viewport settles after sidebar CSS transition. Fire an extra
@@ -9803,8 +10006,9 @@ function showCertModal(){
     document.getElementById('cert-has-state').style.display='none';
   }
   document.getElementById('cert-modal-overlay').classList.add('open');
+  _overlayOpen('certModal', closeCertModal);
 }
-function closeCertModal(){document.getElementById('cert-modal-overlay').classList.remove('open');}
+function closeCertModal(){_overlayClose('certModal');document.getElementById('cert-modal-overlay').classList.remove('open');}
 function generateCert(){if(!_certConnId)return;document.getElementById('cert-none-state').style.display='none';document.getElementById('cert-has-state').style.display='none';document.getElementById('cert-loading').style.display='';wsend({type:'generate_cert',conn_id:_certConnId});}
 async function deleteCert(){if(!_certConnId)return;if(!(await customConfirm('Delete this certificate?\n\nMake sure to run: /msg NickServ CERT DEL <fingerprint> first.','Delete')))return;wsend({type:'delete_cert',conn_id:_certConnId});document.getElementById('cert-none-state').style.display='';document.getElementById('cert-has-state').style.display='none';const net=networks.find(n=>n.config.id===_certConnId);if(net){net.has_cert=false;net.cert_fingerprint=null;}updateCertBtn();}
 function copyCertFp(){const fp=document.getElementById('cert-fingerprint').textContent;if(!fp)return;navigator.clipboard?.writeText(fp).then(()=>{const el=document.getElementById('cert-fingerprint');el.style.color='var(--join)';setTimeout(()=>el.style.color='',1500);});}
@@ -9823,6 +10027,7 @@ let _notifPrefs = null;
 
 async function showNotifModal() {
   document.getElementById('notif-modal').classList.add('open');
+  _overlayOpen('notifModal', closeNotifModal);
   await loadNotifPrefs();
   renderNotifModal();
   renderNotifNetworkList();
@@ -9882,7 +10087,7 @@ function renderHighlightTags(){
   if(!words.length){c.innerHTML='<span style="font-size:11px;color:var(--text3)">No highlight words set.</span>';return;}
   c.innerHTML=words.map(w=>`<span class="hl-tag">${esc(w)}<button class="hl-tag-x" onclick="removeHighlightWord('${esc(w)}')">&times;</button></span>`).join('');
 }
-function closeNotifModal() { document.getElementById('notif-modal').classList.remove('open'); }
+function closeNotifModal() { _overlayClose('notifModal'); document.getElementById('notif-modal').classList.remove('open'); }
 
 async function loadNotifPrefs() {
   if (!sessionToken) return;
@@ -11208,8 +11413,9 @@ function showHelpPanel(){
     </div>`;
   body.appendChild(sup);
   document.getElementById('help-overlay').classList.add('show');
+  _overlayOpen('helpPanel', closeHelpPanel);
 }
-function closeHelpPanel(){document.getElementById('help-overlay').classList.remove('show');}
+function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── Admin Panel ──────────────────────────────────────────────────────────────
 let _isAdmin=false;
@@ -11229,6 +11435,7 @@ async function showAdminPanel(){
   const body=document.getElementById('admin-body');
   body.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">Loading...</div>';
   document.getElementById('admin-overlay').classList.add('show');
+  _overlayOpen('adminPanel', closeAdminPanel);
 
   try{
     // Load settings
@@ -11340,7 +11547,7 @@ async function showAdminPanel(){
   }
 }
 
-function closeAdminPanel(){document.getElementById('admin-overlay').classList.remove('show');}
+function closeAdminPanel(){_overlayClose('adminPanel');document.getElementById('admin-overlay').classList.remove('show');}
 
 async function adminSaveSettings(){
   const open=document.getElementById('admin-reg-open').classList.contains('on');
@@ -11451,8 +11658,50 @@ function showHelp(conn_id, target, specific) {
 }
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
-function scrollBottom(){const a=document.getElementById('chat-area');if(!a)return;const nearBottom=a.scrollHeight-a.scrollTop-a.clientHeight<200;if(nearBottom){a.scrollTop=a.scrollHeight;requestAnimationFrame(()=>a.scrollTop=a.scrollHeight);}updateScrollBtn();}
-function scrollForce(){const a=document.getElementById('chat-area');if(!a)return;a.scrollTop=a.scrollHeight;requestAnimationFrame(()=>{a.scrollTop=a.scrollHeight;});[50,150,300,600,1200,2000].forEach(ms=>setTimeout(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();},ms));if(typeof ResizeObserver!=='undefined'){let _so=new ResizeObserver(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();_so.disconnect();});_so.observe(a);setTimeout(()=>_so.disconnect(),3000);}}
+function scrollBottom(){
+  const a=document.getElementById('chat-area');
+  if(!a)return;
+  /* 600px threshold lets a tall new message (image preview, multi-line)
+     still trigger the snap even though it just inflated scrollHeight. */
+  const nearBottom=a.scrollHeight-a.scrollTop-a.clientHeight<600;
+  if(nearBottom){
+    // Flush iOS momentum scroll so the assignment actually lands.
+    const _prev=a.style.webkitOverflowScrolling;
+    a.style.webkitOverflowScrolling='auto';
+    a.scrollTop=a.scrollHeight;
+    requestAnimationFrame(()=>{
+      a.scrollTop=a.scrollHeight;
+      a.style.webkitOverflowScrolling=_prev||'';
+    });
+  }
+  updateScrollBtn();
+}
+function scrollForce(){
+  const a=document.getElementById('chat-area');
+  if(!a)return;
+  // iOS momentum-scroll quirk: assigning scrollTop while -webkit-overflow-
+  // scrolling:touch is active can be silently ignored. Briefly flip it to
+  // 'auto' to flush any in-progress momentum, assign, then restore on the
+  // next frame. Desktop/Android ignore the style toggle.
+  const prevOvf=a.style.webkitOverflowScrolling;
+  a.style.webkitOverflowScrolling='auto';
+  a.scrollTop=a.scrollHeight;
+  requestAnimationFrame(()=>{
+    a.scrollTop=a.scrollHeight;
+    a.style.webkitOverflowScrolling=prevOvf||'';
+  });
+  [50,150,300,600,1200,2000].forEach(ms=>setTimeout(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();},ms));
+  if(typeof ResizeObserver!=='undefined'){
+    // Observe for 3s and re-anchor on resize, but only if the user is still
+    // near the bottom (so mid-window scroll-ups aren't snapped back).
+    let _so=new ResizeObserver(()=>{
+      const dist=a.scrollHeight-a.scrollTop-a.clientHeight;
+      if(dist<400){a.scrollTop=a.scrollHeight;updateScrollBtn();}
+    });
+    _so.observe(a);
+    setTimeout(()=>_so.disconnect(),3000);
+  }
+}
 function updateScrollBtn(){const a=document.getElementById('chat-area'),b=document.getElementById('scroll-bottom-btn');if(!a||!b)return;const far=a.scrollHeight-a.scrollTop-a.clientHeight>200;b.classList.toggle('show',far);}
 // Attach scroll listener once DOM ready
 document.addEventListener('DOMContentLoaded',()=>{document.getElementById('chat-area')?.addEventListener('scroll',updateScrollBtn);});
@@ -11514,16 +11763,20 @@ function toggleSearchPanel(){
   const p=document.getElementById('search-panel');
   // Close mentions if open
   document.getElementById('mentions-panel').classList.remove('show');
+  _overlayClose('mentionsPanel');
   p.classList.toggle('show');
   if(p.classList.contains('show')){
+    _overlayOpen('searchPanel', closeSearchPanel);
     const inp=document.getElementById('search-input');
     inp.value='';
     inp.focus();
     const searchLabel=active&&!active.target.startsWith('#')?'conversation':'channel';
     document.getElementById('search-results').innerHTML=`<div class="search-empty">Type to search current ${searchLabel}</div>`;
+  } else {
+    _overlayClose('searchPanel');
   }
 }
-function closeSearchPanel(){document.getElementById('search-panel').classList.remove('show');}
+function closeSearchPanel(){_overlayClose('searchPanel');document.getElementById('search-panel').classList.remove('show');}
 
 function doSearch(query){
   const el=document.getElementById('search-results');
@@ -11577,7 +11830,12 @@ document.addEventListener('click',e=>{
 function toggleMentionsPanel(){
   const p=document.getElementById('mentions-panel');
   p.classList.toggle('show');
-  if(p.classList.contains('show'))renderMentionsList();
+  if(p.classList.contains('show')){
+    _overlayOpen('mentionsPanel', ()=>{p.classList.remove('show'); _overlayClose('mentionsPanel');});
+    renderMentionsList();
+  } else {
+    _overlayClose('mentionsPanel');
+  }
 }
 function renderMentionsList(){
   const el=document.getElementById('mentions-list');
@@ -11593,6 +11851,7 @@ function renderMentionsList(){
     d.innerHTML=`<div class="mention-meta">${meta}</div><div class="mention-text">${esc(m.text)}</div>`;
     d.onclick=()=>{
       document.getElementById('mentions-panel').classList.remove('show');
+      _overlayClose('mentionsPanel');
       // If this target is popped out, focus the popup instead of navigating main.
       if(!_detMode && isDetached(m.conn_id,m.target)){
         openDetachedWindow(m.conn_id,m.target);
@@ -11866,7 +12125,8 @@ function showMonitorPanel(){
     }
   }
   ov.classList.add('show');
-  }catch(e){console.error('Monitor panel error:',e);document.getElementById('monitor-overlay')?.classList.add('show');}
+  _overlayOpen('monitorPanel', closeMonitorPanel);
+  }catch(e){console.error('Monitor panel error:',e);document.getElementById('monitor-overlay')?.classList.add('show');_overlayOpen('monitorPanel', closeMonitorPanel);}
 }
 function monitorViewMsg(nick){
   const m=loadMonitor();
@@ -11898,7 +12158,7 @@ function monitorWhois(nick){
     wsend({type:'send',conn_id:active.conn_id,raw:`WHOIS ${nick}`});
   }
 }
-function closeMonitorPanel(){document.getElementById('monitor-overlay').classList.remove('show');}
+function closeMonitorPanel(){_overlayClose('monitorPanel');document.getElementById('monitor-overlay').classList.remove('show');}
 function timeAgo(ts){
   const s=Math.floor((Date.now()-ts)/1000);
   if(s<60)return s+'s ago';
@@ -12132,11 +12392,11 @@ function timeAgo(ts){
 .cst-detail-total{font-size:11px;color:var(--text3);}
 </style>
 <!-- Session manager overlay -->
-<div id="sessions-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)this.classList.remove('show')">
+<div id="sessions-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeSessionsPanel()">
   <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">📱 Active Sessions</span>
-      <span onclick="document.getElementById('sessions-overlay').classList.remove('show')" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+      <span onclick="closeSessionsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
     </div>
     <div id="sessions-list" style="overflow-y:auto;flex:1;padding:12px 16px;-webkit-overflow-scrolling:touch"></div>
   </div>
