@@ -5121,6 +5121,7 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.0 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 121 themes • 135 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'GIPHY': case 'GIF': {
         const sub=(args[0]||'').toLowerCase();
         // ── Key management: /giphy key [value|clear] ────────────────────
@@ -7548,6 +7549,7 @@ document.addEventListener('click',e=>{
     {cmd:'listnick',desc:'List all kept nicks',usage:'/listnick'},
     // ── Fun ──
     {cmd:'prism',desc:'Rainbow colored text',usage:'/prism message'},
+    {cmd:'advertise',desc:'Tell the channel about CryptIRC',usage:'/advertise'},
     {cmd:'shrug',desc:'¯\\_(ツ)_/¯',usage:'/shrug [text]'},
     {cmd:'tableflip',desc:'(╯°□°)╯︵ ┻━┻',usage:'/tableflip [text]'},
     {cmd:'unflip',desc:'┬─┬ノ( º _ ºノ)',usage:'/unflip [text]'},
