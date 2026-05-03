@@ -4046,7 +4046,7 @@ function renderChat(){
     if(!active||active.conn_id+'|'+active.target!==_activeAtRender)return;
     if(Date.now()>_mediaScrollDeadline)return;
     const dist=area.scrollHeight-area.scrollTop-area.clientHeight;
-    if(dist<800) scrollForce();  // user still near bottom — re-anchor
+    if(dist<200) scrollForce();  // user still near bottom — re-anchor
   };
   area.querySelectorAll('img,video').forEach(el=>{
     if(el.tagName==='IMG'?el.complete:(el.readyState>=1))return;
@@ -4492,7 +4492,7 @@ function buildMediaEl(url){
         // threshold covers a revealed preview + small image without
         // snapping users who deliberately scrolled up.
         const _area=document.getElementById('chat-area');
-        if(_area && _area.scrollHeight-_area.scrollTop-_area.clientHeight<500) scrollForce();
+        if(_area && _area.scrollHeight-_area.scrollTop-_area.clientHeight<200) scrollForce();
       }).catch(()=>card.remove());
     return card;
   }
@@ -11714,10 +11714,7 @@ function showHelp(conn_id, target, specific) {
 function scrollBottom(){
   const a=document.getElementById('chat-area');
   if(!a)return;
-  /* 600px threshold lets a tall new message (image preview, multi-line)
-     still trigger the snap even though it just inflated scrollHeight.
-     Use percentage of clientHeight as fallback when keyboard shrinks viewport. */
-  const thresh=Math.max(600, a.clientHeight * 1.5);
+  const thresh=150;
   const nearBottom=a.scrollHeight-a.scrollTop-a.clientHeight<thresh;
   if(nearBottom){
     // Flush iOS momentum scroll: briefly set overflowY to hidden to interrupt

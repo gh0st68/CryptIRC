@@ -75,6 +75,10 @@ pub struct AppState {
     pub registration_code:   Arc<tokio::sync::RwLock<String>>,
     pub max_upload_mb:       Arc<tokio::sync::RwLock<usize>>,
     pub admin_settings_lock: Arc<tokio::sync::Mutex<()>>,
+    pub base_path:           String,
+    pub static_index:        Arc<String>,
+    pub static_manifest:     Arc<String>,
+    pub static_sw:           Arc<String>,
 }
 
 impl AppState {
@@ -448,6 +452,12 @@ async fn main() -> Result<()> {
     let paste_store = Arc::new(paste::PasteStore::new(&data_dir));
     let preview_service = Arc::new(preview::PreviewService::new(&data_dir));
 
+    let base_path = std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into());
+    let bp_trimmed = base_path.trim_end_matches('/');
+    let static_index    = Arc::new(include_str!("../static/index.html").replace("/cryptirc", bp_trimmed));
+    let static_manifest = Arc::new(include_str!("../static/manifest.json").replace("/cryptirc", bp_trimmed));
+    let static_sw       = Arc::new(include_str!("../static/sw.js").replace("/cryptirc", bp_trimmed));
+
     let state = AppState {
         connections:         Arc::new(DashMap::new()),
         conn_owners:         Arc::new(DashMap::new()),
@@ -462,6 +472,8 @@ async fn main() -> Result<()> {
         registration_code: Arc::new(tokio::sync::RwLock::new(reg_code)),
         max_upload_mb:     Arc::new(tokio::sync::RwLock::new(max_upload_mb)),
         admin_settings_lock: Arc::new(tokio::sync::Mutex::new(())),
+        base_path: bp_trimmed.to_string(),
+        static_index, static_manifest, static_sw,
     };
 
     // Background: purge expired sessions and stale user events hourly
@@ -472,7 +484,6 @@ async fn main() -> Result<()> {
       });
     }
 
-    let base_path = std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into());
     let inner = Router::new()
         .route("/",                      get(serve_index))
         .route("/Sortable.min.js",       get(serve_sortable_js))
@@ -525,11 +536,19 @@ async fn main() -> Result<()> {
         .route("/e2e/bundle/:username",  get(route_e2e_get_bundle))
         .route("/ws",                    get(ws_handler));
 
-    let app = Router::new()
-        .nest(&base_path, inner)
-        .route(&format!("{}/", base_path), get(serve_index))
-        .layer(middleware::from_fn(security_headers_mw))
-        .with_state(state);
+    let bp = &state.base_path;
+    let app = if bp.is_empty() || bp == "/" {
+        // Base path is root — no nesting needed
+        inner
+            .layer(middleware::from_fn(security_headers_mw))
+            .with_state(state)
+    } else {
+        Router::new()
+            .nest(bp, inner)
+            .route(&format!("{}/", bp), get(serve_index))
+            .layer(middleware::from_fn(security_headers_mw))
+            .with_state(state)
+    };
 
     let port: u16 = std::env::var("CRYPTIRC_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(9001);
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -540,9 +559,9 @@ async fn main() -> Result<()> {
 
 // ─── Static assets ────────────────────────────────────────────────────────────
 
-async fn serve_index()    -> Html<&'static str> { Html(include_str!("../static/index.html")) }
-async fn serve_manifest() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/manifest+json")], include_str!("../static/manifest.json")) }
-async fn serve_sw()       -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/sw.js")) }
+async fn serve_index(State(state): State<AppState>) -> Html<String> { Html((*state.static_index).clone()) }
+async fn serve_manifest(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/manifest+json")], (*state.static_manifest).clone()) }
+async fn serve_sw(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], (*state.static_sw).clone()) }
 async fn serve_icon()     -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/svg+xml")], include_str!("../static/icon.svg")) }
 async fn serve_icon_192() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-192.png").as_slice()) }
 async fn serve_icon_512() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-512.png").as_slice()) }
