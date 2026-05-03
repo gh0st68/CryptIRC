@@ -248,6 +248,11 @@ echo ""
 echo -e "${BOLD}[6/6] Configuring services...${NC}"
 echo ""
 
+if [[ -f /etc/caddy/Caddyfile ]]; then
+    cp /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak.$(date +%s)"
+    echo -e "  ${YELLOW}⚠ Existing Caddyfile backed up to /etc/caddy/Caddyfile.bak.*${NC}"
+fi
+
 cat > /etc/caddy/Caddyfile << CADDY
 {
     email $EMAIL
