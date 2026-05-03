@@ -2189,7 +2189,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     <div id="typing-indicator"></div>
     <div id="input-wrap">
       <div id="input-inner">
-        <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="nope" data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore data-form-type="other" spellcheck="true" autocorrect="on" autocapitalize="none" enterkeyhint="send" type="search" name="msg-input-irc">
+        <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" aria-autocomplete="none" data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore data-form-type="other" spellcheck="true" autocorrect="on" autocapitalize="none" enterkeyhint="send" type="text" name="msg-input-irc-x" inputmode="text">
         <button id="send-btn" onclick="doSend()" title="Send">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="pointer-events:none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
@@ -2715,23 +2715,46 @@ function _onResume(){
   if(!sessionToken)return;
   if(!ws || ws.readyState !== 1){
     connectWs(); // WS dead — reconnect (logs will load via state handler)
-  } else if(active?.conn_id && active?.target){
-    // WS alive but may have missed messages while frozen — ID-based sync
-    const k=bk(active.conn_id,active.target);
-    const lastId=_lastMsgId[k];
-    if(lastId>0){
-      wsend({type:'sync',conn_id:active.conn_id,target:active.target,after_id:lastId});
-    } else {
-      wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
+  } else {
+    // WS alive but may have missed messages while frozen — sync ALL channels
+    // so unread badges populate, not just the active one.
+    for(const net of networks){
+      const id=net.config.id;
+      // Sync each joined channel
+      for(const ch of (net.channels||[])){
+        const k=bk(id,ch.name);
+        const lastId=_lastMsgId[k];
+        if(lastId>0) wsend({type:'sync',conn_id:id,target:ch.name,after_id:lastId});
+      }
+      // Sync open PM/query buffers
+      if(queryBufs[id]){
+        for(const [lc] of queryBufs[id]){
+          const k=bk(id,lc);
+          const lastId=_lastMsgId[k];
+          if(lastId>0) wsend({type:'sync',conn_id:id,target:lc,after_id:lastId});
+        }
+      }
     }
-    // Refresh the nick list for the active channel — we may have missed JOIN/PART/QUIT
-    // events while the tab was frozen (common on mobile PWA when backgrounded).
-    if(active.target.startsWith('#')||active.target.startsWith('&')){
-      wsend({type:'send',conn_id:active.conn_id,raw:`NAMES ${active.target}`});
+    // Sync active channel with full fallback if no lastId
+    if(active?.conn_id && active?.target){
+      const k=bk(active.conn_id,active.target);
+      const lastId=_lastMsgId[k];
+      if(!lastId){
+        wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
+      }
+      // Refresh the nick list for the active channel — we may have missed JOIN/PART/QUIT
+      // events while the tab was frozen (common on mobile PWA when backgrounded).
+      if(active.target.startsWith('#')||active.target.startsWith('&')){
+        wsend({type:'send',conn_id:active.conn_id,raw:`NAMES ${active.target}`});
+      }
     }
   }
   scrollForce();
   updateTypingIndicator();
+  // Safety net: re-render sidebar after sync responses arrive to ensure
+  // unread badges are up to date. Sync responses are async (irc_message events
+  // through the E2E queue), so schedule a sidebar refresh after they settle.
+  [500,1500,3000].forEach(ms=>setTimeout(()=>renderSidebar(),ms));
 }
 document.addEventListener('visibilitychange',()=>{
   if(!document.hidden){_onResume();_resetIdleTimer();}
@@ -3763,15 +3786,15 @@ function prependLogs(conn_id,target,lines){
       scrollForce();
     } else if(area&&unique.length>0){
       // Loading older messages — preserve scroll position. iOS momentum-
-      // scroll can swallow a bare scrollTop assignment here; flush and
-      // restore webkitOverflowScrolling so the anchor sticks.
+      // scroll can swallow a bare scrollTop assignment here; briefly set
+      // overflowY to hidden to flush momentum, then restore.
       const newHeight=area.scrollHeight;
-      const _prev=area.style.webkitOverflowScrolling;
-      area.style.webkitOverflowScrolling='auto';
+      area.style.overflowY='hidden';
+      void area.offsetHeight;
       area.scrollTop=newHeight-oldHeight;
+      area.style.overflowY='';
       requestAnimationFrame(()=>{
         area.scrollTop=newHeight-oldHeight;
-        area.style.webkitOverflowScrolling=_prev||'';
       });
     }
   }
@@ -11662,16 +11685,20 @@ function scrollBottom(){
   const a=document.getElementById('chat-area');
   if(!a)return;
   /* 600px threshold lets a tall new message (image preview, multi-line)
-     still trigger the snap even though it just inflated scrollHeight. */
-  const nearBottom=a.scrollHeight-a.scrollTop-a.clientHeight<600;
+     still trigger the snap even though it just inflated scrollHeight.
+     Use percentage of clientHeight as fallback when keyboard shrinks viewport. */
+  const thresh=Math.max(600, a.clientHeight * 1.5);
+  const nearBottom=a.scrollHeight-a.scrollTop-a.clientHeight<thresh;
   if(nearBottom){
-    // Flush iOS momentum scroll so the assignment actually lands.
-    const _prev=a.style.webkitOverflowScrolling;
-    a.style.webkitOverflowScrolling='auto';
+    // Flush iOS momentum scroll: briefly set overflowY to hidden to interrupt
+    // any in-progress inertial scroll, then restore. The old
+    // webkitOverflowScrolling trick is a no-op on iOS 15+.
+    a.style.overflowY='hidden';
+    void a.offsetHeight; // force reflow
     a.scrollTop=a.scrollHeight;
+    a.style.overflowY='';
     requestAnimationFrame(()=>{
       a.scrollTop=a.scrollHeight;
-      a.style.webkitOverflowScrolling=_prev||'';
     });
   }
   updateScrollBtn();
@@ -11679,16 +11706,15 @@ function scrollBottom(){
 function scrollForce(){
   const a=document.getElementById('chat-area');
   if(!a)return;
-  // iOS momentum-scroll quirk: assigning scrollTop while -webkit-overflow-
-  // scrolling:touch is active can be silently ignored. Briefly flip it to
-  // 'auto' to flush any in-progress momentum, assign, then restore on the
-  // next frame. Desktop/Android ignore the style toggle.
-  const prevOvf=a.style.webkitOverflowScrolling;
-  a.style.webkitOverflowScrolling='auto';
+  // Flush iOS momentum scroll: briefly set overflowY to hidden to interrupt
+  // any in-progress inertial scroll, then restore. The old
+  // webkitOverflowScrolling trick is a no-op on iOS 15+.
+  a.style.overflowY='hidden';
+  void a.offsetHeight; // force reflow
   a.scrollTop=a.scrollHeight;
+  a.style.overflowY='';
   requestAnimationFrame(()=>{
     a.scrollTop=a.scrollHeight;
-    a.style.webkitOverflowScrolling=prevOvf||'';
   });
   [50,150,300,600,1200,2000].forEach(ms=>setTimeout(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();},ms));
   if(typeof ResizeObserver!=='undefined'){
