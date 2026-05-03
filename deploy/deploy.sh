@@ -160,7 +160,7 @@ echo -e "  ${DIM}Installing system packages...${NC}"
 apt-get update -qq
 apt-get install -y --no-install-recommends \
     curl ca-certificates git build-essential pkg-config \
-    libssl-dev python3 python3-pip dnsutils \
+    libssl-dev python3 python3-pip dnsutils ffmpeg \
     debian-keyring debian-archive-keyring apt-transport-https >/dev/null 2>&1
 
 # Install argon2 for adduser.sh

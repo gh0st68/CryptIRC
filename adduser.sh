@@ -3,7 +3,7 @@
 # Usage: sudo bash adduser.sh <username> <email> <password>
 set -euo pipefail
 
-DATA_DIR="/var/lib/cryptirc"
+DATA_DIR="${CRYPTIRC_DATA:-/var/lib/cryptirc}"
 USERNAME="${1:-}"
 EMAIL="${2:-}"
 PASSWORD="${3:-}"
@@ -27,24 +27,34 @@ if [[ ${#PASSWORD} -lt 10 ]]; then
     exit 1
 fi
 
-# Hash password with Argon2id (same format as Rust argon2 crate)
-HASH=$(python3 -c "
-from argon2 import PasswordHasher
-ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, type=argon2.Type.ID)
-print(ph.hash('$PASSWORD'))
-")
+mkdir -p "$DATA_DIR/users"
 
+# Hash password and write user JSON in one python call.
+# All values passed via environment to avoid shell injection.
 CREATED_AT=$(date +%s)
+EMAIL_LOWER=$(echo "$EMAIL" | tr '[:upper:]' '[:lower:]')
 
-cat > "$USER_FILE" << EOF
-{
-  "username": "$USERNAME",
-  "email": "$(echo "$EMAIL" | tr '[:upper:]' '[:lower:]')",
-  "password_hash": "$HASH",
-  "verified": true,
-  "created_at": $CREATED_AT
+_CRYPTIRC_PW="$PASSWORD" \
+_U="$USERNAME" \
+_E="$EMAIL_LOWER" \
+_T="$CREATED_AT" \
+_F="$USER_FILE" \
+python3 -c "
+import json, os
+from argon2 import PasswordHasher
+import argon2
+ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, type=argon2.Type.ID)
+pw_hash = ph.hash(os.environ['_CRYPTIRC_PW'])
+data = {
+    'username': os.environ['_U'],
+    'email': os.environ['_E'],
+    'password_hash': pw_hash,
+    'verified': True,
+    'created_at': int(os.environ['_T'])
 }
-EOF
+with open(os.environ['_F'], 'w') as f:
+    json.dump(data, f, indent=2)
+"
 
 chown cryptirc:cryptirc "$USER_FILE"
 chmod 640 "$USER_FILE"

@@ -3,7 +3,7 @@
 # Usage: sudo bash resetpass.sh <username> <new_password>
 set -euo pipefail
 
-DATA_DIR="/var/lib/cryptirc"
+DATA_DIR="${CRYPTIRC_DATA:-/var/lib/cryptirc}"
 USERNAME="${1:-}"
 PASSWORD="${2:-}"
 
@@ -26,20 +26,21 @@ if [[ ${#PASSWORD} -lt 10 ]]; then
     exit 1
 fi
 
-# Hash password with Argon2id (same format as Rust argon2 crate)
-HASH=$(python3 -c "
-from argon2 import PasswordHasher
-ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, type=argon2.Type.ID)
-print(ph.hash('$PASSWORD'))
-")
-
-# Update the password hash in the user JSON
+# Hash password and update user JSON in one python call.
+# All values passed via environment to avoid shell injection.
+_CRYPTIRC_PW="$PASSWORD" \
+_F="$USER_FILE" \
 python3 -c "
-import json, sys
-with open('$USER_FILE', 'r') as f:
+import json, os
+from argon2 import PasswordHasher
+import argon2
+ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, type=argon2.Type.ID)
+pw_hash = ph.hash(os.environ['_CRYPTIRC_PW'])
+path = os.environ['_F']
+with open(path, 'r') as f:
     user = json.load(f)
-user['password_hash'] = '''$HASH'''
-with open('$USER_FILE', 'w') as f:
+user['password_hash'] = pw_hash
+with open(path, 'w') as f:
     json.dump(user, f, indent=2)
 "
 
