@@ -73,6 +73,7 @@ pub struct AppState {
     pub data_dir:            String,
     pub registration_open:   Arc<tokio::sync::RwLock<bool>>,
     pub registration_code:   Arc<tokio::sync::RwLock<String>>,
+    pub max_upload_mb:       Arc<tokio::sync::RwLock<usize>>,
     pub admin_settings_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -417,17 +418,18 @@ async fn main() -> Result<()> {
     let from_email  = std::env::var("CRYPTIRC_FROM_EMAIL").unwrap_or_else(|_| "noreply@cryptirc.local".into());
     // Load admin settings from disk (persisted), fall back to env vars
     let admin_settings_path = std::path::PathBuf::from(&data_dir).join("admin_settings.json");
-    let (registration_open, reg_code) = if admin_settings_path.exists() {
+    let (registration_open, reg_code, max_upload_mb) = if admin_settings_path.exists() {
         let json = std::fs::read_to_string(&admin_settings_path).unwrap_or_default();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
         let open = v.get("registration_open").and_then(|v| v.as_bool()).unwrap_or(true);
         let code = v.get("registration_code").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        info!("Loaded admin settings from disk (registration_open={}, has_code={})", open, !code.is_empty());
-        (open, code)
+        let upload_mb = v.get("max_upload_mb").and_then(|v| v.as_u64()).unwrap_or(25) as usize;
+        info!("Loaded admin settings from disk (registration_open={}, has_code={}, max_upload_mb={})", open, !code.is_empty(), upload_mb);
+        (open, code, upload_mb)
     } else {
         let open = std::env::var("CRYPTIRC_REGISTRATION").unwrap_or_else(|_| "open".into()) != "closed";
         let code = std::env::var("CRYPTIRC_REG_CODE").unwrap_or_default();
-        (open, code)
+        (open, code, 25)
     };
     std::fs::create_dir_all(&data_dir)?;
     std::fs::create_dir_all(&upload_dir)?;
@@ -458,6 +460,7 @@ async fn main() -> Result<()> {
         data_dir: data_dir.clone(),
         registration_open: Arc::new(tokio::sync::RwLock::new(registration_open)),
         registration_code: Arc::new(tokio::sync::RwLock::new(reg_code)),
+        max_upload_mb:     Arc::new(tokio::sync::RwLock::new(max_upload_mb)),
         admin_settings_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
@@ -497,7 +500,7 @@ async fn main() -> Result<()> {
         .route("/auth/reset",            post(route_reset_password).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/me",               get(route_me))
         .route("/auth/change-password",  post(route_change_password).layer(DefaultBodyLimit::max(8_192)))
-        .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(26_214_400)))
+        .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(500 * 1024 * 1024)))
         .route("/uploads",               get(route_uploads_list))
         .route("/uploads/delete",        post(route_uploads_delete).layer(DefaultBodyLimit::max(4_096)))
         .route("/uploads/clear",         post(route_uploads_clear))
@@ -723,14 +726,16 @@ async fn route_admin_get_settings(State(state): State<AppState>, headers: Header
     }
     let open = *state.registration_open.read().await;
     let code = state.registration_code.read().await.clone();
+    let upload_mb = *state.max_upload_mb.read().await;
     Json(serde_json::json!({
         "registration_open": open,
         "registration_code": code,
+        "max_upload_mb": upload_mb,
     })).into_response()
 }
 
 #[derive(Deserialize)]
-struct AdminSettings { registration_open: Option<bool>, registration_code: Option<String> }
+struct AdminSettings { registration_open: Option<bool>, registration_code: Option<String>, max_upload_mb: Option<usize> }
 
 #[derive(Deserialize)]
 struct AdminAddUser { username: String, password: String, #[serde(default)] email: String }
@@ -773,6 +778,11 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     if let Some(code) = body.registration_code {
         *state.registration_code.write().await = code;
     }
+    if let Some(mb) = body.max_upload_mb {
+        // Clamp to 1–500 MB
+        let clamped = mb.clamp(1, 500);
+        *state.max_upload_mb.write().await = clamped;
+    }
     // Persist admin settings to disk under lock to prevent concurrent read-modify-write races
     let _guard = state.admin_settings_lock.lock().await;
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
@@ -781,6 +791,7 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     } else { serde_json::json!({}) };
     existing["registration_open"] = serde_json::json!(*state.registration_open.read().await);
     existing["registration_code"] = serde_json::json!(*state.registration_code.read().await);
+    existing["max_upload_mb"] = serde_json::json!(*state.max_upload_mb.read().await);
     let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
     drop(_guard);
     (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
@@ -993,7 +1004,8 @@ async fn route_upload(State(state): State<AppState>, headers: HeaderMap, multipa
             if !state.auth.can_upload(&user).await {
                 return (StatusCode::FORBIDDEN, Json(Msg { message: "Upload permission not granted. Contact an admin.".into() })).into_response();
             }
-            match upload::handle_upload(&state.upload_dir, multipart).await {
+            let max_bytes = *state.max_upload_mb.read().await * 1024 * 1024;
+            match upload::handle_upload(&state.upload_dir, multipart, max_bytes).await {
                 Ok(r)  => {
                     // Track upload for the user
                     let _ = upload::record_upload(&state.data_dir, &user, &r).await;

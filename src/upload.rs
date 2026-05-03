@@ -12,7 +12,8 @@ use serde::Serialize;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024; // 25 MB hard cap (axum limit set in main.rs)
+/// Default max upload size — overridden at runtime by admin setting.
+const DEFAULT_MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 
 /// Extensions whose MIME types could execute code in a browser.
 /// These are blocked entirely rather than served with a wrong type.
@@ -39,15 +40,17 @@ pub struct UploadResult {
     pub is_image:      bool,
 }
 
-pub async fn handle_upload(upload_dir: &str, mut multipart: Multipart) -> Result<UploadResult> {
+pub async fn handle_upload(upload_dir: &str, mut multipart: Multipart, max_bytes: usize) -> Result<UploadResult> {
+    let limit = if max_bytes > 0 { max_bytes } else { DEFAULT_MAX_UPLOAD_BYTES };
     while let Some(field) = multipart.next_field().await? {
         let original_name = field.file_name().unwrap_or("upload").to_string();
         // Clamp original_name length
         let original_name: String = original_name.chars().take(255).collect();
 
         let data = field.bytes().await?;
-        if data.len() > MAX_UPLOAD_BYTES {
-            anyhow::bail!("File too large (max 25 MB)");
+        if data.len() > limit {
+            let limit_mb = limit / (1024 * 1024);
+            anyhow::bail!("File too large (max {} MB)", limit_mb);
         }
         if data.is_empty() {
             anyhow::bail!("Empty file");
@@ -71,7 +74,7 @@ pub async fn handle_upload(upload_dir: &str, mut multipart: Multipart) -> Result
         }
 
         // Strip image metadata (EXIF, GPS, camera info, etc.) for privacy
-        let data = strip_image_metadata(&data, &ext);
+        let data = strip_metadata(&data, &ext).await;
 
         let filename = format!("{}.{}", Uuid::new_v4(), ext);
         std::fs::create_dir_all(upload_dir)?;
@@ -207,17 +210,62 @@ pub fn is_image(filename: &str) -> bool {
     matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "ico")
 }
 
-/// Strip metadata from images for privacy.
+/// Strip metadata from uploads for privacy.
 /// JPEG: removes all APP1-APP15 markers (EXIF, XMP, IPTC, GPS, camera info, etc.)
 ///       while preserving APP0 (JFIF), DQT, DHT, SOF, SOS and image data.
 /// PNG:  removes all non-critical ancillary chunks (tEXt, iTXt, zTXt, eXIf, etc.)
 ///       while preserving IHDR, PLTE, IDAT, IEND, tRNS, gAMA, cHRM, sRGB, iCCP.
-fn strip_image_metadata(data: &[u8], ext: &str) -> Vec<u8> {
+/// Video (mp4/webm): uses ffmpeg to strip all metadata while copying streams untouched.
+async fn strip_metadata(data: &[u8], ext: &str) -> Vec<u8> {
     match ext {
         "jpg" | "jpeg" => strip_jpeg_metadata(data),
         "png" => strip_png_metadata(data),
+        "mp4" | "webm" | "mp3" | "ogg" | "wav" | "flac" =>
+            strip_av_metadata(data, ext).await.unwrap_or_else(|| data.to_vec()),
         _ => data.to_vec(),
     }
+}
+
+/// Strip metadata from audio/video files using ffmpeg.
+/// Writes to a temp file, runs ffmpeg -map_metadata -1, reads back the result.
+/// Returns None on any failure (caller falls back to original data).
+async fn strip_av_metadata(data: &[u8], ext: &str) -> Option<Vec<u8>> {
+    use tokio::process::Command;
+
+    let tmp_dir = std::env::temp_dir();
+    let id = uuid::Uuid::new_v4();
+    let input_path = tmp_dir.join(format!("cryptirc_in_{}.{}", id, ext));
+    let output_path = tmp_dir.join(format!("cryptirc_out_{}.{}", id, ext));
+
+    // Write input
+    tokio::fs::write(&input_path, data).await.ok()?;
+
+    let result = Command::new("ffmpeg")
+        .args([
+            "-y",                   // overwrite output
+            "-i", input_path.to_str()?,
+            "-map_metadata", "-1",  // strip all metadata
+            "-c", "copy",           // copy streams without re-encoding
+            output_path.to_str()?,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    // Read output
+    let stripped = if result.map(|s| s.success()).unwrap_or(false) {
+        tokio::fs::read(&output_path).await.ok()
+    } else {
+        None
+    };
+
+    // Clean up temp files
+    let _ = tokio::fs::remove_file(&input_path).await;
+    let _ = tokio::fs::remove_file(&output_path).await;
+
+    stripped
 }
 
 fn strip_jpeg_metadata(data: &[u8]) -> Vec<u8> {

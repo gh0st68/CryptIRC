@@ -11502,6 +11502,12 @@ async function showAdminPanel(){
         <input id="admin-reg-code" value="${esc(settings.registration_code)}" placeholder="Leave empty for no code" style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none" onchange="adminSaveSettings()">
       </div>
       <div style="font-size:10px;color:var(--text3);margin-top:6px">If set, users must enter this code when registering.</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:12px">
+        <span style="font-size:13px;color:var(--text);flex-shrink:0">Max Upload Size</span>
+        <input id="admin-upload-mb" type="number" min="1" max="500" value="${settings.max_upload_mb||25}" style="width:70px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none;text-align:center" onchange="adminSaveSettings()">
+        <span style="font-size:13px;color:var(--text3)">MB</span>
+      </div>
+      <div style="font-size:10px;color:var(--text3);margin-top:4px">Maximum file upload size per file (1–500 MB).</div>
     `;
     body.appendChild(regSection);
 
@@ -11575,11 +11581,15 @@ function closeAdminPanel(){_overlayClose('adminPanel');document.getElementById('
 async function adminSaveSettings(){
   const open=document.getElementById('admin-reg-open').classList.contains('on');
   const code=document.getElementById('admin-reg-code').value;
+  const uploadEl=document.getElementById('admin-upload-mb');
+  const uploadMb=uploadEl?Math.max(1,Math.min(500,parseInt(uploadEl.value)||25)):undefined;
   try{
+    const payload={registration_open:open,registration_code:code};
+    if(uploadMb!==undefined) payload.max_upload_mb=uploadMb;
     await fetch('/cryptirc/admin/settings',{
       method:'PUT',
       headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
-      body:JSON.stringify({registration_open:open,registration_code:code})
+      body:JSON.stringify(payload)
     });
     showToast('Admin settings saved');
   }catch(e){}
