@@ -85,6 +85,14 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 - **Mobile-first PWA** — swipe gestures, safe-area support, works perfectly on iOS and Android
 - **Single Rust binary** — deploy in one command on any Linux server
 
+### Deployment
+- **Single binary** — one `cargo build` and you're done
+- Interactive deploy script for **Debian/Ubuntu** and **Arch Linux** with Caddy, Postfix, and systemd
+- Automatic **HTTPS** via Caddy + Let's Encrypt
+- Hardened systemd unit with **full sandboxing** (ProtectSystem, PrivateTmp, restricted syscalls, no capabilities)
+- **Automatic backups** on update — last 5 snapshots of all user data kept in `/var/lib/cryptirc-backups/`
+- Existing Caddyfile backed up before overwriting — safe for servers already running Caddy
+
 ## Quick Start
 
 ```bash
