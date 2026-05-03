@@ -4663,14 +4663,19 @@ async function handleInput(raw){
     switch(cmd){
       // ── Navigation ──────────────────────────────────────────────────
       case 'JOIN': {
-        let ch=args[0]||'';
-        if(ch&&!ch.startsWith('#')&&!ch.startsWith('&')&&!ch.startsWith('+')&&!ch.startsWith('!')) ch='#'+ch;
-        let jKey=args[1]||null;
-        // Auto-fill saved channel key if none provided
-        if(!jKey){const ks=loadChanKeys();jKey=ks[bk(conn_id,ch)]||null;}
-        // Save key if provided
-        if(args[1]){const ks=loadChanKeys();ks[bk(conn_id,ch)]=args[1];saveChanKeys(ks);}
-        wsend({type:'join_channel',conn_id,channel:ch,key:jKey}); break;
+        const chans=(args[0]||'').split(',').filter(Boolean);
+        const keys=(args[1]||'').split(',');
+        const ks=loadChanKeys();
+        for(let i=0;i<chans.length;i++){
+          let ch=chans[i];
+          if(ch&&!ch.startsWith('#')&&!ch.startsWith('&')&&!ch.startsWith('+')&&!ch.startsWith('!')) ch='#'+ch;
+          let jKey=keys[i]||null;
+          if(!jKey){jKey=ks[bk(conn_id,ch)]||null;}
+          if(keys[i]){ks[bk(conn_id,ch)]=keys[i];}
+          wsend({type:'join_channel',conn_id,channel:ch,key:jKey});
+        }
+        if(keys.some(Boolean)) saveChanKeys(ks);
+        break;
       }
       case 'PART': case 'LEAVE':
         wsend({type:'part_channel',conn_id,channel:args[0]||target}); break;
