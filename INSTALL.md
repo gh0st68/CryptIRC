@@ -4,7 +4,7 @@
 
 ## Requirements
 
-- **OS**: Debian 12 or Ubuntu 22.04+ (other Linux distros work but are untested)
+- **OS**: Debian 12, Ubuntu 22.04+, or Arch Linux
 - **RAM**: 512 MB minimum, 1 GB recommended
 - **Disk**: 1 GB free space minimum
 - **Domain**: A domain or subdomain with an A record pointing to the server's public IP
@@ -28,6 +28,16 @@ For non-interactive install:
 ```bash
 sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
 ```
+
+### Arch Linux
+
+```bash
+git clone https://github.com/gh0st68/CryptIRC.git
+cd CryptIRC
+sudo bash deploy/deploy-arch.sh
+```
+
+Uses `pacman` instead of `apt`, installs `rustup` from the Arch repos, and supports `firewalld`/`iptables` in addition to `ufw`.
 
 After it finishes, visit `https://yourdomain.com` and log in.
 
