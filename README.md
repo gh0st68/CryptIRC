@@ -198,7 +198,10 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 - **Client TLS certificates** -- generate and manage ECDSA P-256 certs for SASL EXTERNAL
 - **Zero-knowledge architecture** -- the server cannot read your messages or credentials
 - **SASL PLAIN protection** -- refuses to send credentials over unencrypted connections
-- **Image metadata stripping** -- EXIF, GPS, camera info auto-removed from uploaded JPEG/PNG
+- **Upload metadata stripping** -- all uploads are automatically scrubbed of metadata before being saved to disk:
+  - **JPEG**: strips all APP1–APP15 markers (EXIF, XMP, IPTC, GPS coordinates, camera make/model, lens info, timestamps) while preserving APP0 (JFIF), quantization tables, Huffman tables, and image data
+  - **PNG**: removes all ancillary chunks (tEXt, iTXt, zTXt, eXIf, dSIG, tIME) while preserving critical chunks (IHDR, PLTE, IDAT, IEND) and safe ancillary chunks (tRNS, gAMA, cHRM, sRGB, iCCP, pHYs)
+  - **Video/Audio** (MP4, WebM, MP3, OGG, WAV, FLAC): uses ffmpeg to strip all metadata containers (`-map_metadata -1`) while copying streams untouched — no re-encoding, no quality loss
 - **Block private messages** -- +g mode with one-time notification per sender (3-hour cooldown)
 - **Session manager** -- view and revoke active sessions across devices
 - **Message expiry** -- configurable auto-delete of local message buffers (1hr–7days)
@@ -260,7 +263,7 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 - **Emoji picker** with colon autocomplete (`:wave:` style)
 - **Slash command autocomplete** -- type `/` to see all 100+ commands
 - **Search** -- search messages in current channel with highlighted results
-- **File uploads** -- drag-and-drop or paperclip, with automatic EXIF/GPS metadata stripping
+- **File uploads** -- drag-and-drop or paperclip, with automatic metadata stripping for images, video, and audio (configurable max size from admin panel)
 - **My Uploads panel** -- view, manage, and delete your uploaded files
 - **Desktop & mobile push notifications** -- iOS PWA support, suppressed when app is focused or DND active
 - **Smart unread badges** -- gray for regular messages, red for mentions and DMs
