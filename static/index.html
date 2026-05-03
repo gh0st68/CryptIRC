@@ -8963,11 +8963,13 @@ function gatherPreferences(){
     stats: {tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount},
     ignoreList: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_ignore')||'[]');}catch{return[];}})(),
     pmAllow: [...pmAllowList],
+    _pmAllowTs: parseInt(localStorage.getItem('cryptirc_pm_allow_ts')||'0'),
     pmBlock: localStorage.getItem('cryptirc_block_pms')==='true',
     pmCooldown: parseInt(localStorage.getItem('cryptirc_pm_cooldown')||'24'),
     pmNotify: localStorage.getItem('cryptirc_pm_notify')!=='false',
     pmDeliverFirst: localStorage.getItem('cryptirc_pm_deliver_first')!=='false',
     pmNet: loadPmNet(),
+    _pmNetTs: parseInt(localStorage.getItem('cryptirc_pm_net_ts')||'0'),
     pmBlocked: loadPmBlocked(),
     highlightWords: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}})(),
     favsOnly: localStorage.getItem('cryptirc_favs_only')==='true',
@@ -9038,12 +9040,20 @@ function restorePreferences(p){
     if(p.lastActive) localStorage.setItem('cryptirc_active',JSON.stringify(p.lastActive));
     if(p.stats){_txBytes=p.stats.tx||0;_rxBytes=p.stats.rx||0;_txCount=p.stats.tc||0;_rxCount=p.stats.rc||0;}
     if(p.ignoreList) localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));
-    if(Array.isArray(p.pmAllow)){pmAllowList=new Set(p.pmAllow.map(s=>String(s).toLowerCase()));localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));}
+    if(Array.isArray(p.pmAllow)){
+      const localTs=parseInt(localStorage.getItem('cryptirc_pm_allow_ts')||'0');
+      const serverTs=p._pmAllowTs||0;
+      if(localTs<=serverTs){pmAllowList=new Set(p.pmAllow.map(s=>String(s).toLowerCase()));localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));}
+    }
     if(p.pmBlock!=null) localStorage.setItem('cryptirc_block_pms',p.pmBlock?'true':'false');
     if(p.pmCooldown!=null) localStorage.setItem('cryptirc_pm_cooldown',String(p.pmCooldown));
     if(p.pmNotify!=null) localStorage.setItem('cryptirc_pm_notify',p.pmNotify?'true':'false');
     if(p.pmDeliverFirst!=null) localStorage.setItem('cryptirc_pm_deliver_first',p.pmDeliverFirst?'true':'false');
-    if(p.pmNet&&typeof p.pmNet==='object') localStorage.setItem('cryptirc_pm_net',JSON.stringify(p.pmNet));
+    if(p.pmNet&&typeof p.pmNet==='object'){
+      const localTs=parseInt(localStorage.getItem('cryptirc_pm_net_ts')||'0');
+      const serverTs=p._pmNetTs||0;
+      if(localTs<=serverTs) localStorage.setItem('cryptirc_pm_net',JSON.stringify(p.pmNet));
+    }
     if(Array.isArray(p.pmBlocked)) localStorage.setItem('cryptirc_pm_blocked',JSON.stringify(p.pmBlocked.slice(-PM_BLOCKED_MAX)));
     if(p.highlightWords) localStorage.setItem('cryptirc_highlight_words',JSON.stringify(p.highlightWords));
     if(p.userNotes) localStorage.setItem('cryptirc_user_notes',JSON.stringify(p.userNotes));
@@ -10536,11 +10546,11 @@ async function _readNotifClickCache(){
 
 // ── PM allow list + per-network settings ─────────────────────────────────────
 let pmAllowList = new Set((()=>{try{return JSON.parse(localStorage.getItem('cryptirc_pm_allow')||'[]');}catch{return[];}})());
-function savePmAllow(){localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));savePrefsToServer();}
+function savePmAllow(){localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));localStorage.setItem('cryptirc_pm_allow_ts',String(Date.now()));savePrefsToServer();}
 
 // Per-network overrides: {[conn_id]: {override:bool, enabled, cooldown, notify, deliverFirst, allowList:[]}}
 function loadPmNet(){try{return JSON.parse(localStorage.getItem('cryptirc_pm_net')||'{}');}catch{return{};}}
-function savePmNet(obj){localStorage.setItem('cryptirc_pm_net',JSON.stringify(obj));savePrefsToServer();}
+function savePmNet(obj){localStorage.setItem('cryptirc_pm_net',JSON.stringify(obj));localStorage.setItem('cryptirc_pm_net_ts',String(Date.now()));savePrefsToServer();}
 
 // Blocked PMs log — capped at 100 most recent to prevent flood
 const PM_BLOCKED_MAX = 100;
