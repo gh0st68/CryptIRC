@@ -2263,6 +2263,7 @@ function saveQueryBufs(){
       obj[connId]=[...m.entries()];
     }
     localStorage.setItem('cryptirc_queries',JSON.stringify(obj));
+    localStorage.setItem('cryptirc_queries_ts',String(Date.now()));
   }catch(e){} savePrefsToServer();
 }
 function loadQueryBufs(){
@@ -8969,6 +8970,7 @@ function gatherPreferences(){
     mentions: mentionsList.slice(0,100),
     inputHistory: inputHistory.slice(-100),
     queries: (()=>{const o={};for(const[c,m] of Object.entries(queryBufs))o[c]=[...m.entries()];return o;})(),
+    _queriesTs: parseInt(localStorage.getItem('cryptirc_queries_ts')||'0'),
     lastActive: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_active'));}catch{return null;}})(),
     stats: {tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount},
     ignoreList: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_ignore')||'[]');}catch{return[];}})(),
@@ -8983,6 +8985,7 @@ function gatherPreferences(){
     pmBlocked: loadPmBlocked(),
     highlightWords: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}})(),
     favsOnly: localStorage.getItem('cryptirc_favs_only')==='true',
+    _favsOnlyTs: parseInt(localStorage.getItem('cryptirc_favs_only_ts')||'0'),
     sidebarCollapsed: localStorage.getItem('cryptirc_sidebar_collapsed')==='1',
     nickCollapsed: localStorage.getItem('cryptirc_nick_collapsed')==='1',
     userNotes: loadUserNotes(),
@@ -9003,17 +9006,24 @@ function savePrefsToServer(){
   clearTimeout(_prefsSaveTimer);
   _prefsSaveTimer=setTimeout(flushPrefsToServer,2000);
 }
+let _lastFlushTs=0;
 function flushPrefsToServer(){
   clearTimeout(_prefsSaveTimer);
   try{
-    const prefs=JSON.stringify(gatherPreferences());
-    wsend({type:'save_preferences',prefs});
+    _lastFlushTs=Date.now();
+    const gathered=gatherPreferences();
+    gathered._saveTs=_lastFlushTs;
+    wsend({type:'save_preferences',prefs:JSON.stringify(gathered)});
   }catch(e){}
 }
 // Flush preferences immediately before page unload to prevent data loss
 window.addEventListener('beforeunload',flushPrefsToServer);
 function restorePreferences(p){
   if(!p)return;
+  // Skip if this is our own echo — the server broadcasts saved prefs back to
+  // all sessions including the sender. Without this check, the echo overwrites
+  // local state that the user may have changed since the save was debounced.
+  if(p._saveTs&&p._saveTs===_lastFlushTs)return;
   try{
     if(p.favorites){
       // Use timestamps to resolve conflict — local wins if modified more recently than last server sync
@@ -9046,7 +9056,11 @@ function restorePreferences(p){
     }
     if(p.mentions) mentionsList=p.mentions;
     if(p.inputHistory) inputHistory=p.inputHistory;
-    if(p.queries){for(const[c,entries] of Object.entries(p.queries))queryBufs[c]=new Map(entries);}
+    if(p.queries){
+      const localTs=parseInt(localStorage.getItem('cryptirc_queries_ts')||'0');
+      const serverTs=p._queriesTs||0;
+      if(localTs<=serverTs){for(const[c,entries] of Object.entries(p.queries))queryBufs[c]=new Map(entries);}
+    }
     if(p.lastActive) localStorage.setItem('cryptirc_active',JSON.stringify(p.lastActive));
     if(p.stats){_txBytes=p.stats.tx||0;_rxBytes=p.stats.rx||0;_txCount=p.stats.tc||0;_rxCount=p.stats.rc||0;}
     if(p.ignoreList) localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));
@@ -9073,7 +9087,11 @@ function restorePreferences(p){
     if(p.dndEnd) localStorage.setItem('cryptirc_dnd_end',p.dndEnd);
     if(p.keepnicks) localStorage.setItem('cryptirc_keepnicks',JSON.stringify(p.keepnicks));
     if(p.networkOrder) localStorage.setItem('cryptirc_net_order',JSON.stringify(p.networkOrder));
-    if(p.favsOnly!=null) localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
+    if(p.favsOnly!=null){
+      const localTs=parseInt(localStorage.getItem('cryptirc_favs_only_ts')||'0');
+      const serverTs=p._favsOnlyTs||0;
+      if(localTs<=serverTs) localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
+    }
     if(p.sidebarCollapsed!=null) localStorage.setItem('cryptirc_sidebar_collapsed',p.sidebarCollapsed?'1':'');
     if(p.nickCollapsed!=null) localStorage.setItem('cryptirc_nick_collapsed',p.nickCollapsed?'1':'');
     // Giphy prefs: seed localStorage from the encrypted server prefs when the
@@ -9364,6 +9382,7 @@ function renderPMList(){
 function toggleFavsOnly(){
   const on=localStorage.getItem('cryptirc_favs_only')==='true';
   localStorage.setItem('cryptirc_favs_only',on?'false':'true');
+  localStorage.setItem('cryptirc_favs_only_ts',String(Date.now()));
   savePrefsToServer();
   applyFavsOnly();
   renderSidebar();
