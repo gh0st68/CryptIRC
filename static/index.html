@@ -2419,12 +2419,12 @@ function initViewportFix() {
         _vvPending = false;
         app.style.height = vv.height + 'px';
         window.scrollTo(0, 0);
-        // If the chat was near the bottom before the viewport resized,
-        // re-anchor it so the user doesn't lose the latest message when
-        // the keyboard opens/closes or browser chrome hides.
-        const area = document.getElementById('chat-area');
-        if (area && (area.scrollHeight - area.scrollTop - area.clientHeight < 300)) {
-          area.scrollTop = area.scrollHeight;
+        // If the user was near the bottom before the viewport resized,
+        // re-anchor so they don't lose the latest message when the
+        // keyboard opens/closes or browser chrome hides.
+        if(!_userScrolledAway){
+          const area = document.getElementById('chat-area');
+          if(area) area.scrollTop = area.scrollHeight;
         }
       });
     }
@@ -2439,8 +2439,10 @@ function initViewportFix() {
       // Remove safe-area bottom padding when keyboard is open (home bar is hidden)
       if(iw) iw.style.paddingBottom = '0';
       [200, 500, 1000].forEach(ms => setTimeout(() => {
-        const area = document.getElementById('chat-area');
-        if (area) area.scrollTop = area.scrollHeight;
+        if(!_userScrolledAway){
+          const area = document.getElementById('chat-area');
+          if (area) area.scrollTop = area.scrollHeight;
+        }
         window.scrollTo(0, 0);
       }, ms));
     });
@@ -2452,10 +2454,7 @@ function initViewportFix() {
         window.scrollTo(0, 0);
         // Chat area just grew (keyboard gone) — if the user was reading the
         // tail before typing, put them back at the latest message.
-        const area = document.getElementById('chat-area');
-        if (area && (area.scrollHeight - area.scrollTop - area.clientHeight < 400)) {
-          scrollForce();
-        }
+        if(!_userScrolledAway) scrollBottom();
       }, 150);
     });
   }
@@ -2750,7 +2749,7 @@ function _onResume(){
       }
     }
   }
-  scrollForce();
+  scrollBottom();
   updateTypingIndicator();
   // Safety net: re-render sidebar after sync responses arrive to ensure
   // unread badges are up to date. Sync responses are async (irc_message events
@@ -4044,10 +4043,10 @@ function renderChat(){
   const _activeAtRender=active&&active.conn_id+'|'+active.target;
   const _mediaScrollDeadline=Date.now()+8000;
   const _mediaScrollFn=()=>{
+    if(_userScrolledAway)return;
     if(!active||active.conn_id+'|'+active.target!==_activeAtRender)return;
     if(Date.now()>_mediaScrollDeadline)return;
-    const dist=area.scrollHeight-area.scrollTop-area.clientHeight;
-    if(dist<200) scrollForce();  // user still near bottom — re-anchor
+    scrollBottom();
   };
   area.querySelectorAll('img,video').forEach(el=>{
     if(el.tagName==='IMG'?el.complete:(el.readyState>=1))return;
@@ -4335,7 +4334,7 @@ function updateTypingIndicator(){
   if(typers.length===1) el._typingBase=typers[0]+' is typing';
   else if(typers.length===2) el._typingBase=typers[0]+' and '+typers[1]+' are typing';
   else el._typingBase=typers.slice(0,-1).join(', ')+' and '+typers[typers.length-1]+' are typing';
-  if(wasHidden){el._dc=0;el.textContent=el._typingBase+'.';scrollForce();}
+  if(wasHidden){el._dc=0;el.textContent=el._typingBase+'.';scrollBottom();}
 }
 // Global typing dot ticker — cycles . .. ... on the indicator whenever visible
 setInterval(()=>{
@@ -4395,7 +4394,7 @@ function buildMediaEl(url){
     const wrap=document.createElement('div');wrap.className='msg-media';
     const img=document.createElement('img');img.className='msg-img';img.src=authedUrl;img.alt='image';img.loading='lazy';
     img.onclick=e=>{e.stopPropagation();openLightbox(authedUrl);};
-    img.onload=()=>scrollBottom();
+    img.onload=()=>{if(!_userScrolledAway)scrollBottom();};
     img.onerror=()=>wrap.style.display='none';
     wrap.appendChild(img);
     return wrap;
@@ -4410,7 +4409,7 @@ function buildMediaEl(url){
   // Videos
   if(VID_EXTS.test(url)){
     const wrap=document.createElement('div');wrap.className='msg-media';
-    const vid=document.createElement('video');vid.src=authedUrl;vid.controls=true;vid.preload='metadata';vid.onloadedmetadata=()=>scrollBottom();
+    const vid=document.createElement('video');vid.src=authedUrl;vid.controls=true;vid.preload='metadata';vid.onloadedmetadata=()=>{if(!_userScrolledAway)scrollBottom();};
     wrap.appendChild(vid);
     return wrap;
   }
@@ -4421,14 +4420,14 @@ function buildMediaEl(url){
     const wrap=document.createElement('div');
     wrap.className='msg-yt';
     wrap.innerHTML=`<div class="msg-yt-thumb"><img src="https://img.youtube.com/vi/${ytId}/hqdefault.jpg" alt="YouTube" loading="lazy"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${_ytUid}">Loading...</div><div class="msg-yt-desc" id="yt-d-${_ytUid}"></div><div class="msg-yt-meta" id="yt-m-${_ytUid}"><span>YouTube</span></div></div>`;
-    wrap.querySelector('img').onload=()=>scrollBottom();
+    wrap.querySelector('img').onload=()=>{if(!_userScrolledAway)scrollBottom();};
     wrap.querySelector('img').onerror=()=>wrap.style.display='none';
     // Click thumbnail to play inline — click title/info to open in browser
     wrap.querySelector('.msg-yt-thumb').addEventListener('click',(e)=>{
       e.preventDefault();e.stopPropagation();
       const thumb=wrap.querySelector('.msg-yt-thumb');
       thumb.innerHTML=`<iframe src="https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0&modestbranding=1" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="no-referrer-when-downgrade"></iframe>`;
-      scrollBottom();
+      if(!_userScrolledAway)scrollBottom();
     });
     wrap.querySelector('.msg-yt-info').addEventListener('click',()=>window.open(url,'_blank'));
     // Fetch video info via noembed (no API key needed, privacy-friendly)
@@ -4463,7 +4462,7 @@ function buildMediaEl(url){
           if(d.viewCount) parts.push(d.viewCount.toLocaleString()+' views');
           if(d.likes) parts.push(d.likes.toLocaleString()+' likes');
           metaEl.innerHTML=parts.map(p=>`<span>${p}</span>`).join('');
-          scrollBottom();
+          if(!_userScrolledAway)scrollBottom();
         }
       }
     }).catch(()=>{});
@@ -4485,15 +4484,14 @@ function buildMediaEl(url){
         let html=`<div class="msg-link-preview-domain">${esc(d.site_name||d.domain)}</div>`;
         html+=`<div class="msg-link-preview-title">${esc(d.title)}</div>`;
         if(d.description) html+=`<div class="msg-link-preview-desc">${esc(d.description)}</div>`;
-        if(d.image&&d.image.startsWith('https://')) html+=`<img class="msg-link-preview-img" src="${esc(d.image)}" loading="lazy" onload="scrollBottom()" onerror="this.remove()">`;
+        if(d.image&&d.image.startsWith('https://')) html+=`<img class="msg-link-preview-img" src="${esc(d.image)}" loading="lazy" onload="if(!_userScrolledAway)scrollBottom()" onerror="this.remove()">`;
         el.innerHTML=html;
         el.style.display='';
         // Card just materialized — may have added meaningful height. If the
         // user is near the bottom, re-anchor to the latest message. 500px
         // threshold covers a revealed preview + small image without
         // snapping users who deliberately scrolled up.
-        const _area=document.getElementById('chat-area');
-        if(_area && _area.scrollHeight-_area.scrollTop-_area.clientHeight<200) scrollForce();
+        if(!_userScrolledAway) scrollBottom();
       }).catch(()=>card.remove());
     return card;
   }
@@ -10021,9 +10019,9 @@ function closeSidebar(){
   _overlayClose('sidebar');
   document.getElementById('sidebar').classList.remove('open');
   document.getElementById('sidebar-backdrop').classList.remove('show');
-  // Mobile: viewport settles after sidebar CSS transition. Fire an extra
-  // scrollForce once the layout is stable so the chat lands at the bottom.
-  setTimeout(()=>scrollForce(),350);
+  // Mobile: viewport settles after sidebar CSS transition. Re-anchor only
+  // if the user was already near the bottom.
+  setTimeout(()=>scrollBottom(),350);
 }
 function toggleNickPanel(){
   const np=document.getElementById('nick-panel');
@@ -11730,53 +11728,51 @@ function showHelp(conn_id, target, specific) {
 }
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
+let _userScrolledAway=false;
+let _scrollForceTimers=[];
+let _scrollForceRO=null;
+function _isNearBottom(a,thresh){return a.scrollHeight-a.scrollTop-a.clientHeight<thresh;}
+function _iosFlushScroll(a){a.style.overflowY='hidden';void a.offsetHeight;a.scrollTop=a.scrollHeight;a.style.overflowY='';requestAnimationFrame(()=>{a.scrollTop=a.scrollHeight;});}
 function scrollBottom(){
   const a=document.getElementById('chat-area');
-  if(!a)return;
-  const thresh=150;
-  const nearBottom=a.scrollHeight-a.scrollTop-a.clientHeight<thresh;
-  if(nearBottom){
-    // Flush iOS momentum scroll: briefly set overflowY to hidden to interrupt
-    // any in-progress inertial scroll, then restore. The old
-    // webkitOverflowScrolling trick is a no-op on iOS 15+.
-    a.style.overflowY='hidden';
-    void a.offsetHeight; // force reflow
-    a.scrollTop=a.scrollHeight;
-    a.style.overflowY='';
-    requestAnimationFrame(()=>{
-      a.scrollTop=a.scrollHeight;
-    });
-  }
+  if(!a||_userScrolledAway)return;
+  if(_isNearBottom(a,150)){_iosFlushScroll(a);}
   updateScrollBtn();
 }
 function scrollForce(){
   const a=document.getElementById('chat-area');
   if(!a)return;
-  // Flush iOS momentum scroll: briefly set overflowY to hidden to interrupt
-  // any in-progress inertial scroll, then restore. The old
-  // webkitOverflowScrolling trick is a no-op on iOS 15+.
-  a.style.overflowY='hidden';
-  void a.offsetHeight; // force reflow
-  a.scrollTop=a.scrollHeight;
-  a.style.overflowY='';
-  requestAnimationFrame(()=>{
-    a.scrollTop=a.scrollHeight;
+  _userScrolledAway=false;
+  _iosFlushScroll(a);
+  // Cancel any previous delayed scrolls
+  _scrollForceTimers.forEach(t=>clearTimeout(t));
+  _scrollForceTimers=[];
+  if(_scrollForceRO){_scrollForceRO.disconnect();_scrollForceRO=null;}
+  // Delayed re-anchors — but bail if user scrolls away in the meantime
+  [50,150,300,600,1200,2000].forEach(ms=>{
+    _scrollForceTimers.push(setTimeout(()=>{
+      if(_userScrolledAway)return;
+      a.scrollTop=a.scrollHeight;updateScrollBtn();
+    },ms));
   });
-  [50,150,300,600,1200,2000].forEach(ms=>setTimeout(()=>{a.scrollTop=a.scrollHeight;updateScrollBtn();},ms));
   if(typeof ResizeObserver!=='undefined'){
-    // Observe for 3s and re-anchor on resize, but only if the user is still
-    // near the bottom (so mid-window scroll-ups aren't snapped back).
-    let _so=new ResizeObserver(()=>{
-      const dist=a.scrollHeight-a.scrollTop-a.clientHeight;
-      if(dist<400){a.scrollTop=a.scrollHeight;updateScrollBtn();}
+    _scrollForceRO=new ResizeObserver(()=>{
+      if(_userScrolledAway)return;
+      if(_isNearBottom(a,150)){a.scrollTop=a.scrollHeight;updateScrollBtn();}
     });
-    _so.observe(a);
-    setTimeout(()=>_so.disconnect(),3000);
+    _scrollForceRO.observe(a);
+    _scrollForceTimers.push(setTimeout(()=>{if(_scrollForceRO){_scrollForceRO.disconnect();_scrollForceRO=null;}},3000));
   }
 }
 function updateScrollBtn(){const a=document.getElementById('chat-area'),b=document.getElementById('scroll-bottom-btn');if(!a||!b)return;const far=a.scrollHeight-a.scrollTop-a.clientHeight>200;b.classList.toggle('show',far);}
+function _onChatScroll(){
+  const a=document.getElementById('chat-area');
+  if(!a)return;
+  _userScrolledAway=!_isNearBottom(a,200);
+  updateScrollBtn();
+}
 // Attach scroll listener once DOM ready
-document.addEventListener('DOMContentLoaded',()=>{document.getElementById('chat-area')?.addEventListener('scroll',updateScrollBtn);});
+document.addEventListener('DOMContentLoaded',()=>{document.getElementById('chat-area')?.addEventListener('scroll',_onChatScroll);});
 
 // ─── Mentions system ──────────────────────────────────────────────────────────
 let mentionsList=[];
