@@ -319,6 +319,8 @@ pub struct NetworkConfig {
     pub sasl_external:         bool,
     pub client_cert_id:        Option<String>,
     pub auto_join:             Vec<String>,
+    #[serde(default)]
+    pub channel_keys:          std::collections::HashMap<String, String>,
     pub auto_reconnect:        bool,
     #[serde(default)]
     pub oper_login:            Option<String>,
@@ -346,7 +348,7 @@ impl Default for NetworkConfig {
             nick: String::new(), realname: String::new(), username: String::new(),
             password: None, sasl_plain: None,
             sasl_external: false, client_cert_id: None,
-            auto_join: vec![], auto_reconnect: true,
+            auto_join: vec![], auto_reconnect: true, channel_keys: std::collections::HashMap::new(),
             oper_login: None, oper_pass: None,
             channel_order: vec![],
             nickserv_pass: None, auto_identify: false,
@@ -1674,7 +1676,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                         }
                     }
                 }
-                // Persist JOIN/PART in auto_join
+                // Persist JOIN/PART in auto_join (with channel key if provided)
                 let upper = safe.to_uppercase();
                 if upper.starts_with("JOIN ") || upper.starts_with("PART ") {
                     let parts: Vec<&str> = safe.splitn(3, ' ').collect();
@@ -1684,12 +1686,20 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                             if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
                                 let lc = ch.to_lowercase();
                                 if upper.starts_with("JOIN ") {
+                                    let mut changed = false;
                                     if !cfg.auto_join.iter().any(|c| c.to_lowercase() == lc) && cfg.auto_join.len() < 100 {
                                         cfg.auto_join.push(ch.to_string());
-                                        let _ = state.save_network(&cfg, username).await;
+                                        changed = true;
                                     }
+                                    // Save channel key if provided (JOIN #chan key)
+                                    if parts.len() >= 3 && !parts[2].is_empty() {
+                                        cfg.channel_keys.insert(lc, parts[2].to_string());
+                                        changed = true;
+                                    }
+                                    if changed { let _ = state.save_network(&cfg, username).await; }
                                 } else {
                                     cfg.auto_join.retain(|c| c.to_lowercase() != lc);
+                                    cfg.channel_keys.remove(&lc);
                                     let _ = state.save_network(&cfg, username).await;
                                 }
                             }
@@ -1710,13 +1720,19 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                     _ => format!("JOIN {}\r\n", safe_ch),
                 };
                 let _ = conn.lock().await.send_raw(&cmd).await;
-                // Persist channel in auto_join
+                // Persist channel in auto_join (with key if provided)
                 if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
                     let lc = safe_ch.to_lowercase();
+                    let mut changed = false;
                     if !cfg.auto_join.iter().any(|c| c.to_lowercase() == lc) {
-                        cfg.auto_join.push(safe_ch);
-                        let _ = state.save_network(&cfg, username).await;
+                        cfg.auto_join.push(safe_ch.clone());
+                        changed = true;
                     }
+                    match key.as_deref() {
+                        Some(k) if !k.is_empty() => { cfg.channel_keys.insert(lc, strip_crlf(k).to_string()); changed = true; }
+                        _ => {}
+                    }
+                    if changed { let _ = state.save_network(&cfg, username).await; }
                 }
             }
         }
@@ -1739,6 +1755,7 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
                 user_nick = cfg.nick.clone();
                 let lc = safe.to_lowercase();
                 cfg.auto_join.retain(|c| c.to_lowercase() != lc);
+                cfg.channel_keys.remove(&lc);
                 let _ = state.save_network(&cfg, username).await;
             }
             // When offline, no server will echo the PART back — synthesize the

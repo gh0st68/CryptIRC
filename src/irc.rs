@@ -667,7 +667,13 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         for ch in &cfg.auto_join {
                             let safe = strip_crlf(ch);
                             if !safe.is_empty() {
-                                conn.lock().await.send_raw(&format!("JOIN {}\r\n", safe)).await?;
+                                let lc = safe.to_lowercase();
+                                let cmd = if let Some(key) = cfg.channel_keys.get(&lc) {
+                                    format!("JOIN {} {}\r\n", safe, key)
+                                } else {
+                                    format!("JOIN {}\r\n", safe)
+                                };
+                                conn.lock().await.send_raw(&cmd).await?;
                             }
                         }
                     }
