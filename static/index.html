@@ -2698,18 +2698,31 @@ window.addEventListener('popstate', () => {
 // silently drops WS messages without firing onclose, so the connection looks
 // alive but no events arrive. Periodically poll for missed messages on the
 // active channel, and force-reconnect if the WS has been quiet for too long.
-setInterval(()=>{
+function _syncActiveChannel(){
   if(!sessionToken||!ws||ws.readyState!==1)return;
-  // Background sync: re-fetch any messages we might have missed on the active channel
-  if(active?.conn_id && active?.target && active.target!=='status'){
-    const _sk=bk(active.conn_id,active.target),_lid=_lastMsgId[_sk];
-    if(_lid>0) wsend({type:'sync',conn_id:active.conn_id,target:active.target,after_id:_lid});
-  }
-  // Staleness check: if WS hasn't had activity in 90s, it's likely a zombie — reconnect
-  if(Date.now()-_lastWsActivity > 90000){
+  if(!active?.conn_id||!active?.target||active.target==='status')return;
+  const _sk=bk(active.conn_id,active.target),_lid=_lastMsgId[_sk];
+  if(_lid>0) wsend({type:'sync',conn_id:active.conn_id,target:active.target,after_id:_lid});
+  else wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:50});
+}
+setInterval(()=>{
+  _syncActiveChannel();
+  // Staleness check: if WS hasn't had activity in 30s, it's likely a zombie — reconnect
+  if(sessionToken&&ws&&ws.readyState===1&&Date.now()-_lastWsActivity>30000){
     try{ws.close();}catch(e){} // onclose will trigger reconnect via the handler chain
   }
-},15000);
+},5000);
+// Touch/interaction-based sync: iOS may throttle setInterval but touch events
+// always fire. Debounced to avoid spamming on every tap.
+let _lastTouchSync=0;
+function _onTouchSync(){
+  const now=Date.now();
+  if(now-_lastTouchSync<3000)return; // at most once per 3s
+  _lastTouchSync=now;
+  _syncActiveChannel();
+}
+document.addEventListener('touchstart',_onTouchSync,{passive:true});
+document.addEventListener('click',_onTouchSync,{passive:true});
 // Reconnect + catch up when app comes back from background (iOS PWA, minimized desktop, etc.)
 function _onResume(){
   if(!sessionToken)return;
