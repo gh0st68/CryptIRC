@@ -4573,7 +4573,21 @@ document.addEventListener('DOMContentLoaded',()=>{
 
   const inp=document.getElementById('msg-input');
   inp.addEventListener('keydown', async e=>{
-    if(e.key==='Enter')          { sendTypingDone(); await handleInput(inp.value); inp.value=''; historyIdx=-1; }
+    if(e.key==='Enter')          {
+      // Defer to any open autocomplete picker (slash, nick, emoji, chan).
+      // Those pickers register their own keydown handlers AFTER this one,
+      // so they run later in dispatch order — without this early return,
+      // the main submit path would always fire first and ship a half-typed
+      // /command, @nick, :emoji or #channel before the picker had a chance
+      // to complete it.
+      const _slashAc = document.getElementById('slash-autocomplete');
+      const _nickAc  = document.getElementById('nick-autocomplete');
+      const _emojiAc = document.getElementById('emoji-autocomplete');
+      const _chanAc  = document.getElementById('chan-autocomplete');
+      const _acOpen = (el) => el && el.style.display && el.style.display!=='none';
+      if(_acOpen(_slashAc)||_acOpen(_nickAc)||_acOpen(_emojiAc)||_acOpen(_chanAc)) return;
+      sendTypingDone(); await handleInput(inp.value); inp.value=''; historyIdx=-1;
+    }
     else if(e.key==='ArrowUp')   {if(historyIdx<inputHistory.length-1){historyIdx++;inp.value=inputHistory[inputHistory.length-1-historyIdx];}e.preventDefault();}
     else if(e.key==='ArrowDown') {if(historyIdx>0){historyIdx--;inp.value=inputHistory[inputHistory.length-1-historyIdx];}else{historyIdx=-1;inp.value='';}e.preventDefault();}
     else if(e.key==='Tab')       {e.preventDefault();tabComplete(inp);}
@@ -7392,7 +7406,12 @@ document.addEventListener('click',e=>{
     acEl.style.display='block'; acIdx=0;
     acEl.innerHTML=matches.map((em,i)=>`<div class="emoji-ac-item${i===0?' active':''}" data-i="${i}">${em.e} :${em.n}:</div>`).join('');
     acEl.querySelectorAll('.emoji-ac-item').forEach(el=>{
-      el.onclick=()=>{completeEmoji(matches[+el.dataset.i]);};
+      // pointerdown + preventDefault — same iOS-blur-cascade fix as nick picker.
+      el.addEventListener('pointerdown',e=>{
+        if(e.button!==undefined && e.button!==0) return;
+        e.preventDefault();
+        completeEmoji(matches[+el.dataset.i]);
+      });
     });
   });
   function completeEmoji(em){
@@ -7446,7 +7465,16 @@ document.addEventListener('click',e=>{
     nacEl.style.display='block'; nacIdx=0;
     nacEl.innerHTML=nicks.map((n,i)=>`<div class="emoji-ac-item${i===0?' active':''}" data-i="${i}" style="font-size:13px"><span class="nc${nickHash(n)}">${esc(n)}</span></div>`).join('');
     nacEl.querySelectorAll('.emoji-ac-item').forEach(el=>{
-      el.onclick=()=>{completeNick(nicks[+el.dataset.i]);};
+      // pointerdown + preventDefault to dodge the iOS input-blur cascade:
+      // a plain click handler gets eaten because the tap blurs the input,
+      // dismisses the keyboard, slides the overlay down out of the original
+      // tap coordinates, and the synthetic click lands on empty space →
+      // user has to tap twice. This is the same fix slash uses below.
+      el.addEventListener('pointerdown',e=>{
+        if(e.button!==undefined && e.button!==0) return;
+        e.preventDefault();
+        completeNick(nicks[+el.dataset.i]);
+      });
     });
   });
   function completeNick(nick){
@@ -7640,7 +7668,10 @@ document.addEventListener('click',e=>{
     if(!items.length)return;
     if(e.key==='ArrowDown'){e.preventDefault();slashIdx=Math.min(slashIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
     else if(e.key==='ArrowUp'){e.preventDefault();slashIdx=Math.max(slashIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
-    else if(e.key==='Tab'){
+    else if(e.key==='Tab'||e.key==='Enter'){
+      // Enter and Tab both commit the highlighted command. Main keydown
+      // handler at the top of this file early-returns when this picker is
+      // open, so by the time we get here, the message hasn't been sent yet.
       e.preventDefault();
       const v=inp.value;
       const q=v.slice(1).toLowerCase();
@@ -7649,7 +7680,6 @@ document.addEventListener('click',e=>{
       if(show[slashIdx])completeSlash(show[slashIdx]);
     }
     else if(e.key==='Escape'){slashEl.style.display='none';slashIdx=-1;}
-    else if(e.key==='Enter'){slashEl.style.display='none';slashIdx=-1;}
   });
   // Close on click outside
   document.addEventListener('click',e=>{if(!e.target.closest('#slash-autocomplete')&&!e.target.closest('#msg-input'))slashEl.style.display='none';});
@@ -8621,7 +8651,14 @@ function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFi
     if(!chans.length){chEl.style.display='none';chIdx=-1;return;}
     chEl.style.display='block';chIdx=0;
     chEl.innerHTML=chans.map((c,i)=>`<div class="emoji-ac-item${i===0?' active':''}" data-i="${i}" style="font-size:13px;color:var(--text2)">${esc(c)}</div>`).join('');
-    chEl.querySelectorAll('.emoji-ac-item').forEach(el=>{el.onclick=()=>{completeChan(chans[+el.dataset.i]);};});
+    chEl.querySelectorAll('.emoji-ac-item').forEach(el=>{
+      // pointerdown + preventDefault — same iOS-blur-cascade fix as nick picker.
+      el.addEventListener('pointerdown',e=>{
+        if(e.button!==undefined && e.button!==0) return;
+        e.preventDefault();
+        completeChan(chans[+el.dataset.i]);
+      });
+    });
   });
   function completeChan(ch){
     const v=inp.value,pos=inp.selectionStart,before=v.slice(0,pos);
