@@ -7708,11 +7708,10 @@ document.addEventListener('click',e=>{
     if(e.key==='ArrowDown'){e.preventDefault();e.stopImmediatePropagation();slashIdx=Math.min(slashIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
     else if(e.key==='ArrowUp'){e.preventDefault();e.stopImmediatePropagation();slashIdx=Math.max(slashIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
     else if(e.key==='Tab'||e.key==='Enter'){
-      // Tab: complete only (leave cursor for arg typing).
-      // Enter: complete AND submit immediately IFF the command is argless
-      // (usage field is exactly '/cmd' with no placeholders). For commands
-      // that take args (like /op nick or /msg target text) Enter still just
-      // completes — the user types the args and presses Enter again.
+      // Tab: complete only (leave cursor parked for arg typing).
+      // Enter: complete AND submit. For argless commands we run them. For
+      // arg-taking commands we still complete and park the cursor — the user
+      // is expected to type args and press Enter again.
       e.preventDefault();
       e.stopImmediatePropagation();
       const v=inp.value;
@@ -7724,8 +7723,17 @@ document.addEventListener('click',e=>{
         completeSlash(picked);
         const argless = (picked.usage||'').trim() === '/'+picked.cmd;
         if(e.key==='Enter' && argless){
-          inp.value = inp.value.replace(/\s+$/, '');
-          if(typeof doSend==='function') doSend();
+          // Belt-and-suspenders against any other handler firing on this same
+          // keydown event: synchronously clear inp.value FIRST so any
+          // downstream `handleInput(inp.value)` call (main keydown, etc.) sees
+          // an empty input and bails. Capture the command separately, then
+          // dispatch via setTimeout(0) so the rest of the current event
+          // finishes before we actually fire the command.
+          const cmdToRun = inp.value.replace(/\s+$/, '');
+          inp.value = '';
+          setTimeout(()=>{
+            if(typeof handleInput === 'function') handleInput(cmdToRun);
+          }, 0);
         }
       }
     }
