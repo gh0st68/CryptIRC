@@ -7453,11 +7453,13 @@ document.addEventListener('click',e=>{
     if(acEl.style.display==='none')return;
     const items=acEl.querySelectorAll('.emoji-ac-item');
     if(!items.length)return;
-    if(e.key==='ArrowDown'){e.preventDefault();acIdx=Math.min(acIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===acIdx));}
-    else if(e.key==='ArrowUp'){e.preventDefault();acIdx=Math.max(acIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===acIdx));}
+    // stopImmediatePropagation — see slash-picker comment for the why.
+    if(e.key==='ArrowDown'){e.preventDefault();e.stopImmediatePropagation();acIdx=Math.min(acIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===acIdx));}
+    else if(e.key==='ArrowUp'){e.preventDefault();e.stopImmediatePropagation();acIdx=Math.max(acIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===acIdx));}
     else if(e.key==='Tab'||e.key==='Enter'){
       if(acIdx>=0&&acIdx<items.length){
         e.preventDefault();
+        e.stopImmediatePropagation();
         const q=inp.value.slice(0,inp.selectionStart).match(/:([a-z0-9_]{2,})$/)?.[1]||'';
         const matches=EMOJIS.filter(em=>em.n.includes(q)).slice(0,8);
         if(matches[acIdx])completeEmoji(matches[acIdx]);
@@ -7516,18 +7518,20 @@ document.addEventListener('click',e=>{
     if(nacEl.style.display==='none')return;
     const items=nacEl.querySelectorAll('.emoji-ac-item');
     if(!items.length)return;
-    if(e.key==='ArrowDown'){e.preventDefault();nacIdx=Math.min(nacIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===nacIdx));}
-    else if(e.key==='ArrowUp'){e.preventDefault();nacIdx=Math.max(nacIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===nacIdx));}
+    // stopImmediatePropagation — see slash-picker comment for the why.
+    if(e.key==='ArrowDown'){e.preventDefault();e.stopImmediatePropagation();nacIdx=Math.min(nacIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===nacIdx));}
+    else if(e.key==='ArrowUp'){e.preventDefault();e.stopImmediatePropagation();nacIdx=Math.max(nacIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===nacIdx));}
     else if(e.key==='Tab'||e.key==='Enter'){
       if(nacIdx>=0&&nacIdx<items.length){
         e.preventDefault();
+        e.stopImmediatePropagation();
         const nicks=getChannelNicks().filter(n=>n.toLowerCase().startsWith(
           (inp.value.slice(0,inp.selectionStart).match(/@([a-zA-Z0-9_\-\[\]\\`^]{0,20})$/)||[])[1]?.toLowerCase()||''
         )).slice(0,10);
         if(nicks[nacIdx])completeNick(nicks[nacIdx]);
       }
     }
-    else if(e.key==='Escape'){nacEl.style.display='none';nacIdx=-1;}
+    else if(e.key==='Escape'){e.stopImmediatePropagation();nacEl.style.display='none';nacIdx=-1;}
   });
 })();
 
@@ -7693,18 +7697,24 @@ document.addEventListener('click',e=>{
     if(slashEl.style.display==='none'||slashEl.style.display==='')return;
     const items=slashEl.querySelectorAll('.slash-ac-item');
     if(!items.length)return;
-    if(e.key==='ArrowDown'){e.preventDefault();slashIdx=Math.min(slashIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
-    else if(e.key==='ArrowUp'){e.preventDefault();slashIdx=Math.max(slashIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
+    // CRITICAL: stopImmediatePropagation on every key we handle. This IIFE's
+    // keydown is registered during HTML parse — the main inp.keydown handler
+    // registers later inside DOMContentLoaded. JS dispatches in registration
+    // order, so without this stop, completeSlash() closes the picker FIRST,
+    // then the main handler runs against a now-closed picker, fails its
+    // defer check, and pipes the half-typed value into handleInput (causing
+    // a double-execute for argless commands and a stale partial submit for
+    // arg-taking ones). The earlier _acOpen defer was insufficient.
+    if(e.key==='ArrowDown'){e.preventDefault();e.stopImmediatePropagation();slashIdx=Math.min(slashIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
+    else if(e.key==='ArrowUp'){e.preventDefault();e.stopImmediatePropagation();slashIdx=Math.max(slashIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
     else if(e.key==='Tab'||e.key==='Enter'){
       // Tab: complete only (leave cursor for arg typing).
       // Enter: complete AND submit immediately IFF the command is argless
       // (usage field is exactly '/cmd' with no placeholders). For commands
       // that take args (like /op nick or /msg target text) Enter still just
       // completes — the user types the args and presses Enter again.
-      // Main keydown handler at the top of this file early-returns while
-      // this picker is open, so by the time we get here, the message
-      // hasn't been sent yet.
       e.preventDefault();
+      e.stopImmediatePropagation();
       const v=inp.value;
       const q=v.slice(1).toLowerCase();
       const matches=q?CMDS.filter(c=>c.cmd.startsWith(q)):CMDS;
@@ -7712,18 +7722,14 @@ document.addEventListener('click',e=>{
       const picked=show[slashIdx];
       if(picked){
         completeSlash(picked);
-        // Auto-submit argless commands on Enter (Tab stays at "complete only").
         const argless = (picked.usage||'').trim() === '/'+picked.cmd;
         if(e.key==='Enter' && argless){
-          // Trim the trailing space completeSlash added, then submit.
           inp.value = inp.value.replace(/\s+$/, '');
-          // doSend() has the _sendLock guard so a stray double-fire can't
-          // ship the command twice.
           if(typeof doSend==='function') doSend();
         }
       }
     }
-    else if(e.key==='Escape'){slashEl.style.display='none';slashIdx=-1;}
+    else if(e.key==='Escape'){e.stopImmediatePropagation();slashEl.style.display='none';slashIdx=-1;}
   });
   // Close on click outside
   document.addEventListener('click',e=>{if(!e.target.closest('#slash-autocomplete')&&!e.target.closest('#msg-input'))slashEl.style.display='none';});
@@ -8713,10 +8719,11 @@ function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFi
   inp.addEventListener('keydown',e=>{
     if(chEl.style.display==='none')return;
     const items=chEl.querySelectorAll('.emoji-ac-item');if(!items.length)return;
-    if(e.key==='ArrowDown'){e.preventDefault();chIdx=Math.min(chIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===chIdx));}
-    else if(e.key==='ArrowUp'){e.preventDefault();chIdx=Math.max(chIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===chIdx));}
-    else if(e.key==='Tab'||e.key==='Enter'){if(chIdx>=0&&chIdx<items.length){e.preventDefault();const chans=getAllChannels().filter(c=>c.toLowerCase().startsWith(((inp.value.slice(0,inp.selectionStart).match(/(^|\s)(#[a-zA-Z0-9_\-]{0,30})$/)||[])[2]||'').toLowerCase())).slice(0,10);if(chans[chIdx])completeChan(chans[chIdx]);}}
-    else if(e.key==='Escape'){chEl.style.display='none';chIdx=-1;}
+    // stopImmediatePropagation — see slash-picker comment for the why.
+    if(e.key==='ArrowDown'){e.preventDefault();e.stopImmediatePropagation();chIdx=Math.min(chIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===chIdx));}
+    else if(e.key==='ArrowUp'){e.preventDefault();e.stopImmediatePropagation();chIdx=Math.max(chIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===chIdx));}
+    else if(e.key==='Tab'||e.key==='Enter'){if(chIdx>=0&&chIdx<items.length){e.preventDefault();e.stopImmediatePropagation();const chans=getAllChannels().filter(c=>c.toLowerCase().startsWith(((inp.value.slice(0,inp.selectionStart).match(/(^|\s)(#[a-zA-Z0-9_\-]{0,30})$/)||[])[2]||'').toLowerCase())).slice(0,10);if(chans[chIdx])completeChan(chans[chIdx]);}}
+    else if(e.key==='Escape'){e.stopImmediatePropagation();chEl.style.display='none';chIdx=-1;}
   });
   document.addEventListener('click',e=>{if(!e.target.closest('#chan-autocomplete')&&!e.target.closest('#msg-input'))chEl.style.display='none';});
 })();
