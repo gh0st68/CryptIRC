@@ -7696,15 +7696,32 @@ document.addEventListener('click',e=>{
     if(e.key==='ArrowDown'){e.preventDefault();slashIdx=Math.min(slashIdx+1,items.length-1);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
     else if(e.key==='ArrowUp'){e.preventDefault();slashIdx=Math.max(slashIdx-1,0);items.forEach((el,i)=>el.classList.toggle('active',i===slashIdx));items[slashIdx]?.scrollIntoView({block:'nearest'});}
     else if(e.key==='Tab'||e.key==='Enter'){
-      // Enter and Tab both commit the highlighted command. Main keydown
-      // handler at the top of this file early-returns when this picker is
-      // open, so by the time we get here, the message hasn't been sent yet.
+      // Tab: complete only (leave cursor for arg typing).
+      // Enter: complete AND submit immediately IFF the command is argless
+      // (usage field is exactly '/cmd' with no placeholders). For commands
+      // that take args (like /op nick or /msg target text) Enter still just
+      // completes — the user types the args and presses Enter again.
+      // Main keydown handler at the top of this file early-returns while
+      // this picker is open, so by the time we get here, the message
+      // hasn't been sent yet.
       e.preventDefault();
       const v=inp.value;
       const q=v.slice(1).toLowerCase();
       const matches=q?CMDS.filter(c=>c.cmd.startsWith(q)):CMDS;
       const show=matches.slice(0,80);
-      if(show[slashIdx])completeSlash(show[slashIdx]);
+      const picked=show[slashIdx];
+      if(picked){
+        completeSlash(picked);
+        // Auto-submit argless commands on Enter (Tab stays at "complete only").
+        const argless = (picked.usage||'').trim() === '/'+picked.cmd;
+        if(e.key==='Enter' && argless){
+          // Trim the trailing space completeSlash added, then submit.
+          inp.value = inp.value.replace(/\s+$/, '');
+          // doSend() has the _sendLock guard so a stray double-fire can't
+          // ship the command twice.
+          if(typeof doSend==='function') doSend();
+        }
+      }
     }
     else if(e.key==='Escape'){slashEl.style.display='none';slashIdx=-1;}
   });
