@@ -3018,18 +3018,22 @@ function handleEvent(ev) {
         const _eb=getBuf(ev.conn_id,ev.target);
         let _ei=_eb.findIndex(m=>m.ts===ev.ts&&m.from===ev.from&&(m.text||'').slice(0,50)===(ev.text||'').slice(0,50));
         if(_ei<0){
-          // Encrypted-channel fallback: the optimistic add stored plaintext
-          // while ev.text carries the sd8~… ciphertext, so the slice match
-          // above never hits for E2E channels. We already know via _sentMsgs
-          // that THIS echo corresponds to one of our own sends — but for
-          // multiple rapid-fire encrypted sends (A then B then C), echoes
-          // arrive in send order (A first), so we want the OLDEST unstamped
-          // self-encrypted entry within the 30s window, not the newest.
-          // Walk back, track the last (= oldest in time order) match.
+          // Fallback covering two failure modes of the strict-equality
+          // findIndex above:
+          //   • clock skew: optimistic add used Date.now()/1000 (client)
+          //     while ev.ts is server time — strict m.ts===ev.ts fails when
+          //     they differ by even 1 second.
+          //   • E2E channels: optimistic stored plaintext but ev.text is
+          //     the sd8~… ciphertext.
+          // We're inside the `idx>=0` branch, so _sentMsgs already
+          // confirmed this echo corresponds to one of OUR sends. Walk
+          // backwards and pick the OLDEST unstamped self-sent entry in
+          // the 30s window — echoes arrive in send order, so for rapid
+          // A/B/C fires we want to stamp A first, then B, then C.
           for(let i=_eb.length-1;i>=0;i--){
             const m=_eb[i];
             if(m.ts<ev.ts-30) break;
-            if(m.from===ev.from && m.encrypted===true && !m.id) _ei=i;
+            if(m.from===ev.from && !m.id) _ei=i;
           }
         }
         if(_ei>=0&&ev.msg_id) _eb[_ei].id=ev.msg_id;
@@ -3845,9 +3849,32 @@ function appendSyncLines(conn_id,target,lines){
     const id=l.id||0;
     trackMsgId(conn_id,target,id);
     if(id>0&&existingIds.has(id)) continue;
-    // Fuzzy fallback for messages already in buffer without an id (locally-sent)
+    // Exact fuzzy key — catches the common case where ts/from/text match.
     const fk=l.ts+'|'+l.from+'|'+(l.text||'').slice(0,50);
     if(existingKeys.has(fk)) continue;
+    // Clock-skew + E2E fuzzy match: an optimistic self-sent entry in the
+    // buffer has m.ts = client clock (Date.now()/1000) while l.ts is the
+    // server clock — they diverge by 1-2s commonly, breaking the strict
+    // key match above. Walk the tail looking for an unstamped (no id)
+    // entry from the same `from` with matching text within ±30s of l.ts.
+    // If found, stamp it with l.id and skip the dup.
+    let _matched=false;
+    const _tailStart=Math.max(0,buf.length-30);
+    const _slice=(l.text||'').slice(0,50);
+    for(let i=buf.length-1;i>=_tailStart;i--){
+      const m=buf[i];
+      if(Math.abs((m.ts||0)-l.ts)>30) continue;
+      if(m.id) continue;
+      if(m.from!==l.from) continue;
+      if((m.text||'').slice(0,50)!==_slice) continue;
+      if(l.id) m.id=l.id;
+      // Also seed existingIds so a second copy of this msg in the same
+      // sync batch can't slip past the id check above.
+      if(l.id) existingIds.add(l.id);
+      _matched=true;
+      break;
+    }
+    if(_matched) continue;
     buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind},conn_id));
     added++;
   }
