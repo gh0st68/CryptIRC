@@ -3007,14 +3007,35 @@ function handleEvent(ev) {
       // Check if this device sent this exact message
       const idx=window._sentMsgs.findIndex(s=>s.conn===ev.conn_id&&s.target===ev.target&&s.text===ev.text);
       if(idx>=0){
-        // This device sent it — already displayed, skip. Update buffer entry with msg_id.
+        // This device sent it — already displayed, skip. Stamp the buffer
+        // entry with msg_id so any duplicate echo that arrives later (e.g.
+        // from a second WS subscription) gets caught by addMessage's
+        // internal dedup-by-id at the buf.push() path.
         window._sentMsgs.splice(idx,1);
         const _eb=getBuf(ev.conn_id,ev.target);
-        const _ei=_eb.findIndex(m=>m.ts===ev.ts&&m.from===ev.from&&(m.text||'').slice(0,50)===(ev.text||'').slice(0,50));
+        let _ei=_eb.findIndex(m=>m.ts===ev.ts&&m.from===ev.from&&(m.text||'').slice(0,50)===(ev.text||'').slice(0,50));
+        if(_ei<0){
+          // Encrypted-channel fallback: the optimistic add stored plaintext
+          // while ev.text carries the sd8~… ciphertext, so the slice match
+          // above never hits for E2E channels. We already know via _sentMsgs
+          // that THIS echo corresponds to one of our own sends — but for
+          // multiple rapid-fire encrypted sends (A then B then C), echoes
+          // arrive in send order (A first), so we want the OLDEST unstamped
+          // self-encrypted entry within the 30s window, not the newest.
+          // Walk back, track the last (= oldest in time order) match.
+          for(let i=_eb.length-1;i>=0;i--){
+            const m=_eb[i];
+            if(m.ts<ev.ts-30) break;
+            if(m.from===ev.from && m.encrypted===true && !m.id) _ei=i;
+          }
+        }
         if(_ei>=0&&ev.msg_id) _eb[_ei].id=ev.msg_id;
         break;
       }
-      // From another device — check buffer for duplicates before adding
+      // From another device — OR a duplicate echo where _sentMsgs was already
+      // consumed by a prior fire (e.g. two WS connections, reconnect race).
+      // Check the buffer for a recent matching entry before adding; if none,
+      // hand off to addMessage, which has its own id-based dedup at buf.push().
       const echoBuf=getBuf(ev.conn_id,ev.target);
       const echoKey=ev.ts+'|'+ev.from+'|'+(ev.text||'').slice(0,50);
       if(echoBuf.some(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)===echoKey)) break;
@@ -4405,7 +4426,13 @@ function buildMediaEl(url){
   // Images
   if(IMG_EXTS.test(url)||url.includes('/files/')){
     const wrap=document.createElement('div');wrap.className='msg-media';
-    const img=document.createElement('img');img.className='msg-img';img.src=authedUrl;img.alt='image';img.loading='lazy';
+    // Chat images load eagerly: they're appended at the bottom of the chat
+    // (always in viewport), and `loading="lazy"` combined with the default
+    // `aspect-ratio: auto` left them at 0×0 — IntersectionObserver never
+    // fired in older Chromium (Electron lags stable Chrome), so giphy/etc
+    // never decoded. Click-to-lightbox worked because that path didn't use
+    // lazy. Eager load is fine here; perf cost is negligible on a chat tail.
+    const img=document.createElement('img');img.className='msg-img';img.src=authedUrl;img.alt='image';img.decoding='async';
     img.onclick=e=>{e.stopPropagation();openLightbox(authedUrl);};
     img.onload=()=>{if(!_userScrolledAway)scrollBottom();};
     img.onerror=()=>wrap.style.display='none';
