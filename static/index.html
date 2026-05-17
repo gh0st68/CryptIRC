@@ -1988,6 +1988,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     <div class="form-row">
       <div class="form-field"><label class="form-label">Auto-Join (space-separated)</label><input class="form-input" id="f-autojoin" placeholder="#twisted #dev" autocapitalize="none" autocorrect="off"></div>
     </div>
+    <div class="form-row">
+      <div class="form-field" style="flex:1"><label class="form-label">Quit Message (optional)</label><input class="form-input" id="f-quit" placeholder="Leave blank to advertise CryptIRC" maxlength="200"></div>
+    </div>
     <div id="f-sasl-section" style="border-top:1px solid var(--border);margin:14px 0 12px;padding-top:12px;">
       <div style="font-size:11px;color:var(--text2);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">SASL Authentication</div>
       <div class="form-row">
@@ -5884,6 +5887,7 @@ function resetNetworkForm(){
   document.getElementById('f-real').value='';
   document.getElementById('f-pass').value='';
   document.getElementById('f-autojoin').value='';
+  {const fq=document.getElementById('f-quit'); if(fq) fq.value='';}
   document.getElementById('f-sasl-method').value='none';
   document.getElementById('f-sasl-account').value='';
   document.getElementById('f-sasl-password').value='';
@@ -5984,6 +5988,7 @@ function editNetwork(id){
   document.getElementById('f-real').value=c.realname||'';
   document.getElementById('f-pass').value='';
   document.getElementById('f-autojoin').value=(c.auto_join||[]).join(' ');
+  {const fq=document.getElementById('f-quit'); if(fq) fq.value=c.quit_message||'';}
   document.getElementById('f-reconnect').value=c.auto_reconnect?'true':'false';
   document.getElementById('f-tls-invalid').value=c.tls_accept_invalid_certs?'true':'false';
   document.getElementById('f-oper-login').value=c.oper_login||'';
@@ -6146,7 +6151,8 @@ function saveNetwork(){
     auto_identify:document.getElementById('f-auto-identify').value==='true',
     nickserv_pass:document.getElementById('f-nickserv-pass').value||null,
     disabled_caps:[...document.querySelectorAll('#f-caps-grid input[data-cap]:not(:checked)')].map(el=>el.dataset.cap),
-    perform_commands:(document.getElementById('f-perform')?.value||'').split('\n').map(l=>l.trim()).filter(Boolean)};
+    perform_commands:(document.getElementById('f-perform')?.value||'').split('\n').map(l=>l.trim()).filter(Boolean),
+    quit_message:((document.getElementById('f-quit')?.value||'').trim())||null};
   if(editingNetworkId){
     wsend({type:'update_network',network:cfg}); closeModal();
   } else {

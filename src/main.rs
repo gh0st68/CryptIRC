@@ -337,6 +337,25 @@ pub struct NetworkConfig {
     // Perform: raw IRC (or /slash) commands fired once, after registration + NickServ, before auto-join
     #[serde(default)]
     pub perform_commands:      Vec<String>,
+    // Per-network user-configurable QUIT reason. None / empty → bot uses
+    // DEFAULT_QUIT_MESSAGE (advertises CryptIRC). Account-deletion has its
+    // own fixed reason and ignores this.
+    #[serde(default)]
+    pub quit_message:          Option<String>,
+}
+
+/// Default QUIT reason sent when the user hasn't customized one. Doubles as
+/// soft advertising for CryptIRC on every disconnect, reconnect, or network
+/// switch — keep it short (well under 200 chars) so no server truncates it.
+pub const DEFAULT_QUIT_MESSAGE: &str = "CryptIRC — end-to-end encrypted IRC client — https://github.com/gh0st68/CryptIRC";
+
+/// Pick the QUIT reason for a given network config: custom (trimmed, non-empty)
+/// if set, else the default advertising string.
+pub fn quit_reason_for(cfg: &NetworkConfig) -> &str {
+    match cfg.quit_message.as_deref() {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => DEFAULT_QUIT_MESSAGE,
+    }
 }
 
 impl Default for NetworkConfig {
@@ -354,6 +373,7 @@ impl Default for NetworkConfig {
             nickserv_pass: None, auto_identify: false,
             disabled_caps: vec![],
             perform_commands: vec![],
+            quit_message: None,
         }
     }
 }
@@ -1566,7 +1586,11 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             state.request_disconnect(&id);
             if let Some(conn) = state.connections.get(&id) {
                 let mut c = conn.lock().await;
-                let _ = c.send_raw("QUIT :CryptIRC\r\n").await;
+                let reason = match state.get_network_config(&id, username).await {
+                    Some(cfg) => quit_reason_for(&cfg).to_string(),
+                    None => DEFAULT_QUIT_MESSAGE.to_string(),
+                };
+                let _ = c.send_raw(&format!("QUIT :{}\r\n", reason)).await;
             }
             state.abort_connect_task(&id);
             state.connections.remove(&id);
@@ -1585,7 +1609,11 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             // the task so its reconnect loop can't resurrect itself.
             if let Some(conn) = state.connections.get(&id) {
                 let mut c = conn.lock().await;
-                let _ = c.send_raw("QUIT :CryptIRC\r\n").await;
+                let reason = match state.get_network_config(&id, username).await {
+                    Some(cfg) => quit_reason_for(&cfg).to_string(),
+                    None => DEFAULT_QUIT_MESSAGE.to_string(),
+                };
+                let _ = c.send_raw(&format!("QUIT :{}\r\n", reason)).await;
             }
             state.abort_connect_task(&id);
             state.connections.remove(&id);
@@ -1607,7 +1635,11 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             // abort() is deterministic — no sleep/flag race.
             if let Some(conn) = state.connections.get(&id) {
                 let mut c = conn.lock().await;
-                let _ = c.send_raw("QUIT :CryptIRC\r\n").await;
+                let reason = match state.get_network_config(&id, username).await {
+                    Some(cfg) => quit_reason_for(&cfg).to_string(),
+                    None => DEFAULT_QUIT_MESSAGE.to_string(),
+                };
+                let _ = c.send_raw(&format!("QUIT :{}\r\n", reason)).await;
             }
             state.abort_connect_task(&id);
             state.connections.remove(&id);
@@ -2337,7 +2369,8 @@ impl AppState {
             // Kill any existing connection first to prevent duplicate sessions.
             if let Some(conn) = self.connections.get(&id) {
                 let mut c = conn.lock().await;
-                let _ = c.send_raw("QUIT :CryptIRC\r\n").await;
+                let reason = quit_reason_for(&cfg);
+                let _ = c.send_raw(&format!("QUIT :{}\r\n", reason)).await;
             }
             self.abort_connect_task(&id);
             self.connections.remove(&id);
