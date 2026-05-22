@@ -54,20 +54,27 @@ source "$HOME/.cargo/env" 2>/dev/null || true
 cargo build --release 2>&1 | tail -5
 echo ""
 
+# ── Stop service ─────────────────────────────────────────────────────────────
+echo -e "${BOLD}Stopping CryptIRC...${NC}"
+if systemctl is-active --quiet cryptirc; then
+    systemctl stop cryptirc
+    echo -e "  ${GREEN}✓ CryptIRC stopped${NC}"
+else
+    echo -e "  ${YELLOW}⚠ CryptIRC was not running${NC}"
+fi
+echo ""
+
 # ── Swap binary ──────────────────────────────────────────────────────────────
-echo -e "${BOLD}Swapping binary...${NC}"
-# Copy new binary alongside (don't overwrite while running)
-cp target/release/cryptirc "$INSTALL_DIR/cryptirc.new"
-chmod 755 "$INSTALL_DIR/cryptirc.new"
-chown root:root "$INSTALL_DIR/cryptirc.new"
-# Atomic rename
-mv "$INSTALL_DIR/cryptirc.new" "$INSTALL_DIR/cryptirc"
+echo -e "${BOLD}Installing new binary...${NC}"
+cp target/release/cryptirc "$INSTALL_DIR/cryptirc"
+chmod 755 "$INSTALL_DIR/cryptirc"
+chown root:root "$INSTALL_DIR/cryptirc"
 echo -e "  ${GREEN}✓ Binary updated${NC}"
 echo ""
 
-# ── Restart ───────────────────────────────────────────────────────────────────
-echo -e "${BOLD}Restarting CryptIRC...${NC}"
-systemctl restart cryptirc
+# ── Start service ────────────────────────────────────────────────────────────
+echo -e "${BOLD}Starting CryptIRC...${NC}"
+systemctl start cryptirc
 sleep 2
 if systemctl is-active --quiet cryptirc; then
     echo -e "  ${GREEN}✓ CryptIRC restarted successfully${NC}"
