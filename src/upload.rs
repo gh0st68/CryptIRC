@@ -141,15 +141,47 @@ pub fn content_type_for(filename: &str) -> &'static str {
 
 // ─── Per-user upload tracking ────────────────────────────────────────────────
 
+/// Status of a single upload row visible in the user's Uploads channel.
+#[derive(Debug, Serialize, serde::Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum UploadStatus {
+    Uploading,
+    Done,
+    Error,
+    Canceled,
+}
+
 #[derive(Debug, Serialize, serde::Deserialize, Clone)]
 pub struct UploadRecord {
+    /// Stable id chosen by the client, used across HTTP + WS for this upload.
+    /// Defaults to filename for legacy completed records (which had no id).
+    #[serde(default)]
+    pub id: String,
     pub filename: String,
     pub original_name: String,
     pub size: usize,
     pub content_type: String,
     pub url: String,
     pub uploaded_at: i64,
+    #[serde(default = "default_done_status")]
+    pub status: UploadStatus,
+    #[serde(default)]
+    pub progress_bytes: usize,
+    #[serde(default)]
+    pub started_at: i64,
+    #[serde(default)]
+    pub completed_at: i64,
+    #[serde(default)]
+    pub error: String,
+    /// Where the originating device intended this upload to go (for the
+    /// "Insert into chat" UX). Optional — purely a display hint.
+    #[serde(default)]
+    pub source_conn_id: String,
+    #[serde(default)]
+    pub source_target: String,
 }
+
+fn default_done_status() -> UploadStatus { UploadStatus::Done }
 
 fn user_uploads_path(data_dir: &str, username: &str) -> PathBuf {
     PathBuf::from(data_dir).join("uploads").join(format!("{}.json", username))
@@ -161,20 +193,368 @@ pub async fn record_upload(data_dir: &str, username: &str, result: &UploadResult
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     let mut records = load_user_records(&path).await;
+    let now = chrono::Utc::now().timestamp();
     records.push(UploadRecord {
+        id: result.filename.clone(), // legacy direct uploads use filename as id
         filename: result.filename.clone(),
         original_name: result.original_name.clone(),
         size: result.size,
         content_type: result.content_type.clone(),
         url: result.url.clone(),
-        uploaded_at: chrono::Utc::now().timestamp(),
+        uploaded_at: now,
+        status: UploadStatus::Done,
+        progress_bytes: result.size,
+        started_at: now,
+        completed_at: now,
+        error: String::new(),
+        source_conn_id: String::new(),
+        source_target: String::new(),
     });
     let _ = tokio::fs::write(&path, serde_json::to_string(&records).unwrap_or_default()).await;
     Ok(())
 }
 
+// ─── Chunked / resumable upload management ───────────────────────────────────
+
+/// Filesystem-safe id used in temp paths. Same alphabet as filename sanitizer.
+fn safe_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect()
+}
+
+fn safe_user(username: &str) -> String {
+    username.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .take(64)
+        .collect()
+}
+
+/// Temp directory for in-flight chunks for one upload.
+/// Layout: {data_dir}/uploads/_inprogress/{username}/{id}/{ data, meta.json }
+fn inprogress_dir(data_dir: &str, username: &str, id: &str) -> Option<PathBuf> {
+    let u = safe_user(username);
+    let i = safe_id(id);
+    if u.is_empty() || i.is_empty() { return None; }
+    Some(PathBuf::from(data_dir).join("uploads").join("_inprogress").join(u).join(i))
+}
+
+/// Read/write the per-user persistent record list. Single-writer; callers
+/// must serialize their own mutations. We keep this private to nudge callers
+/// toward [`update_record`] which atomically applies a mutation.
+async fn load_records(data_dir: &str, username: &str) -> Vec<UploadRecord> {
+    let mut records = load_user_records(&user_uploads_path(data_dir, username)).await;
+    // Migration: pre-chunked records have empty id. Backfill from filename
+    // so every row has a unique stable key for in-memory maps and remove().
+    for r in &mut records {
+        if r.id.is_empty() {
+            r.id = if r.filename.is_empty() { Uuid::new_v4().to_string() } else { r.filename.clone() };
+        }
+        if r.progress_bytes == 0 && r.status == UploadStatus::Done { r.progress_bytes = r.size; }
+        if r.started_at == 0  { r.started_at  = r.uploaded_at; }
+        if r.completed_at == 0 && r.status == UploadStatus::Done { r.completed_at = r.uploaded_at; }
+    }
+    records
+}
+
+async fn save_records(data_dir: &str, username: &str, records: &[UploadRecord]) {
+    let path = user_uploads_path(data_dir, username);
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let _ = tokio::fs::write(&path, serde_json::to_string(records).unwrap_or_default()).await;
+}
+
+/// Find-or-insert by id; apply mutation; persist. Returns the new record.
+async fn upsert_record<F: FnOnce(&mut UploadRecord)>(
+    data_dir: &str, username: &str, id: &str,
+    blank: UploadRecord, mutate: F,
+) -> UploadRecord {
+    let mut records = load_records(data_dir, username).await;
+    let pos = records.iter().position(|r| r.id == id);
+    let record = match pos {
+        Some(p) => { mutate(&mut records[p]); records[p].clone() }
+        None    => {
+            let mut r = blank;
+            mutate(&mut r);
+            records.push(r.clone());
+            r
+        }
+    };
+    save_records(data_dir, username, &records).await;
+    record
+}
+
+pub async fn get_record(data_dir: &str, username: &str, id: &str) -> Option<UploadRecord> {
+    load_records(data_dir, username).await.into_iter().find(|r| r.id == id)
+}
+
+/// Begin a chunked upload. Creates the temp directory and a new record in
+/// `Uploading` state with progress_bytes=0. Idempotent on retry — if a
+/// record with this id already exists in `Uploading`, returns it unchanged.
+pub async fn init_chunked_upload(
+    data_dir: &str, username: &str, id: &str,
+    original_name: &str, size: usize,
+    source_conn_id: &str, source_target: &str,
+) -> Result<UploadRecord> {
+    let id = safe_id(id);
+    if id.is_empty() { anyhow::bail!("Invalid upload id"); }
+    let dir = inprogress_dir(data_dir, username, &id)
+        .ok_or_else(|| anyhow::anyhow!("Invalid upload path"))?;
+    tokio::fs::create_dir_all(&dir).await?;
+    // Resume case: if data file already has bytes, keep them.
+    let existing_bytes = match tokio::fs::metadata(dir.join("data")).await {
+        Ok(m) => m.len() as usize,
+        Err(_) => 0,
+    };
+
+    let original_name: String = original_name.chars().take(255).collect();
+    let now = chrono::Utc::now().timestamp();
+    let blank = UploadRecord {
+        id: id.clone(),
+        filename: String::new(),
+        original_name: original_name.clone(),
+        size,
+        content_type: String::new(),
+        url: String::new(),
+        uploaded_at: 0,
+        status: UploadStatus::Uploading,
+        progress_bytes: existing_bytes,
+        started_at: now,
+        completed_at: 0,
+        error: String::new(),
+        source_conn_id: source_conn_id.to_string(),
+        source_target: source_target.to_string(),
+    };
+    let rec = upsert_record(data_dir, username, &id, blank, |r| {
+        // If reviving a non-Uploading record, reset to Uploading. This
+        // covers the "I canceled then tried again with the same id" case.
+        if r.status != UploadStatus::Uploading {
+            r.status = UploadStatus::Uploading;
+            r.error = String::new();
+            r.url = String::new();
+            r.filename = String::new();
+            r.completed_at = 0;
+            r.uploaded_at = 0;
+        }
+        r.progress_bytes = existing_bytes;
+        r.size = size;
+        r.original_name = original_name.clone();
+        if !source_conn_id.is_empty() { r.source_conn_id = source_conn_id.to_string(); }
+        if !source_target.is_empty() { r.source_target = source_target.to_string(); }
+    }).await;
+    Ok(rec)
+}
+
+/// Append a chunk at the given absolute offset. Validates that offset matches
+/// the current file size (no out-of-order writes). Returns the new
+/// progress_bytes after appending. Caller is responsible for honoring any
+/// max-upload limit before calling.
+pub async fn append_chunk(
+    data_dir: &str, username: &str, id: &str,
+    offset: usize, chunk: &[u8],
+) -> Result<UploadRecord> {
+    use tokio::io::AsyncWriteExt;
+    let id = safe_id(id);
+    let dir = inprogress_dir(data_dir, username, &id)
+        .ok_or_else(|| anyhow::anyhow!("Invalid upload path"))?;
+    let data_path = dir.join("data");
+    let current = match tokio::fs::metadata(&data_path).await {
+        Ok(m) => m.len() as usize,
+        Err(_) => 0,
+    };
+    if offset != current {
+        anyhow::bail!("Offset mismatch (have {}, got {})", current, offset);
+    }
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true).append(true).open(&data_path).await?;
+    file.write_all(chunk).await?;
+    file.flush().await?;
+    let new_total = current + chunk.len();
+    let rec = upsert_record(data_dir, username, &id,
+        UploadRecord {
+            id: id.clone(), filename: String::new(), original_name: String::new(),
+            size: 0, content_type: String::new(), url: String::new(),
+            uploaded_at: 0, status: UploadStatus::Uploading,
+            progress_bytes: new_total, started_at: chrono::Utc::now().timestamp(),
+            completed_at: 0, error: String::new(),
+            source_conn_id: String::new(), source_target: String::new(),
+        },
+        |r| { r.progress_bytes = new_total; r.status = UploadStatus::Uploading; },
+    ).await;
+    Ok(rec)
+}
+
+/// Finalize: validate the assembled temp file, strip metadata, move into
+/// the public upload dir, mark record as Done. Returns the final record.
+pub async fn finalize_chunked_upload(
+    data_dir: &str, upload_dir: &str, username: &str, id: &str,
+) -> Result<UploadRecord> {
+    let id = safe_id(id);
+    let dir = inprogress_dir(data_dir, username, &id)
+        .ok_or_else(|| anyhow::anyhow!("Invalid upload path"))?;
+    let data_path = dir.join("data");
+    let raw = tokio::fs::read(&data_path).await
+        .map_err(|_| anyhow::anyhow!("No data uploaded"))?;
+    if raw.is_empty() { anyhow::bail!("Empty file"); }
+
+    let existing = get_record(data_dir, username, &id).await
+        .ok_or_else(|| anyhow::anyhow!("Unknown upload id"))?;
+    let original_name = existing.original_name.clone();
+    if existing.size > 0 && raw.len() != existing.size {
+        anyhow::bail!("Size mismatch (declared {} got {})", existing.size, raw.len());
+    }
+
+    let raw_ext = original_name.rsplit('.').next().unwrap_or("bin").to_lowercase();
+    let ext = sanitize_ext(&raw_ext);
+    if ext.is_empty() { anyhow::bail!("Missing or invalid file extension"); }
+    if BLOCKED_EXTENSIONS.contains(&ext.as_str()) { anyhow::bail!("File type not permitted"); }
+
+    let stripped = strip_metadata(&raw, &ext).await;
+
+    let filename = format!("{}.{}", Uuid::new_v4(), ext);
+    std::fs::create_dir_all(upload_dir)?;
+    let final_path = PathBuf::from(upload_dir).join(&filename);
+    tokio::fs::write(&final_path, &stripped).await?;
+
+    // Clean up the temp directory.
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+
+    let content_type = safe_content_type(&ext).to_string();
+    let url = format!(
+        "{}/files/{}",
+        std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into()),
+        filename
+    );
+    let now = chrono::Utc::now().timestamp();
+    let size_final = stripped.len();
+    let rec = upsert_record(data_dir, username, &id,
+        existing.clone(),
+        |r| {
+            r.status = UploadStatus::Done;
+            r.filename = filename.clone();
+            r.url = url.clone();
+            r.content_type = content_type.clone();
+            r.size = size_final;
+            r.progress_bytes = size_final;
+            r.completed_at = now;
+            r.uploaded_at = now;
+            r.error = String::new();
+        },
+    ).await;
+    Ok(rec)
+}
+
+/// Cancel an in-flight upload: removes the temp dir and marks the record
+/// as Canceled. (We keep the row briefly so other devices observe the
+/// transition; callers may follow up with `remove_record`.)
+pub async fn cancel_chunked_upload(
+    data_dir: &str, username: &str, id: &str,
+) -> Result<UploadRecord> {
+    let id = safe_id(id);
+    if let Some(dir) = inprogress_dir(data_dir, username, &id) {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+    let now = chrono::Utc::now().timestamp();
+    let rec = upsert_record(data_dir, username, &id,
+        UploadRecord {
+            id: id.clone(), filename: String::new(), original_name: String::new(),
+            size: 0, content_type: String::new(), url: String::new(),
+            uploaded_at: 0, status: UploadStatus::Canceled,
+            progress_bytes: 0, started_at: now, completed_at: now,
+            error: String::new(),
+            source_conn_id: String::new(), source_target: String::new(),
+        },
+        |r| {
+            // Only transition from Uploading → Canceled. If already Done
+            // or Error, leave it alone (caller should use remove_record).
+            if r.status == UploadStatus::Uploading {
+                r.status = UploadStatus::Canceled;
+                r.completed_at = now;
+            }
+        },
+    ).await;
+    Ok(rec)
+}
+
+/// Mark an upload as Error (e.g. originating device hit a fatal client error).
+pub async fn error_chunked_upload(
+    data_dir: &str, username: &str, id: &str, message: &str,
+) -> Result<UploadRecord> {
+    let id = safe_id(id);
+    if let Some(dir) = inprogress_dir(data_dir, username, &id) {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+    let now = chrono::Utc::now().timestamp();
+    let msg: String = message.chars().take(300).collect();
+    let rec = upsert_record(data_dir, username, &id,
+        UploadRecord {
+            id: id.clone(), filename: String::new(), original_name: String::new(),
+            size: 0, content_type: String::new(), url: String::new(),
+            uploaded_at: 0, status: UploadStatus::Error,
+            progress_bytes: 0, started_at: now, completed_at: now,
+            error: msg.clone(),
+            source_conn_id: String::new(), source_target: String::new(),
+        },
+        |r| {
+            if r.status == UploadStatus::Uploading {
+                r.status = UploadStatus::Error;
+                r.completed_at = now;
+                r.error = msg.clone();
+            }
+        },
+    ).await;
+    Ok(rec)
+}
+
+/// Remove a record from the user's list. Also deletes:
+///   - the temp dir if still in progress
+///   - the final uploaded file if status==Done (matches existing
+///     `delete_user_upload` semantics so "Remove" doubles as "delete file")
+/// Returns true if a record was removed.
+pub async fn remove_record(
+    data_dir: &str, upload_dir: &str, username: &str, id: &str,
+) -> bool {
+    let id = safe_id(id);
+    if let Some(dir) = inprogress_dir(data_dir, username, &id) {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+    let mut records = load_records(data_dir, username).await;
+    let before = records.len();
+    let mut to_unlink: Option<String> = None;
+    records.retain(|r| {
+        if r.id == id {
+            if r.status == UploadStatus::Done && !r.filename.is_empty() {
+                to_unlink = Some(r.filename.clone());
+            }
+            false
+        } else { true }
+    });
+    if records.len() != before {
+        save_records(data_dir, username, &records).await;
+        if let Some(name) = to_unlink {
+            // Reuse the same sanitize as delete_user_upload.
+            let safe: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-').take(128).collect();
+            let _ = tokio::fs::remove_file(PathBuf::from(upload_dir).join(&safe)).await;
+        }
+        true
+    } else { false }
+}
+
+/// All records for the user (in-flight + completed + errored + canceled).
+/// Used to seed the client's Uploads channel on connect.
+pub async fn list_all_records(data_dir: &str, username: &str) -> Vec<UploadRecord> {
+    load_records(data_dir, username).await
+}
+
 pub async fn list_user_uploads(data_dir: &str, username: &str) -> Vec<UploadRecord> {
-    load_user_records(&user_uploads_path(data_dir, username)).await
+    // Historical "My Uploads" panel — finished uploads only. In-flight rows
+    // belong to the live Uploads channel, not the archive.
+    load_records(data_dir, username).await
+        .into_iter()
+        .filter(|r| r.status == UploadStatus::Done)
+        .collect()
 }
 
 pub async fn delete_user_upload(data_dir: &str, upload_dir: &str, username: &str, filename: &str) {

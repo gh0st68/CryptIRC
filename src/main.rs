@@ -208,6 +208,11 @@ pub enum ClientMessage {
     LoadPasswords     {},
     // Clear all user data (logs, notepad, pastes)
     ClearAllData      {},
+    // Permanently delete logs for a single chat/PM target
+    ClearTargetLogs   { conn_id: String, target: String },
+    // Uploads channel — list seed + remove
+    UploadListGet     {},
+    UploadRemove      { id: String },
     // Channel order
     SaveChannelOrder  { conn_id: String, order: Vec<String> },
     // Idle/active status for push notification gating
@@ -295,6 +300,14 @@ pub enum ServerEvent {
     PasswordSafe     { data: String },
     AccountDeleted   {},
     DataCleared      {},
+    TargetCleared    { conn_id: String, target: String },
+    /// Initial seed of the user's persistent upload list. Sent on auth, and
+    /// in response to `UploadListGet`.
+    UploadState      { records: Vec<upload::UploadRecord> },
+    /// One row changed — created, progressed, completed, errored, canceled.
+    UploadUpdate     { record: upload::UploadRecord },
+    /// A row was removed from the list entirely (Remove button).
+    UploadRemoved    { id: String },
     Error            { message: String },
 }
 
@@ -534,6 +547,12 @@ async fn main() -> Result<()> {
         .route("/auth/me",               get(route_me))
         .route("/auth/change-password",  post(route_change_password).layer(DefaultBodyLimit::max(8_192)))
         .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(500 * 1024 * 1024)))
+        .route("/upload/init",           post(route_upload_init).layer(DefaultBodyLimit::max(4_096)))
+        .route("/upload/chunk/:id",      post(route_upload_chunk).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
+        .route("/upload/status/:id",     get(route_upload_status))
+        .route("/upload/finalize/:id",   post(route_upload_finalize))
+        .route("/upload/cancel/:id",     post(route_upload_cancel))
+        .route("/upload/error/:id",      post(route_upload_error).layer(DefaultBodyLimit::max(4_096)))
         .route("/uploads",               get(route_uploads_list))
         .route("/uploads/delete",        post(route_uploads_delete).layer(DefaultBodyLimit::max(4_096)))
         .route("/uploads/clear",         post(route_uploads_clear))
@@ -1086,6 +1105,136 @@ async fn route_uploads_clear(State(state): State<AppState>, headers: HeaderMap) 
     Json(serde_json::json!({"ok": true})).into_response()
 }
 
+// ─── Chunked / resumable upload routes ───────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ChunkedInitBody {
+    id:             String,
+    original_name:  String,
+    size:           usize,
+    #[serde(default)] source_conn_id: String,
+    #[serde(default)] source_target:  String,
+}
+
+async fn upload_auth(state: &AppState, headers: &HeaderMap) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    let user = bearer_token(headers).and_then(|t| state.auth.validate_session(&t))
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))))?;
+    if !state.auth.can_upload(&user).await {
+        return Err((StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"Upload permission not granted."}))));
+    }
+    Ok(user)
+}
+
+async fn route_upload_init(
+    State(state): State<AppState>, headers: HeaderMap,
+    Json(body): Json<ChunkedInitBody>,
+) -> impl IntoResponse {
+    let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
+    let max_bytes = *state.max_upload_mb.read().await * 1024 * 1024;
+    if body.size > max_bytes {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("File too large (max {} MB)", max_bytes / (1024 * 1024))
+        }))).into_response();
+    }
+    match upload::init_chunked_upload(
+        &state.data_dir, &user, &body.id,
+        &body.original_name, body.size,
+        &body.source_conn_id, &body.source_target,
+    ).await {
+        Ok(rec) => {
+            state.send_to_user(&user, ServerEvent::UploadUpdate { record: rec.clone() });
+            (StatusCode::OK, Json(serde_json::json!(rec))).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ChunkQuery { offset: usize }
+
+async fn route_upload_chunk(
+    State(state): State<AppState>, headers: HeaderMap,
+    Path(id): Path<String>, Query(q): Query<ChunkQuery>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
+    // Enforce the admin max-upload limit against the cumulative file size.
+    let max_bytes = *state.max_upload_mb.read().await * 1024 * 1024;
+    if q.offset.saturating_add(body.len()) > max_bytes {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("File too large (max {} MB)", max_bytes / (1024 * 1024))
+        }))).into_response();
+    }
+    match upload::append_chunk(&state.data_dir, &user, &id, q.offset, &body).await {
+        Ok(rec) => {
+            state.send_to_user(&user, ServerEvent::UploadUpdate { record: rec.clone() });
+            (StatusCode::OK, Json(serde_json::json!(rec))).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+async fn route_upload_status(
+    State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>,
+) -> impl IntoResponse {
+    let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
+    match upload::get_record(&state.data_dir, &user, &id).await {
+        Some(rec) => (StatusCode::OK, Json(serde_json::json!(rec))).into_response(),
+        None      => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"Unknown upload"}))).into_response(),
+    }
+}
+
+async fn route_upload_finalize(
+    State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>,
+) -> impl IntoResponse {
+    let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
+    match upload::finalize_chunked_upload(&state.data_dir, &state.upload_dir, &user, &id).await {
+        Ok(rec) => {
+            state.send_to_user(&user, ServerEvent::UploadUpdate { record: rec.clone() });
+            (StatusCode::OK, Json(serde_json::json!(rec))).into_response()
+        }
+        Err(e) => {
+            // On finalize failure, flip the record to error state so other
+            // sessions see it instead of an indefinite "Uploading".
+            let _ = upload::error_chunked_upload(&state.data_dir, &user, &id, &e.to_string()).await;
+            if let Some(rec) = upload::get_record(&state.data_dir, &user, &id).await {
+                state.send_to_user(&user, ServerEvent::UploadUpdate { record: rec });
+            }
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response()
+        }
+    }
+}
+
+async fn route_upload_cancel(
+    State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>,
+) -> impl IntoResponse {
+    let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
+    match upload::cancel_chunked_upload(&state.data_dir, &user, &id).await {
+        Ok(rec) => {
+            state.send_to_user(&user, ServerEvent::UploadUpdate { record: rec.clone() });
+            (StatusCode::OK, Json(serde_json::json!(rec))).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct UploadErrorBody { message: String }
+
+async fn route_upload_error(
+    State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>,
+    Json(body): Json<UploadErrorBody>,
+) -> impl IntoResponse {
+    let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
+    match upload::error_chunked_upload(&state.data_dir, &user, &id, &body.message).await {
+        Ok(rec) => {
+            state.send_to_user(&user, ServerEvent::UploadUpdate { record: rec.clone() });
+            (StatusCode::OK, Json(serde_json::json!(rec))).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
 async fn route_e2e_get_bundle(
     Path(target_user): Path<String>,
     headers: HeaderMap,
@@ -1419,6 +1568,16 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         if let Ok(k) = state.crypto.derive_e2e_enc_key(&username).await {
             let e2e_enc_key = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, k);
             let _ = sender.send(Message::Text(serde_json::to_string(&ServerEvent::VaultUnlocked { e2e_enc_key }).unwrap())).await;
+        }
+    }
+
+    // Seed the Uploads channel with this user's persistent upload list.
+    {
+        let records = upload::list_all_records(&state.data_dir, &username).await;
+        if !records.is_empty() {
+            let _ = sender.send(Message::Text(
+                serde_json::to_string(&ServerEvent::UploadState { records }).unwrap()
+            )).await;
         }
     }
 
@@ -2252,6 +2411,27 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             info!("All data cleared for user: {}", username);
             // Broadcast to all user's sessions so other devices clear too
             state.send_to_user(username, ServerEvent::DataCleared {});
+        }
+        ClientMessage::ClearTargetLogs { conn_id, target } => {
+            if !state.owns_network(username, &conn_id).await { return; }
+            match state.logger.delete_target(username, &conn_id, &target).await {
+                Ok(_) => {
+                    state.send_to_user(username, ServerEvent::TargetCleared {
+                        conn_id: conn_id.clone(),
+                        target:  target.clone(),
+                    });
+                }
+                Err(e) => send(ServerEvent::Error { message: format!("Clear failed: {}", e) }),
+            }
+        }
+        ClientMessage::UploadListGet {} => {
+            let records = upload::list_all_records(&state.data_dir, username).await;
+            send(ServerEvent::UploadState { records });
+        }
+        ClientMessage::UploadRemove { id } => {
+            if upload::remove_record(&state.data_dir, &state.upload_dir, username, &id).await {
+                state.send_to_user(username, ServerEvent::UploadRemoved { id });
+            }
         }
         ClientMessage::MonitorPush { nick, status } => {
             let safe_nick: String = nick.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '[' || *c == ']' || *c == '\\' || *c == '`' || *c == '^').take(32).collect();

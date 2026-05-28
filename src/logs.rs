@@ -139,6 +139,22 @@ impl EncryptedLogger {
         Ok(lines)
     }
 
+    /// Permanently delete all logs for a target (channel or query). Returns
+    /// Ok(true) if the directory existed and was removed, Ok(false) if there
+    /// was nothing to delete. The per-user sequence counter is intentionally
+    /// NOT reset — new messages keep getting monotonically larger ids so any
+    /// in-flight sync from another session can't resurrect deleted records.
+    pub async fn delete_target(&self, username: &str, conn_id: &str, target: &str) -> Result<bool> {
+        if !self.crypto.is_unlocked(username).await { anyhow::bail!("Vault locked"); }
+        let dir = PathBuf::from(&self.data_dir)
+            .join("logs")
+            .join(sanitize_path_component(conn_id)?)
+            .join(sanitize_path_component(target)?);
+        if tokio::fs::metadata(&dir).await.is_err() { return Ok(false); }
+        tokio::fs::remove_dir_all(&dir).await?;
+        Ok(true)
+    }
+
     fn log_path(&self, conn_id: &str, target: &str, ts: i64) -> PathBuf {
         let safe_conn   = sanitize_lossy(conn_id);
         let safe_target = sanitize_lossy(target);

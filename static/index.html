@@ -2886,7 +2886,8 @@ function wsend(obj){
     'connect','disconnect','add_network','remove_network','update_network',
     'lock_vault','unlock_vault','change_passphrase',
     'generate_cert','delete_cert',
-    'clear_all_data','delete_account',
+    'clear_all_data','clear_target_logs','delete_account',
+    'upload_remove',
   ]);
   if(obj && _toastTypes.has(obj.type)){
     const now = Date.now();
@@ -2906,7 +2907,7 @@ function handleEvent(ev) {
       currentUser=ev.username;
       // If idle on reconnect, tell server immediately after auth
       if(_isIdle&&ws&&ws.readyState===1)ws.send(JSON.stringify({type:'idle'}));
-      wsend({type:'load_appearance'}); wsend({type:'load_preferences'});
+      wsend({type:'load_appearance'}); wsend({type:'load_preferences'}); wsend({type:'upload_list_get'});
       // Re-check push subscription after auth
       setTimeout(async()=>{
         if(swRegistration && Notification?.permission==='granted'){
@@ -2951,11 +2952,16 @@ function handleEvent(ev) {
       if(!_detMode && !active){
         const saved=loadLastActive();
         if(saved&&saved.conn_id&&saved.target){
-          const net=networks.find(n=>n.config.id===saved.conn_id);
-          if(net){
-            active={conn_id:saved.conn_id,target:saved.target};
-            renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay();
-            updateInputPlaceholder();
+          if(isUploadsConn(saved.conn_id)){
+            active={conn_id:UPLOAD_CONN,target:UPLOAD_TARGET};
+            renderSidebar(); renderChat(); updateTopbar(); updateInputPlaceholder();
+          } else {
+            const net=networks.find(n=>n.config.id===saved.conn_id);
+            if(net){
+              active={conn_id:saved.conn_id,target:saved.target};
+              renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay();
+              updateInputPlaceholder();
+            }
           }
         }
       }
@@ -3523,9 +3529,28 @@ function handleEvent(ev) {
       buffers={};
       unread.clear();
       mentionUnread.clear();
+      for(const k of Object.keys(_lastMsgId)) delete _lastMsgId[k];
       renderChat();
       renderSidebar();
       break;
+    case 'upload_state':  _onUploadState(ev.records||[]); break;
+    case 'upload_update': _onUploadUpdate(ev.record);     break;
+    case 'upload_removed':_onUploadRemoved(ev.id);        break;
+    case 'target_cleared': {
+      // Server confirmed on-disk logs for this target are gone. Drop the
+      // buffer + sync state on every session so reload/resync can't bring
+      // the conversation back.
+      const k=bk(ev.conn_id,ev.target);
+      buffers[k]=[];
+      delete _lastMsgId[k];
+      unread.delete(k);
+      mentionUnread.delete(k);
+      saveUnread();
+      clearNoticesForTarget(ev.conn_id,ev.target);
+      if(isActive(ev.conn_id,ev.target)) renderChat();
+      renderSidebar();
+      break;
+    }
     case 'account_deleted':
       customAlert('Your account has been deleted.').then(()=>{
         localStorage.clear();
@@ -3783,16 +3808,13 @@ function _reconstructStatusFields(m,conn_id){
 }
 async function clearCurrentHistory(){
   if(!active)return;
-  if(!(await customConfirm('Clear chat history for '+active.target+'?','Clear')))return;
-  const k=bk(active.conn_id,active.target);
-  buffers[k]=[];
-  renderChat();
+  if(!(await customConfirm('Permanently delete chat history for '+active.target+'? This removes the logs from the server and cannot be undone.','Delete')))return;
+  // Server will reply with target_cleared which wipes buffer + sync state.
+  wsend({type:'clear_target_logs',conn_id:active.conn_id,target:active.target});
 }
 async function clearBufHistory(connId,target){
-  if(!(await customConfirm('Clear chat history for '+target+'?','Clear')))return;
-  const k=bk(connId,target);
-  buffers[k]=[];
-  if(active&&active.conn_id===connId&&active.target.toLowerCase()===target.toLowerCase()) renderChat();
+  if(!(await customConfirm('Permanently delete chat history for '+target+'? This removes the logs from the server and cannot be undone.','Delete')))return;
+  wsend({type:'clear_target_logs',conn_id:connId,target});
 }
 function prependLogs(conn_id,target,lines){
   const buf=getBuf(conn_id,target);
@@ -3895,6 +3917,9 @@ function renderSidebar(){
 function _renderSidebarNow(){
   const el=document.getElementById('network-list');
   el.innerHTML='';
+  // Uploads pseudo-channel — pinned above networks when visible.
+  const upEntry=_renderUploadsSidebarEntry();
+  if(upEntry) el.appendChild(upEntry);
   for(const net of networks){
     const id=net.config.id;
     const g=document.createElement('div'); g.className='net-group'; g.dataset.netId=id;
@@ -3977,6 +4002,11 @@ function updateInputPlaceholder(){
   const inp=document.getElementById('msg-input');
   if(!inp)return;
   if(!active){inp.placeholder='Select a channel…';inp.disabled=true;return;}
+  if(isUploadsConn(active.conn_id)){
+    inp.placeholder='Uploads — pick a chat to send messages';
+    inp.disabled=true;
+    return;
+  }
   const net=networks.find(n=>n.config.id===active.conn_id);
   inp.disabled=!net?.connected;
   if(!net?.connected){inp.placeholder='Not connected';return;}
@@ -4023,6 +4053,18 @@ function updateLagDisplay(){
 }
 function setActive(conn_id,target){
   active={conn_id,target};
+  // Uploads pseudo-channel doesn't live in IRC space — skip unread/sync/E2E
+  // bookkeeping entirely. It still uses the same active/render plumbing.
+  if(isUploadsConn(conn_id)){
+    if(!_detMode){
+      try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){}
+    }
+    renderSidebar(); renderChat(); updateTopbar(); updateInputPlaceholder();
+    return;
+  }
+  // Track the last real IRC view so files dropped/picked while on the Uploads
+  // channel still associate with a sensible source for "Insert into chat".
+  _lastIrcActive={conn_id,target};
   unread.delete(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
   clearNoticesForTarget(conn_id,target);
   // Persist active view and open queries — skipped in detached mode so the
@@ -4050,6 +4092,8 @@ function renderChat(){
   const area=document.getElementById('chat-area');
   const welcome=document.getElementById('welcome');
   if(!active){area.style.display='none';welcome.style.display='flex';return;}
+  // Uploads pseudo-channel uses its own renderer; bail before IRC paths run.
+  if(isUploadsActive()){ welcome.style.display='none'; renderUploadsView(); updateTopbar(); updateInputPlaceholder(); return; }
   area.style.display='block'; welcome.style.display='none'; area.innerHTML='';
   const buf=getBuf(active.conn_id,active.target);
   // "Load more" button at top
@@ -4409,13 +4453,23 @@ setInterval(()=>{
 },400);
 function updateTopbar(){
   if(!active)return;
-  const net=networks.find(n=>n.config.id===active.conn_id);
-  document.getElementById('chan-title').textContent=active.target;
-  document.getElementById('chan-title').style.color='var(--text)';
   const topicInline=document.getElementById('topic-inline');
   const topicSep=document.getElementById('topic-sep');
   const topicMenuBtn=document.getElementById('topic-menu-btn');
   const topbarSpacer=document.getElementById('topbar-spacer');
+  if(isUploadsConn(active.conn_id)){
+    document.getElementById('chan-title').textContent='Uploads';
+    document.getElementById('chan-title').style.color='var(--text)';
+    topicInline.style.display='none';
+    topicSep.style.display='none';
+    topicMenuBtn.style.display='none';
+    topbarSpacer.style.display='';
+    document.getElementById('usercount').textContent='';
+    return;
+  }
+  const net=networks.find(n=>n.config.id===active.conn_id);
+  document.getElementById('chan-title').textContent=active.target;
+  document.getElementById('chan-title').style.color='var(--text)';
   if(net){
     const ch=net.channels.find(c=>c.name===active.target);
     const topic=ch?.topic||'';
@@ -5165,7 +5219,10 @@ async function handleInput(raw){
         break;
       }
       case 'CLEAR':
-        {buffers[bk(conn_id,target)]=[]; renderChat(); break;}
+        // Permanently deletes the on-disk log for this target so it can't
+        // resurrect on the next sync. Server replies with target_cleared,
+        // which wipes the local buffer + msg_id sync state.
+        {wsend({type:'clear_target_logs',conn_id,target}); break;}
       case 'CLEARALL':
         {buffers={}; renderChat(); break;}
       case 'PING': {
@@ -5671,27 +5728,438 @@ async function submitPaste(btn){
   }catch(e){showToast('Error: '+e.message);}finally{btn.disabled=false;btn.textContent='Create Paste';}
 }
 function handleFileSelect(files){if(!active)return;Array.from(files).forEach(uploadFile);}
+
+// ─── Chunked / resumable upload system ───────────────────────────────────────
+//
+// State model:
+//   _uploads[id]      — server-authoritative record (mirrored from upload_*
+//                       WS events). Drives the Uploads pseudo-channel UI.
+//   _uploadJobs[id]   — local-only handle for an upload originating on THIS
+//                       device. Holds the cancel flag and chunk-loop state.
+//                       Records present in _uploads but not in _uploadJobs
+//                       are uploads from another device — we can observe
+//                       them but not feed them bytes.
+//   IndexedDB store   — the File blob for each in-flight upload originating
+//                       here, so we can auto-resume after a tab close.
+const _uploads={};
+const _uploadJobs={};
+let _lastIrcActive=null;
+const UPLOAD_CHUNK_BYTES = 1024 * 1024;        // 1 MB
+const UPLOAD_RETRY_MS    = 2500;
+const UPLOAD_TARGET      = '__uploads';
+const UPLOAD_CONN        = '__sys';
+const UPLOAD_KEY         = UPLOAD_CONN + '/' + UPLOAD_TARGET;
+function isUploadsActive(){return !!active && active.conn_id===UPLOAD_CONN && active.target===UPLOAD_TARGET;}
+function isUploadsConn(c){return c===UPLOAD_CONN;}
+let _uploadsHidden = (()=>{ try{ return localStorage.getItem('cryptirc_uploads_hidden')==='1'; }catch(e){ return false; } })();
+function setUploadsHidden(v){ _uploadsHidden=!!v; try{localStorage.setItem('cryptirc_uploads_hidden', v?'1':'0');}catch(e){} renderSidebar(); }
+function uploadsAnyActive(){ for(const id in _uploads){ if(_uploads[id].status==='uploading') return true; } return false; }
+function uploadsAnyExist(){ for(const _ in _uploads) return true; return false; }
+
+// ─── IndexedDB blob cache ────────────────────────────────────────────────────
+const _idbName='cryptirc-uploads',_idbStore='files';
+let _idbReady=null;
+function _idbOpen(){
+  if(_idbReady) return _idbReady;
+  _idbReady = new Promise((resolve,reject)=>{
+    if(!self.indexedDB){ reject(new Error('IndexedDB unavailable')); return; }
+    const req=self.indexedDB.open(_idbName,1);
+    req.onupgradeneeded=()=>{ const db=req.result; if(!db.objectStoreNames.contains(_idbStore)) db.createObjectStore(_idbStore,{keyPath:'id'}); };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+  return _idbReady;
+}
+async function idbPutFile(id,file){
+  try{
+    const db=await _idbOpen();
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction(_idbStore,'readwrite');
+      tx.objectStore(_idbStore).put({id, file, name:file.name, type:file.type, size:file.size, ts:Date.now()});
+      tx.oncomplete=()=>resolve();
+      tx.onerror=()=>reject(tx.error);
+    });
+  }catch(e){ console.warn('idbPutFile failed',e); }
+}
+async function idbGetFile(id){
+  try{
+    const db=await _idbOpen();
+    return new Promise((resolve)=>{
+      const tx=db.transaction(_idbStore,'readonly');
+      const req=tx.objectStore(_idbStore).get(id);
+      req.onsuccess=()=>resolve(req.result?.file||null);
+      req.onerror=()=>resolve(null);
+    });
+  }catch(e){ return null; }
+}
+async function idbDeleteFile(id){
+  try{
+    const db=await _idbOpen();
+    return new Promise((resolve)=>{
+      const tx=db.transaction(_idbStore,'readwrite');
+      tx.objectStore(_idbStore).delete(id);
+      tx.oncomplete=()=>resolve();
+      tx.onerror=()=>resolve();
+    });
+  }catch(e){}
+}
+async function idbListIds(){
+  try{
+    const db=await _idbOpen();
+    return new Promise((resolve)=>{
+      const tx=db.transaction(_idbStore,'readonly');
+      const req=tx.objectStore(_idbStore).getAllKeys();
+      req.onsuccess=()=>resolve(req.result||[]);
+      req.onerror=()=>resolve([]);
+    });
+  }catch(e){ return []; }
+}
+
+// ─── Upload helpers ──────────────────────────────────────────────────────────
+function _newUploadId(){
+  if(self.crypto && self.crypto.randomUUID) return self.crypto.randomUUID().replace(/-/g,'').slice(0,32);
+  return (Date.now().toString(36) + Math.random().toString(36).slice(2,12));
+}
+function _uploadBase(){ return location.pathname.replace(/\/$/,''); }
+function _uploadAuthHeader(){ return {'Authorization':'Bearer '+(sessionToken||'')}; }
+function _fmtSpeed(bps){
+  if(!isFinite(bps)||bps<=0) return '';
+  if(bps>=1024*1024) return (bps/1024/1024).toFixed(1)+' MB/s';
+  if(bps>=1024)      return (bps/1024).toFixed(1)+' KB/s';
+  return Math.round(bps)+' B/s';
+}
+async function _postJson(url,body){
+  const r=await fetch(url,{method:'POST',headers:{..._uploadAuthHeader(),'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const d=await r.json().catch(()=>({}));
+  return {ok:r.ok, status:r.status, data:d};
+}
+
+// Kick off a brand-new upload for a File the user just picked or dropped.
 async function uploadFile(file){
   if(!sessionToken){showToast('Not authenticated');return;}
-  const prog=document.getElementById('upload-progress');
-  prog.textContent=`📤 Uploading ${file.name}…`; prog.classList.add('show');
-  try {
-    const fd=new FormData(); fd.append('file',file);
-    const r=await fetch('/cryptirc/upload',{method:'POST',headers:{'Authorization':'Bearer '+sessionToken},body:fd});
-    const d=await r.json();
-    if(!r.ok){prog.textContent=`❌ ${d.message}`;setTimeout(()=>prog.classList.remove('show'),3000);return;}
-    const pubUrl=d.url.replace('/files/','/pub/');
-    const shareUrl=`${location.origin}${pubUrl}`;
-    const text=d.is_image?shareUrl:`${d.original_name}: ${shareUrl}`;
-    // Put the link in the input bar instead of sending immediately
-    const inp=document.getElementById('msg-input');
-    if(inp){
-      inp.value=inp.value?(inp.value+' '+text):text;
-      inp.focus();
+  // Source = the chat the user was last on (so even files dropped while
+  // viewing the Uploads channel get a sensible "Insert into chat" target).
+  const src = (active && !isUploadsConn(active.conn_id)) ? active : _lastIrcActive;
+  if(!src){showToast('Select a channel first');return;}
+  const id=_newUploadId();
+  await idbPutFile(id,file);
+  _uploadJobs[id]={canceled:false, file, lastTickAt:Date.now(), lastTickBytes:0, speed:0};
+  // Pre-seed local state so the row appears instantly (server broadcast
+  // confirms / replaces this in milliseconds).
+  _uploads[id]={
+    id, original_name:file.name, size:file.size, content_type:'',
+    url:'', filename:'', uploaded_at:0, status:'uploading', progress_bytes:0,
+    started_at: Math.floor(Date.now()/1000), completed_at:0, error:'',
+    source_conn_id: src.conn_id, source_target: src.target,
+  };
+  setUploadsHidden(false);
+  renderSidebar();
+  if(isUploadsActive()) renderChat();
+  flashUploadPip(`📤 ${file.name}`);
+  try{
+    const init=await _postJson(`${_uploadBase()}/upload/init`, {
+      id, original_name:file.name, size:file.size,
+      source_conn_id: src.conn_id, source_target: src.target,
+    });
+    if(!init.ok){
+      showToast(init.data.error||'Upload init failed');
+      _uploads[id].status='error'; _uploads[id].error=init.data.error||'init failed';
+      delete _uploadJobs[id]; await idbDeleteFile(id);
+      if(isUploadsActive()) renderChat();
+      renderSidebar();
+      return;
     }
-    prog.textContent=`✓ Uploaded ${d.original_name}`;
-    setTimeout(()=>prog.classList.remove('show'),2500);
-  } catch(e){prog.textContent=`❌ Upload failed`;setTimeout(()=>prog.classList.remove('show'),3000);}
+    runUploadLoop(id);
+  }catch(e){
+    showToast('Upload init failed: '+e.message);
+    _uploads[id].status='error'; _uploads[id].error=e.message;
+    delete _uploadJobs[id]; await idbDeleteFile(id);
+    if(isUploadsActive()) renderChat();
+    renderSidebar();
+  }
+}
+
+// Main chunk-pump. Survives navigation between channels; the only thing
+// that stops it is `canceled` or running out of bytes. On transient errors
+// (network blip, server 503), retries forever with backoff — that's how
+// "tab closes mid-upload then reopens to seamless resume" works.
+async function runUploadLoop(id){
+  if(_uploadJobs[id]?.running) return;
+  let file=_uploadJobs[id]?.file;
+  if(!file){
+    file=await idbGetFile(id);
+    if(!file){
+      // No bytes available on this device. Another device may finish it,
+      // or it'll sit paused until someone removes it.
+      delete _uploadJobs[id];
+      return;
+    }
+    _uploadJobs[id]={canceled:false, file, lastTickAt:Date.now(), lastTickBytes:0, speed:0};
+  }
+  _uploadJobs[id].running=true;
+  try{
+    // Ask the server how far it actually has, in case we just woke from
+    // a tab close and our local offset is stale.
+    let offset=0;
+    try{
+      const sr=await fetch(`${_uploadBase()}/upload/status/${encodeURIComponent(id)}`,{headers:_uploadAuthHeader()});
+      if(sr.ok){ const sd=await sr.json(); offset=sd.progress_bytes||0; }
+    }catch(_){}
+    while(offset < file.size){
+      if(!_uploadJobs[id] || _uploadJobs[id].canceled) return;
+      const end=Math.min(offset+UPLOAD_CHUNK_BYTES, file.size);
+      const chunk=file.slice(offset, end);
+      let ok=false;
+      try{
+        const r=await fetch(`${_uploadBase()}/upload/chunk/${encodeURIComponent(id)}?offset=${offset}`, {
+          method:'POST', headers:{..._uploadAuthHeader(),'Content-Type':'application/octet-stream'}, body:chunk,
+        });
+        if(r.ok){
+          const d=await r.json();
+          const before=offset, now=Date.now(), j=_uploadJobs[id];
+          offset=d.progress_bytes||end;
+          if(j){
+            const dt=Math.max(1, now - j.lastTickAt);
+            const db=offset - j.lastTickBytes;
+            j.speed = j.speed ? (j.speed*0.6 + (db*1000/dt)*0.4) : (db*1000/dt);
+            j.lastTickAt=now; j.lastTickBytes=offset;
+          }
+          ok=true;
+        } else if(r.status===400){
+          // Most likely an offset mismatch — re-sync from server.
+          try{
+            const sr=await fetch(`${_uploadBase()}/upload/status/${encodeURIComponent(id)}`,{headers:_uploadAuthHeader()});
+            if(sr.ok){ const sd=await sr.json(); offset=sd.progress_bytes||0; continue; }
+          }catch(_){}
+        }
+      }catch(e){ /* network blip — fall through to retry */ }
+      if(!ok){
+        // Optimistically reflect our intent locally so the UI doesn't look
+        // frozen during retries; the server's next 200 will overwrite.
+        if(_uploadJobs[id]?.canceled) return;
+        await new Promise(r=>setTimeout(r, UPLOAD_RETRY_MS));
+      }
+    }
+    // All bytes uploaded — ask server to finalize.
+    if(!_uploadJobs[id] || _uploadJobs[id].canceled) return;
+    let tries=0;
+    while(tries++<5){
+      try{
+        const r=await fetch(`${_uploadBase()}/upload/finalize/${encodeURIComponent(id)}`,{method:'POST',headers:_uploadAuthHeader()});
+        if(r.ok){
+          const d=await r.json();
+          // _uploads[id] will be updated via broadcast, but populate now so the
+          // UI doesn't briefly flicker between "100%" and the Done state.
+          Object.assign(_uploads[id]||{}, d);
+          await idbDeleteFile(id);
+          delete _uploadJobs[id];
+          if(isUploadsActive()) renderChat();
+          renderSidebar();
+          return;
+        }
+        if(r.status===401){ showToast('Upload finalize: not authenticated'); break; }
+      }catch(_){}
+      await new Promise(r=>setTimeout(r, UPLOAD_RETRY_MS));
+    }
+  } finally {
+    if(_uploadJobs[id]) _uploadJobs[id].running=false;
+  }
+}
+
+async function cancelUpload(id){
+  const j=_uploadJobs[id];
+  if(j) j.canceled=true;
+  try{ await fetch(`${_uploadBase()}/upload/cancel/${encodeURIComponent(id)}`,{method:'POST',headers:_uploadAuthHeader()}); }catch(_){}
+  await idbDeleteFile(id);
+  delete _uploadJobs[id];
+  // Server broadcasts the cancellation; UI updates on receipt.
+}
+function removeUploadRow(id){
+  wsend({type:'upload_remove', id});
+  // Optimistic local removal so the row disappears immediately even if
+  // the WS round-trip is slow.
+  delete _uploads[id];
+  delete _uploadJobs[id];
+  idbDeleteFile(id);
+  if(isUploadsActive()) renderChat();
+  renderSidebar();
+}
+function copyUploadLink(id){
+  const r=_uploads[id]; if(!r||!r.url) return;
+  const pubUrl=r.url.replace('/files/','/pub/');
+  const shareUrl=`${location.origin}${pubUrl}`;
+  navigator.clipboard?.writeText(shareUrl).then(()=>showToast('Link copied!')).catch(()=>{
+    const t=document.createElement('textarea');t.value=shareUrl;document.body.appendChild(t);t.select();
+    try{document.execCommand('copy');}catch(_){} document.body.removeChild(t);showToast('Link copied!');
+  });
+}
+function insertUploadLink(id){
+  const r=_uploads[id]; if(!r||!r.url) return;
+  const pubUrl=r.url.replace('/files/','/pub/');
+  const shareUrl=`${location.origin}${pubUrl}`;
+  const isImg=['jpg','jpeg','png','gif','webp','avif','ico'].includes((r.filename||'').split('.').pop().toLowerCase());
+  const text=isImg?shareUrl:`${r.original_name}: ${shareUrl}`;
+  // Switch to the chat this upload was started in (if still around), then
+  // drop the link in the input there.
+  if(r.source_conn_id && r.source_target){
+    const haveNet = networks.find(n=>n.config.id===r.source_conn_id);
+    if(haveNet) setActive(r.source_conn_id, r.source_target);
+  }
+  const inp=document.getElementById('msg-input');
+  if(inp){ inp.value = inp.value ? (inp.value+' '+text) : text; inp.focus(); }
+  showToast('Inserted into chat');
+}
+
+// Briefly flash the existing tiny strip so users see something happened
+// even when the Uploads channel isn't focused. Click to jump to it.
+function flashUploadPip(msg){
+  const prog=document.getElementById('upload-progress');
+  if(!prog) return;
+  prog.textContent=msg; prog.classList.add('show');
+  prog.style.cursor='pointer';
+  prog.onclick=()=>{ setUploadsHidden(false); setActive(UPLOAD_CONN, UPLOAD_TARGET); };
+  clearTimeout(prog._fadeTimer);
+  prog._fadeTimer=setTimeout(()=>prog.classList.remove('show'), 2500);
+}
+
+// ─── WS event glue ───────────────────────────────────────────────────────────
+function _onUploadState(records){
+  for(const k of Object.keys(_uploads)) delete _uploads[k];
+  for(const r of records) _uploads[r.id]=r;
+  // For any in-flight record where THIS device has the bytes cached,
+  // (re)start the upload loop. That's what makes resume-after-reload work.
+  (async()=>{
+    const ids=await idbListIds();
+    const haveLocal=new Set(ids);
+    for(const r of records){
+      if(r.status==='uploading' && haveLocal.has(r.id) && !_uploadJobs[r.id]){
+        runUploadLoop(r.id);
+      }
+    }
+    // Stale IDB rows whose server record is gone — clean up.
+    for(const id of ids){
+      if(!_uploads[id]) idbDeleteFile(id);
+    }
+  })();
+  if(records.length) setUploadsHidden(false);
+  if(isUploadsActive()) renderChat();
+  renderSidebar();
+}
+function _onUploadUpdate(rec){
+  _uploads[rec.id]=rec;
+  if(rec.status==='uploading') setUploadsHidden(false);
+  // If a record canceled / errored from another device, stop our loop.
+  if((rec.status==='canceled'||rec.status==='error') && _uploadJobs[rec.id]){
+    _uploadJobs[rec.id].canceled=true;
+    idbDeleteFile(rec.id);
+  }
+  if(isUploadsActive()) renderChat();
+  renderSidebar();
+}
+function _onUploadRemoved(id){
+  delete _uploads[id];
+  if(_uploadJobs[id]) _uploadJobs[id].canceled=true;
+  delete _uploadJobs[id];
+  idbDeleteFile(id);
+  if(isUploadsActive()) renderChat();
+  renderSidebar();
+}
+
+// ─── Renderers ───────────────────────────────────────────────────────────────
+function renderUploadsView(){
+  const area=document.getElementById('chat-area');
+  area.style.display='block';
+  area.innerHTML='';
+  const wrap=document.createElement('div');
+  wrap.style.cssText='padding:14px 16px;display:flex;flex-direction:column;gap:10px;max-width:800px;margin:0 auto';
+  const header=document.createElement('div');
+  header.style.cssText='display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:4px';
+  header.innerHTML=`<div style="font-weight:700;color:var(--text);font-size:14px">Uploads</div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button id="upload-pick-btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer">+ Upload file</button>
+    </div>`;
+  wrap.appendChild(header);
+  header.querySelector('#upload-pick-btn').onclick=()=>document.getElementById('file-input').click();
+  const rows=Object.values(_uploads).sort((a,b)=>(b.started_at||0)-(a.started_at||0));
+  if(!rows.length){
+    const empty=document.createElement('div');
+    empty.style.cssText='padding:30px;text-align:center;color:var(--text3);font-size:12px';
+    empty.textContent='No uploads yet. Drop a file or click "+ Upload file" above.';
+    wrap.appendChild(empty);
+  }
+  for(const r of rows) wrap.appendChild(_renderUploadRow(r));
+  area.appendChild(wrap);
+}
+function _renderUploadRow(r){
+  const row=document.createElement('div');
+  row.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:6px';
+  const pct=r.size?Math.min(100, Math.floor((r.progress_bytes||0) * 100 / r.size)):0;
+  const status=r.status||'uploading';
+  const statusColor = status==='done'?'var(--accent,#00d4aa)' : status==='error'?'var(--error,#ff6b6b)' : status==='canceled'?'var(--text3)' : 'var(--accent,#00d4aa)';
+  const job=_uploadJobs[r.id];
+  const speedTxt = (status==='uploading' && job && job.speed>0) ? _fmtSpeed(job.speed) : '';
+  const statusLabel = status==='done'?'Done' : status==='error'?('Error'+(r.error?': '+r.error:'')) : status==='canceled'?'Canceled' : (job?`Uploading${speedTxt?' · '+speedTxt:''}`:'Uploading (other device)');
+  const sizeTxt=`${formatBytes(r.progress_bytes||0)} / ${formatBytes(r.size||0)}`;
+  row.innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px">
+      <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)" title="${esc(r.original_name||'')}">${esc(r.original_name||'(unnamed)')}</div>
+      <div style="font-size:11px;color:var(--text3);font-family:var(--mono);flex-shrink:0">${pct}%</div>
+    </div>
+    <div style="height:6px;background:var(--bg3);border-radius:3px;overflow:hidden">
+      <div style="height:100%;width:${pct}%;background:${statusColor};transition:width .2s ease"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:var(--text3);font-family:var(--mono)">
+      <div>${sizeTxt} · <span style="color:${statusColor}">${esc(statusLabel)}</span></div>
+      <div data-actions style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    </div>`;
+  const actions=row.querySelector('[data-actions]');
+  function btn(label,fn,color){
+    const b=document.createElement('button');
+    b.textContent=label;
+    b.style.cssText=`background:none;border:1px solid var(--border);color:${color||'var(--text2)'};padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px;font-family:var(--mono)`;
+    b.onclick=fn; actions.appendChild(b);
+  }
+  if(status==='uploading') btn('Cancel', ()=>cancelUpload(r.id), 'var(--error,#ff6b6b)');
+  if(status==='done'){
+    btn('Copy link', ()=>copyUploadLink(r.id), 'var(--accent,#00d4aa)');
+    btn('Insert', ()=>insertUploadLink(r.id), 'var(--accent,#00d4aa)');
+  }
+  if(status!=='uploading') btn('Remove', ()=>removeUploadRow(r.id), 'var(--text3)');
+  return row;
+}
+
+function _renderUploadsSidebarEntry(){
+  // Hide entirely when manually closed, OR when there's nothing to show yet
+  // (no prior uploads + no in-flight) — keeps the sidebar clean for new users.
+  if(_uploadsHidden) return null;
+  if(!uploadsAnyExist()) return null;
+  const el=document.createElement('div');
+  el.className='net-group';
+  el.dataset.netId=UPLOAD_CONN;
+  const isA=isUploadsActive();
+  let active_n=0, done_n=0;
+  for(const id in _uploads){
+    if(_uploads[id].status==='uploading') active_n++;
+    else if(_uploads[id].status==='done') done_n++;
+  }
+  const subtitle=active_n?`${active_n} uploading`:(done_n?`${done_n} ready`:'idle');
+  el.innerHTML=`<div class="net-label${isA?' active':''}" style="${isA?'background:var(--bg4);':''}">
+    <span class="net-dot ${active_n?'online':''}"></span>
+    <span class="net-name">Uploads <span style="opacity:.5;font-size:10px;font-weight:normal">· ${esc(subtitle)}</span></span>
+    <span class="net-actions">
+      <button class="net-btn" title="Hide" data-upload-close>✕</button>
+    </span>
+  </div>`;
+  el.querySelector('.net-label').onclick=(e)=>{
+    if(e.target.closest('[data-upload-close]')) return;
+    setActive(UPLOAD_CONN, UPLOAD_TARGET); closeSidebar();
+  };
+  el.querySelector('[data-upload-close]').onclick=(e)=>{
+    e.stopPropagation();
+    setUploadsHidden(true);
+    if(isUploadsActive()) setActive(networks[0]?.config.id||'', 'status');
+  };
+  return el;
 }
 
 // ─── User Count Update + Blink ───────────────────────────────────────────────
