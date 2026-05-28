@@ -600,14 +600,24 @@ async fn main() -> Result<()> {
 
 // ─── Static assets ────────────────────────────────────────────────────────────
 
-async fn serve_index(State(state): State<AppState>) -> Html<String> { Html((*state.static_index).clone()) }
-async fn serve_manifest(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/manifest+json")], (*state.static_manifest).clone()) }
-async fn serve_sw(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], (*state.static_sw).clone()) }
+// no-store on the HTML + service-worker + JS bundles so Electron's Chromium
+// (and Safari/Chrome) don't keep serving a stale build after we deploy.
+// Without an explicit Cache-Control header, Chromium uses heuristic caching
+// (~10% of (now - Last-Modified)) which kept users pinned to old JS for
+// minutes-to-hours.
+const NO_CACHE: &str = "no-store, no-cache, must-revalidate";
+async fn serve_index(State(state): State<AppState>) -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8"),
+      (header::CACHE_CONTROL, NO_CACHE)],
+     (*state.static_index).clone())
+}
+async fn serve_manifest(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/manifest+json"),(header::CACHE_CONTROL,NO_CACHE)], (*state.static_manifest).clone()) }
+async fn serve_sw(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], (*state.static_sw).clone()) }
 async fn serve_icon()     -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/svg+xml")], include_str!("../static/icon.svg")) }
 async fn serve_icon_192() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-192.png").as_slice()) }
 async fn serve_icon_512() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-512.png").as_slice()) }
-async fn serve_e2e_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/e2e.js")) }
-async fn serve_sortable_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8")], include_str!("../static/Sortable.min.js")) }
+async fn serve_e2e_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/e2e.js")) }
+async fn serve_sortable_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/Sortable.min.js")) }
 
 // Bundled notification sounds — shipped in the binary so deploys don't need
 // external asset files. Served at /sounds/<name>.mp3.
