@@ -5768,7 +5768,13 @@ const UPLOAD_KEY         = UPLOAD_CONN + '/' + UPLOAD_TARGET;
 function isUploadsActive(){return !!active && active.conn_id===UPLOAD_CONN && active.target===UPLOAD_TARGET;}
 function isUploadsConn(c){return c===UPLOAD_CONN;}
 let _uploadsHidden = (()=>{ try{ return localStorage.getItem('cryptirc_uploads_hidden')==='1'; }catch(e){ return false; } })();
-function setUploadsHidden(v){ _uploadsHidden=!!v; try{localStorage.setItem('cryptirc_uploads_hidden', v?'1':'0');}catch(e){} renderSidebar(); }
+function setUploadsHidden(v){
+  v=!!v;
+  if(v===_uploadsHidden) return;        // idempotent — avoid spurious renders
+  _uploadsHidden=v;
+  try{localStorage.setItem('cryptirc_uploads_hidden', v?'1':'0');}catch(e){}
+  renderSidebar();
+}
 function uploadsAnyActive(){ for(const id in _uploads){ if(_uploads[id].status==='uploading') return true; } return false; }
 function uploadsAnyExist(){ for(const _ in _uploads) return true; return false; }
 
@@ -6067,15 +6073,27 @@ function _onUploadState(records){
   renderSidebar();
 }
 function _onUploadUpdate(rec){
+  const prev=_uploads[rec.id];
   _uploads[rec.id]=rec;
-  if(rec.status==='uploading') setUploadsHidden(false);
+  if(rec.status==='uploading') setUploadsHidden(false);  // idempotent now
   // If a record canceled / errored from another device, stop our loop.
   if((rec.status==='canceled'||rec.status==='error') && _uploadJobs[rec.id]){
     _uploadJobs[rec.id].canceled=true;
     idbDeleteFile(rec.id);
   }
-  if(isUploadsActive()) renderChat();
-  renderSidebar();
+  // Brand-new row, or status transition between buckets that affects sidebar
+  // visibility (none → exists, or last-uploading-finishing) — fall back to
+  // a full render. Pure progress updates hit the in-place fast paths and
+  // don't churn the main sidebar (which kept eating click handlers on
+  // network channels mid-tap).
+  const isNew = !prev;
+  if(isNew){
+    renderSidebar();
+    if(isUploadsActive()) renderChat();
+    return;
+  }
+  _refreshUploadsPin();
+  _updateUploadRowInPlace(rec);
 }
 function _onUploadRemoved(id){
   delete _uploads[id];
@@ -6125,29 +6143,51 @@ function renderUploadsView(){
   for(const r of rows) wrap.appendChild(_renderUploadRow(r));
   area.appendChild(wrap);
 }
+function _uploadStatusColor(status){
+  if(status==='done')     return 'var(--accent,#00d4aa)';
+  if(status==='error')    return 'var(--error,#ff6b6b)';
+  if(status==='canceled') return 'var(--text3)';
+  return 'var(--accent,#00d4aa)';
+}
+function _uploadStatusLabel(r){
+  const job=_uploadJobs[r.id];
+  const speedTxt = (r.status==='uploading' && job && job.speed>0) ? _fmtSpeed(job.speed) : '';
+  if(r.status==='done')     return 'Done';
+  if(r.status==='error')    return 'Error'+(r.error?': '+r.error:'');
+  if(r.status==='canceled') return 'Canceled';
+  return job ? `Uploading${speedTxt?' · '+speedTxt:''}` : 'Uploading (other device)';
+}
 function _renderUploadRow(r){
   const row=document.createElement('div');
+  row.dataset.uploadId=r.id;
+  row.dataset.uploadStatus=r.status||'uploading';
   row.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:6px';
   const pct=r.size?Math.min(100, Math.floor((r.progress_bytes||0) * 100 / r.size)):0;
   const status=r.status||'uploading';
-  const statusColor = status==='done'?'var(--accent,#00d4aa)' : status==='error'?'var(--error,#ff6b6b)' : status==='canceled'?'var(--text3)' : 'var(--accent,#00d4aa)';
-  const job=_uploadJobs[r.id];
-  const speedTxt = (status==='uploading' && job && job.speed>0) ? _fmtSpeed(job.speed) : '';
-  const statusLabel = status==='done'?'Done' : status==='error'?('Error'+(r.error?': '+r.error:'')) : status==='canceled'?'Canceled' : (job?`Uploading${speedTxt?' · '+speedTxt:''}`:'Uploading (other device)');
+  const statusColor=_uploadStatusColor(status);
+  const statusLabel=_uploadStatusLabel(r);
   const sizeTxt=`${formatBytes(r.progress_bytes||0)} / ${formatBytes(r.size||0)}`;
+  // Data-* hooks let _updateUploadRowInPlace() target just the changing
+  // bits per progress event instead of nuking the whole row each chunk.
   row.innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px">
       <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)" title="${esc(r.original_name||'')}">${esc(r.original_name||'(unnamed)')}</div>
-      <div style="font-size:11px;color:var(--text3);font-family:var(--mono);flex-shrink:0">${pct}%</div>
+      <div data-pct style="font-size:11px;color:var(--text3);font-family:var(--mono);flex-shrink:0">${pct}%</div>
     </div>
     <div style="height:6px;background:var(--bg3);border-radius:3px;overflow:hidden">
-      <div style="height:100%;width:${pct}%;background:${statusColor};transition:width .2s ease"></div>
+      <div data-bar style="height:100%;width:${pct}%;background:${statusColor};transition:width .2s ease"></div>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:var(--text3);font-family:var(--mono)">
-      <div>${sizeTxt} · <span style="color:${statusColor}">${esc(statusLabel)}</span></div>
+      <div><span data-size>${sizeTxt}</span> · <span data-status style="color:${statusColor}">${esc(statusLabel)}</span></div>
       <div data-actions style="display:flex;gap:6px;flex-wrap:wrap"></div>
     </div>`;
+  _fillUploadRowActions(row, r);
+  return row;
+}
+function _fillUploadRowActions(row, r){
   const actions=row.querySelector('[data-actions]');
+  actions.innerHTML='';
+  const status=r.status||'uploading';
   function btn(label,fn,color){
     const b=document.createElement('button');
     b.textContent=label;
@@ -6160,7 +6200,64 @@ function _renderUploadRow(r){
     btn('Insert', ()=>insertUploadLink(r.id), 'var(--accent,#00d4aa)');
   }
   if(status!=='uploading') btn('Remove', ()=>removeUploadRow(r.id), 'var(--text3)');
-  return row;
+}
+// In-place row update: progress bar, %, size, status text. Falls back to
+// a full re-render only when the row doesn't exist yet or the status
+// transitions (different action buttons are needed).
+function _updateUploadRowInPlace(r){
+  if(!isUploadsActive()) return;                 // not visible — skip
+  const area=document.getElementById('chat-area');
+  const row=area && area.querySelector(`[data-upload-id="${CSS.escape(r.id)}"]`);
+  if(!row){ renderUploadsView(); return; }
+  const prevStatus=row.dataset.uploadStatus||'uploading';
+  const status=r.status||'uploading';
+  const pct=r.size?Math.min(100, Math.floor((r.progress_bytes||0) * 100 / r.size)):0;
+  const color=_uploadStatusColor(status);
+  const pctEl=row.querySelector('[data-pct]');
+  const barEl=row.querySelector('[data-bar]');
+  const sizeEl=row.querySelector('[data-size]');
+  const statusEl=row.querySelector('[data-status]');
+  if(pctEl)    pctEl.textContent = pct+'%';
+  if(barEl){   barEl.style.width = pct+'%'; barEl.style.background = color; }
+  if(sizeEl)   sizeEl.textContent = `${formatBytes(r.progress_bytes||0)} / ${formatBytes(r.size||0)}`;
+  if(statusEl){ statusEl.textContent = _uploadStatusLabel(r); statusEl.style.color = color; }
+  if(prevStatus !== status){
+    row.dataset.uploadStatus = status;
+    _fillUploadRowActions(row, r);
+  }
+}
+// Surgical pin refresh: just the "Upload Status · 2 uploading" subtitle
+// and the dot. Cheap enough to fire on every chunk. Falls back to a full
+// renderSidebar only when the visibility of the pin itself changes
+// (appear / disappear).
+function _refreshUploadsPin(){
+  const pin=document.getElementById('uploads-pin');
+  if(!pin) return;
+  const shouldShow = !_uploadsHidden && uploadsAnyExist();
+  const isShowing  = !!pin.firstChild;
+  if(shouldShow !== isShowing){
+    renderSidebar();
+    return;
+  }
+  if(!shouldShow) return;
+  let active_n=0;
+  for(const id in _uploads) if(_uploads[id].status==='uploading') active_n++;
+  const dot=pin.querySelector('.net-dot');
+  if(dot){
+    if(active_n) dot.classList.add('online');
+    else dot.classList.remove('online');
+  }
+  const sub=pin.querySelector('.net-name span');
+  if(sub){
+    let done_n=0;
+    for(const id in _uploads) if(_uploads[id].status==='done') done_n++;
+    sub.textContent='· '+(active_n?`${active_n} uploading`:(done_n?`${done_n} ready`:'idle'));
+  }
+  const lbl=pin.querySelector('.net-label');
+  if(lbl){
+    if(isUploadsActive()){ lbl.classList.add('active'); lbl.style.background='var(--bg4)'; }
+    else                 { lbl.classList.remove('active'); lbl.style.background=''; }
+  }
 }
 
 function _renderUploadsSidebarEntry(){
