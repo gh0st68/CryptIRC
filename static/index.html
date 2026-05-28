@@ -5853,8 +5853,13 @@ async function uploadFile(file){
     source_conn_id: src.conn_id, source_target: src.target,
   };
   setUploadsHidden(false);
+  // Jump straight to the Uploads view so the user sees the row appear with
+  // its progress bar instantly. We do this only on the originating device —
+  // other sessions get the sidebar update + tiny toast but aren't yanked
+  // away from whatever they were doing.
+  if(!isUploadsActive()) setActive(UPLOAD_CONN, UPLOAD_TARGET);
+  else renderChat();
   renderSidebar();
-  if(isUploadsActive()) renderChat();
   flashUploadPip(`📤 ${file.name}`);
   try{
     const init=await _postJson(`${_uploadBase()}/upload/init`, {
@@ -6077,9 +6082,23 @@ function renderUploadsView(){
   header.innerHTML=`<div style="font-weight:700;color:var(--text);font-size:14px">Uploads</div>
     <div style="display:flex;gap:8px;align-items:center">
       <button id="upload-pick-btn" style="background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer">+ Upload file</button>
+      <button id="upload-close-view-btn" title="Close (keeps sidebar entry)" style="background:none;border:1px solid var(--border);color:var(--text3);padding:3px 9px;border-radius:6px;font-size:14px;cursor:pointer;line-height:1">✕</button>
     </div>`;
   wrap.appendChild(header);
   header.querySelector('#upload-pick-btn').onclick=()=>document.getElementById('file-input').click();
+  // Close-view: return to the last real IRC chat (or status) — does NOT
+  // hide the sidebar entry, so the user can jump back into the channel
+  // any time. To truly dismiss the entry, ✕ on the sidebar entry itself.
+  header.querySelector('#upload-close-view-btn').onclick=()=>{
+    if(_lastIrcActive){
+      setActive(_lastIrcActive.conn_id, _lastIrcActive.target);
+    } else if(networks[0]){
+      setActive(networks[0].config.id, 'status');
+    } else {
+      active=null; renderChat(); renderSidebar(); updateInputPlaceholder();
+      try{localStorage.removeItem('cryptirc_active');}catch(e){}
+    }
+  };
   const rows=Object.values(_uploads).sort((a,b)=>(b.started_at||0)-(a.started_at||0));
   if(!rows.length){
     const empty=document.createElement('div');
@@ -6147,7 +6166,7 @@ function _renderUploadsSidebarEntry(){
     <span class="net-dot ${active_n?'online':''}"></span>
     <span class="net-name">Uploads <span style="opacity:.5;font-size:10px;font-weight:normal">· ${esc(subtitle)}</span></span>
     <span class="net-actions">
-      <button class="net-btn" title="Hide" data-upload-close>✕</button>
+      <button class="net-btn" title="Hide Uploads entry (new uploads will bring it back)" data-upload-close>✕</button>
     </span>
   </div>`;
   el.querySelector('.net-label').onclick=(e)=>{
