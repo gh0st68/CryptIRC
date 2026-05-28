@@ -2111,6 +2111,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <div id="favorites-list"></div>
       <div id="pm-list" style="padding:0"></div>
       <div id="network-list"></div>
+      <!-- Upload Status pseudo-channel sits in its own container so
+           favorites-only mode (which hides #network-list) doesn't hide it. -->
+      <div id="uploads-pin"></div>
     </div>
     <div id="sidebar-footer">
       <button class="sidebar-btn" onclick="showAddNetwork()">+ Server</button>
@@ -3991,10 +3994,15 @@ function _renderSidebarNow(){
     }
     el.appendChild(g);
   }
-  // Upload Status pseudo-channel — pinned BELOW all networks/channels so
-  // it sits at the bottom of the list as its own row.
-  const upEntry=_renderUploadsSidebarEntry();
-  if(upEntry) el.appendChild(upEntry);
+  // Upload Status pseudo-channel — rendered into its own #uploads-pin
+  // container (sibling of #network-list), so it stays visible even when
+  // favorites-only mode hides the rest of the network list.
+  const pin=document.getElementById('uploads-pin');
+  if(pin){
+    pin.innerHTML='';
+    const upEntry=_renderUploadsSidebarEntry();
+    if(upEntry) pin.appendChild(upEntry);
+  }
   updateCertBtn();
   renderFavorites();
   renderPMList();
