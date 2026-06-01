@@ -1978,15 +1978,18 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
         ClientMessage::GetLogs { conn_id, target, limit, before } => {
             if !state.owns_network(username, &conn_id).await { return; }
             let lim = limit.unwrap_or(200).min(500);
-            // Read all logs (up to internal cap), then filter and slice
-            let all_lines = state.logger.read_logs(username, &conn_id, &target, 10000).await.unwrap_or_default();
-            let filtered: Vec<LogLine> = if let Some(ts) = before {
-                all_lines.into_iter().filter(|l| l.ts < ts).collect()
+            let lines = if let Some(ts) = before {
+                // Paging / jump-to-message: scan the FULL history so we can reach
+                // any depth (read_logs would cap the look-back to the last 10k and
+                // hide older messages — the bug behind "message no longer in
+                // history" when search finds something far back).
+                state.logger.read_logs_before(username, &conn_id, &target, ts, lim).await.unwrap_or_default()
             } else {
-                all_lines
+                // Initial load: just the most-recent `lim` messages.
+                let all_lines = state.logger.read_logs(username, &conn_id, &target, 10000).await.unwrap_or_default();
+                let start = all_lines.len().saturating_sub(lim);
+                all_lines[start..].to_vec()
             };
-            let start = filtered.len().saturating_sub(lim);
-            let lines = filtered[start..].to_vec();
             send(ServerEvent::LogLines { conn_id, target, lines });
         }
         ClientMessage::SearchLogs { conn_id, target, query, limit } => {

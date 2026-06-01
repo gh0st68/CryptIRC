@@ -118,6 +118,19 @@ impl EncryptedLogger {
         Ok(matches)
     }
 
+    /// Return up to `limit` messages with ts < `before`, the most-recent such
+    /// (chronological order). Unlike read_logs(N) this does NOT cap how far back
+    /// it looks — it scans the FULL history, so paging / jump-to-message can
+    /// reach any depth (read_logs slices to the last N and would hide anything
+    /// older than that window). Same I/O cost as read_logs: both read_all_lines.
+    pub async fn read_logs_before(&self, username: &str, conn_id: &str, target: &str, before: i64, limit: usize) -> Result<Vec<LogLine>> {
+        if !self.crypto.is_unlocked(username).await { anyhow::bail!("Vault locked"); }
+        let lines = self.read_all_lines(username, conn_id, target).await?;
+        let mut filtered: Vec<LogLine> = lines.into_iter().filter(|l| l.ts < before).collect();
+        let start = filtered.len().saturating_sub(limit);
+        Ok(filtered.split_off(start))
+    }
+
     /// Read and decrypt all log lines for a target (shared by read_logs and read_logs_since).
     async fn read_all_lines(&self, username: &str, conn_id: &str, target: &str) -> Result<Vec<LogLine>> {
         let dir = PathBuf::from(&self.data_dir)

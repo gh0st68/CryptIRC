@@ -11343,18 +11343,29 @@ function jumpToMessage(conn_id, target, ts, from){
   // Scan the rendered DOM for the target row. Matches on timestamp and, when a
   // sender is known, on the row's `from` OR its rendered nick text (covers
   // prefix/case quirks) so a correct row isn't rejected over a cosmetic diff.
+  const flash = el => { el.classList.add('flash'); setTimeout(()=>el.classList.remove('flash'), 3000); };
+  // Reveal + scroll to a row. Status messages (join/part/quit/nick/mode/…) are
+  // rendered as hidden children inside a collapsed `.status-condensed` block —
+  // they DO carry data-ts (built via buildRow) so the scan below matches them,
+  // but scrollIntoView on a display:none element does nothing. Expand the parent
+  // block first so the target is actually visible.
+  const reveal = r => {
+    const cond = r.closest('.status-condensed');
+    if(cond) cond.classList.add('expanded');
+    // Instant jump (behavior:'auto'), not a slow smooth-scroll animation — the
+    // user wants to land on the message immediately.
+    r.scrollIntoView({behavior:'auto', block:'center'});
+    flash(r);
+  };
   const tryFind = ()=>{
-    const rows = document.querySelectorAll('.msg-row');
-    for(const r of rows){
+    for(const r of document.querySelectorAll('.msg-row')){
       if(r.dataset.ts !== String(ts)) continue;
       if(from){
         const nickEl = r.querySelector('.msg-nick');
         const nickText = nickEl ? stripPfx(nickEl.textContent.trim().replace(/^\* /,'')) : '';
         if(r.dataset.from !== from && nickText !== from) continue;
       }
-      r.scrollIntoView({behavior:'smooth', block:'center'});
-      r.classList.add('flash');
-      setTimeout(()=>r.classList.remove('flash'), 3000);
+      reveal(r);
       return true;
     }
     return false;
@@ -11367,6 +11378,7 @@ function jumpToMessage(conn_id, target, ts, from){
   // puts the channel into "history view" (see _enterHistoryView). One shot — no
   // chunk-by-chunk paging, no depth cap.
   const lk = conn_id + '/' + target;
+  const POLL = 100;          // fast re-check so we scroll the instant the window lands
   let windowLoaded = false;  // have we already loaded the focused window this jump?
   let noTsElapsed = 0;       // ms spent scanning when we have no ts to anchor on
 
@@ -11375,13 +11387,13 @@ function jumpToMessage(conn_id, target, ts, from){
     if(!isActive(conn_id, target)) return;
     if(tryFind()) return;
     // A log chunk (initial load or the window we asked for) is still in flight.
-    if(_pendingLogs.has(lk)){ setTimeout(tick, 250); return; }
+    if(_pendingLogs.has(lk)){ setTimeout(tick, POLL); return; }
 
     // No timestamp to anchor on — just scan for a few seconds while the initial
     // load streams in, then give up silently (keeps old no-ts callers working).
     if(tsNum == null){
-      noTsElapsed += 250;
-      if(noTsElapsed < 4000) setTimeout(tick, 250);
+      noTsElapsed += POLL;
+      if(noTsElapsed < 4000) setTimeout(tick, POLL);
       return;
     }
 
@@ -11396,7 +11408,7 @@ function jumpToMessage(conn_id, target, ts, from){
       _enterHistoryView(conn_id, target);
       getBuf(conn_id, target).length = 0;
       wsend({type:'get_logs', conn_id, target, limit:300, before:tsNum + 1});
-      setTimeout(tick, 250);
+      setTimeout(tick, POLL);
       return;
     }
     // Window loaded but the target still isn't present → it's genuinely gone
@@ -11404,8 +11416,8 @@ function jumpToMessage(conn_id, target, ts, from){
     showToast('Message no longer in history');
   };
 
-  // Let setActive paint the first page, then begin.
-  setTimeout(tick, 150);
+  // setActive renders synchronously; a short beat lets the DOM settle, then go.
+  setTimeout(tick, 60);
 }
 
 // ── History view: the active buffer holds a focused window from the past (loaded
