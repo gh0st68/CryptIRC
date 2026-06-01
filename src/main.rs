@@ -1991,7 +1991,8 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
         }
         ClientMessage::SearchLogs { conn_id, target, query, limit } => {
             if !state.owns_network(username, &conn_id).await { return; }
-            let lim = limit.unwrap_or(200).min(500);
+            // 0 = no limit: search and return EVERY match across the full history.
+            let lim = limit.unwrap_or(0);
             let lines = state.logger.search_logs(username, &conn_id, &target, &query, lim).await.unwrap_or_default();
             send(ServerEvent::SearchResults { conn_id, target, query, lines });
         }

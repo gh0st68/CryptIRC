@@ -12702,13 +12702,20 @@ function doSearch(query){
   const sConn=active.conn_id, sTarget=active.target;
   window._searchReq={conn_id:sConn,target:sTarget,query};
   el.innerHTML='<div class="search-empty">Searching…</div>';
-  wsend({type:'search_logs',conn_id:sConn,target:sTarget,query,limit:200});
+  // No `limit` → server returns EVERY match across the channel/chat's full history.
+  wsend({type:'search_logs',conn_id:sConn,target:sTarget,query});
 }
 function renderSearchResults(conn_id,target,query,results){
   const el=document.getElementById('search-results');
   if(!el)return;
   if(!results||!results.length){el.innerHTML='<div class="search-empty">No results found</div>';return;}
   el.innerHTML='';
+  // Count header so it's clear the full history was searched.
+  const hdr=document.createElement('div');
+  hdr.className='search-empty';
+  hdr.style.cssText='padding:6px 10px;color:var(--text3);font-size:11px';
+  hdr.textContent=`${results.length} result${results.length===1?'':'s'} across all history`;
+  el.appendChild(hdr);
   // Server returns chronological (oldest→newest); show newest first.
   for(let i=results.length-1;i>=0;i--){
     const m=results[i];
