@@ -4366,15 +4366,42 @@ function buildRow(msg){
   }
   return row;
 }
-// Delegated click handler for nick list — attached once, works for all nicks
+// Delegated click handler for nick list — attached once, works for all nicks.
+// iOS quirk: when the message input is focused, a tap on a nick fires
+// touchend → synthetic mousedown → input blur → keyboard dismiss → visualViewport
+// resize → layout shift → the synthetic `click` then lands at stale coords (or a
+// stray synthetic click instantly closes the just-opened overlay). Net effect:
+// the first tap appears to do nothing and you have to tap twice. We commit the
+// tap on touchend with preventDefault() to cancel that whole cascade, and guard
+// the click handler so it doesn't double-fire on touch devices.
 (function(){
   const nl=document.getElementById('nick-list');
   if(nl&&!nl._delegated){
     nl._delegated=true;
+    let _touchHandled=false,_tStart=null;
+    nl.addEventListener('touchstart',function(e){
+      _tStart=e.touches.length?[e.touches[0].clientX,e.touches[0].clientY]:null;
+    },{passive:true});
+    nl.addEventListener('touchend',function(e){
+      const entry=e.target.closest('.nick-entry');
+      // Only treat as a tap if the finger barely moved — otherwise this was a
+      // scroll of the member list and must not open the menu on release.
+      const t=e.changedTouches&&e.changedTouches[0];
+      const moved=_tStart&&t?_distPts(_tStart,[t.clientX,t.clientY])>10:false;
+      _tStart=null;
+      if(entry&&entry.dataset.nick&&!moved){
+        e.preventDefault();   // cancel synthetic mousedown/click + input-blur cascade
+        e.stopPropagation();
+        _touchHandled=true;
+        setTimeout(()=>{_touchHandled=false;},700);
+        showNickMenu(e,entry.dataset.nick);
+      }
+    },{passive:false});
     nl.addEventListener('click',function(e){
       const entry=e.target.closest('.nick-entry');
       if(entry&&entry.dataset.nick){
         e.stopPropagation();
+        if(_touchHandled)return;   // touchend already opened it on this device
         showNickMenu(e,entry.dataset.nick);
       }
     });
@@ -10512,7 +10539,10 @@ function showNickMenu(e,nick){
     const overlay=document.createElement('div');
     overlay.className='nick-ctx-overlay';
     overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:199;';
-    overlay.addEventListener('click',()=>{closeNickMenu();});
+    // Ignore a stray synthetic click that may fire right after the opening tap
+    // (the iOS touchend→click cascade) so the menu doesn't open-then-close.
+    menu._openedAt=Date.now();
+    overlay.addEventListener('click',()=>{if(Date.now()-menu._openedAt<400)return;closeNickMenu();});
     // Add nick name header
     const hdr=document.createElement('div');
     hdr.style.cssText='padding:8px 12px;font-weight:700;color:var(--accent);border-bottom:1px solid var(--border);font-size:13px;';
@@ -10530,7 +10560,11 @@ function showNickMenu(e,nick){
   } else {
     document.body.appendChild(menu);
     const r=menu.getBoundingClientRect();
-    let x=e.clientX,y=e.clientY;
+    // e may be a TouchEvent (no clientX/Y on the event itself) on touch tablets
+    // wider than the mobile breakpoint — fall back to the touch point, then center.
+    const _ct=e.changedTouches&&e.changedTouches[0];
+    let x=(e.clientX!=null?e.clientX:(_ct?_ct.clientX:window.innerWidth/2));
+    let y=(e.clientY!=null?e.clientY:(_ct?_ct.clientY:window.innerHeight/2));
     if(x+r.width>window.innerWidth) x=window.innerWidth-r.width-8;
     if(x<8) x=8;
     if(y+r.height>window.innerHeight) y=window.innerHeight-r.height-8;
@@ -10566,6 +10600,7 @@ function showTopicMenu(e){
     const muted=isMuted(muteKey);
     m.innerHTML+=`<button class="topic-menu-item" onclick="toggleMute('${esc(muteKey)}');closeTopicMenu()">${muted?'🔔 Unmute':'🔇 Mute'}</button>`;
     m.innerHTML+=`<button class="topic-menu-item" onclick="chanListData=[];chanListConnId='${esc(conn_id)}';document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';document.getElementById('chanlist-count').textContent='';document.getElementById('chanlist-search').value='';document.getElementById('chanlist-overlay').classList.add('show');wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'LIST'});closeTopicMenu()">📋 Channel list</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="clearBufHistory('${esc(conn_id)}','${esc(target)}');closeTopicMenu()">🗑 Clear History</button>`;
     m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">🚪 Leave channel</button>`;
   } else if(isPM){
     m.innerHTML+=`<button class="topic-menu-item" onclick="wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'WHOIS ${esc(target)}'});closeTopicMenu()">🔍 Whois</button>`;
@@ -10579,6 +10614,7 @@ function showTopicMenu(e){
     const fav=isFavorite(conn_id,target);
     m.innerHTML+=`<button class="topic-menu-item" onclick="toggleFavorite('${esc(conn_id)}','${esc(target)}');closeTopicMenu()">${fav?'★ Unfavorite':'☆ Favorite'}</button>`;
     m.innerHTML+=`<button class="topic-menu-item" onclick="chanListData=[];chanListConnId='${esc(conn_id)}';document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';document.getElementById('chanlist-count').textContent='';document.getElementById('chanlist-search').value='';document.getElementById('chanlist-overlay').classList.add('show');wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'LIST'});closeTopicMenu()">📋 Channel list</button>`;
+    m.innerHTML+=`<button class="topic-menu-item" onclick="clearBufHistory('${esc(conn_id)}','${esc(target)}');closeTopicMenu()">🗑 Clear History</button>`;
     m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">✕ Close PM</button>`;
   } else if(target==='status'){
     // Status window — network management options
