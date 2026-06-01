@@ -149,6 +149,7 @@ pub enum ClientMessage {
     JoinChannel      { conn_id: String, channel: String, key: Option<String> },
     PartChannel      { conn_id: String, channel: String },
     GetLogs          { conn_id: String, target: String, limit: Option<usize>, before: Option<i64> },
+    SearchLogs       { conn_id: String, target: String, query: String, limit: Option<usize> },
     Sync             { conn_id: String, target: String, after_id: u64 },
     GetState         {},
     // Certificate management
@@ -274,6 +275,7 @@ pub enum ServerEvent {
     Reconnecting     { conn_id: String, attempt: u32, delay_secs: u64, reason: String },
     State            { networks: Vec<NetworkState>, vault_unlocked: bool },
     LogLines         { conn_id: String, target: String, lines: Vec<LogLine> },
+    SearchResults    { conn_id: String, target: String, query: String, lines: Vec<LogLine> },
     SyncLines        { conn_id: String, target: String, lines: Vec<LogLine> },
     CertInfo         { conn_id: String, fingerprint: String, cert_pem: String },
     // ── E2E events — explicit renames because snake_case turns E2E into e2_e
@@ -1986,6 +1988,12 @@ async fn handle_command(cmd: ClientMessage, username: &str, state: &AppState) {
             let start = filtered.len().saturating_sub(lim);
             let lines = filtered[start..].to_vec();
             send(ServerEvent::LogLines { conn_id, target, lines });
+        }
+        ClientMessage::SearchLogs { conn_id, target, query, limit } => {
+            if !state.owns_network(username, &conn_id).await { return; }
+            let lim = limit.unwrap_or(200).min(500);
+            let lines = state.logger.search_logs(username, &conn_id, &target, &query, lim).await.unwrap_or_default();
+            send(ServerEvent::SearchResults { conn_id, target, query, lines });
         }
         ClientMessage::Sync { conn_id, target, after_id } => {
             if !state.owns_network(username, &conn_id).await { return; }

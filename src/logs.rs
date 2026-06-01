@@ -95,6 +95,24 @@ impl EncryptedLogger {
         Ok(filtered)
     }
 
+    /// Search ALL logs for a target (full history, not just a loaded window),
+    /// returning matching lines in chronological order — most recent `limit`.
+    /// Case-insensitive substring match on the message text. Skips status/system
+    /// lines (from == "*") to match the in-app search's intent.
+    pub async fn search_logs(&self, username: &str, conn_id: &str, target: &str, query: &str, limit: usize) -> Result<Vec<LogLine>> {
+        if !self.crypto.is_unlocked(username).await { anyhow::bail!("Vault locked"); }
+        let q = query.trim().to_lowercase();
+        if q.is_empty() { return Ok(Vec::new()); }
+        let safe_limit = limit.clamp(1, 500);
+        let lines = self.read_all_lines(username, conn_id, target).await?;
+        let mut matches: Vec<LogLine> = lines
+            .into_iter()
+            .filter(|l| l.from != "*" && l.text.to_lowercase().contains(&q))
+            .collect();
+        let start = matches.len().saturating_sub(safe_limit);
+        Ok(matches.split_off(start))
+    }
+
     /// Read and decrypt all log lines for a target (shared by read_logs and read_logs_since).
     async fn read_all_lines(&self, username: &str, conn_id: &str, target: &str) -> Result<Vec<LogLine>> {
         let dir = PathBuf::from(&self.data_dir)
