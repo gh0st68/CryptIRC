@@ -12688,7 +12688,10 @@ function doSearch(query){
   const el=document.getElementById('search-results');
   if(!query||query.length<2){el.innerHTML='<div class="search-empty">Type at least 2 characters</div>';return;}
   if(!active){el.innerHTML='<div class="search-empty">No channel selected</div>';return;}
-  const buf=getBuf(active.conn_id,active.target);
+  // Capture the searched channel so a result click jumps to the right place
+  // even if `active` changes before the user clicks.
+  const sConn=active.conn_id, sTarget=active.target;
+  const buf=getBuf(sConn,sTarget);
   const q=query.toLowerCase();
   const results=buf.filter(m=>m.text&&m.text.toLowerCase().includes(q)&&m.from!=='*').reverse().slice(0,50);
   if(!results.length){el.innerHTML='<div class="search-empty">No results found</div>';return;}
@@ -12700,16 +12703,10 @@ function doSearch(query){
     d.innerHTML=`<div class="search-result-meta">${esc(m.from)} · ${time}</div><div class="search-result-text">${highlighted}</div>`;
     d.onclick=()=>{
       closeSearchPanel();
-      // Find and flash the message in chat
-      const rows=document.querySelectorAll('.msg-row');
-      for(const r of rows){
-        if(r.dataset.ts===String(m.ts)&&(r.dataset.from===m.from||!m.from)){
-          r.scrollIntoView({behavior:'smooth',block:'center'});
-          r.style.background='rgba(0,212,170,.15)';
-          setTimeout(()=>r.style.background='',3000);
-          break;
-        }
-      }
+      // Delegate to jumpToMessage: it re-renders the searched channel (restoring
+      // any DOM rows pruned while scrolled near the bottom), pages back through
+      // history if needed, scrolls, and flashes — same robust path as mentions.
+      jumpToMessage(sConn,sTarget,m.ts,m.from);
     };
     el.appendChild(d);
   }
