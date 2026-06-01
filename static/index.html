@@ -812,6 +812,12 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   cursor:pointer; transition:background .15s; border-radius:6px; margin:4px 12px;
 }
 .load-more-btn:hover { background:var(--bg3); }
+.history-view-banner {
+  position:sticky; top:0; z-index:6; text-align:center; padding:8px 12px;
+  margin:0 0 6px; background:var(--accent); color:#04140f; font-size:12px;
+  font-weight:600; cursor:pointer; border-radius:0 0 8px 8px; user-select:none;
+}
+.history-view-banner:hover { filter:brightness(1.08); }
 .day-div { display:flex; align-items:center; gap:10px; padding:10px 12px; color:var(--text3); font-size:10px; }
 .day-div::before, .day-div::after { content:''; flex:1; height:1px; background:var(--border); }
 
@@ -2259,6 +2265,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 let ws=null, sessionToken=null, currentUser=null;
 let networks=[], active=null;
 let buffers={}, unread=new Map(), mentionUnread=new Map(), queryBufs={};
+let _historyView=null; // history-view state: {bk,conn_id,target} when the active buffer is a past window (see jumpToMessage)
 // Restore unread counts
 try{const ur=JSON.parse(localStorage.getItem('cryptirc_unread')||'{}');for(const[k,v] of Object.entries(ur))unread.set(k,v);}catch(e){}
 function saveUnread(){try{const o={};for(const[k,v] of unread)o[k]=v;localStorage.setItem('cryptirc_unread',JSON.stringify(o));}catch(e){} savePrefsToServer();}
@@ -3537,7 +3544,7 @@ function handleEvent(ev) {
       break;
     }
     case 'data_cleared':
-      buffers={};
+      buffers={}; _historyView=null;
       unread.clear();
       mentionUnread.clear();
       for(const k of Object.keys(_lastMsgId)) delete _lastMsgId[k];
@@ -3553,6 +3560,7 @@ function handleEvent(ev) {
       // the conversation back.
       const k=bk(ev.conn_id,ev.target);
       buffers[k]=[];
+      if(_historyView && _historyView.bk===k) _historyView=null;
       delete _lastMsgId[k];
       unread.delete(k);
       mentionUnread.delete(k);
@@ -3721,6 +3729,15 @@ function previewNotifSound(id){
 
 function addMessage(conn_id,target,msg){
   const buf=getBuf(conn_id,target);
+  // History view: the buffer is a focused window from the past, not the live
+  // tail. The user's OWN message means they're chatting again → snap back to
+  // present so it lands in the live view. Anyone else's message must NOT be
+  // grafted onto the window (it would appear with a misleading time gap); it's
+  // persisted server-side and shows when the user taps "jump to present".
+  if(_historyView && _historyView.bk===bk(conn_id,target)){
+    if(msg && msg.from && msg.from===getNick(conn_id)){ _exitHistoryView(); }
+    else { return; }
+  }
   // Dedup by msg_id only. Server-delivered messages carry a unique ID — if
   // we see the same ID twice in the tail, it's a genuine duplicate (multiple
   // delivery paths, broadcast glitch, etc.) and should be dropped.
@@ -4082,6 +4099,13 @@ function setActive(conn_id,target){
   // Track the last real IRC view so files dropped/picked while on the Uploads
   // channel still associate with a sensible source for "Insert into chat".
   _lastIrcActive={conn_id,target};
+  // Leaving a history-view target for a DIFFERENT target → drop the stale
+  // historical window so reopening that channel loads present fresh.
+  if(_historyView && _historyView.bk!==bk(conn_id,target)){
+    getBuf(_historyView.conn_id,_historyView.target).length=0;
+    _lastMsgId[_historyView.bk]=0;
+    _historyView=null;
+  }
   unread.delete(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
   clearNoticesForTarget(conn_id,target);
   // Persist active view and open queries — skipped in detached mode so the
@@ -4113,6 +4137,14 @@ function renderChat(){
   if(isUploadsActive()){ welcome.style.display='none'; renderUploadsView(); updateTopbar(); updateInputPlaceholder(); return; }
   area.style.display='block'; welcome.style.display='none'; area.innerHTML='';
   const buf=getBuf(active.conn_id,active.target);
+  // History-view banner — buffer is a window from the past; tap to return to live.
+  if(_historyView && _historyView.bk===bk(active.conn_id,active.target)){
+    const hb=document.createElement('div');
+    hb.className='history-view-banner';
+    hb.textContent='⏷ Viewing older history — tap to jump to present';
+    hb.onclick=()=>_exitHistoryView();
+    area.appendChild(hb);
+  }
   // "Load more" button at top
   if(active.target!=='status'&&buf.length>0){
     const loadMore=document.createElement('div');
@@ -5268,7 +5300,7 @@ async function handleInput(raw){
         // which wipes the local buffer + msg_id sync state.
         {wsend({type:'clear_target_logs',conn_id,target}); break;}
       case 'CLEARALL':
-        {buffers={}; renderChat(); break;}
+        {buffers={}; _historyView=null; renderChat(); break;}
       case 'UPLOAD':
       case 'UPLOADS':
         // Reopen the Uploads channel even after it's been hidden from the
@@ -6533,7 +6565,7 @@ async function pwSafeDelete(idx){
 async function clearAllLogs(){
   if(!(await customConfirm('Clear ALL data? This will delete:\n• Chat history & logs (server + local)\n• Your notepad\n• Your paste posts\n\nThis cannot be undone.','Clear all')))return;
   // Clear local buffers
-  buffers={};
+  buffers={}; _historyView=null;
   unread.clear();
   renderChat();
   renderSidebar();
@@ -11328,24 +11360,21 @@ function jumpToMessage(conn_id, target, ts, from){
     return false;
   };
 
-  // The target message may be older than the window loaded on open. Page back
-  // through server history (get_logs … before:<oldest>) one chunk at a time,
-  // re-scanning after each chunk lands, until we find it, prove it's older than
-  // anything the server still has, or hit a hard page cap. This is what fixes
-  // "clicking an old mention doesn't jump" — previously the scan only looked at
-  // whatever happened to be loaded and silently gave up.
+  // If the target isn't in the currently-loaded buffer, load the exact history
+  // window that contains it — get_logs before:(ts+1) returns the most-recent
+  // chunk of messages with ts <= target, so the target is guaranteed to be the
+  // newest message in that set. This reaches ANY depth in a single request and
+  // puts the channel into "history view" (see _enterHistoryView). One shot — no
+  // chunk-by-chunk paging, no depth cap.
   const lk = conn_id + '/' + target;
-  let pages = 0;             // older-history chunks requested
-  const MAX_PAGES = 20;      // ~4000 msgs back — under prependLogs' 5000 buffer cap
-  let lastReqOldest = null;  // buffer-oldest ts at our last request (no-progress detector)
+  let windowLoaded = false;  // have we already loaded the focused window this jump?
   let noTsElapsed = 0;       // ms spent scanning when we have no ts to anchor on
-  let boundaryChecks = 0;    // grace re-scans once we've paged past the target ts
 
   const tick = ()=>{
-    // User navigated away while we were paging — abandon quietly.
+    // User navigated away while we were working — abandon quietly.
     if(!isActive(conn_id, target)) return;
     if(tryFind()) return;
-    // A log chunk (initial load or a page we asked for) is still in flight.
+    // A log chunk (initial load or the window we asked for) is still in flight.
     if(_pendingLogs.has(lk)){ setTimeout(tick, 250); return; }
 
     // No timestamp to anchor on — just scan for a few seconds while the initial
@@ -11356,37 +11385,46 @@ function jumpToMessage(conn_id, target, ts, from){
       return;
     }
 
-    const buf = getBuf(conn_id, target);
-    const oldest = buf.length>0 ? buf[0].ts : null;
-
-    // Loaded history reaches at/below the target's time but we still didn't find
-    // it → the message is genuinely gone (deleted/cleared/edited). Re-scan a
-    // couple more times in case it rendered this very tick, then report.
-    if(oldest != null && oldest <= tsNum){
-      if(++boundaryChecks <= 2){ setTimeout(tick, 200); return; }
-      showToast('Message no longer in history');
+    if(!windowLoaded){
+      // Don't tear down the buffer if we can't actually fetch — that would leave
+      // an empty channel. Require a live socket first.
+      if(!(ws && ws.readyState===1)){ showToast('Not connected — can’t load history'); return; }
+      // Replace the buffer with the focused window around the target and enter
+      // history view. wsend() registers lk in _pendingLogs, so the next tick
+      // waits for the window to land before scanning again.
+      windowLoaded = true;
+      _enterHistoryView(conn_id, target);
+      getBuf(conn_id, target).length = 0;
+      wsend({type:'get_logs', conn_id, target, limit:300, before:tsNum + 1});
+      setTimeout(tick, 250);
       return;
     }
-    // The last page brought nothing older → server has no more history below this.
-    if(lastReqOldest != null && oldest != null && oldest >= lastReqOldest){
-      showToast('Message no longer in history');
-      return;
-    }
-    if(pages >= MAX_PAGES){
-      showToast('Message is too far back to load');
-      return;
-    }
-    // Request the next older chunk directly (don't depend on `active`/the button).
-    // wsend() adds lk to _pendingLogs when it actually sends, so the next tick
-    // will wait on the in-flight request rather than spamming duplicates.
-    pages++;
-    lastReqOldest = (oldest != null) ? oldest : Math.floor(Date.now()/1000);
-    wsend({type:'get_logs', conn_id, target, limit:200, before:lastReqOldest});
-    setTimeout(tick, 250);
+    // Window loaded but the target still isn't present → it's genuinely gone
+    // (deleted/cleared). Leave the user in the window we loaded.
+    showToast('Message no longer in history');
   };
 
   // Let setActive paint the first page, then begin.
   setTimeout(tick, 150);
+}
+
+// ── History view: the active buffer holds a focused window from the past (loaded
+// by jumpToMessage) rather than the live tail. A banner lets the user return to
+// present, and addMessage suppresses live messages from grafting onto the window.
+// State var `_historyView` is declared up near `buffers` to avoid any TDZ.
+function _enterHistoryView(conn_id, target){
+  _historyView = { bk: bk(conn_id, target), conn_id, target };
+}
+function _exitHistoryView(){
+  if(!_historyView) return;
+  const { conn_id, target } = _historyView;
+  _historyView = null;
+  getBuf(conn_id, target).length = 0;       // drop the historical window
+  _lastMsgId[bk(conn_id, target)] = 0;      // force a fresh present load, not a sync
+  if(isActive(conn_id, target)){
+    renderChat();                            // clear the stale window + banner now
+    wsend({type:'get_logs', conn_id, target, limit:200}); // prependLogs scrolls to bottom
+  }
 }
 
 // Called by the state handler once networks are loaded, to drain any pending nav.
