@@ -2668,7 +2668,13 @@ function connectWs() {
   if(ws){try{ws.onclose=null;ws.onerror=null;ws.onmessage=null;ws.close();}catch(e){}}
   const proto=location.protocol==='https:'?'wss':'ws';
   ws=new WebSocket(`${proto}://${location.host}/cryptirc/ws`);
-  ws.onopen=()=>{_wsRetries=0;_lastWsActivity=Date.now();};
+  ws.onopen=()=>{_wsRetries=0;_lastWsActivity=Date.now();
+    // In-flight get_logs/sync requests are dead after a (re)connect — their
+    // responses were lost (iOS silently drops WS messages). Clearing the pending
+    // sets prevents a stale key from making jumpToMessage's tick wait forever,
+    // which showed up as "clicking a notification sometimes doesn't jump".
+    _pendingLogs.clear(); _pendingSyncs.clear();
+  };
   ws.onmessage=e=>{_lastWsActivity=Date.now();_rxBytes+=(e.data||'').length;_rxCount++;flashLed('rx');updateStarfieldTitle();try{handleEvent(JSON.parse(e.data));}catch(err){console.error('WS parse error:',err);}};
   ws.onclose=()=>{_rateQueue=[];if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}const d=Math.min(1000*Math.pow(2,_wsRetries),60000);setTimeout(connectWs,d+Math.random()*1000);_wsRetries++;};
   ws.onerror=()=>ws.close();
@@ -2869,14 +2875,17 @@ function updateStarfieldTitle(){
   }
   draw();
 })();
-// Track pending log/sync requests so we ignore responses from other sessions
-const _pendingLogs=new Set();
+// Track pending log/sync requests so we ignore responses from other sessions.
+// _pendingLogs is a Map of "conn/target" -> send-time(ms) so jumpToMessage can
+// tell a young in-flight request (worth waiting for) from a stale key whose
+// response was dropped (must be abandoned, not waited on forever).
+const _pendingLogs=new Map();
 const _pendingSyncs=new Set();
 function wsend(obj){
   if(ws&&ws.readyState===1){
     const s=JSON.stringify(obj);_txBytes+=s.length;_txCount++;ws.send(s);flashLed('tx');updateStarfieldTitle();
     // Track log/sync requests from THIS session
-    if(obj.type==='get_logs') _pendingLogs.add(obj.conn_id+'/'+obj.target);
+    if(obj.type==='get_logs') _pendingLogs.set(obj.conn_id+'/'+obj.target, Date.now());
     if(obj.type==='sync') _pendingSyncs.add(obj.conn_id+'/'+obj.target);
     // Track sent PRIVMSG/NOTICE for irc_echo dedup
     if(obj.type==='send'&&obj.raw){
@@ -11385,15 +11394,29 @@ function jumpToMessage(conn_id, target, ts, from){
   // chunk-by-chunk paging, no depth cap.
   const lk = conn_id + '/' + target;
   const POLL = 100;          // fast re-check so we scroll the instant the window lands
+  const PEND_MAX = 12000;    // a pending log request older than this is presumed lost
+  const OFFLINE_MAX = 6000;  // max wait for the socket to (re)connect before giving up
   let windowLoaded = false;  // have we already loaded the focused window this jump?
   let noTsElapsed = 0;       // ms spent scanning when we have no ts to anchor on
+  let offlineWaited = 0;     // ms spent waiting for the socket to come back
 
   const tick = ()=>{
     // User navigated away while we were working — abandon quietly.
     if(!isActive(conn_id, target)) return;
     if(tryFind()) return;
+
     // A log chunk (initial load or the window we asked for) is still in flight.
-    if(_pendingLogs.has(lk)){ setTimeout(tick, POLL); return; }
+    // A genuinely young request is worth waiting for (huge channels take seconds
+    // to decrypt), but a response can be silently dropped on iOS (WS zombie),
+    // stranding the key in _pendingLogs forever and hanging this tick. Tell them
+    // apart by the send-time: wait while the request is young; once it's older
+    // than PEND_MAX it's presumed lost — drop it and proceed so a jump can never
+    // hang. (_pendingLogs is a Map of key -> send-time for exactly this.)
+    if(_pendingLogs.has(lk)){
+      const sentAt = _pendingLogs.get(lk) || 0;
+      if(Date.now() - sentAt < PEND_MAX){ setTimeout(tick, POLL); return; }
+      _pendingLogs.delete(lk);
+    }
 
     // No timestamp to anchor on — just scan for a few seconds while the initial
     // load streams in, then give up silently (keeps old no-ts callers working).
@@ -11404,12 +11427,19 @@ function jumpToMessage(conn_id, target, ts, from){
     }
 
     if(!windowLoaded){
-      // Don't tear down the buffer if we can't actually fetch — that would leave
-      // an empty channel. Require a live socket first.
-      if(!(ws && ws.readyState===1)){ showToast('Not connected — can’t load history'); return; }
+      // Need a live socket to fetch the window. If we're mid-reconnect, wait a
+      // bounded time for it to come back (the jump self-heals on reconnect)
+      // rather than failing immediately. Don't tear down the buffer until we can
+      // actually fetch — that would leave an empty channel.
+      if(!(ws && ws.readyState===1)){
+        offlineWaited += POLL;
+        if(offlineWaited < OFFLINE_MAX){ setTimeout(tick, POLL); return; }
+        showToast('Not connected — try again in a moment');
+        return;
+      }
       // Replace the buffer with the focused window around the target and enter
       // history view. wsend() registers lk in _pendingLogs, so the next tick
-      // waits for the window to land before scanning again.
+      // waits (bounded) for the window to land before scanning again.
       windowLoaded = true;
       _enterHistoryView(conn_id, target);
       getBuf(conn_id, target).length = 0;
@@ -11417,8 +11447,9 @@ function jumpToMessage(conn_id, target, ts, from){
       setTimeout(tick, POLL);
       return;
     }
-    // Window loaded but the target still isn't present → it's genuinely gone
-    // (deleted/cleared). Leave the user in the window we loaded.
+    // Window loaded and its response processed, but the target still isn't
+    // present → it's genuinely gone (deleted/cleared). Leave the user in the
+    // window we loaded.
     showToast('Message no longer in history');
   };
 
@@ -12837,10 +12868,10 @@ function renderMentionsList(){
         openDetachedWindow(m.conn_id,m.target);
         return;
       }
-      // PMs have no in-channel row to anchor on — just open the conversation.
-      if(isPm){ setActive(m.conn_id,m.target); return; }
-      // Channel mention: jumpToMessage now pages back through history if the
-      // message is older than the loaded window, so old mentions jump too.
+      // Channel mention OR PM notice — jumpToMessage scrolls to the exact message,
+      // paging through history (windowed load) if it's older than the loaded
+      // buffer. PM buffers render rows with data-ts just like channels, so this
+      // takes you to the actual message for DMs too instead of only opening it.
       jumpToMessage(m.conn_id,m.target,m.ts,m.from);
     };
     el.appendChild(d);
