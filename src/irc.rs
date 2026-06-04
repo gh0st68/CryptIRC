@@ -604,6 +604,19 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let actual_nick = {
                             let mut c = conn.lock().await;
                             c.connected = true;
+                            // Adopt the nick the network actually assigned us — the
+                            // first parameter of 001 (RPL_WELCOME). This is the
+                            // authoritative nick. Critical for ZNC, where the real
+                            // nick can differ from the NICK we sent: if c.nick stays
+                            // stale, self-echo suppression (`from == c.nick`, see the
+                            // PRIVMSG/NOTICE arms) misses and the user's own messages
+                            // appear twice — once under the config nick, once under
+                            // the real nick.
+                            if let Some(real) = p.params.get(0) {
+                                if !real.is_empty() && real.as_str() != "*" {
+                                    c.nick = real.clone();
+                                }
+                            }
                             c.nick.clone()
                         };
                         send(ServerEvent::Connected { conn_id: conn_id.to_string(), server: cfg.server.clone(), nick: actual_nick.clone() });
