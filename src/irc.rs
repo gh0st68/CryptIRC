@@ -711,15 +711,16 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let text   = p.params.get(1).cloned().unwrap_or_default();
                         let user_nick = { conn.lock().await.nick.clone() };
                         // echo-message: if server echoes our own PRIVMSG, skip it here —
-                        // the Send handler already broadcasts IrcEcho for multi-device sync
-                        // Don't suppress echo for batch messages (chathistory/+H playback)
+                        // the Send handler already broadcasts IrcEcho for multi-device sync.
+                        // Suppress regardless of prefix form: a real IRCd echoes the full
+                        // nick!user@host, but ZNC (and some bouncers) echo self-messages with
+                        // a bare `:nick` prefix. Gating on `prefix.contains('!')` let those
+                        // through and the user saw their own line twice. `from == user_nick`
+                        // (with the authoritative nick adopted from 001) is the real test.
+                        // Don't suppress echo for batch messages (chathistory/+H playback).
                         let in_batch = p.tags.contains_key("batch");
                         if echo_message_enabled && from == user_nick && !in_batch {
-                            if let Some(ref pfx) = p.prefix {
-                                if pfx.contains('!') {
-                                    continue;
-                                }
-                            }
+                            continue;
                         }
                         // Reply to CTCP VERSION
                         if text == "\x01VERSION\x01" {
@@ -750,11 +751,13 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let text   = p.params.get(1).cloned().unwrap_or_default();
                         let user_nick = { conn.lock().await.nick.clone() };
                         info!("[{}] NOTICE: from={} target={} text={}", conn_id, from, target, &text[..text.len().min(120)]);
-                        // Suppress echo-message echoes of our own NOTICEs (same as PRIVMSG)
-                        if echo_message_enabled && from == user_nick {
-                            if let Some(ref pfx) = p.prefix {
-                                if pfx.contains('!') { continue; }
-                            }
+                        // Suppress echo-message echoes of our own NOTICEs (same as PRIVMSG).
+                        // Match on `from == user_nick` only — ZNC echoes self-messages with a
+                        // bare `:nick` prefix, so gating on `prefix.contains('!')` let them
+                        // through and duplicated. Don't suppress batch (playback) NOTICEs.
+                        let in_batch = p.tags.contains_key("batch");
+                        if echo_message_enabled && from == user_nick && !in_batch {
+                            continue;
                         }
                         // Route notices: channel → channel, server → status,
                         // our own outgoing → keep target (recipient), incoming → sender's nick
