@@ -7470,13 +7470,24 @@ function applyThemeCSS(cfg){
   // Toggle animation overlay
   const animEl=document.getElementById('anim-overlay');
   if(animEl){
-    if(t.animation){animEl.classList.add('active');startAnimation(t.animation);}
-    else{animEl.classList.remove('active');stopAnimation();}
+    if(t.animation){
+      animEl.classList.add('active');
+      _desiredAnimType=t.animation;
+      // Only actually run the 60fps loop while the window is visible+focused;
+      // the visibility watcher (see _syncAnimToVisibility) starts/stops it as
+      // focus changes. Same visible result when in use — no canvas churn when
+      // the window is hidden or in the background.
+      if(_appActive())startAnimation(t.animation);else stopAnimation();
+    }else{
+      animEl.classList.remove('active');
+      _desiredAnimType=null;
+      stopAnimation();
+    }
   }
 }
 
 // ─── Animation System ─────────────────────────────────────────────────────────
-let _animId=null,_animTimers=[],_animResizeFn=null,_animCurType=null;
+let _animId=null,_animTimers=[],_animResizeFn=null,_animCurType=null,_desiredAnimType=null;
 function stopAnimation(){
   if(_animId){cancelAnimationFrame(_animId);_animId=null;}
   // Timers can be either setInterval handles or {cancel} objects (for mouse listeners etc.)
@@ -7500,6 +7511,25 @@ function startAnimation(type){
   resize();_animResizeFn=resize;window.addEventListener('resize',resize);
   const fn=_ANIM[type];if(fn)fn(cv,ctx);
 }
+// Pause the decorative background animation whenever the window is hidden or
+// unfocused — there's no reason to burn 60fps of GPU/CPU on a starfield nobody
+// is looking at. Biggest idle-cost reduction, and invisible in normal use: when
+// the window is focused the animation runs exactly as before; when you switch
+// away it stops and resumes on return. _desiredAnimType (set in applyThemeCSS)
+// is the single source of truth for what should run, so theme changes stay in
+// sync. Registered as dedicated listeners so existing visibility/focus handlers
+// are untouched.
+function _appActive(){return !document.hidden && document.hasFocus();}
+function _syncAnimToVisibility(){
+  if(_appActive()){
+    if(_desiredAnimType && _animCurType!==_desiredAnimType) startAnimation(_desiredAnimType);
+  }else if(_animCurType){
+    stopAnimation();
+  }
+}
+document.addEventListener('visibilitychange',_syncAnimToVisibility);
+window.addEventListener('blur',_syncAnimToVisibility);
+window.addEventListener('focus',_syncAnimToVisibility);
 const _ANIM={
 rain(cv,ctx){
   const drops=[];
@@ -12880,26 +12910,39 @@ function renderMentionsList(){
 function clearMentions(){mentionsList=[];_unseenMentions=0;saveMentions();updateMentionsBadge();renderMentionsList();}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\\/g,'&#92;').replace(/`/g,'&#96;');}
 const MIRC_COLORS=['#fff','#000','#00007f','#009300','#ff0000','#7f0000','#9c009c','#fc7f00','#ffff00','#00fc00','#009393','#00ffff','#0000fc','#ff00ff','#7f7f7f','#d2d2d2'];
+// Grapheme segmenter (cached). Lets parseMircColors iterate by visible
+// glyph instead of UTF-16 code unit, so multi-codepoint emoji — surrogate
+// pairs (💧🌡️🌙), variation selectors (☀️), ZWJ sequences (🤦🏻‍♂️), skin
+// tones — are emitted as ONE unit. Without this, a colored emoji was split
+// across per-char <span>s into two lone surrogates and rendered as □□.
+const _graphemeSeg=(typeof Intl!=='undefined'&&Intl.Segmenter)
+  ? new Intl.Segmenter(undefined,{granularity:'grapheme'}) : null;
 function parseMircColors(s){
   // Process mIRC formatting: \x03fg[,bg] \x02bold \x1Funderline \x1Ditalic \x0F reset \x16 reverse
   let out='',bold=false,underline=false,italic=false,fg=null,bg=null;
-  for(let i=0;i<s.length;i++){
-    const c=s.charCodeAt(i);
-    if(c===0x03){ // color
-      let fgStr='',bgStr='';
-      if(i+1<s.length&&/\d/.test(s[i+1])){fgStr+=s[++i];if(i+1<s.length&&/\d/.test(s[i+1]))fgStr+=s[++i];}
-      if(fgStr&&i+1<s.length&&s[i+1]===','){
-        i++;
-        if(i+1<s.length&&/\d/.test(s[i+1])){bgStr+=s[++i];if(i+1<s.length&&/\d/.test(s[i+1]))bgStr+=s[++i];}
+  // Split into grapheme clusters; control codes are single-char clusters.
+  const segs=_graphemeSeg?Array.from(_graphemeSeg.segment(s),x=>x.segment):Array.from(s);
+  const isDigit=k=>{const g=segs[k];return g&&g.length===1&&g>='0'&&g<='9';};
+  for(let gi=0;gi<segs.length;gi++){
+    const g=segs[gi];
+    if(g.length===1){
+      const c=g.charCodeAt(0);
+      if(c===0x03){ // color
+        let fgStr='',bgStr='';
+        if(isDigit(gi+1)){fgStr+=segs[++gi];if(isDigit(gi+1))fgStr+=segs[++gi];}
+        if(fgStr&&segs[gi+1]===','){
+          gi++;
+          if(isDigit(gi+1)){bgStr+=segs[++gi];if(isDigit(gi+1))bgStr+=segs[++gi];}
+        }
+        if(fgStr){fg=parseInt(fgStr)%16;bg=bgStr?parseInt(bgStr)%16:bg;}else{fg=null;bg=null;}
+        continue;
       }
-      if(fgStr){fg=parseInt(fgStr)%16;bg=bgStr?parseInt(bgStr)%16:bg;}else{fg=null;bg=null;}
-      continue;
+      if(c===0x02){bold=!bold;continue;}
+      if(c===0x1F){underline=!underline;continue;}
+      if(c===0x1D){italic=!italic;continue;}
+      if(c===0x16){const t=fg;fg=bg;bg=t;continue;}
+      if(c===0x0F){bold=false;underline=false;italic=false;fg=null;bg=null;continue;}
     }
-    if(c===0x02){bold=!bold;continue;}
-    if(c===0x1F){underline=!underline;continue;}
-    if(c===0x1D){italic=!italic;continue;}
-    if(c===0x16){const t=fg;fg=bg;bg=t;continue;}
-    if(c===0x0F){bold=false;underline=false;italic=false;fg=null;bg=null;continue;}
     // Build styled span if needed
     let styles=[];
     if(fg!==null)styles.push('color:'+MIRC_COLORS[fg]);
@@ -12907,7 +12950,7 @@ function parseMircColors(s){
     if(bold)styles.push('font-weight:bold');
     if(underline)styles.push('text-decoration:underline');
     if(italic)styles.push('font-style:italic');
-    const ch=s[i]==='&'?'&amp;':s[i]==='<'?'&lt;':s[i]==='>'?'&gt;':s[i]==='"'?'&quot;':s[i]==="'"?'&#39;':s[i];
+    const ch=g==='&'?'&amp;':g==='<'?'&lt;':g==='>'?'&gt;':g==='"'?'&quot;':g==="'"?'&#39;':g;
     if(styles.length)out+=`<span style="${styles.join(';')}">${ch}</span>`;
     else out+=ch;
   }
