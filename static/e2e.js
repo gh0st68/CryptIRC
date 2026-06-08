@@ -738,12 +738,39 @@ async function e2eHandleEvent(ev) {
       break;
     }
 
-    case 'e2e_channel_key':
+    case 'e2e_channel_key': {
+      // Was this key part of the bulk reload that fires on every (re)connect?
+      const wasBulk = E2E._bulkKeyLoad && E2E._bulkKeyLoad.has(ev.channel);
+      if (E2E._bulkKeyLoad) E2E._bulkKeyLoad.delete(ev.channel);
+      // Did we ALREADY hold a key for this channel (case-insensitive)? The
+      // server fans E2EChannelKey out to ALL of the user's sessions and even
+      // re-delivers the same key multiple times during a reconnect storm, so a
+      // notice must only fire for a genuinely NEW key — never a re-delivery of
+      // one we already have. Read this BEFORE loadChannelKeyFromBlob().
+      const _lc = String(ev.channel).toLowerCase();
+      let hadKey = !!E2E.channelKeys[ev.channel];
+      if (!hadKey) for (const k in E2E.channelKeys) { if (k.toLowerCase() === _lc) { hadKey = true; break; } }
       await loadChannelKeyFromBlob(ev.channel, ev.blob);
       updateE2EIndicator(ev.channel);
-      const chLabel = ev.channel.startsWith('#') || ev.channel.startsWith('&') ? 'Channel' : 'DM';
-      e2eSysMsg(ev.channel, `🔐 ${chLabel} encryption active for ${ev.channel}`);
+      // History may have replayed from logs as ciphertext before this key
+      // arrived (get_logs races e2e_channel_key on a fresh session). Re-decrypt
+      // any buffered sd8~ lines now that the PSK is loaded.
+      if (typeof redecryptChannelHistory === 'function') {
+        try { await redecryptChannelHistory(ev.channel); }
+        catch(e) { console.error('[E2E] history re-decrypt failed', e); }
+      }
+      // Announce ONLY for a genuinely new key learned during a live session
+      // (another device just ran /e2e keygen|add). Suppressed for: the
+      // per-connect bulk reload (wasBulk) and any redundant re-delivery of a key
+      // we already had (hadKey). The keygen/add command prints its own
+      // confirmation on the device that created the key; the topbar lock icon
+      // always reflects current status via updateE2EIndicator.
+      if (!wasBulk && !hadKey) {
+        const chLabel = ev.channel.startsWith('#') || ev.channel.startsWith('&') ? 'Channel' : 'DM';
+        e2eSysMsg(ev.channel, `🔐 ${chLabel} encryption active for ${ev.channel}`);
+      }
       break;
+    }
 
     case 'e2e_channel_list':
       // Remove keys for channels no longer in the list
@@ -753,6 +780,11 @@ async function e2eHandleEvent(ev) {
           updateE2EIndicator(ch);
         }
       }
+      // Mark this as a bulk (re)load. e2eInit re-requests the full key list on
+      // every (re)connect, so the per-key handler must NOT announce "encryption
+      // active" for these — otherwise reconnects (esp. the iOS PWA WS watchdog)
+      // spam one line per channel every time the app is reopened.
+      E2E._bulkKeyLoad = new Set(ev.channels);
       for (const ch of ev.channels) wsend({ type:'e2e_load_channel_key', channel:ch });
       break;
 

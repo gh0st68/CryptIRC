@@ -355,12 +355,12 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 #mentions-btn:hover { background:var(--bg3); color:var(--text); }
 #mentions-btn.has-unread, #mentions-btn.has-unread:hover { color:var(--error,#e55); }
 #mentions-btn .mentions-count { display:none !important; }
-#mentions-panel { display:none; position:absolute; top:36px; left:0; width:min(360px, 90vw); max-height:400px; background:var(--bg1); border:1px solid var(--border); border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.5); z-index:100; overflow:hidden; }
+#mentions-panel { display:none; position:absolute; top:36px; left:0; width:min(360px, 90vw); max-height:min(400px,70dvh); background:var(--bg1); border:1px solid var(--border); border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.5); z-index:100; overflow:hidden; }
 #mentions-panel.show { display:flex; flex-direction:column; }
 #mentions-panel-hdr { padding:10px 12px; font-size:12px; font-weight:600; color:var(--text); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
 #mentions-list { overflow-y:auto; flex:1; max-height:360px; }
 /* Search panel */
-#search-panel { display:none; position:absolute; top:36px; right:0; width:min(400px, 90vw); max-height:450px; background:var(--bg1); border:1px solid var(--border); border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.5); z-index:100; overflow:hidden; }
+#search-panel { display:none; position:absolute; top:36px; right:0; width:min(400px, 90vw); max-height:min(450px,70dvh); background:var(--bg1); border:1px solid var(--border); border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,.5); z-index:100; overflow:hidden; }
 #search-panel.show { display:flex; flex-direction:column; }
 #search-panel-hdr { padding:8px 10px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:6px; }
 #search-input { flex:1; background:var(--bg2); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:16px; padding:8px 10px; outline:none; -webkit-appearance:none; }
@@ -572,6 +572,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .encrypt-box {
   background:var(--bg2); border:1px solid var(--border2); border-radius:12px;
   width:100%; max-width:460px; box-shadow:0 20px 60px rgba(0,0,0,.6); overflow:hidden;
+  max-height:min(88vh,88dvh); display:flex; flex-direction:column;
 }
 .encrypt-header {
   padding:16px 20px 12px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:10px; flex-shrink:0;
@@ -583,7 +584,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   display:flex; align-items:center; justify-content:center;
 }
 .encrypt-close:hover { color:var(--text); background:var(--bg4); }
-.encrypt-body { padding:16px 20px 20px; }
+.encrypt-body { padding:16px 20px 20px; overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
 .encrypt-status {
   display:flex; align-items:center; gap:10px; padding:14px 16px; border-radius:8px;
   margin-bottom:16px; font-size:13px;
@@ -847,7 +848,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 #msg-input::placeholder { color:var(--text3); }
 #send-btn {
   background:none; border:none; outline:none; color:var(--text2); cursor:pointer;
-  width:32px; height:32px; min-width:32px;
+  width:40px; height:40px; min-width:40px;
   display:flex; align-items:center; justify-content:center;
   font-size:15px; flex-shrink:0;
   transition:color .12s;
@@ -859,7 +860,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 #send-btn:active { color:var(--accent); }
 #emoji-picker {
   position:absolute; bottom:calc(var(--input-bar-h, 48px) + 4px); right:10px;
-  width:min(320px, calc(100vw - 20px)); max-height:min(300px, 50vh); background:var(--bg1); border:1px solid var(--border);
+  width:min(320px, calc(100vw - 20px)); max-height:min(300px, 42dvh); background:var(--bg1); border:1px solid var(--border);
   border-radius:8px; z-index:100; box-shadow:0 4px 16px rgba(0,0,0,.5);
   display:flex; flex-direction:column; overflow:hidden;
 }
@@ -868,7 +869,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   color:var(--text); font-size:16px; outline:none; -webkit-appearance:none;
 }
 #emoji-grid {
-  display:flex; flex-wrap:wrap; gap:2px; padding:6px; overflow-y:auto; max-height:250px;
+  display:flex; flex-wrap:wrap; gap:2px; padding:6px; overflow-y:auto; max-height:min(250px,34dvh);
 }
 .emoji-item {
   width:40px; height:40px; display:flex; align-items:center; justify-content:center;
@@ -900,7 +901,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .upload-btn {
   background:none; border:none; outline:none;
   color:var(--text2); cursor:pointer; font-size:16px;
-  padding:4px; min-width:32px; min-height:32px;
+  padding:4px; min-width:40px; min-height:40px;
   display:flex; align-items:center; justify-content:center;
   transition:color .15s; flex-shrink:0; box-sizing:border-box;
   -webkit-appearance:none; appearance:none;
@@ -1214,7 +1215,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 /* ── Stats overlay ── */
 #stats-overlay { position:fixed; inset:0; background:rgba(0,0,0,.8); display:none; align-items:center; justify-content:center; z-index:170; }
 #stats-overlay.show { display:flex; }
-.stats-box { background:var(--bg2); border:1px solid var(--border2); border-radius:12px; padding:20px 24px; max-width:500px; width:90%; max-height:80vh; overflow-y:auto; }
+.stats-box { background:var(--bg2); border:1px solid var(--border2); border-radius:12px; padding:20px 24px; max-width:500px; width:90%; max-height:min(80vh,80dvh); overflow-y:auto; }
 .stats-box h3 { margin:0 0 12px; font-size:15px; color:var(--accent); font-family:var(--sans); }
 .stats-table { width:100%; font-size:12px; border-collapse:collapse; }
 .stats-table th { text-align:left; color:var(--text2); padding:4px 8px; border-bottom:1px solid var(--border); }
@@ -1285,8 +1286,8 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   #sidebar-footer { padding:4px 4px calc(4px + var(--sab)); gap:3px; }
   #input-wrap { padding:0 0 var(--sab); }
   #msg-input { padding:0 8px; height:var(--input-h, 36px); font-size:16px; line-height:1; }
-  #send-btn { width:26px; height:26px; min-width:26px; font-size:13px; padding:1px; }
-  #input-wrap .upload-btn { font-size:13px; padding:1px; min-width:26px; min-height:26px; }
+  #send-btn { width:44px; height:44px; min-width:44px; font-size:15px; padding:0; }
+  #input-wrap .upload-btn { font-size:15px; padding:0; min-width:44px; min-height:44px; }
 }
 @media(max-width:360px) {
   .auth-box { padding:16px; }
@@ -1302,10 +1303,10 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   .appear-box { max-width:100%; max-height:min(92vh, 92dvh); }
   .appear-body { padding:14px 14px 18px; }
   .appear-header { padding:14px 14px 10px; }
-  #help-overlay > div { width:100% !important; max-width:100% !important; max-height:100dvh !important; border-radius:0 !important; }
+  #help-overlay > div { width:100% !important; max-width:100% !important; max-height:100dvh !important; border-radius:0 !important; padding-top:var(--sat); padding-bottom:var(--sab); padding-left:var(--sal); padding-right:var(--sar); }
   #help-body { padding:14px !important; font-size:12px !important; word-wrap:break-word; }
   #help-body pre, #help-body code { white-space:pre-wrap !important; word-wrap:break-word !important; overflow-wrap:anywhere !important; }
-  #monitor-overlay > div { width:100% !important; max-width:100% !important; max-height:100dvh !important; border-radius:0 !important; }
+  #monitor-overlay > div { width:100% !important; max-width:100% !important; max-height:100dvh !important; border-radius:0 !important; padding-top:var(--sat); padding-bottom:var(--sab); padding-left:var(--sal); padding-right:var(--sar); }
 }
 /* Detached pop-out mode — hide channel list + welcome + hamburger; focus on one chat */
 .detached-mode #sidebar,
@@ -1318,6 +1319,68 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .detached-mode #reattach-btn { display: inline-flex !important; }
 #reattach-btn { display: none; align-items:center; gap:4px; background:var(--bg3); border:1px solid var(--border); color:var(--text2); border-radius:6px; padding:4px 10px; cursor:pointer; font-size:11px; font-family:inherit; flex-shrink:0; }
 #reattach-btn:hover { color:var(--text); border-color:var(--text3); background:var(--bg4); }
+
+/* ══ iPhone / touch responsiveness improvements ═══════════════════════════════
+   All blocks below are gated on hover:none / pointer:coarse / orientation /
+   max-width / prefers-reduced-motion, so they are INERT on desktop + Electron. */
+
+/* Kill sticky :hover after a tap on touch devices, and surface affordances that
+   are otherwise revealed only on hover (which never fires on touch). */
+@media (hover:none) {
+  .msg-row:hover { background:transparent; }
+  .msg-img:hover { opacity:1; transform:none; }
+  .msg-yt:hover, .msg-link-preview:hover { box-shadow:none; }
+  .msg-nick:hover, .msg-body a:hover, .nick-mention:hover, .monitor-nick:hover { text-decoration:none; }
+  .giphy-close-btn:hover { transform:none; }
+  /* Per-message reply button: the hover-reveal at .msg-row:hover never triggers
+     on touch, so keep it faintly visible with a real 44px hit area. */
+  .msg-reply-btn { opacity:.4; padding:8px; right:2px; top:0; min-width:44px; min-height:44px; display:inline-flex; align-items:center; justify-content:center; }
+  .msg-reply-btn:active { opacity:1; color:var(--accent); }
+  /* Bump sub-44px touch targets */
+  .nick-ctx-item { min-height:44px; }
+  .appear-toggle { min-height:44px; }
+  .fav-star { padding:8px; }
+  .hl-tag-x { padding:6px 8px; }
+}
+
+/* Respect the OS "Reduce Motion" accessibility setting (also saves battery). */
+@media (prefers-reduced-motion:reduce) {
+  *, *::before, *::after { animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; }
+  #anim-overlay { display:none !important; }
+}
+
+/* Landscape on a short phone: reclaim vertical space, bound modals. pointer:coarse
+   keeps a deliberately-short desktop window from triggering this. */
+@media (orientation:landscape) and (max-height:480px) and (pointer:coarse) {
+  #topbar { padding-top:max(var(--sat),2px); min-height:34px; }
+  #welcome { padding:16px 24px; gap:8px; }
+  .welcome-logo { font-size:26px; }
+  .encrypt-box, .appear-box, .chanlist-box { max-height:94dvh; }
+  #sidebar { width:min(280px,70vw); }
+  #nick-panel { width:min(180px,40vw); }
+}
+
+/* Small phones: trim the welcome panel and make the channel-list rows two-line
+   so the topic is actually readable instead of ellipsized to nothing. */
+@media (max-width:480px) {
+  #welcome { padding:24px 18px; gap:10px; }
+  .welcome-logo { font-size:28px; }
+  .welcome-sub { font-size:11px; max-width:100%; }
+  .chanlist-row { grid-template-columns:1fr auto; grid-template-areas:'chan users' 'topic topic'; row-gap:2px; }
+  .chanlist-chan { grid-area:chan; }
+  .chanlist-users { grid-area:users; }
+  .chanlist-topic { grid-area:topic; white-space:normal; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .chanlist-head-row { display:none; }
+}
+
+/* Tightest widths: declutter the topbar so the channel name isn't crushed. */
+@media (max-width:380px) {
+  #topic-inline, #topic-sep { display:none !important; }
+  #lag-mobile { display:none !important; }
+  #topbar { gap:2px; }
+  #e2e-lock, #search-btn, #mentions-btn { padding:6px 4px; }
+  #chan-title { font-size:13px; }
+}
 </style>
 <script>
 // Apply theme colors immediately — :root no longer sets theme defaults,
@@ -2097,7 +2160,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 </div>
 
 <div id="links-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:600;align-items:center;justify-content:center">
-  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(550px,94vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(550px,94vw);max-height:min(80vh,80dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-weight:600;color:var(--text)">Server Links</span>
       <span id="links-count" style="font-size:11px;color:var(--text3)"></span>
@@ -3073,15 +3136,33 @@ function handleEvent(ev) {
       }
       // From another device — OR a duplicate echo where _sentMsgs was already
       // consumed by a prior fire (e.g. two WS connections, reconnect race).
-      // Check the buffer for a recent matching entry before adding; if none,
-      // hand off to addMessage, which has its own id-based dedup at buf.push().
-      const echoBuf=getBuf(ev.conn_id,ev.target);
-      const echoKey=ev.ts+'|'+ev.from+'|'+(ev.text||'').slice(0,50);
-      if(echoBuf.some(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)===echoKey)) break;
-      addMessage(ev.conn_id, ev.target, {
-        id:ev.msg_id||0, ts:ev.ts, from:ev.from, text:ev.text,
-        kind:ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg',
-      });
+      // E2E: ev.text is the sd8~ channel ciphertext (the server holds no key),
+      // so this OTHER device must decrypt it the same way the live irc_message
+      // path does — otherwise it renders raw ciphertext until a refresh pulls
+      // decrypted history. Serialize through _e2eQueue like the live path, and
+      // dedup on the DECRYPTED text. If the key isn't loaded yet we keep the
+      // ciphertext so redecryptChannelHistory fixes it when the key arrives.
+      {
+        const _eConn=ev.conn_id, _eTarget=ev.target, _eText=ev.text;
+        const _eFrom=ev.from, _eTs=ev.ts, _eId=ev.msg_id||0, _eKind=ev.kind;
+        if(!window._e2eQueue) window._e2eQueue=Promise.resolve();
+        window._e2eQueue=window._e2eQueue.then(async()=>{
+          let dtext=_eText, enc=false;
+          if(typeof _eText==='string'&&_eText.startsWith('sd8~')&&typeof channelDecrypt==='function'){
+            try{
+              const kn=(typeof _resolveChanKeyName==='function')?_resolveChanKeyName(_eTarget):null;
+              if(kn){ const pt=await channelDecrypt(kn,_eText); if(pt!==null){dtext=pt;enc=true;} }
+            }catch(_){}
+          }
+          const echoBuf=getBuf(_eConn,_eTarget);
+          const echoKey=_eTs+'|'+_eFrom+'|'+(dtext||'').slice(0,50);
+          if(echoBuf.some(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)===echoKey)) return;
+          addMessage(_eConn,_eTarget,{
+            id:_eId, ts:_eTs, from:_eFrom, text:dtext, encrypted:enc,
+            kind:_eKind==='Action'?'action':_eKind==='Notice'?'notice':'privmsg',
+          });
+        });
+      }
       break;
     }
     case 'irc_message':
@@ -3178,8 +3259,11 @@ function handleEvent(ev) {
           const _zbuf=getBuf(ev.conn_id,ev.target);
           let _zdup=false;
           const _zts=Math.max(0,_zbuf.length-30);
+          // id match: scan the WHOLE buffer (ZNC/bouncer replay can re-deliver a
+          // line whose original is far from the tail). Fuzzy match below stays
+          // windowed so genuinely repeated identical text isn't wrongly dropped.
           if(zncMsg.id){
-            for(let _zi=_zts;_zi<_zbuf.length;_zi++){
+            for(let _zi=0;_zi<_zbuf.length;_zi++){
               if(_zbuf[_zi].id===zncMsg.id){_zdup=true;break;}
             }
           }
@@ -3754,15 +3838,19 @@ function addMessage(conn_id,target,msg){
     else { return; }
   }
   // Dedup by msg_id only. Server-delivered messages carry a unique ID — if
-  // we see the same ID twice in the tail, it's a genuine duplicate (multiple
-  // delivery paths, broadcast glitch, etc.) and should be dropped.
+  // we see the same ID twice it's a genuine duplicate (multiple delivery paths,
+  // the server fanning events to ALL sessions, bouncer/ZNC replay) and should
+  // be dropped. Scan the WHOLE buffer, not just the tail: a re-delivered copy
+  // can land far from the end (the original may sit >30 rows back, or a history
+  // load may have buf.sort()-ed an earlier copy ahead of the tail), so a
+  // last-N window misses it and the row gets duplicated. A server msg_id is
+  // unique per logical message, so a full-buffer id match is always a real dup.
   // Self-sent local additions have no ID and are always pushed (rapid-fire
   // identical messages like sending "lol" twice must still appear twice).
   // irc_echo / echo-message reconciliation is handled separately in its own
   // handler via _sentMsgs, not here.
   if(msg&&msg.id&&msg.from!=='*'&&msg.kind!=='system'&&msg.kind!=='error'){
-    const tailStart=Math.max(0,buf.length-30);
-    for(let i=tailStart;i<buf.length;i++){
+    for(let i=0;i<buf.length;i++){
       if(buf[i].id===msg.id) return;
     }
   }
@@ -3859,10 +3947,73 @@ async function clearBufHistory(connId,target){
   if(!(await customConfirm('Permanently delete chat history for '+target+'? This removes the logs from the server and cannot be undone.','Delete')))return;
   wsend({type:'clear_target_logs',conn_id:connId,target});
 }
-function prependLogs(conn_id,target,lines){
+// ─── E2E history decryption ─────────────────────────────────────────────────
+// Channel/DM PSK ciphertext (sd8~…) is what's persisted to the server logs for
+// EVERY sender — the server holds no key and never decrypts. The live message
+// path decrypts on arrival, but history replayed from logs (and search results)
+// used to land here as raw ciphertext. That's invisible for other people (their
+// recent lines are also re-delivered live and the decrypted copy wins dedup)
+// yet very visible for your OWN messages, whose only post-reload source is the
+// log. Decrypt sd8~ lines here so replayed history matches the live path.
+// Sender-agnostic: keyed purely on the channel/DM target, so self lines decrypt
+// exactly like everyone else's.
+function _resolveChanKeyName(target){
+  const ck=window.E2E&&window.E2E.channelKeys;
+  if(!ck||target==null) return null;
+  if(ck[target]) return target;            // exact case (matches the live path)
+  const lc=String(target).toLowerCase();   // fall back to case-insensitive
+  for(const k in ck){ if(k.toLowerCase()===lc) return k; }
+  return null;
+}
+async function _decryptLogLines(target,lines){
+  if(!Array.isArray(lines)||!lines.length) return lines;
+  if(typeof channelDecrypt!=='function') return lines;
+  const keyName=_resolveChanKeyName(target);
+  if(!keyName) return lines; // key not loaded yet — leave ciphertext for the re-decrypt pass on key arrival
+  const out=new Array(lines.length);
+  for(let i=0;i<lines.length;i++){
+    const l=lines[i];
+    if(l&&typeof l.text==='string'&&l.text.startsWith('sd8~')){
+      try{
+        const pt=await channelDecrypt(keyName,l.text);
+        if(pt!==null){ out[i]=Object.assign({},l,{text:pt,encrypted:true}); continue; }
+      }catch(_){}
+    }
+    out[i]=l;
+  }
+  return out;
+}
+// Re-decrypt already-buffered sd8~ lines once a channel PSK finally loads —
+// covers the race where get_logs returns before e2e_channel_key arrives.
+async function redecryptChannelHistory(channel){
+  const keyName=_resolveChanKeyName(channel);
+  if(!keyName||typeof channelDecrypt!=='function') return;
+  const lc=String(channel).toLowerCase();
+  for(const k in buffers){
+    const slash=k.lastIndexOf('/');                 // buffer key = `${conn_id}/${target.toLowerCase()}`
+    if(slash<0||k.slice(slash+1)!==lc) continue;
+    const buf=buffers[k];
+    let changed=false;
+    for(const m of buf){
+      if(m&&typeof m.text==='string'&&m.text.startsWith('sd8~')){
+        try{
+          const pt=await channelDecrypt(keyName,m.text);
+          if(pt!==null){ m.text=pt; m.encrypted=true; changed=true; }
+        }catch(_){}
+      }
+    }
+    if(changed){
+      const conn_id=k.slice(0,slash);
+      if(active&&active.conn_id===conn_id&&typeof active.target==='string'&&active.target.toLowerCase()===lc) renderChat();
+    }
+  }
+}
+window.redecryptChannelHistory=redecryptChannelHistory;
+async function prependLogs(conn_id,target,lines){
+  lines=await _decryptLogLines(target,lines);
   const buf=getBuf(conn_id,target);
   const wasEmpty=buf.length===0;
-  const newMsgs=lines.map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind},conn_id));
+  const newMsgs=lines.map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted},conn_id));
   // Track highest msg_id from log lines
   for(const m of newMsgs) trackMsgId(conn_id,target,m.id);
   // Deduplicate: use msg_id when available, fall back to ts+from+text
@@ -3905,7 +4056,8 @@ function prependLogs(conn_id,target,lines){
     }
   }
 }
-function appendSyncLines(conn_id,target,lines){
+async function appendSyncLines(conn_id,target,lines){
+  lines=await _decryptLogLines(target,lines);
   const buf=getBuf(conn_id,target);
   const existingIds=new Set(buf.filter(m=>m.id>0).map(m=>m.id));
   const existingKeys=new Set(buf.map(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)));
@@ -3940,7 +4092,7 @@ function appendSyncLines(conn_id,target,lines){
       break;
     }
     if(_matched) continue;
-    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind},conn_id));
+    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted},conn_id));
     added++;
   }
   if(added>0){
@@ -5729,7 +5881,7 @@ function showNotepad(){
   const ov=document.createElement('div');ov.id='notepad-overlay';
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:16px;';
   const box=document.createElement('div');
-  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(600px,94vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
+  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(600px,94vw);max-height:min(85vh,85dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
   box.innerHTML=`
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-weight:700;font-size:14px;color:var(--text)">📝 Encrypted Notepad</span>
@@ -5764,7 +5916,7 @@ function showPasteModal(){
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:16px;';
   const box=document.createElement('div');
-  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(500px,94vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
+  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(500px,94vw);max-height:min(85vh,85dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
   box.innerHTML=`
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-weight:700;font-size:14px;color:var(--text)">📋 New Paste</span>
@@ -6474,7 +6626,7 @@ function showPasswordPanel(){
   if(!ov){
     ov=document.createElement('div');ov.id='pwsafe-overlay';
     ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1000;display:none;align-items:center;justify-content:center;padding:16px;';
-    ov.innerHTML=`<div id="pwsafe-box" style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(500px,94vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+    ov.innerHTML=`<div id="pwsafe-box" style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(500px,94vw);max-height:min(88vh,88dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
       <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
         <span style="font-weight:700;font-size:14px;color:var(--text)">🔐 Password Management</span>
         <span onclick="document.getElementById('pwsafe-overlay').classList.remove('show');document.getElementById('pwsafe-overlay').style.display='none'" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
@@ -7365,6 +7517,9 @@ function applyThemeCSS(cfg){
   // Pick theme: use mobile override if set
   const themeName=(mob&&cfg.mobileTheme)?cfg.mobileTheme:cfg.theme;
   const t=THEMES[themeName]||THEMES.midnight;
+  // Keep the iOS PWA status-bar tint in sync with the active theme background,
+  // otherwise a light theme shows a black status-bar seam above the app.
+  const _tc=document.querySelector('meta[name="theme-color"]'); if(_tc&&t.bg0) _tc.setAttribute('content',t.bg0);
   r.setProperty('--bg0',t.bg0); r.setProperty('--bg1',t.bg1); r.setProperty('--bg2',t.bg2);
   r.setProperty('--bg3',t.bg3); r.setProperty('--bg4',t.bg4);
   r.setProperty('--border',t.border); r.setProperty('--border2',t.border2);
@@ -7497,18 +7652,36 @@ function stopAnimation(){
   });
   _animTimers=[];
   if(_animResizeFn){window.removeEventListener('resize',_animResizeFn);_animResizeFn=null;}
+  if(_animResizeRaf){cancelAnimationFrame(_animResizeRaf);_animResizeRaf=0;}
   const cv=document.getElementById('anim-canvas');
   if(cv){const c=cv.getContext('2d');if(c)c.clearRect(0,0,cv.width,cv.height);}
   document.querySelectorAll('.anim-flash').forEach(e=>e.remove());
   _animCurType=null;
 }
+let _animResizeRaf=0;
 function startAnimation(type){
   if(_animCurType===type)return;
+  // Honor the OS Reduce Motion setting — skip the decorative background entirely.
+  if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion:reduce)').matches)return;
   stopAnimation();_animCurType=type;
   const cv=document.getElementById('anim-canvas');if(!cv)return;
   const ctx=cv.getContext('2d');
-  function resize(){cv.width=window.innerWidth;cv.height=window.innerHeight;}
-  resize();_animResizeFn=resize;window.addEventListener('resize',resize);
+  // rAF-coalesce resizes and skip no-ops: iOS fires resize repeatedly on URL-bar
+  // show/hide and keyboard open/close, and each cv.width= reallocates+clears the
+  // whole backing store. Size to the visual viewport so it tracks the visible area.
+  function resize(){
+    if(_animResizeRaf)return;
+    _animResizeRaf=requestAnimationFrame(()=>{
+      _animResizeRaf=0;
+      const vv=window.visualViewport;
+      const w=Math.round(vv?vv.width:window.innerWidth);
+      const h=Math.round(vv?vv.height:window.innerHeight);
+      if(cv.width!==w||cv.height!==h){cv.width=w;cv.height=h;}
+    });
+  }
+  cv.width=Math.round(window.visualViewport?window.visualViewport.width:window.innerWidth);
+  cv.height=Math.round(window.visualViewport?window.visualViewport.height:window.innerHeight);
+  _animResizeFn=resize;window.addEventListener('resize',resize,{passive:true});
   const fn=_ANIM[type];if(fn)fn(cv,ctx);
 }
 // Pause the decorative background animation whenever the window is hidden or
@@ -10753,7 +10926,7 @@ function viewFullTopic(){
     document.body.appendChild(ov);
   }
   const box=document.createElement('div');
-  box.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 20px;max-width:min(600px,90vw);max-height:60vh;overflow-y:auto;color:var(--text);font-size:14px;line-height:1.6;word-break:break-word;';
+  box.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 20px;max-width:min(600px,90vw);max-height:min(60vh,60dvh);overflow-y:auto;color:var(--text);font-size:14px;line-height:1.6;word-break:break-word;';
   box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Topic — ${esc(active.target)}</div>${parseMircColors(topic)}`;
   ov.innerHTML='';ov.appendChild(box);
 }
@@ -10784,7 +10957,7 @@ function customConfirm(message, okLabel, cancelLabel){
     const ov=document.createElement('div');
     ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px;';
     const box=document.createElement('div');
-    box.style.cssText='background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:20px;width:min(420px,92vw);max-height:80vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.5);';
+    box.style.cssText='background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:20px;width:min(420px,92vw);max-height:min(80vh,80dvh);overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.5);';
     const msgDiv=document.createElement('div');
     msgDiv.style.cssText='color:var(--text);font-size:13px;white-space:pre-wrap;line-height:1.5;margin-bottom:14px;word-break:break-word;';
     msgDiv.textContent=message||'';
@@ -10818,7 +10991,7 @@ function customAlert(message){
     const ov=document.createElement('div');
     ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px;';
     const box=document.createElement('div');
-    box.style.cssText='background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:20px;width:min(420px,92vw);max-height:80vh;overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.5);';
+    box.style.cssText='background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:20px;width:min(420px,92vw);max-height:min(80vh,80dvh);overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.5);';
     const msgDiv=document.createElement('div');
     msgDiv.style.cssText='color:var(--text);font-size:13px;white-space:pre-wrap;line-height:1.5;margin-bottom:14px;word-break:break-word;';
     msgDiv.textContent=message||'';
@@ -11647,7 +11820,7 @@ function showIgnorePanel(){
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:16px;';
   const box=document.createElement('div');
-  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(400px,94vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
+  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(400px,94vw);max-height:min(80vh,80dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
   function render(){
     const list=[...ignoreList].sort();
     let html=`<div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
@@ -11707,7 +11880,7 @@ function showPmProtectionPanel(){
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1100;display:flex;align-items:center;justify-content:center;padding:16px;';
   const box=document.createElement('div');
-  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(460px,94vw);max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
+  box.style.cssText='background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(460px,94vw);max-height:min(88vh,88dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6);';
 
   function render(){
     // Determine scope values
@@ -12822,10 +12995,11 @@ function doSearch(query){
   // No `limit` → server returns EVERY match across the channel/chat's full history.
   wsend({type:'search_logs',conn_id:sConn,target:sTarget,query});
 }
-function renderSearchResults(conn_id,target,query,results){
+async function renderSearchResults(conn_id,target,query,results){
   const el=document.getElementById('search-results');
   if(!el)return;
   if(!results||!results.length){el.innerHTML='<div class="search-empty">No results found</div>';return;}
+  results=await _decryptLogLines(target,results); // sd8~ search hits are ciphertext on disk — decrypt before display
   el.innerHTML='';
   // Count header so it's clear the full history was searched.
   const hdr=document.createElement('div');
@@ -13184,7 +13358,7 @@ function monitorViewMsg(nick){
     document.body.appendChild(ov);
   }
   const box=document.createElement('div');
-  box.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 20px;max-width:min(500px,90vw);max-height:60vh;overflow-y:auto;word-break:break-word;';
+  box.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px 20px;max-width:min(500px,90vw);max-height:min(60vh,60dvh);overflow-y:auto;word-break:break-word;';
   box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Last message from ${esc(nick)}</div>
     <div style="color:var(--text);font-size:14px;line-height:1.6">${parseMircColors(e.lastMsg||'')}</div>
     ${e.channel?`<div style="font-size:10px;color:var(--text3);margin-top:10px">${esc(e.network||'')} / ${esc(e.channel)} · ${e.lastSeen?new Date(e.lastSeen).toLocaleString():''}</div>`:''}`;
@@ -13213,7 +13387,7 @@ function timeAgo(ts){
 </script>
 
 <div id="monitor-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center">
-  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(440px,92vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(440px,92vw);max-height:min(80vh,80dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-weight:600;color:var(--text)">Nick Monitor</span>
       <span onclick="closeMonitorPanel()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
@@ -13233,7 +13407,7 @@ function timeAgo(ts){
 </div>
 
 <div id="help-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center">
-  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(560px,94vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(560px,94vw);max-height:min(85vh,85dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-family:var(--sans);font-weight:700;font-size:16px;color:var(--text)">❓ Help</span>
       <span onclick="closeHelpPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
@@ -13293,7 +13467,7 @@ function timeAgo(ts){
 </style>
 <!-- Admin panel -->
 <div id="admin-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center">
-  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(600px,94vw);max-height:85vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(600px,94vw);max-height:min(85vh,85dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-family:var(--sans);font-weight:700;font-size:16px;color:#f0c040">👑 Admin Panel</span>
       <span onclick="closeAdminPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
@@ -13306,7 +13480,7 @@ function timeAgo(ts){
 /* Mobile PWA layout — stack the user rows and add-user form so nothing overflows
    viewport width on small screens. Desktop keeps its single-line layout. */
 @media (max-width: 600px) {
-  #admin-overlay > div { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; max-height: 100dvh !important; height: 100dvh !important; }
+  #admin-overlay > div { width: 100% !important; max-width: 100% !important; border-radius: 0 !important; max-height: 100dvh !important; height: 100dvh !important; padding-top:var(--sat); padding-bottom:var(--sab); padding-left:var(--sal); padding-right:var(--sar); box-sizing:border-box; }
   #admin-body { padding: 12px !important; }
   #admin-body .admin-user-row { flex-wrap: wrap !important; row-gap: 6px !important; }
   #admin-body .admin-user-row > span:nth-child(1) { flex-basis: auto !important; }
@@ -13322,7 +13496,7 @@ function timeAgo(ts){
 
 <!-- IRCv3 Caps overlay -->
 <div id="caps-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeCapsPanel()">
-  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:480px;width:92%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:480px;width:92%;max-height:min(80vh,80dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">🔧 IRCv3 Capabilities</span>
       <span onclick="closeCapsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
@@ -13337,7 +13511,7 @@ function timeAgo(ts){
 <style>#caps-overlay.show{display:flex !important;}</style>
 <!-- Security panel overlay -->
 <div id="security-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeSecurityPanel()">
-  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:min(80vh,80dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">🔒 Security &amp; Privacy</span>
       <span onclick="closeSecurityPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
@@ -13406,7 +13580,7 @@ function timeAgo(ts){
 <style>#security-overlay.show{display:flex !important;}</style>
 <!-- Channel Stats panel -->
 <div id="chanstats-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeStatsPanel()">
-  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:500px;width:92%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:500px;width:92%;max-height:min(80vh,80dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
       <span id="chanstats-title" style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent);display:flex;align-items:center;gap:8px">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
@@ -13437,7 +13611,7 @@ function timeAgo(ts){
 </style>
 <!-- Session manager overlay -->
 <div id="sessions-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeSessionsPanel()">
-  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:min(70vh,70dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">📱 Active Sessions</span>
       <span onclick="closeSessionsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
@@ -13448,7 +13622,7 @@ function timeAgo(ts){
 <style>#sessions-overlay.show{display:flex !important;}</style>
 <!-- Uploads overlay -->
 <div id="uploads-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeUploadsPanel()">
-  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:500px;width:92%;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:500px;width:92%;max-height:min(80vh,80dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">📁 My Uploads</span>
       <div style="display:flex;gap:8px;align-items:center">
@@ -13463,7 +13637,7 @@ function timeAgo(ts){
 <!-- Stats overlay -->
 <!-- IRC Oper Panel -->
 <div id="oper-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeOperPanel()">
-  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:560px;width:94%;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:560px;width:94%;max-height:min(85vh,85dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:#f0c040;display:flex;align-items:center;gap:8px">⚡ IRC Oper Panel</span>
       <span onclick="closeOperPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px 8px">&#10005;</span>
