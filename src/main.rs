@@ -79,6 +79,7 @@ pub struct AppState {
     pub static_index:        Arc<String>,
     pub static_manifest:     Arc<String>,
     pub static_sw:           Arc<String>,
+    pub static_app_js:       Arc<String>,
 }
 
 impl AppState {
@@ -494,6 +495,9 @@ async fn main() -> Result<()> {
     let static_index    = Arc::new(include_str!("../static/index.html").replace("/cryptirc", bp_trimmed));
     let static_manifest = Arc::new(include_str!("../static/manifest.json").replace("/cryptirc", bp_trimmed));
     let static_sw       = Arc::new(include_str!("../static/sw.js").replace("/cryptirc", bp_trimmed));
+    // app.js holds the main frontend script (extracted verbatim from index.html).
+    // It contains /cryptirc asset/WS paths, so it needs the same base-path rewrite.
+    let static_app_js   = Arc::new(include_str!("../static/app.js").replace("/cryptirc", bp_trimmed));
 
     let state = AppState {
         connections:         Arc::new(DashMap::new()),
@@ -510,7 +514,7 @@ async fn main() -> Result<()> {
         max_upload_mb:     Arc::new(tokio::sync::RwLock::new(max_upload_mb)),
         admin_settings_lock: Arc::new(tokio::sync::Mutex::new(())),
         base_path: bp_trimmed.to_string(),
-        static_index, static_manifest, static_sw,
+        static_index, static_manifest, static_sw, static_app_js,
     };
 
     // Background: purge expired sessions and stale user events hourly
@@ -525,6 +529,7 @@ async fn main() -> Result<()> {
         .route("/",                      get(serve_index))
         .route("/Sortable.min.js",       get(serve_sortable_js))
         .route("/e2e.js",                get(serve_e2e_js))
+        .route("/app.js",                get(serve_app_js))
         .route("/manifest.json",         get(serve_manifest))
         .route("/sw.js",                 get(serve_sw))
         .route("/icon.svg",              get(serve_icon))
@@ -619,6 +624,7 @@ async fn serve_icon()     -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/
 async fn serve_icon_192() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-192.png").as_slice()) }
 async fn serve_icon_512() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/png")], include_bytes!("../static/icon-512.png").as_slice()) }
 async fn serve_e2e_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/e2e.js")) }
+async fn serve_app_js(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], (*state.static_app_js).clone()) }
 async fn serve_sortable_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/Sortable.min.js")) }
 
 // Bundled notification sounds — shipped in the binary so deploys don't need
