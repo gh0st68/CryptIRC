@@ -1858,6 +1858,9 @@ function _renderSidebarNow(){
       ci.innerHTML=`${chLock}${esc(ch.name)}<span class="chan-right">${chDet}${uc&&!chMuted?`<span class="chan-unread-badge${mc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${chMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
       ci.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,id,ch.name,'channel');});
       ci.onclick=()=>_sidebarActivate(id,ch.name);
+      // a11y (#58): channel rows are keyboard-focusable buttons — Enter/Space open them.
+      ci.tabIndex=0;ci.setAttribute('role','button');ci.setAttribute('aria-label','Channel '+ch.name);
+      ci.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();_sidebarActivate(id,ch.name);}});
       chanContainer.appendChild(ci);
     }
     g.appendChild(chanContainer);
@@ -1880,6 +1883,9 @@ function _renderSidebarNow(){
         qi.innerHTML=`${dmLock}${esc(display)}<span class="chan-right">${qDet}${uc&&!pmMuted?`<span class="chan-unread-badge highlight">${uc>99?'99+':uc}</span>`:''}${pmMuted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
         qi.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleChanMenu(e.currentTarget,id,lc,'pm');});
         qi.onclick=()=>_sidebarActivate(id,display);
+        // a11y (#58): PM rows are keyboard-focusable buttons — Enter/Space open them.
+        qi.tabIndex=0;qi.setAttribute('role','button');qi.setAttribute('aria-label','Direct message '+display);
+        qi.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();_sidebarActivate(id,display);}});
         g.appendChild(qi);
       }
     }
@@ -2247,7 +2253,13 @@ function buildRow(msg){
   if(isSys){nickHtml=`<span class="msg-nick" style="color:var(--text3)">—</span>`;bodyHtml=`<span class="msg-body">${renderStatusText(msg)}</span>`;}
   else if(msg.kind==='action'){nickHtml=`<span class="msg-nick ${nc}">* ${pfxHtml}${esc(msg.from)}</span>`;bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;}
   else{
-    nickHtml=`<span class="msg-nick ${nc}" onclick="showNickMenu(event,'${esc(msg.from)}')" oncontextmenu="event.preventDefault();showNickMenu(event,'${esc(msg.from)}')" style="cursor:pointer">${pfxHtml}${esc(msg.from)}</span>`;
+    // SECURITY: the nick is attacker-controlled (IRC prefix, no char validation)
+    // so it must NOT be interpolated into an inline event-handler JS-string —
+    // esc() is correct for the HTML *attribute* context (data-nick) but the
+    // parser decodes &#39;→' before an onclick body is compiled as JS, re-enabling
+    // breakout. We store the nick in data-nick and open the menu via the delegated
+    // document-level click/contextmenu listener (see below).
+    nickHtml=`<span class="msg-nick ${nc}" data-nick="${esc(msg.from)}" style="cursor:pointer">${pfxHtml}${esc(msg.from)}</span>`;
     bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;
   }
   row.innerHTML=`<span class="msg-ts">${ts}</span>${nickHtml}${bodyHtml}`;
@@ -2312,6 +2324,45 @@ function buildRow(msg){
       }
     });
   }
+})();
+// SECURITY: delegated open-menu handler for nicks rendered inside chat message
+// bodies (the per-message .msg-nick clickable nick + in-body .nick-mention spans).
+// These carry an HTML-attribute-escaped data-nick instead of an inline onclick,
+// so an attacker-controlled nick can never reach a JS-string/code context
+// (replaces the old onclick="showNickMenu(event,'…')" sinks — findings #3/#9/#10).
+// Document-level so it covers the main chat, split view and detached windows
+// uniformly. Guarded against double-fire on touch via _touchHandledBody.
+(function(){
+  if(document._nickBodyDelegated)return;
+  document._nickBodyDelegated=true;
+  let _touchHandledBody=false;
+  const _findNick=(el)=>{const n=el.closest('.msg-nick[data-nick],.nick-mention[data-nick]');return n&&n.dataset.nick?n:null;};
+  document.addEventListener('touchend',function(e){
+    const n=_findNick(e.target);
+    if(n){
+      e.preventDefault();
+      e.stopPropagation();
+      _touchHandledBody=true;
+      setTimeout(()=>{_touchHandledBody=false;},700);
+      showNickMenu(e,n.dataset.nick);
+    }
+  },{passive:false});
+  document.addEventListener('click',function(e){
+    const n=_findNick(e.target);
+    if(n){
+      e.stopPropagation();
+      if(_touchHandledBody)return;   // touchend already opened it on this device
+      showNickMenu(e,n.dataset.nick);
+    }
+  });
+  document.addEventListener('contextmenu',function(e){
+    const n=_findNick(e.target);
+    if(n){
+      e.preventDefault();
+      e.stopPropagation();
+      showNickMenu(e,n.dataset.nick);
+    }
+  });
 })();
 function renderNickPanel(names){
   const list=document.getElementById('nick-list');
@@ -4250,28 +4301,13 @@ function closeSettingsMenu(){document.getElementById('settings-menu').classList.
 document.addEventListener('click',e=>{const m=document.getElementById('settings-menu');if(m&&m.classList.contains('open')&&!e.target.closest('#settings-menu')&&!e.target.closest('#settings-gear-btn'))closeSettingsMenu();});
 
 // ─── Custom prompt (works in Electron where window.prompt is broken) ─────────
-function customPrompt(label, defaultVal='', isPassword=false){
-  return new Promise(resolve=>{
-    const ov=document.createElement('div');
-    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:9998;display:flex;align-items:center;justify-content:center;padding:16px;';
-    ov.innerHTML=`<div style="background:var(--bg1);border:1px solid var(--border);border-radius:10px;padding:20px;width:min(360px,90vw);box-shadow:0 16px 48px rgba(0,0,0,.6)">
-      <div style="font-size:13px;color:var(--text);margin-bottom:10px;font-weight:500">${label}</div>
-      <input id="_cp_input" type="${isPassword?'password':'text'}" value="${esc(defaultVal)}" style="width:100%;padding:10px 12px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;outline:none;box-sizing:border-box" autocomplete="off">
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
-        <button id="_cp_cancel" style="padding:8px 16px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text3);cursor:pointer;font-size:13px">Cancel</button>
-        <button id="_cp_ok" style="padding:8px 16px;background:var(--accent);border:none;border-radius:6px;color:#000;cursor:pointer;font-weight:700;font-size:13px">OK</button>
-      </div>
-    </div>`;
-    document.body.appendChild(ov);
-    const inp=ov.querySelector('#_cp_input');
-    inp.focus();inp.select();
-    const done=val=>{ov.remove();resolve(val);};
-    ov.querySelector('#_cp_ok').addEventListener('click',()=>done(inp.value));
-    ov.querySelector('#_cp_cancel').addEventListener('click',()=>done(null));
-    inp.addEventListener('keydown',e=>{if(e.key==='Enter')done(inp.value);if(e.key==='Escape')done(null);});
-    ov.addEventListener('click',e=>{if(e.target===ov)done(null);});
-  });
-}
+// NOTE: customPrompt is defined later (single canonical definition near the nick
+// menu) and uses textContent for the message — safe against HTML/JS injection.
+// A second, earlier definition used to live here that injected its `label` into
+// innerHTML UNESCAPED; several call sites pass attacker-influenced nicks into that
+// label (e.g. `Note for ${nick}:`), making it a latent stored-XSS foot-gun the
+// moment a refactor reordered the definitions (audit #89). It was always shadowed
+// (the later same-name function declaration wins) and is now removed entirely.
 
 // ─── Vault ────────────────────────────────────────────────────────────────────
 function doUnlock(){
@@ -4338,9 +4374,39 @@ function showPasswordPanel(){
   ov.style.display='flex';ov.classList.add('show');
   renderPasswordPanel();
 }
+// SECURITY: delegated handler for the password-safe item controls. Reads the entry
+// index / element id from data-* (no user data in a code/JS-string context, #10) and
+// performs the copy-username / reveal-password / copy-password action. Bound lazily
+// on first render (the #pwsafe-body element lives below this script tag); idempotent.
+function _bindPwSafeDelegation(){
+  const body=document.getElementById('pwsafe-body');
+  if(!body||body._pwSafeDelegated)return;
+  body._pwSafeDelegated=true;
+  body.addEventListener('click',e=>{
+    const el=e.target.closest('[data-pw-act]');
+    if(!el||!body.contains(el))return;
+    const act=el.dataset.pwAct;
+    if(act==='copyuser'){
+      const entry=_pwSafe[+el.dataset.pwIdx];
+      if(entry){navigator.clipboard?.writeText(entry.username||'');showToast('Username copied');}
+      return;
+    }
+    const s=document.getElementById(el.dataset.pwTarget);
+    if(!s)return;
+    if(act==='reveal'){
+      if(s.textContent==='••••••••'){
+        s.textContent=atob(s.dataset.v);s.style.color='var(--accent)';
+        setTimeout(()=>{s.textContent='••••••••';s.style.color='var(--text)';},5000);
+      } else {s.textContent='••••••••';s.style.color='var(--text)';}
+    } else if(act==='copypass'){
+      navigator.clipboard?.writeText(atob(s.dataset.v||''));showToast('Password copied');
+    }
+  });
+}
 function renderPasswordPanel(){
   const body=document.getElementById('pwsafe-body');
   if(!body)return;
+  _bindPwSafeDelegation();   // idempotent; binds the delegated item-action listener once
   let html='';
   // ── Change Passwords section ──
   html+=`<div style="margin-bottom:18px">
@@ -4392,11 +4458,16 @@ function renderPasswordSafeHTML(){
           <button onclick="pwSafeDelete(${i})" style="padding:3px 8px;background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;cursor:pointer;font-size:10px">Delete</button>
         </div>
       </div>`;
+    // SECURITY: vault entry username is user-provided. It is no longer interpolated
+    // into an inline-handler JS-string (old onclick="...writeText('${esc(...)}')",
+    // #10); the copy control carries a data-pw-act/data-pw-idx and a delegated
+    // listener reads _pwSafe[idx].username at click time. Reveal/copy-password use
+    // the same delegated path (they already used the safe dataset.v mechanism).
     if(e.username) html+=`<div style="font-size:11px;color:var(--text3);margin-bottom:3px">User: <span style="color:var(--text);font-family:var(--mono)">${esc(e.username)}</span>
-      <span onclick="navigator.clipboard?.writeText('${esc(e.username.replace(/'/g,"\\'"))}');showToast('Username copied')" style="cursor:pointer;margin-left:4px;opacity:.5">📋</span></div>`;
+      <span data-pw-act="copyuser" data-pw-idx="${i}" style="cursor:pointer;margin-left:4px;opacity:.5">📋</span></div>`;
     html+=`<div style="font-size:11px;color:var(--text3);margin-bottom:3px">Pass: <span id="${safeId}" style="color:var(--text);font-family:var(--mono)">••••••••</span>
-      <span onclick="const s=document.getElementById('${safeId}');if(s.textContent==='••••••••'){s.textContent=atob(s.dataset.v);s.style.color='var(--accent)';setTimeout(()=>{s.textContent='••••••••';s.style.color='var(--text)';},5000);}else{s.textContent='••••••••';s.style.color='var(--text)';}" style="cursor:pointer;margin-left:4px;opacity:.5">👁</span>
-      <span onclick="navigator.clipboard?.writeText(atob(document.getElementById('${safeId}').dataset.v));showToast('Password copied')" style="cursor:pointer;margin-left:2px;opacity:.5">📋</span></div>`;
+      <span data-pw-act="reveal" data-pw-target="${safeId}" style="cursor:pointer;margin-left:4px;opacity:.5">👁</span>
+      <span data-pw-act="copypass" data-pw-target="${safeId}" style="cursor:pointer;margin-left:2px;opacity:.5">📋</span></div>`;
     if(e.notes) html+=`<div style="font-size:10px;color:var(--text3);margin-top:4px;line-height:1.3">${esc(e.notes)}</div>`;
     html+=`</div>`;
   }
@@ -4738,6 +4809,7 @@ function saveNetwork(){
 // ─── Encryption panel ─────────────────────────────────────────────────────────
 function showEncryptPanel(){
   if(!active){return;}
+  _bindEncryptDelegation();   // idempotent; binds the delegated button listener once
   const target=active.target;
   const conn_id=active.conn_id;
   const isChan=target.startsWith('#')||target.startsWith('&');
@@ -4754,19 +4826,19 @@ function showEncryptPanel(){
           <div><strong>Encrypted</strong><br><span style="font-size:11px;color:var(--text2)">Messages in this channel are encrypted with a shared key</span></div>
         </div>
         <div class="encrypt-actions">
-          <button class="encrypt-btn" onclick="encryptAction('share')">
+          <button class="encrypt-btn" data-encrypt-cmd="share">
             <span class="encrypt-btn-icon">👁</span>
             <div class="encrypt-btn-text">Show Key<div class="encrypt-btn-sub">Display the 32-word key in chat</div></div>
           </button>
-          <button class="encrypt-btn" onclick="copyChannelKey()">
+          <button class="encrypt-btn" data-encrypt-fn="copyKey">
             <span class="encrypt-btn-icon">📋</span>
             <div class="encrypt-btn-text">Copy Key<div class="encrypt-btn-sub">Copy the 32-word key to clipboard</div></div>
           </button>
-          <button class="encrypt-btn" onclick="encryptAction('rotate')">
+          <button class="encrypt-btn" data-encrypt-cmd="rotate">
             <span class="encrypt-btn-icon">🔄</span>
             <div class="encrypt-btn-text">Rotate Key<div class="encrypt-btn-sub">Generate a new key — old key holders lose access</div></div>
           </button>
-          <button class="encrypt-btn danger" onclick="encryptAction('off')">
+          <button class="encrypt-btn danger" data-encrypt-cmd="off">
             <span class="encrypt-btn-icon">🔓</span>
             <div class="encrypt-btn-text">Disable Encryption<div class="encrypt-btn-sub">Remove channel key and send messages in plaintext</div></div>
           </button>
@@ -4778,11 +4850,11 @@ function showEncryptPanel(){
           <div><strong>Not Encrypted</strong><br><span style="font-size:11px;color:var(--text3)">Messages are sent in plaintext</span></div>
         </div>
         <div class="encrypt-actions">
-          <button class="encrypt-btn" onclick="encryptAction('keygen')">
+          <button class="encrypt-btn" data-encrypt-cmd="keygen">
             <span class="encrypt-btn-icon">🔑</span>
             <div class="encrypt-btn-text">Generate Key<div class="encrypt-btn-sub">Create a new encryption key for this channel</div></div>
           </button>
-          <button class="encrypt-btn" onclick="showImportKeyUI()">
+          <button class="encrypt-btn" data-encrypt-fn="importKey">
             <span class="encrypt-btn-icon">📥</span>
             <div class="encrypt-btn-text">Import Key<div class="encrypt-btn-sub">Enter a 32-word key shared by someone else</div></div>
           </button>
@@ -4804,19 +4876,19 @@ function showEncryptPanel(){
           <div><strong>PSK Encrypted</strong><br><span style="font-size:11px;color:var(--text2)">Using a shared key — works with any IRC client</span></div>
         </div>
         <div class="encrypt-actions">
-          <button class="encrypt-btn" onclick="encryptAction('share')">
+          <button class="encrypt-btn" data-encrypt-cmd="share">
             <span class="encrypt-btn-icon">👁</span>
             <div class="encrypt-btn-text">Show Key<div class="encrypt-btn-sub">Display the 32-word key</div></div>
           </button>
-          <button class="encrypt-btn" onclick="copyChannelKey()">
+          <button class="encrypt-btn" data-encrypt-fn="copyKey">
             <span class="encrypt-btn-icon">📋</span>
             <div class="encrypt-btn-text">Copy Key<div class="encrypt-btn-sub">Copy the 32-word key to clipboard</div></div>
           </button>
-          <button class="encrypt-btn" onclick="encryptAction('rotate')">
+          <button class="encrypt-btn" data-encrypt-cmd="rotate">
             <span class="encrypt-btn-icon">🔄</span>
             <div class="encrypt-btn-text">Rotate Key<div class="encrypt-btn-sub">Generate a new key</div></div>
           </button>
-          <button class="encrypt-btn danger" onclick="encryptAction('off')">
+          <button class="encrypt-btn danger" data-encrypt-cmd="off">
             <span class="encrypt-btn-icon">🔓</span>
             <div class="encrypt-btn-text">Disable Encryption<div class="encrypt-btn-sub">Send messages in plaintext</div></div>
           </button>
@@ -4828,15 +4900,15 @@ function showEncryptPanel(){
           <div><strong>E2E Encrypted</strong><br><span style="font-size:11px;color:var(--text2)">Using Signal protocol (X3DH + Double Ratchet)</span></div>
         </div>
         <div class="encrypt-actions">
-          <button class="encrypt-btn" onclick="encryptAction('verify','${esc(target)}')">
+          <button class="encrypt-btn" data-encrypt-cmd="verify" data-encrypt-target="1">
             <span class="encrypt-btn-icon">✓</span>
             <div class="encrypt-btn-text">Verify Identity<div class="encrypt-btn-sub">Compare safety phrases to verify this person</div></div>
           </button>
-          <button class="encrypt-btn" onclick="encryptAction('fingerprint')">
+          <button class="encrypt-btn" data-encrypt-cmd="fingerprint">
             <span class="encrypt-btn-icon">🆔</span>
             <div class="encrypt-btn-text">Your Fingerprint<div class="encrypt-btn-sub">Show your identity key fingerprint</div></div>
           </button>
-          <button class="encrypt-btn danger" onclick="encryptAction('off','${esc(target)}')">
+          <button class="encrypt-btn danger" data-encrypt-cmd="off" data-encrypt-target="1">
             <span class="encrypt-btn-icon">🔓</span>
             <div class="encrypt-btn-text">End E2E Session<div class="encrypt-btn-sub">Stop encrypting messages to this user</div></div>
           </button>
@@ -4848,15 +4920,15 @@ function showEncryptPanel(){
           <div><strong>Not Encrypted</strong><br><span style="font-size:11px;color:var(--text3)">Messages are sent in plaintext</span></div>
         </div>
         <div class="encrypt-actions">
-          <button class="encrypt-btn" onclick="encryptAction('keygen')">
+          <button class="encrypt-btn" data-encrypt-cmd="keygen">
             <span class="encrypt-btn-icon">🔑</span>
             <div class="encrypt-btn-text">Shared Key (PSK)<div class="encrypt-btn-sub">Generate a key — share it with ${esc(target)} to encrypt DMs</div></div>
           </button>
-          <button class="encrypt-btn" onclick="showImportKeyUI()">
+          <button class="encrypt-btn" data-encrypt-fn="importKey">
             <span class="encrypt-btn-icon">📥</span>
             <div class="encrypt-btn-text">Import Key<div class="encrypt-btn-sub">Enter a 32-word key from ${esc(target)}</div></div>
           </button>
-          <button class="encrypt-btn" onclick="encryptAction('on','${esc(target)}')">
+          <button class="encrypt-btn" data-encrypt-cmd="on" data-encrypt-target="1">
             <span class="encrypt-btn-icon">🔐</span>
             <div class="encrypt-btn-text">Signal E2E<div class="encrypt-btn-sub">Auto key exchange — requires ${esc(target)} on this CryptIRC server</div></div>
           </button>
@@ -4870,6 +4942,28 @@ function showEncryptPanel(){
   _overlayOpen('encryptPanel', closeEncryptPanel);
 }
 function closeEncryptPanel(){_overlayClose('encryptPanel');document.getElementById('encrypt-overlay').classList.remove('show');}
+// SECURITY: delegated handler for the encryption-panel buttons. The buttons carry
+// a fixed data-encrypt-cmd (share/rotate/off/keygen/verify/fingerprint/on) plus an
+// optional data-encrypt-target flag — never the PM nick interpolated into an inline
+// handler JS-string (the old onclick="encryptAction('verify','…')" sinks, #9/#10).
+// When the action needs the peer nick it uses active.target at click time (the panel
+// only ever targets the active DM, so this is identical behavior). Bound lazily on
+// first panel render (the body element lives below this script tag); idempotent.
+function _bindEncryptDelegation(){
+  const body=document.getElementById('encrypt-panel-body');
+  if(!body||body._encryptDelegated)return;
+  body._encryptDelegated=true;
+  body.addEventListener('click',function(e){
+    const btn=e.target.closest('[data-encrypt-cmd],[data-encrypt-fn]');
+    if(!btn||!body.contains(btn))return;
+    const fn=btn.dataset.encryptFn;
+    if(fn==='copyKey'){copyChannelKey();return;}
+    if(fn==='importKey'){showImportKeyUI();return;}
+    const cmd=btn.dataset.encryptCmd;
+    if(!cmd)return;
+    encryptAction(cmd, btn.dataset.encryptTarget&&active?active.target:undefined);
+  });
+}
 async function encryptAction(cmd,arg){
   if(!active)return;
   const args=arg?[cmd,arg]:[cmd];
@@ -7449,6 +7543,7 @@ function toggleStatsEnabled(btn){
 }
 function renderStatsChannelList(){
   document.getElementById('chanstats-title').innerHTML='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Channel Stats';
+  _bindStatsDelegation();   // idempotent; binds the delegated row/clear listener once
   const body=document.getElementById('chanstats-body');
   // Enable/disable toggle + refresh
   let html='<div class="appear-section"><div class="appear-row"><div><span class="appear-label">Enable channel stats</span><div style="font-size:10px;color:var(--text3)">Track message counts per nick across sessions</div></div>';
@@ -7479,7 +7574,10 @@ function renderStatsChannelList(){
   }
   html+=`<div class="appear-section"><div class="appear-section-title">Channels (${entries.length})</div>`;
   for(const e of entries){
-    html+=`<div class="cst-chan" onclick="renderStatsDetail('${e.key.replace(/'/g,"\\'")}')">`;
+    // SECURITY: stats key embeds a channel name (user-influenced). Carry it in an
+    // HTML-attribute-escaped data-stats-key opened via the delegated chanstats-body
+    // listener, not an inline-handler JS-string (#10).
+    html+=`<div class="cst-chan" data-stats-key="${esc(e.key)}">`;
     html+=`<div><div class="cst-chan-name">${esc(e.chanName)}</div><div class="cst-chan-meta">${esc(e.netLabel)} &middot; ${e.uniqueNicks} nicks</div></div>`;
     html+=`<div style="display:flex;align-items:center;gap:8px"><span style="font-size:14px;font-weight:700;color:var(--accent)">${e.total.toLocaleString()}</span><span class="cst-chan-arrow">&rsaquo;</span></div>`;
     html+=`</div>`;
@@ -7490,6 +7588,7 @@ function renderStatsChannelList(){
   body.innerHTML=html;
 }
 function renderStatsDetail(key){
+  _bindStatsDelegation();   // idempotent; ensures back/clear delegation is bound
   document.getElementById('chanstats-title').innerHTML='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> Channel Stats';
   const body=document.getElementById('chanstats-body');
   const nicks=_chanStats[key]||{};
@@ -7517,9 +7616,31 @@ function renderStatsDetail(key){
     html+=`</div>`;
   }
   if(sorted.length>50) html+=`<div style="font-size:11px;color:var(--text3);text-align:center;padding:8px">...and ${sorted.length-50} more nicks</div>`;
-  // Clear channel button
-  html+=`<div style="text-align:center;padding:12px 0"><button onclick="customConfirm('Clear stats for ${esc(chanName)}?','Clear').then(ok=>{if(ok){delete _chanStats['${key.replace(/'/g,"\\'")}'];_chanStatsDirty=true;saveStatsToServer();renderStatsChannelList();}})" style="background:none;border:1px solid var(--border);color:var(--text3);padding:6px 16px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">Clear Channel Stats</button></div>`;
+  // Clear channel button — carries the stats key in a data attribute; the delegated
+  // chanstats-body listener confirms and clears (no user data in a JS-string, #10).
+  html+=`<div style="text-align:center;padding:12px 0"><button data-stats-clear="${esc(key)}" style="background:none;border:1px solid var(--border);color:var(--text3);padding:6px 16px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">Clear Channel Stats</button></div>`;
   body.innerHTML=html;
+}
+// SECURITY: delegated listener for stats rows / clear-channel button. Reads the
+// channel stats key from data-* (HTML-attribute escaped) instead of an inline
+// onclick JS-string (#10). Bound lazily on first render (the #chanstats-body element
+// lives below this script tag). Idempotent via _statsDelegated.
+function _bindStatsDelegation(){
+  const body=document.getElementById('chanstats-body');
+  if(!body||body._statsDelegated)return;
+  body._statsDelegated=true;
+  body.addEventListener('click',e=>{
+    const row=e.target.closest('[data-stats-key]');
+    if(row&&body.contains(row)){renderStatsDetail(row.dataset.statsKey);return;}
+    const clr=e.target.closest('[data-stats-clear]');
+    if(clr&&body.contains(clr)){
+      const key=clr.dataset.statsClear;
+      const chanName=key.split('/').slice(1).join('/');
+      customConfirm('Clear stats for '+chanName+'?','Clear').then(ok=>{
+        if(ok){delete _chanStats[key];_chanStatsDirty=true;saveStatsToServer();renderStatsChannelList();}
+      });
+    }
+  });
 }
 
 // ─── Split view ──────────────────────────────────────────────────────────────
@@ -8545,50 +8666,81 @@ function showTopicMenu(e){
   const{conn_id,target}=active;
   const isChan=target.startsWith('#')||target.startsWith('&');
   const isPM=!isChan&&target!=='status';
-  // Build menu dynamically
+  // Build menu dynamically.
+  // SECURITY: these handlers carry the PM/DM target nick (attacker-controlled) and
+  // mute keys derived from it. They are NOT interpolated into inline-handler
+  // JS-strings (the old onclick="…'${esc(target)}'…" sinks — #9/#10); instead each
+  // button is a real element with an .onclick closure capturing the value as a
+  // plain JS variable, so the data never enters a code/JS-string context.
   m.innerHTML='';
+  // Helper: build a topic-menu button. `label` is set via textContent (no HTML
+  // injection); `fn` runs on click and closeTopicMenu() is always called after.
+  const _mkItem=(label,fn,danger)=>{
+    const b=document.createElement('button');
+    b.className='topic-menu-item';
+    if(danger)b.style.color='#f87171';
+    b.textContent=label;
+    b.onclick=()=>{try{fn();}finally{closeTopicMenu();}};
+    m.appendChild(b);
+    return b;
+  };
+  // Open the channel-list overlay for a given connection (same behavior as the
+  // former inline handler, just without string-built JS).
+  const _openChanList=(cid)=>{
+    chanListData=[];chanListConnId=cid;
+    document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';
+    document.getElementById('chanlist-count').textContent='';
+    document.getElementById('chanlist-search').value='';
+    document.getElementById('chanlist-overlay').classList.add('show');
+    wsend({type:'send',conn_id:cid,raw:'LIST'});
+  };
   if(isChan){
-    m.innerHTML+=`<button class="topic-menu-item" onclick="viewFullTopic();closeTopicMenu()">👁 View topic</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="editTopic();closeTopicMenu()">✏️ Edit topic</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="copyTopic();closeTopicMenu()">📋 Copy topic</button>`;
+    _mkItem('👁 View topic',()=>viewFullTopic());
+    _mkItem('✏️ Edit topic',()=>editTopic());
+    _mkItem('📋 Copy topic',()=>copyTopic());
     const fav=isFavorite(conn_id,target);
-    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleFavorite('${esc(conn_id)}','${esc(target)}');closeTopicMenu()">${fav?'★ Unfavorite':'☆ Favorite'}</button>`;
+    _mkItem(fav?'★ Unfavorite':'☆ Favorite',()=>toggleFavorite(conn_id,target));
     const muteKey=conn_id+'/'+target;
     const muted=isMuted(muteKey);
-    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleMute('${esc(muteKey)}');closeTopicMenu()">${muted?'🔔 Unmute':'🔇 Mute'}</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="chanListData=[];chanListConnId='${esc(conn_id)}';document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';document.getElementById('chanlist-count').textContent='';document.getElementById('chanlist-search').value='';document.getElementById('chanlist-overlay').classList.add('show');wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'LIST'});closeTopicMenu()">📋 Channel list</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="clearBufHistory('${esc(conn_id)}','${esc(target)}');closeTopicMenu()">🗑 Clear History</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">🚪 Leave channel</button>`;
+    _mkItem(muted?'🔔 Unmute':'🔇 Mute',()=>toggleMute(muteKey));
+    _mkItem('📋 Channel list',()=>_openChanList(conn_id));
+    _mkItem('🗑 Clear History',()=>clearBufHistory(conn_id,target));
+    _mkItem('🚪 Leave channel',()=>leaveCurrentChannel(),true);
   } else if(isPM){
-    m.innerHTML+=`<button class="topic-menu-item" onclick="wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'WHOIS ${esc(target)}'});closeTopicMenu()">🔍 Whois</button>`;
+    _mkItem('🔍 Whois',()=>wsend({type:'send',conn_id,raw:'WHOIS '+target}));
     const pmAllowed=isPmAllowedFor(conn_id,target);
-    m.innerHTML+=`<button class="topic-menu-item" onclick="${pmAllowed?'removePmAllow':'addPmAllow'}('${esc(target)}','${esc(conn_id)}');showToast('${pmAllowed?esc(target)+' removed from PM allow list':'PMs from '+esc(target)+' will now bypass protection'}');closeTopicMenu()">${pmAllowed?'🛡 Remove PM allow':'🛡 Allow PMs'}</button>`;
+    _mkItem(pmAllowed?'🛡 Remove PM allow':'🛡 Allow PMs',()=>{
+      if(pmAllowed){removePmAllow(target,conn_id);showToast(target+' removed from PM allow list');}
+      else{addPmAllow(target,conn_id);showToast('PMs from '+target+' will now bypass protection');}
+    });
     const ignored=isIgnored(target);
-    m.innerHTML+=`<button class="topic-menu-item" onclick="${ignored?'removeIgnore':'addIgnore'}('${esc(target)}');closeTopicMenu()">${ignored?'👂 Unignore':'🚫 Ignore user'}</button>`;
+    _mkItem(ignored?'👂 Unignore':'🚫 Ignore user',()=>{ignored?removeIgnore(target):addIgnore(target);});
     const muteKey=conn_id+'/'+target;
     const muted=isMuted(muteKey);
-    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleMute('${esc(muteKey)}');closeTopicMenu()">${muted?'🔔 Unmute':'🔇 Mute conversation'}</button>`;
+    _mkItem(muted?'🔔 Unmute':'🔇 Mute conversation',()=>toggleMute(muteKey));
     const fav=isFavorite(conn_id,target);
-    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleFavorite('${esc(conn_id)}','${esc(target)}');closeTopicMenu()">${fav?'★ Unfavorite':'☆ Favorite'}</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="chanListData=[];chanListConnId='${esc(conn_id)}';document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';document.getElementById('chanlist-count').textContent='';document.getElementById('chanlist-search').value='';document.getElementById('chanlist-overlay').classList.add('show');wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'LIST'});closeTopicMenu()">📋 Channel list</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="clearBufHistory('${esc(conn_id)}','${esc(target)}');closeTopicMenu()">🗑 Clear History</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="leaveCurrentChannel();closeTopicMenu()">✕ Close PM</button>`;
+    _mkItem(fav?'★ Unfavorite':'☆ Favorite',()=>toggleFavorite(conn_id,target));
+    _mkItem('📋 Channel list',()=>_openChanList(conn_id));
+    _mkItem('🗑 Clear History',()=>clearBufHistory(conn_id,target));
+    _mkItem('✕ Close PM',()=>leaveCurrentChannel(),true);
   } else if(target==='status'){
     // Status window — network management options
     const net=networks.find(n=>n.config.id===conn_id);
-    const netLabel=net?esc(net.config.label||net.config.server):'Network';
-    m.innerHTML+=`<button class="topic-menu-item" onclick="editNetwork('${esc(conn_id)}');closeTopicMenu()">✎ Edit ${netLabel}</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="closeTopicMenu();promptJoinChannel('${esc(conn_id)}')">📺 Join channel</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="chanListData=[];chanListConnId='${esc(conn_id)}';document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';document.getElementById('chanlist-count').textContent='';document.getElementById('chanlist-search').value='';document.getElementById('chanlist-overlay').classList.add('show');wsend({type:'send',conn_id:'${esc(conn_id)}',raw:'LIST'});closeTopicMenu()">📋 List channels</button>`;
-    m.innerHTML+=`<button class="topic-menu-item" onclick="showIgnorePanel();closeTopicMenu()">🚫 Ignored users</button>`;
+    const netLabel=net?(net.config.label||net.config.server):'Network';
+    _mkItem('✎ Edit '+netLabel,()=>editNetwork(conn_id));
+    // Join-channel button opened the prompt AFTER closing the menu; preserve order
+    // by closing first then prompting (closeTopicMenu also runs again harmlessly).
+    _mkItem('📺 Join channel',()=>{closeTopicMenu();promptJoinChannel(conn_id);});
+    _mkItem('📋 List channels',()=>_openChanList(conn_id));
+    _mkItem('🚫 Ignored users',()=>showIgnorePanel());
     const netMuted=isMuted('net:'+conn_id);
-    m.innerHTML+=`<button class="topic-menu-item" onclick="toggleMute('net:${esc(conn_id)}');closeTopicMenu()">${netMuted?'🔔 Unmute network':'🔇 Mute network'}</button>`;
+    _mkItem(netMuted?'🔔 Unmute network':'🔇 Mute network',()=>toggleMute('net:'+conn_id));
     if(net?.connected){
-      m.innerHTML+=`<button class="topic-menu-item" onclick="wsend({type:'disconnect',id:'${esc(conn_id)}'});closeTopicMenu()">⚡ Disconnect</button>`;
+      _mkItem('⚡ Disconnect',()=>wsend({type:'disconnect',id:conn_id}));
     } else {
-      m.innerHTML+=`<button class="topic-menu-item" onclick="wsend({type:'connect',id:'${esc(conn_id)}'});closeTopicMenu()">⚡ Connect</button>`;
+      _mkItem('⚡ Connect',()=>wsend({type:'connect',id:conn_id}));
     }
-    m.innerHTML+=`<button class="topic-menu-item" style="color:#f87171" onclick="removeNetwork('${esc(conn_id)}','${netLabel}');closeTopicMenu()">🗑 Delete network</button>`;
+    _mkItem('🗑 Delete network',()=>removeNetwork(conn_id,netLabel),true);
   }
   const btn=document.getElementById('topic-menu-btn');
   const r=btn.getBoundingClientRect();
@@ -8739,7 +8891,13 @@ document.addEventListener('click',e=>{
 });
 function showToast(msg){
   let t=document.getElementById('generic-toast');
-  if(!t){t=document.createElement('div');t.id='generic-toast';t.style.cssText='position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 16px;font-size:12px;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none;';document.body.appendChild(t);}
+  if(!t){
+    t=document.createElement('div');t.id='generic-toast';
+    // a11y (#91): announce toast text to assistive tech. role=status + aria-live
+    // polite makes screen readers read copy/error/status confirmations as they appear.
+    t.setAttribute('role','status');t.setAttribute('aria-live','polite');t.setAttribute('aria-atomic','true');
+    t.style.cssText='position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 16px;font-size:12px;z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none;';document.body.appendChild(t);
+  }
   t.textContent=msg;t.style.opacity='1';
   clearTimeout(t._timer);t._timer=setTimeout(()=>{t.style.opacity='0';},2500);
 }
@@ -8881,7 +9039,15 @@ function renderHighlightTags(){
   const c=document.getElementById('highlight-tags');if(!c)return;
   const words=getHighlightWords();
   if(!words.length){c.innerHTML='<span style="font-size:11px;color:var(--text3)">No highlight words set.</span>';return;}
-  c.innerHTML=words.map(w=>`<span class="hl-tag">${esc(w)}<button class="hl-tag-x" onclick="removeHighlightWord('${esc(w)}')">&times;</button></span>`).join('');
+  // SECURITY: highlight words are arbitrary user input. Carry the word in an
+  // HTML-attribute-escaped data-hl-word and remove via a delegated listener — never
+  // interpolated into an inline-handler JS-string (#10). The attribute decodes back
+  // to the exact word for dataset.hlWord.
+  c.innerHTML=words.map(w=>`<span class="hl-tag">${esc(w)}<button class="hl-tag-x" data-hl-word="${esc(w)}">&times;</button></span>`).join('');
+  if(!c._hlDelegated){
+    c._hlDelegated=true;
+    c.addEventListener('click',e=>{const b=e.target.closest('.hl-tag-x[data-hl-word]');if(b&&c.contains(b))removeHighlightWord(b.dataset.hlWord);});
+  }
 }
 function closeNotifModal() { _overlayClose('notifModal'); document.getElementById('notif-modal').classList.remove('open'); }
 
@@ -9537,9 +9703,12 @@ function showIgnorePanel(){
     } else {
       html+=`<div id="ignore-panel-list">`;
       for(const nick of list){
+        // SECURITY: the ignore mask is arbitrary user input. Carry it in an
+        // HTML-attribute-escaped data-ignore-rm and remove via the delegated box
+        // listener (re-renders the panel) instead of an inline-handler JS-string (#10).
         html+=`<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
           <span style="font-size:13px;color:var(--text);font-family:var(--mono)">${esc(nick)}</span>
-          <button onclick="removeIgnore('${esc(nick)}');this.closest('div[style*=flex]').remove();if(!document.querySelectorAll('#ignore-panel-list>div').length)document.getElementById('ignore-panel-list').innerHTML='<div style=\\'color:var(--text3);text-align:center;padding:20px 0;font-size:13px\\'>No ignored users</div>'" style="padding:3px 10px;background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;cursor:pointer;font-size:11px">Remove</button>
+          <button data-ignore-rm="${esc(nick)}" style="padding:3px 10px;background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;cursor:pointer;font-size:11px">Remove</button>
         </div>`;
       }
       html+=`</div>`;
@@ -9548,6 +9717,9 @@ function showIgnorePanel(){
     box.innerHTML=html;
   }
   render();
+  // Delegated remove handler (see render(): buttons carry data-ignore-rm). Bound
+  // once on the stable box element; re-renders after removal to update the list.
+  box.addEventListener('click',e=>{const b=e.target.closest('[data-ignore-rm]');if(b&&box.contains(b)){removeIgnore(b.dataset.ignoreRm);render();}});
   ov.appendChild(box);
   ov.onclick=e=>{if(e.target===ov)ov.remove();};
   document.body.appendChild(ov);
@@ -10416,16 +10588,33 @@ async function showAdminPanel(){
       row.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);';
       const online=u.sessions>0;
       const uploadOn=u.admin||u.can_upload;
+      // SECURITY: username is user-controlled. Carry it on the row via a DOM property
+      // and tag each action button with a fixed data-admin-act; a delegated listener
+      // reads row.dataset.username — never an inline-handler JS-string (#10).
+      row.dataset.username=u.username;
       row.innerHTML=`
         <span style="font-size:10px">${online?'🟢':'⚫'}</span>
         <span style="flex:1;font-size:13px;color:var(--text);font-weight:${u.admin?'700':'400'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(u.username)}${u.admin?' 👑':''}</span>
         <span style="font-size:10px;color:var(--text3)">${u.sessions} session${u.sessions!==1?'s':''}</span>
-        ${u.admin?'<span class="admin-always-upload" style="font-size:10px;color:var(--text3);padding:3px 8px">📎 always</span>':`<button onclick="adminToggleUpload('${esc(u.username)}',${!uploadOn})" title="${uploadOn?'Revoke':'Grant'} upload permission" style="background:${uploadOn?'rgba(0,212,170,.15)':'none'};border:1px solid ${uploadOn?'var(--accent)':'var(--border)'};color:${uploadOn?'var(--accent)':'var(--text3)'};border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">📎 ${uploadOn?'On':'Off'}</button>`}
-        ${u.admin?'':`<button onclick="adminDisableUser('${esc(u.username)}')" style="background:none;border:1px solid var(--warn);color:var(--warn);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Disable</button>
-        <button onclick="adminDeleteUser('${esc(u.username)}')" style="background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Delete</button>`}
+        ${u.admin?'<span class="admin-always-upload" style="font-size:10px;color:var(--text3);padding:3px 8px">📎 always</span>':`<button data-admin-act="upload" data-admin-val="${!uploadOn}" title="${uploadOn?'Revoke':'Grant'} upload permission" style="background:${uploadOn?'rgba(0,212,170,.15)':'none'};border:1px solid ${uploadOn?'var(--accent)':'var(--border)'};color:${uploadOn?'var(--accent)':'var(--text3)'};border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">📎 ${uploadOn?'On':'Off'}</button>`}
+        ${u.admin?'':`<button data-admin-act="disable" style="background:none;border:1px solid var(--warn);color:var(--warn);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Disable</button>
+        <button data-admin-act="delete" style="background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Delete</button>`}
       `;
       userSection.appendChild(row);
     }
+    // Delegated handler for the per-user admin buttons (reads the username from the
+    // owning row's dataset — no user data in an inline-handler JS-string, #10).
+    userSection.addEventListener('click',ev=>{
+      const btn=ev.target.closest('[data-admin-act]');
+      if(!btn||!userSection.contains(btn))return;
+      const uname=btn.closest('.admin-user-row')?.dataset.username;
+      if(!uname)return;
+      switch(btn.dataset.adminAct){
+        case 'upload': adminToggleUpload(uname, btn.dataset.adminVal==='true'); break;
+        case 'disable': adminDisableUser(uname); break;
+        case 'delete': adminDeleteUser(uname); break;
+      }
+    });
     body.appendChild(userSection);
 
     // Add user form
@@ -10854,7 +11043,12 @@ function renderStatusText(msg){
     const re=new RegExp('(?<![\\w])('+escaped+')(?![\\w])','g');
     html=html.replace(/(<[^>]+>)|([^<]+)/g,(m,tag,text)=>{
       if(tag)return tag;
-      return text.replace(re,(match)=>{const safe=match.replace(/'/g,"\\'");return `<span class="nick-mention nc${nickHash(match)}" onclick="showNickMenu(event,'${safe}')" oncontextmenu="event.preventDefault();showNickMenu(event,'${safe}')" style="cursor:pointer;font-weight:600">${match}</span>`;});
+      // SECURITY: `match` is already HTML-escaped (came through parseMircColors),
+      // so it is a safe HTML *attribute* value. We carry the nick in data-nick and
+      // let the delegated body-nick listener open the menu — never interpolating
+      // a nick into an inline-handler JS-string (findings #3/#9/#10). The HTML
+      // parser decodes the attribute back to the real nick for dataset.nick.
+      return text.replace(re,(match)=>{return `<span class="nick-mention nc${nickHash(match)}" data-nick="${match}" style="cursor:pointer;font-weight:600">${match}</span>`;});
     });
   }
   return highlightNicks(html);
@@ -10872,7 +11066,10 @@ function highlightNicks(html){
   // Split by HTML tags to avoid replacing inside <a href> etc
   return html.replace(/(<[^>]+>)|([^<]+)/g,(m,tag,text)=>{
     if(tag)return tag;
-    return text.replace(re,(match)=>{const safe=match.replace(/'/g,"\\'");return `<span class="nick-mention nc${nickHash(match)}" onclick="showNickMenu(event,'${safe}')" oncontextmenu="event.preventDefault();showNickMenu(event,'${safe}')" style="cursor:pointer;font-weight:600">${match}</span>`;});
+    // SECURITY: carry the nick in an HTML-attribute-escaped data-nick and open the
+    // menu via the delegated body-nick listener instead of an inline-handler
+    // JS-string (findings #3/#9/#10). `match` is already HTML-escaped here.
+    return text.replace(re,(match)=>{return `<span class="nick-mention nc${nickHash(match)}" data-nick="${match}" style="cursor:pointer;font-weight:600">${match}</span>`;});
   });
 }
 function linkify(s){return s.replace(/(https?:\/\/[^\s<>"]+)/g,(m,url)=>{
@@ -10994,6 +11191,7 @@ function showMonitorPanel(){
   const m=loadMonitor();
   const ov=document.getElementById('monitor-overlay');
   const list=document.getElementById('monitor-list');
+  _bindMonitorDelegation();   // idempotent; binds the delegated card listener once
   list.innerHTML='';
   // Set toggle states
   const toggle=document.getElementById('monitor-notif-toggle');
@@ -11023,21 +11221,26 @@ function showMonitorPanel(){
       const lastDate=e.lastSeen?new Date(e.lastSeen).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'—';
       const d=document.createElement('div');
       d.className='monitor-card';
+      // SECURITY: monitored nick is attacker-controlled. Carry it on the card via a
+      // DOM property (no HTML/JS-string context) and tag each control with a fixed
+      // data-monitor-act; a delegated listener on the list reads card.dataset.nick.
+      // Replaces the old onclick="monitorOpenQuery('${esc(e.nick)}')" sinks (#9/#10).
+      d.dataset.nick=e.nick;
       d.innerHTML=`
         <div class="monitor-card-hdr">
-          <span class="monitor-nick" onclick="monitorOpenQuery('${esc(e.nick)}')">${esc(e.nick)}</span>
+          <span class="monitor-nick" data-monitor-act="query">${esc(e.nick)}</span>
           <span class="monitor-status">${statusDot} ${statusText}</span>
         </div>
         <div class="monitor-card-body">
           <div class="monitor-row"><span class="monitor-label">Network</span><span class="monitor-val">${esc(e.network||'—')}</span></div>
           <div class="monitor-row"><span class="monitor-label">Channel</span><span class="monitor-val">${esc(e.channel||'—')}</span></div>
           <div class="monitor-row"><span class="monitor-label">Last Active</span><span class="monitor-val">${ago}${e.lastSeen?' · '+lastDate:''}</span></div>
-          ${e.lastMsg?`<div class="monitor-row monitor-msg-row" onclick="monitorViewMsg('${esc(e.nick)}')"><span class="monitor-label">Last Msg</span><span class="monitor-val monitor-msg">${esc(e.lastMsg.slice(0,60))}${e.lastMsg.length>60?'…':''}</span></div>`:''}
+          ${e.lastMsg?`<div class="monitor-row monitor-msg-row" data-monitor-act="viewmsg"><span class="monitor-label">Last Msg</span><span class="monitor-val monitor-msg">${esc(e.lastMsg.slice(0,60))}${e.lastMsg.length>60?'…':''}</span></div>`:''}
         </div>
         <div class="monitor-card-actions">
-          <button class="monitor-action-btn" onclick="monitorOpenQuery('${esc(e.nick)}')">💬 Query</button>
-          <button class="monitor-action-btn" onclick="monitorWhois('${esc(e.nick)}')">🔍 Whois</button>
-          <button class="monitor-action-btn monitor-remove" onclick="monitorRemove('${esc(e.nick.toLowerCase())}');showMonitorPanel();">✕ Remove</button>
+          <button class="monitor-action-btn" data-monitor-act="query">💬 Query</button>
+          <button class="monitor-action-btn" data-monitor-act="whois">🔍 Whois</button>
+          <button class="monitor-action-btn monitor-remove" data-monitor-act="remove">✕ Remove</button>
         </div>`;
       list.appendChild(d);
     }
@@ -11045,6 +11248,30 @@ function showMonitorPanel(){
   ov.classList.add('show');
   _overlayOpen('monitorPanel', closeMonitorPanel);
   }catch(e){console.error('Monitor panel error:',e);document.getElementById('monitor-overlay')?.classList.add('show');_overlayOpen('monitorPanel', closeMonitorPanel);}
+}
+// SECURITY: delegated handler for monitor-card controls. Reads the attacker-
+// controlled nick from the owning card's dataset (set via DOM property) rather than
+// from an inline-handler JS-string — closes the #9/#10 monitor-panel sinks while
+// preserving exact click behavior (query / view last msg / whois / remove). Bound
+// lazily on first panel render (the list element lives below this script tag, so a
+// top-level binding would run before it exists). Idempotent via _monitorDelegated.
+function _bindMonitorDelegation(){
+  const list=document.getElementById('monitor-list');
+  if(!list||list._monitorDelegated)return;
+  list._monitorDelegated=true;
+  list.addEventListener('click',function(ev){
+    const el=ev.target.closest('[data-monitor-act]');
+    if(!el||!list.contains(el))return;
+    const card=el.closest('.monitor-card');
+    const nick=card&&card.dataset.nick;
+    if(!nick)return;
+    switch(el.dataset.monitorAct){
+      case 'query': monitorOpenQuery(nick); break;
+      case 'viewmsg': monitorViewMsg(nick); break;
+      case 'whois': monitorWhois(nick); break;
+      case 'remove': monitorRemove(nick.toLowerCase()); showMonitorPanel(); break;
+    }
+  });
 }
 function monitorViewMsg(nick){
   const m=loadMonitor();

@@ -15,7 +15,7 @@ use tokio::{
     sync::Mutex,
     time::{sleep, timeout, Duration, Instant},
 };
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::{certs::CertStore, strip_crlf, AppState, MessageKind, NetworkConfig, ServerEvent};
 
@@ -34,6 +34,57 @@ const NAMES_BUF_MAX_CHANNELS: usize = 512;
 const NAMES_BUF_MAX_PER_CHAN: usize = 4096;
 /// S7: maximum IRC line length (prevent memory exhaustion from rogue server)
 const MAX_IRC_LINE_LEN: usize = 8192;
+/// #43: cap the number of channels a single connection will track. A malicious
+/// server can forge unlimited `:<ournick> JOIN #chanN` lines to grow c.channels,
+/// create per-channel log dirs, and amplify outbound NAMES requests without bound.
+const MAX_CHANNELS_PER_CONN: usize = 256;
+/// #45: minimum interval between automatic CTCP replies (per connection). Prevents
+/// an attacker from reflecting a NOTICE flood off the victim via rapid CTCP VERSION
+/// requests, which most IRCds penalize with SendQ/excess-flood kills.
+const CTCP_REPLY_MIN_INTERVAL: Duration = Duration::from_secs(2);
+
+// ─── Safe-truncation / slice helpers ───────────────────────────────────────────
+
+/// #19: char-boundary-safe truncation. Byte-slicing a String (`&s[..n]`) panics
+/// when byte `n` lands in the middle of a multibyte UTF-8 sequence; an ordinary
+/// IRC peer can trivially trigger this with a unicode NOTICE/nick. Take whole
+/// chars instead so truncation can never split a code point.
+fn truncate_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+/// #19: join the tail of params starting at index `n` without panicking when
+/// there are fewer than `n` params. `parse_irc` can legitimately return 0 params,
+/// so any `p.params[N..]` is a panic waiting to happen on malformed server input.
+fn params_from(params: &[String], n: usize) -> String {
+    params.get(n..).map(|s| s.join(" ")).unwrap_or_default()
+}
+
+/// #46: RAII guard that removes a connection's shared-state entries on ANY exit
+/// from `run_loop`, including a panic unwind. Previously the only cleanup lived in
+/// `connect()` *after* the `do_connect(...).await`, so a panic in the parse/dispatch
+/// loop (see #19) unwound straight past it, leaving a stale `connections` /
+/// `conn_owners` pair, a live "connected" UI state, and no auto-reconnect. Holding
+/// cheap Arc clones of the maps lets us reclaim the entries no matter how the loop
+/// terminates.
+///
+/// NOTE: this guard intentionally does NOT touch `connect_tasks`. That handle tracks
+/// the `connect()` task, which outlives a single `run_loop` call (it spans every
+/// reconnect), and `abort_connect_task` relies on it being present to deterministically
+/// kill a reconnecting task. Removing it here would open a race window during the
+/// reconnect backoff. `connect_tasks` is reclaimed on `connect()`'s terminal returns.
+struct ConnCleanup {
+    conn_id:     String,
+    connections: Arc<dashmap::DashMap<String, Arc<Mutex<IrcConnection>>>>,
+    conn_owners: Arc<dashmap::DashMap<String, String>>,
+}
+
+impl Drop for ConnCleanup {
+    fn drop(&mut self) {
+        self.connections.remove(&self.conn_id);
+        self.conn_owners.remove(&self.conn_id);
+    }
+}
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -316,6 +367,15 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
     state.connections.insert(conn_id.to_string(), conn.clone());
     state.conn_owners.insert(conn_id.to_string(), username.to_string());
 
+    // #46: ensure the connections/conn_owners entries are reclaimed on every exit
+    // path — including a panic unwind through the dispatch loop — not just on the
+    // clean `Err`/`Ok` returns handled by connect().
+    let _cleanup = ConnCleanup {
+        conn_id:     conn_id.to_string(),
+        connections: state.connections.clone(),
+        conn_owners: state.conn_owners.clone(),
+    };
+
     let send = |evt: ServerEvent| state.send_to_user(username, evt);
 
     // SASL method selection — refuse SASL PLAIN over non-TLS to prevent cleartext credential leak
@@ -345,6 +405,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
     let mut ping_out    = false;
     // S4: track nick collision count
     let mut nick_retries = 0u32;
+    // #45: throttle automatic CTCP replies so an attacker can't reflect a NOTICE
+    // flood off us (rapid CTCP VERSION → matching NOTICE stream → SendQ/excess-flood
+    // kill). Per-connection token gate; first reply allowed immediately.
+    let mut last_ctcp_reply: Option<Instant> = None;
 
     // Registration — always request CAP LS 302 to negotiate IRCv3 caps
     {
@@ -681,8 +745,12 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             let safe = strip_crlf(ch);
                             if !safe.is_empty() {
                                 let lc = safe.to_lowercase();
+                                // #24: the channel name is stripped above, but the channel KEY comes
+                                // verbatim from config (channel_keys, persisted unsanitized). A key
+                                // containing \r\n<extra line> would smuggle additional raw IRC lines,
+                                // auto-replayed on every reconnect. Strip CRLF/NUL from the key too.
                                 let cmd = if let Some(key) = cfg.channel_keys.get(&lc) {
-                                    format!("JOIN {} {}\r\n", safe, key)
+                                    format!("JOIN {} {}\r\n", safe, strip_crlf(key))
                                 } else {
                                     format!("JOIN {}\r\n", safe)
                                 };
@@ -698,8 +766,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             return Err(anyhow::anyhow!("Nick collision: exhausted {} retries", MAX_NICK_RETRIES));
                         }
                         let mut c = conn.lock().await;
-                        // Truncate to 28 chars before appending to stay within limits
-                        let base = if c.nick.len() > 28 { c.nick[..28].to_string() } else { c.nick.clone() };
+                        // Truncate to 28 chars before appending to stay within limits.
+                        // #19: take whole chars — c.nick is adopted from remote 001/NICK and
+                        // byte-slicing a multibyte nick would panic the connection task.
+                        let base = truncate_chars(&c.nick, 28);
                         let new_nick = format!("{}_{}", base, nick_retries);
                         c.nick = new_nick.clone();
                         c.send_raw(&format!("NICK {}\r\n", new_nick)).await?;
@@ -724,10 +794,21 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         }
                         // Reply to CTCP VERSION
                         if text == "\x01VERSION\x01" {
-                            conn.lock().await.send_raw(&format!(
-                                "NOTICE {} :\x01VERSION CryptIRC v0.9.0 - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
-                                from
-                            )).await?;
+                            // #45: rate-limit automatic CTCP replies. Without this, a stream of
+                            // CTCP VERSION requests (optionally spoofed from many nicks) forces us
+                            // to emit a matching NOTICE stream that the server penalizes with a
+                            // SendQ/excess-flood kill — a no-privilege way to get us disconnected.
+                            let now = Instant::now();
+                            let allow = last_ctcp_reply.map_or(true, |t| now.duration_since(t) >= CTCP_REPLY_MIN_INTERVAL);
+                            if allow {
+                                last_ctcp_reply = Some(now);
+                                // strip_crlf on `from` for defense-in-depth against IRC-line injection
+                                // into the outbound NOTICE (the reader already splits on \r\n).
+                                conn.lock().await.send_raw(&format!(
+                                    "NOTICE {} :\x01VERSION CryptIRC v0.9.0 - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
+                                    strip_crlf(&from)
+                                )).await?;
+                            }
                             continue;
                         }
                         let (kind, clean) = if text.starts_with("\x01ACTION ") && text.ends_with('\x01') {
@@ -750,7 +831,8 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let target = p.params.get(0).cloned().unwrap_or_default();
                         let text   = p.params.get(1).cloned().unwrap_or_default();
                         let user_nick = { conn.lock().await.nick.clone() };
-                        info!("[{}] NOTICE: from={} target={} text={}", conn_id, from, target, &text[..text.len().min(120)]);
+                        // #19: char-safe truncation — byte-slicing remote text panics on multibyte chars.
+                        info!("[{}] NOTICE: from={} target={} text={}", conn_id, from, target, truncate_chars(&text, 120));
                         // Suppress echo-message echoes of our own NOTICEs (same as PRIVMSG).
                         // Match on `from == user_nick` only — ZNC echoes self-messages with a
                         // bare `:nick` prefix, so gating on `prefix.contains('!')` let them
@@ -784,24 +866,52 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let account = if account.is_empty() || account == "*" {
                             p.tags.get("account").cloned().unwrap_or_default()
                         } else if account == "*" { String::new() } else { account };
-                        {
+                        // #43: a malicious server can forge unlimited `:<ournick> JOIN #chanN`
+                        // lines. Each forged self-JOIN would otherwise grow c.channels without
+                        // bound, emit an outbound NAMES (request amplification), and create a
+                        // per-channel log dir on disk. Track whether we accepted this channel so
+                        // we can skip the NAMES + log bookkeeping when over the cap.
+                        // `accepted` = this JOIN should be persisted/echoed;
+                        // `is_self_join` = it was our own JOIN and we should issue NAMES.
+                        let (accepted, is_self_join) = {
                             let mut c = conn.lock().await;
                             if nick == c.nick {
-                                c.channels.entry(channel.clone()).or_insert(ChannelState { topic: String::new(), names: vec![] });
-                                c.send_raw(&format!("NAMES {}\r\n", channel)).await?;
-                            } else if let Some(ch) = c.channels.get_mut(&channel) {
-                                if ch.names.len() < NAMES_BUF_MAX_PER_CHAN { ch.names.push(nick.clone()); }
+                                if c.channels.contains_key(&channel) {
+                                    (true, true)
+                                } else if c.channels.len() < MAX_CHANNELS_PER_CONN {
+                                    c.channels.insert(channel.clone(), ChannelState { topic: String::new(), names: vec![] });
+                                    (true, true)
+                                } else {
+                                    warn!("[{}] Ignoring self-JOIN {} — channel cap ({}) reached", conn_id, channel, MAX_CHANNELS_PER_CONN);
+                                    (false, false)
+                                }
+                            } else {
+                                if let Some(ch) = c.channels.get_mut(&channel) {
+                                    if ch.names.len() < NAMES_BUF_MAX_PER_CHAN { ch.names.push(nick.clone()); }
+                                }
+                                (true, false)
                             }
+                        };
+                        // Only issue the outbound NAMES amplification for an accepted self-JOIN.
+                        if is_self_join {
+                            conn.lock().await.send_raw(&format!("NAMES {}\r\n", channel)).await?;
                         }
-                        // Persist for log replay (Lounge-style condense after refresh).
-                        let mut join_text = format!("→ {} joined", nick);
-                        if !account.is_empty() && account != "*" { join_text.push_str(&format!(" ({})", account)); }
-                        if !realname.is_empty()                  { join_text.push_str(&format!(" — {}", realname)); }
-                        let _ = state.logger.append(&username, &conn_id, &channel, ts, &nick, &join_text, "join").await;
-                        send(ServerEvent::IrcJoinEx {
-                            conn_id: conn_id.to_string(), nick, channel,
-                            account, realname, ts,
-                        });
+                        // Persist for log replay (Lounge-style condense after refresh) —
+                        // skipped for channels rejected by the cap to bound disk/inode growth.
+                        if accepted {
+                            let mut join_text = format!("→ {} joined", nick);
+                            if !account.is_empty() && account != "*" { join_text.push_str(&format!(" ({})", account)); }
+                            if !realname.is_empty()                  { join_text.push_str(&format!(" — {}", realname)); }
+                            let _ = state.logger.append(&username, &conn_id, &channel, ts, &nick, &join_text, "join").await;
+                        }
+                        // #43: don't surface a JOIN for a channel we refused to track
+                        // (a cap-rejected forged self-JOIN) — keep client and server state in sync.
+                        if accepted {
+                            send(ServerEvent::IrcJoinEx {
+                                conn_id: conn_id.to_string(), nick, channel,
+                                account, realname, ts,
+                            });
+                        }
                     }
                     "PART" => {
                         let nick    = nick_from_prefix(&p.prefix);
@@ -1000,7 +1110,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     }
                     // 732 RPL_MONLIST, 733 RPL_ENDOFMONLIST — just pass through
                     "732" | "733" => {
-                        let text = p.params[1..].join(" ");
+                        let text = params_from(&p.params, 1); // #19: guard against <1 param
                         send(ServerEvent::IrcMessage {
                             conn_id: conn_id.to_string(), from: "*".into(),
                             target: "status".into(), text, ts,
@@ -1070,7 +1180,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "MODE" => {
                         let setter = nick_from_prefix(&p.prefix);
                         let target = p.params.get(0).cloned().unwrap_or_default();
-                        let modes  = p.params[1..].join(" ");
+                        let modes  = params_from(&p.params, 1); // #19: guard against parameterless MODE
                         // Update nick prefixes in server-side names list so reconnecting
                         // clients get accurate op/voice/etc. status from the State event.
                         if target.starts_with(['#','&','+','!']) {
@@ -1141,7 +1251,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     }
                     "312" => { // RPL_WHOISSERVER
                         let nick = p.params.get(1).cloned().unwrap_or_default();
-                        let text = p.params[2..].join(" ");
+                        let text = params_from(&p.params, 2); // #19: guard against <2 params
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Server: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "313" => { // RPL_WHOISOPERATOR
@@ -1173,7 +1283,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     }
                     "338" => { // RPL_WHOISACTUALLY (actual host/IP)
                         let nick = p.params.get(1).cloned().unwrap_or_default();
-                        let text = p.params[2..].join(" ");
+                        let text = params_from(&p.params, 2); // #19: guard against <2 params
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Actually: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     "671" => { // RPL_WHOISSECURE
@@ -1280,7 +1390,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     // 324 RPL_CHANNELMODEIS — route to channel, not status
                     "324" => {
                         let chan = p.params.get(1).cloned().unwrap_or_default();
-                        let modes = p.params[2..].join(" ");
+                        let modes = params_from(&p.params, 2); // #19: guard against <2 params
                         let text = format!("{} {}", chan, modes);
                         let display_target = if chan.starts_with(['#','&','+','!']) { chan } else { "status".to_string() };
                         send(ServerEvent::IrcMessage {
@@ -1383,11 +1493,11 @@ fn parse_irc(line: &str) -> IrcLine {
         let (tag_str, r) = rest[1..].split_once(' ').unwrap_or((&rest[1..], ""));
         for pair in tag_str.split(';') {
             if let Some((k, v)) = pair.split_once('=') {
-                // Unescape IRCv3 tag values: \: -> ; \s -> space \\ -> \ \r \n
-                let v = v.replace("\\:", ";").replace("\\s", " ")
-                         .replace("\\r", "\r").replace("\\n", "\n")
-                         .replace("\\\\", "\\");
-                tags.insert(k.to_string(), v);
+                // #85: unescape IRCv3 tag values in a single left-to-right pass as the
+                // message-tags spec requires. The previous chained `.replace()` applied
+                // escapes out of order (e.g. `\s` matched before `\\` collapsed), so an
+                // adversarially-escaped value like `\\s` decoded to `\ ` instead of `\s`.
+                tags.insert(k.to_string(), unescape_tag_value(v));
             } else if !pair.is_empty() {
                 tags.insert(pair.to_string(), String::new());
             }
@@ -1409,6 +1519,32 @@ fn parse_irc(line: &str) -> IrcLine {
         }
     }
     IrcLine { prefix, command: cmd_part.to_uppercase(), params, tags }
+}
+
+/// #85: spec-correct single-pass IRCv3 message-tag value unescaper. Walks the
+/// value once; on '\' it consumes the next char and maps `:`→`;`, `s`→space,
+/// `r`→CR, `n`→LF, any other char to itself, and a trailing lone backslash to a
+/// literal backslash. This avoids the ordering bugs and extra allocations of the
+/// old chained `.replace()` approach.
+fn unescape_tag_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut chars = v.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(':')  => out.push(';'),
+                Some('s')  => out.push(' '),
+                Some('r')  => out.push('\r'),
+                Some('n')  => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                Some(other) => out.push(other),
+                None       => out.push('\\'), // trailing lone backslash → literal
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn nick_from_prefix(p: &Option<String>) -> String {

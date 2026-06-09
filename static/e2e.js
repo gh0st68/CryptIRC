@@ -226,16 +226,29 @@ async function x3dhInitiate(bundle) {
     usedOTPKId = bundle.one_time_prekey.key_id;
   }
 
+  // #12: cryptographically bind BOTH identities into the X3DH root key by
+  // folding the canonical (initiator, responder) identity encoding into the
+  // HKDF info. We are the initiator (A); the bundle owner is the responder (B).
+  // The responder reconstructs the byte-identical AD in x3dhRespond, so both
+  // derive the same root key. identityAD is also pinned on the session and
+  // reused as the per-message AEAD AD.
+  const myDhPub   = await exportPub(dhKeyPair.publicKey,   'ECDH');
+  const mySignPub = await exportPub(signKeyPair.publicKey, 'ECDSA');
+  const identAD   = e2eIdentityAD(
+    myDhPub, mySignPub,                                  // initiator (us)
+    bundle.identity_dh_key, bundle.identity_sign_key      // responder (them)
+  );
+
   const ikm          = concat(dh1, dh2, dh3, dh4);
-  const sharedSecret = await hkdf(ikm, 'X3DH-CryptIRC-v1', 64);
+  const sharedSecret = await hkdf(ikm, concat(new TextEncoder().encode('X3DH-CryptIRC-v1'), identAD), 64);
   const ephPub       = await exportPub(ephPair.publicKey, 'ECDH');
-  return { sharedSecret, ephemeralPub: ephPub, usedOTPKId };
+  return { sharedSecret, ephemeralPub: ephPub, usedOTPKId, identityAD: bytesToBase64(identAD) };
 }
 
 // ─── X3DH: Respond (receiver) ─────────────────────────────────────────────────
 
 async function x3dhRespond(x3dhHeader) {
-  const { dhKeyPair } = E2E.identityKeys;
+  const { dhKeyPair, signKeyPair } = E2E.identityKeys;
 
   // C2: read from E2E._spkBlob (set by event handler)
   // If not loaded yet, request it and wait
@@ -275,9 +288,66 @@ async function x3dhRespond(x3dhHeader) {
     }
   }
 
+  // #12: reconstruct the byte-identical identity AD the initiator used. We are
+  // the responder; the header's sender is the initiator. The initiator's dh
+  // identity is x3dhHeader.sender_ik and its sign identity is
+  // x3dhHeader.sender_sign_ik (added to the header so this binding is mutual).
+  // e2eIdentityAD sorts the two identity pairs canonically, so passing the same
+  // four keys (regardless of which we call "ours") yields the same bytes the
+  // initiator computed. This folds into the HKDF info so both peers derive the
+  // same root key, and is pinned on the session for the per-message AEAD AD.
+  const myDhPub   = await exportPub(dhKeyPair.publicKey,   'ECDH');
+  const mySignPub = await exportPub(signKeyPair.publicKey, 'ECDSA');
+  const identAD   = e2eIdentityAD(
+    x3dhHeader.sender_ik, x3dhHeader.sender_sign_ik || '',  // initiator (them)
+    myDhPub, mySignPub                                      // responder (us)
+  );
+
   const ikm = concat(dh1, dh2, dh3, dh4);
-  const ss = await hkdf(ikm, 'X3DH-CryptIRC-v1', 64);
-  return ss;
+  const ss = await hkdf(ikm, concat(new TextEncoder().encode('X3DH-CryptIRC-v1'), identAD), 64);
+  return { sharedSecret: ss, identityAD: bytesToBase64(identAD) };
+}
+
+// ─── Responder establishment (shared by all 3 X3DH responder paths) ──────────
+//
+// #1: Every responder path (inline [e2ex3dh], relayed e2e_x3dh_header, and the
+// embedded-in-envelope path) MUST authenticate the claimed sender identity
+// BEFORE establishing — otherwise the server (which distributes bundles AND
+// relays X3DH headers) can substitute its own identity_ik and silently MITM the
+// responder direction while the user sees "session established".
+//
+// This single helper is used by all three so they cannot drift apart:
+//   * computes the TOFU fingerprint over BOTH identity keys (dh + sign, #11),
+//   * on a CHANGED key: shows the key-change warning and REFUSES to establish
+//     (returns false — caller must NOT print "session established"),
+//   * on first-use (tofu): records the pin exactly like the initiator side,
+//   * runs x3dhRespond + ratchetInitRecv, pinning theirIdentityPub (#2) and the
+//     identity-binding AD (#12) on the session.
+// Returns true on success, false if establishment was refused/failed.
+async function e2eEstablishResponderSession(from, header) {
+  if (!header || !header.sender_ik) {
+    console.warn('[E2E] responder establish: missing sender_ik');
+    return false;
+  }
+  // #11: pin BOTH identity keys. sender_sign_ik may be absent from an old
+  // initiator; computeIdentityFingerprint tolerates an empty sign key (the
+  // fingerprint then covers dh only, and will mismatch once a real sign key
+  // appears — surfacing a key change rather than silently accepting).
+  const fp    = await computeIdentityFingerprint(header.sender_ik, header.sender_sign_ik || '');
+  const trust = await e2eCheckTrust(from, fp);
+
+  // #1: a changed identity must NOT silently re-establish. Warn and refuse.
+  if (trust.keyChanged) {
+    e2eShowKeyChangeWarning(from, fp);
+    return false;
+  }
+  // status 'tofu' already recorded the pin inside e2eCheckTrust (first contact),
+  // mirroring the initiator side; 'trusted'/'verified' mean the pin matches.
+
+  const { sharedSecret, identityAD } = await x3dhRespond(header);
+  // #2: pin the initiator's long-term identity DH pub (header.sender_ik).
+  await ratchetInitRecv(from, sharedSecret, header.sender_ik, identityAD);
+  return true;
 }
 
 // ─── Session blob cache (for SPK and OTPKs loaded async) ─────────────────────
@@ -296,7 +366,7 @@ async function loadSessionBlobFromCache(partner) {
 
 // ─── Double Ratchet ───────────────────────────────────────────────────────────
 
-async function ratchetInitSend(nick, sharedSecret, theirSPKPub) {
+async function ratchetInitSend(nick, sharedSecret, theirSPKPub, theirIdentityPub, identityAD) {
   // L1: DHr = their SIGNED PREKEY (not identity key)
   const RK  = sharedSecret.slice(0, 32);
   const CKs = sharedSecret.slice(32, 64);
@@ -316,6 +386,11 @@ async function ratchetInitSend(nick, sharedSecret, theirSPKPub) {
     PN:          0,
     DHs:         { pub: dhRatchetPub, priv: await exportPriv(dhRatchet.privateKey) },
     DHr:         theirSPKPub,   // L1: SPK pub, not identity key
+    // #2: pin the partner's LONG-TERM identity DH pubkey so /encrypt verify
+    // hashes the stable identity (not the ratchet key) — matches the responder.
+    theirIdentityPub: theirIdentityPub || null,
+    // #12: pin the canonical identity-binding AD for the per-message AEAD.
+    identityAD:  identityAD || null,
     skipped:     {},
     isInitiator: true,
   };
@@ -325,7 +400,7 @@ async function ratchetInitSend(nick, sharedSecret, theirSPKPub) {
   return session;
 }
 
-async function ratchetInitRecv(nick, sharedSecret) {
+async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD) {
   const RK  = sharedSecret.slice(0, 32);
   const CKr = sharedSecret.slice(32, 64);
 
@@ -344,6 +419,11 @@ async function ratchetInitRecv(nick, sharedSecret) {
     PN:          0,
     DHs:         { pub: dhRatchetPub, priv: dhRatchetPriv },
     DHr:         null,
+    // #2: pin the initiator's LONG-TERM identity DH pubkey (header.sender_ik,
+    // after the #1 trust check) so /encrypt verify matches on both peers.
+    theirIdentityPub: theirIdentityPub || null,
+    // #12: pin the canonical identity-binding AD for the per-message AEAD.
+    identityAD:  identityAD || null,
     skipped:     {},
     isInitiator: false,
   };
@@ -397,7 +477,9 @@ async function _ratchetEncryptInner(nick, plaintext) {
   };
   session.Ns++;
 
-  const ct = await messageEncrypt(mk, new TextEncoder().encode(plaintext), header);
+  // #12: bind both identities into the AEAD via the session-pinned AD.
+  const identAD = sessionIdentityAD(session);
+  const ct = await messageEncrypt(mk, new TextEncoder().encode(plaintext), header, identAD);
   await saveSession(nick, session);
 
   return { h: { d: header.dh, p: header.pn, n: header.n }, c: bytesToBase64(ct) };
@@ -413,11 +495,14 @@ async function ratchetDecrypt(nick, envelope) {
   const ct = base64ToBytes(envelope.c || envelope.ciphertext);
 
   // Check skipped keys
+  // #12: same session-pinned identity AD as the encrypt path.
+  const identAD = sessionIdentityAD(session);
+
   const skipKey = `${nick}/${header.dh}/${header.n}`;
   if (session.skipped[skipKey]) {
     const mk = base64ToBytes(session.skipped[skipKey]);
     delete session.skipped[skipKey];
-    const pt = await messageDecrypt(mk, ct, header);
+    const pt = await messageDecrypt(mk, ct, header, identAD);
     await saveSession(nick, session);
     return new TextDecoder().decode(pt);
   }
@@ -450,7 +535,7 @@ async function ratchetDecrypt(nick, envelope) {
   session.CKr = bytesToBase64(newCKr);
   session.Nr++;
 
-  const pt = await messageDecrypt(mk, ct, header);
+  const pt = await messageDecrypt(mk, ct, header, identAD);
   await saveSession(nick, session);
   return new TextDecoder().decode(pt);
 }
@@ -508,22 +593,40 @@ async function chainKeyStep(ck) {
   return [mk, nck];
 }
 
+// #12: retrieve the identity-binding AD pinned on the session at establishment.
+// Stored as base64 on the session object (so it survives JSON persistence). When
+// absent (legacy/in-flight session predating this change) returns null, which
+// makes messageEncrypt/Decrypt fall back to header-only AD — those old sessions
+// stay self-consistent with their own peer but are intentionally incompatible
+// with upgraded fresh sessions (#12).
+function sessionIdentityAD(session) {
+  return session && session.identityAD ? base64ToBytes(session.identityAD) : null;
+}
+
 // ─── Message encrypt / decrypt ────────────────────────────────────────────────
 
-async function messageEncrypt(keyBytes, plaintext, header) {
+// #12: identAD (Uint8Array) is the canonical encoding of both peer identities
+// (e2eIdentityAD), pinned on the session at establishment. Folding it into the
+// AEAD additionalData cryptographically binds every ratchet message to the two
+// identities, so a substituted identity key produces an AEAD authentication
+// failure instead of a silently-working session. It MUST be supplied
+// identically on encrypt and decrypt — both pull it from session.identityAD.
+async function messageEncrypt(keyBytes, plaintext, header, identAD) {
   const key   = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
-  // Include header as Associated Data to prevent header tampering
-  const ad = header ? new TextEncoder().encode(JSON.stringify(header)) : new Uint8Array(0);
+  // Include header (anti-tamper) AND the bound identity AD (#12) as Associated Data.
+  const headerAD = header ? new TextEncoder().encode(JSON.stringify(header)) : new Uint8Array(0);
+  const ad = identAD ? concat(headerAD, identAD) : headerAD;
   const ct    = await crypto.subtle.encrypt({ name:'AES-GCM', iv:nonce, additionalData:ad }, key, plaintext);
   return concat(nonce, new Uint8Array(ct));
 }
 
-async function messageDecrypt(keyBytes, ctWithNonce, header) {
+async function messageDecrypt(keyBytes, ctWithNonce, header, identAD) {
   const key   = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
   const nonce = ctWithNonce.slice(0, 12);
   const ct    = ctWithNonce.slice(12);
-  const ad = header ? new TextEncoder().encode(JSON.stringify(header)) : new Uint8Array(0);
+  const headerAD = header ? new TextEncoder().encode(JSON.stringify(header)) : new Uint8Array(0);
+  const ad = identAD ? concat(headerAD, identAD) : headerAD;
   return new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv:nonce, additionalData:ad }, key, ct));
 }
 
@@ -650,6 +753,64 @@ async function computeFingerprint(b64PubKey) {
   return hex.match(/.{1,4}/g).join(' ').toUpperCase();
 }
 
+// #11: TOFU must pin BOTH identity keys (sign + dh) so that swapping the sign
+// key (while keeping the dh key) also trips the key-change warning. The pinned
+// fingerprint hashes the canonical concatenation dhKey||signKey of the raw key
+// bytes. Both the pin-creation and compare paths call this so they stay in sync.
+// Inputs are base64 raw EC public keys.
+async function computeIdentityFingerprint(b64DhKey, b64SignKey) {
+  const dh   = base64ToBytes(b64DhKey);
+  const sign = b64SignKey ? base64ToBytes(b64SignKey) : new Uint8Array(0);
+  const digest = await crypto.subtle.digest('SHA-256', concat(dh, sign));
+  const hex    = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
+  return hex.match(/.{1,4}/g).join(' ').toUpperCase();
+}
+
+// #12: Canonical encoding of BOTH peer identities (initiator + responder), used
+// identically on initiator and responder to (a) fold into the X3DH HKDF info so
+// the derived root key is bound to the two identities, and (b) feed the
+// per-message AEAD additionalData so a substituted identity yields an AEAD
+// failure rather than a silently-established session.
+//
+// The two peers' identity pairs are sorted into a CANONICAL order (by the raw
+// bytes of the dh key, same comparison safetyPhrase uses) BEFORE encoding, so
+// the result is identical regardless of which peer is the initiator. This makes
+// initiator and responder derive byte-identical AD unconditionally — even under
+// simultaneous-initiation (glare), where the local "role" can differ between the
+// two ends. Both identity keys (dh + sign) of each peer are bound. Each
+// component is 4-byte big-endian length-prefixed to prevent field-boundary
+// ambiguity. Returns a Uint8Array.
+//
+// NOTE: This intentionally breaks wire compatibility with OLD clients and any
+// in-flight sessions established before this change (their messages bound a
+// different AD). That is expected and acceptable per the audit (#12).
+function e2eIdentityAD(aDhB64, aSignB64, bDhB64, bSignB64) {
+  const aDh = base64ToBytes(aDhB64 || ''), aSign = base64ToBytes(aSignB64 || '');
+  const bDh = base64ToBytes(bDhB64 || ''), bSign = base64ToBytes(bSignB64 || '');
+  // Deterministic order: peer whose dh key sorts first (byte-by-byte) goes first.
+  // Identical comparison logic to safetyPhrase so the two stay consistent.
+  // (P-256 raw pubkeys are fixed-length, so the common-prefix scan is total.)
+  let aFirst = true;
+  for (let i = 0; i < Math.min(aDh.length, bDh.length); i++) {
+    if (aDh[i] < bDh[i]) { aFirst = true;  break; }
+    if (aDh[i] > bDh[i]) { aFirst = false; break; }
+  }
+  const first  = aFirst ? [aDh, aSign] : [bDh, bSign];
+  const second = aFirst ? [bDh, bSign] : [aDh, aSign];
+  const parts = [
+    new TextEncoder().encode('CryptIRC-IDBIND-v1'),
+    first[0], first[1], second[0], second[1],
+  ];
+  // Length-prefix (4-byte big-endian) every component for unambiguous framing.
+  const chunks = [];
+  for (const p of parts) {
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, p.length, false);
+    chunks.push(len, p);
+  }
+  return concat(...chunks);
+}
+
 // C5: sort keys before hashing so output is identical on both sides
 async function safetyPhrase(pubKeyA, pubKeyB) {
   const a   = base64ToBytes(pubKeyA);
@@ -705,7 +866,9 @@ async function e2eHandleEvent(ev) {
         break;
       }
 
-      const fp    = await computeFingerprint(bundle.identity_dh_key);
+      // #11: TOFU now pins BOTH identity keys (dh + sign) so swapping either
+      // trips the key-change warning. Must match the compare path used here.
+      const fp    = await computeIdentityFingerprint(bundle.identity_dh_key, bundle.identity_sign_key);
       const trust = await e2eCheckTrust(nick, fp);
 
       if (trust.keyChanged) {
@@ -713,19 +876,25 @@ async function e2eHandleEvent(ev) {
         return;
       }
 
-      const { sharedSecret, ephemeralPub, usedOTPKId } = await x3dhInitiate(bundle);
-      const myIKPub = await exportPub(E2E.identityKeys.dhKeyPair.publicKey, 'ECDH');
+      const { sharedSecret, ephemeralPub, usedOTPKId, identityAD } = await x3dhInitiate(bundle);
+      const myIKPub     = await exportPub(E2E.identityKeys.dhKeyPair.publicKey,   'ECDH');
+      const mySignIKPub = await exportPub(E2E.identityKeys.signKeyPair.publicKey, 'ECDSA');
 
-      // L1: pass SPK pub (not identity key) as DHr seed
-      await ratchetInitSend(nick, sharedSecret, bundle.signed_prekey.public_key);
+      // L1: pass SPK pub (not identity key) as DHr seed.
+      // #2: pin the partner's long-term identity DH pub (bundle.identity_dh_key).
+      // #12: pin the identity-binding AD.
+      await ratchetInitSend(nick, sharedSecret, bundle.signed_prekey.public_key, bundle.identity_dh_key, identityAD);
 
       // L3: store x3dh_header OUTSIDE the session object, in a separate map
       E2E._pendingX3DH = E2E._pendingX3DH || {};
       E2E._pendingX3DH[nick] = {
-        sender_ik:     myIKPub,
-        ephemeral_pub: ephemeralPub,
-        used_otpk_id:  usedOTPKId,
-        spk_id:        bundle.signed_prekey.key_id,
+        sender_ik:      myIKPub,
+        // #12: include our SIGN identity so the responder can reconstruct the
+        // identical identity AD and pin BOTH our keys via TOFU (#11).
+        sender_sign_ik: mySignIKPub,
+        ephemeral_pub:  ephemeralPub,
+        used_otpk_id:   usedOTPKId,
+        spk_id:         bundle.signed_prekey.key_id,
       };
 
       updateE2EIndicator(nick);
@@ -817,8 +986,14 @@ async function e2eHandleEvent(ev) {
       // Also try to immediately set up the session so it's ready when message arrives
       try {
         console.log('[E2E] Pre-initializing receiver session from relayed x3dh...');
-        const sharedSecret = await x3dhRespond(ev.header);
-        await ratchetInitRecv(nick, sharedSecret);
+        // #1: authenticate sender identity (TOFU/key-change) BEFORE establishing.
+        const ok = await e2eEstablishResponderSession(nick, ev.header);
+        if (!ok) {
+          // Changed/unverified key — e2eEstablishResponderSession warned.
+          // Do NOT print "session established" or consume the pending header.
+          console.warn('[E2E] Relayed x3dh refused (key change / invalid) for', nick);
+          break;
+        }
         delete E2E._pendingIncomingX3DH[nick]; // consumed
         updateE2EIndicator(nick);
         console.log('[E2E] Receiver session pre-initialized for', nick);
@@ -909,11 +1084,17 @@ async function e2eDecryptIncoming(from, target, text) {
       // Pre-initialize receiver session immediately
       if (E2E.ready && E2E.identityKeys) {
         try {
-          const ss = await x3dhRespond(hdr);
-          await ratchetInitRecv(from, ss);
-          delete E2E._pendingIncomingX3DH[from]; // consumed — don't process again
-          updateE2EIndicator(from);
-          console.log('[E2E] Receiver session pre-initialized for', from);
+          // #1: authenticate sender identity (TOFU/key-change) BEFORE establishing.
+          const ok = await e2eEstablishResponderSession(from, hdr);
+          if (!ok) {
+            // Changed/unverified key — warned already; leave header pending and
+            // do NOT establish or claim success.
+            console.warn('[E2E] Inline x3dh refused (key change / invalid) for', from);
+          } else {
+            delete E2E._pendingIncomingX3DH[from]; // consumed — don't process again
+            updateE2EIndicator(from);
+            console.log('[E2E] Receiver session pre-initialized for', from);
+          }
         } catch(e) {
           console.error('[E2E] x3dh pre-init failed:', e.message || e.name || String(e), e);
           if (typeof sysMsg === 'function' && active) {
@@ -961,10 +1142,16 @@ async function e2eDecryptIncoming(from, target, text) {
         }
         const savedSession = E2E.dmSessions[from];
         console.log('[E2E] Calling x3dhRespond...');
-        const sharedSecret = await x3dhRespond(x3dh);
-        console.log('[E2E] x3dhRespond OK, calling ratchetInitRecv...');
-        await ratchetInitRecv(from, sharedSecret);
-        console.log('[E2E] ratchetInitRecv OK, calling ratchetDecrypt...');
+        // #1: authenticate the sender identity (TOFU pin / key-change refusal)
+        // BEFORE establishing and decrypting. e2eEstablishResponderSession runs
+        // x3dhRespond + ratchetInitRecv internally, pinning the identity pub (#2)
+        // and the identity-binding AD (#12).
+        const ok = await e2eEstablishResponderSession(from, x3dh);
+        if (!ok) {
+          // Changed identity — refuse to silently decrypt under an unverified key.
+          return { plaintext:'🔐 [identity key changed — verify before reading]', encrypted:true };
+        }
+        console.log('[E2E] responder session established, calling ratchetDecrypt...');
         const pt = await ratchetDecrypt(from, envelope);
         console.log('[E2E] Decrypt OK');
 
@@ -1107,10 +1294,18 @@ async function handleEncryptCommand(args, conn_id, target) {
       if (!nick) { e2eSysMsg(target,'Usage: /encrypt verify <nick>'); return; }
       const session = E2E.dmSessions[nick];
       if (!session) { e2eSysMsg(target,`No E2E session with ${nick}`); return; }
-      if (!session.DHr) { e2eSysMsg(target,`Session with ${nick} not yet established`); return; }
+      // #2: verify the PINNED long-term identity DH key (theirIdentityPub), NOT
+      // the ratchet key (session.DHr, which is the SPK/ephemeral and differs per
+      // peer and per ratchet step). safetyPhrase() sorts the two identity keys so
+      // BOTH peers derive identical words; computeFingerprint() over the same
+      // pinned key gives both peers the same fingerprint.
+      if (!session.theirIdentityPub) { e2eSysMsg(target,`Session with ${nick} not yet established (no pinned identity)`); return; }
       const myPub  = await exportPub(E2E.identityKeys.dhKeyPair.publicKey, 'ECDH');
-      const phrase = await safetyPhrase(myPub, session.DHr);
-      const fp     = await computeFingerprint(session.DHr);
+      const phrase = await safetyPhrase(myPub, session.theirIdentityPub);
+      // #11: show the pinned combined (dh+sign) TOFU fingerprint — the value the
+      // peer also shows via /encrypt fingerprint — so the displayed fingerprints
+      // match. Fall back to the dh-only fingerprint if no pin is recorded.
+      const fp     = E2E.trustStore[nick]?.fingerprint || await computeFingerprint(session.theirIdentityPub);
       e2eSysMsg(target,`🔐 Safety phrase with ${nick}: ${phrase}`);
       e2eSysMsg(target,`Read this over voice. If they see the same words → /encrypt trust ${nick}`);
       e2eSysMsg(target,`Their fingerprint: ${fp}`);
@@ -1138,8 +1333,11 @@ async function handleEncryptCommand(args, conn_id, target) {
     }
     case 'fingerprint': case 'fp': {
       if (!E2E.identityKeys) { e2eSysMsg(target,'E2E not initialised'); return; }
-      const myPub = await exportPub(E2E.identityKeys.dhKeyPair.publicKey, 'ECDH');
-      e2eSysMsg(target,`🔑 Your fingerprint: ${await computeFingerprint(myPub)}`);
+      const myDhPub   = await exportPub(E2E.identityKeys.dhKeyPair.publicKey,   'ECDH');
+      const mySignPub = await exportPub(E2E.identityKeys.signKeyPair.publicKey, 'ECDSA');
+      // #11: show the combined (dh+sign) identity fingerprint — the same value
+      // peers pin via TOFU — so an out-of-band match is meaningful.
+      e2eSysMsg(target,`🔑 Your fingerprint: ${await computeIdentityFingerprint(myDhPub, mySignPub)}`);
       break;
     }
     default:

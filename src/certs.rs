@@ -64,14 +64,18 @@ impl CertStore {
         let cert_pem = cert.serialize_pem()?;
         let key_pem  = cert.get_key_pair().serialize_pem();
 
-        // Write public cert plaintext
+        // Write public cert plaintext (0600 anyway — only the service reads it; #7)
         let cert_path = dir.join("cert.pem");
         tokio::fs::write(&cert_path, cert_pem.as_bytes()).await?;
+        set_secret_mode(&cert_path).await;
 
-        // Encrypt and write private key
+        // Encrypt and write private key. key.enc is the vault-encrypted client
+        // TLS key — restrict to owner-only so the world-traversable data dir
+        // cannot leak it to other local users (audit #7).
         let key_enc  = self.crypto.encrypt(username, key_pem.as_bytes()).await?;
         let key_path = dir.join("key.enc");
         tokio::fs::write(&key_path, key_enc).await?;
+        set_secret_mode(&key_path).await;
 
         let fingerprint = compute_fingerprint(&cert.serialize_der()?)?;
 
@@ -147,6 +151,19 @@ impl CertStore {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Best-effort chmod 0600 on a freshly written cert/key file (audit #7) so the
+/// world-traversable data dir cannot expose the encrypted client TLS key to
+/// other local users. No-op on non-unix targets.
+async fn set_secret_mode(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
+    }
+    #[cfg(not(unix))]
+    { let _ = path; }
+}
 
 /// Compute SHA-256 fingerprint of a DER-encoded certificate.
 /// Returns colon-separated uppercase hex, e.g. "AA:BB:CC:..."

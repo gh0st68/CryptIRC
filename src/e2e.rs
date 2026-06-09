@@ -22,12 +22,27 @@
 //!     channels/{chan}.enc    — encrypted channel PSK
 //!     trust.json             — TOFU records
 
-use anyhow::{bail, Result};
+// #93: `bail` was imported but never used — dropped to clear the compiler warning.
+use anyhow::Result;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::{Duration, Instant}};
 use tokio::sync::Mutex;
 use tracing::warn;
+
+// #27: Bound the rate at which any third party can drain a given user's
+// one-time-prekey (OTPK) pool. Each `fetch_bundle` consumes one OTPK, and the
+// fetch is reachable by any authenticated user against any target, so without a
+// throttle an attacker can pre-drain a victim's OTPKs and silently downgrade all
+// of their future sessions to a 3-DH handshake (no one-time-prekey forward
+// secrecy). The throttle is keyed on the TARGET user (the resource being
+// drained), independent of the caller, so it caps drain rate regardless of how
+// many distinct attacker identities are used. When the budget is exceeded we
+// still return the bundle but WITHOUT consuming an OTPK — identical behaviour to
+// an empty pool (the initiator falls back to 3-DH) — so legitimate lookups never
+// fail, only the drain primitive is rate-limited.
+const OTPK_CONSUME_WINDOW: Duration = Duration::from_secs(60);
+const OTPK_CONSUME_MAX_PER_WINDOW: u32 = 5;
 
 // ─── Public key bundle types ──────────────────────────────────────────────────
 
@@ -77,14 +92,18 @@ pub struct E2EStore {
     /// S2: per-user mutex prevents TOCTOU races on OTPK consumption.
     /// DashMap<username, Mutex<()>>
     otpk_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// #27: per-target sliding-window counter of OTPK consumptions. Keyed by the
+    /// target username (the pool being drained). Value is (window_start, count).
+    otpk_consume_rate: Arc<DashMap<String, (Instant, u32)>>,
 }
 
 impl E2EStore {
     pub fn new(data_dir: &str) -> Self {
         std::fs::create_dir_all(format!("{}/e2e", data_dir)).ok();
         Self {
-            data_dir:   data_dir.to_string(),
-            otpk_locks: Arc::new(DashMap::new()),
+            data_dir:          data_dir.to_string(),
+            otpk_locks:        Arc::new(DashMap::new()),
+            otpk_consume_rate: Arc::new(DashMap::new()),
         }
     }
 
@@ -101,6 +120,30 @@ impl E2EStore {
             .entry(username.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    /// #27: Returns true if consuming an OTPK for `username` is within the
+    /// per-target rate budget, and records the consumption. Sliding 60s window,
+    /// max OTPK_CONSUME_MAX_PER_WINDOW consumptions per target per window. When
+    /// the budget is exhausted this returns false and the caller MUST NOT consume
+    /// an OTPK (it falls back to a 3-DH bundle instead).
+    fn otpk_consume_allowed(&self, username: &str) -> bool {
+        let now = Instant::now();
+        let mut entry = self
+            .otpk_consume_rate
+            .entry(username.to_string())
+            .or_insert((now, 0));
+        let (window_start, count) = *entry;
+        if now.duration_since(window_start) >= OTPK_CONSUME_WINDOW {
+            // window expired — start a fresh window with this consumption
+            *entry = (now, 1);
+            true
+        } else if count < OTPK_CONSUME_MAX_PER_WINDOW {
+            *entry = (window_start, count + 1);
+            true
+        } else {
+            false
+        }
     }
 
     // ── Identity blob ─────────────────────────────────────────────────────────
@@ -151,10 +194,21 @@ impl E2EStore {
         let json = tokio::fs::read_to_string(dir.join("bundle.json")).await.ok()?;
         let bundle: KeyBundle = serde_json::from_str(&json).ok()?;
 
-        // S2: hold lock while reading + deleting OTPK
-        let lock = self.otpk_lock(username);
-        let _guard = lock.lock().await;
-        let otpk   = self.consume_one_time_prekey_locked(username).await;
+        // #27: throttle OTPK consumption per target so a third party cannot drain
+        // the victim's pool on demand. Over budget → return the bundle without an
+        // OTPK (3-DH fallback), exactly as if the pool were empty.
+        let otpk = if self.otpk_consume_allowed(username) {
+            // S2: hold lock while reading + deleting OTPK
+            let lock = self.otpk_lock(username);
+            let _guard = lock.lock().await;
+            self.consume_one_time_prekey_locked(username).await
+        } else {
+            warn!(
+                "[E2E] OTPK consume rate limit hit for '{}' — serving 3-DH bundle (no OTPK consumed)",
+                username
+            );
+            None
+        };
 
         Some(FetchedBundle {
             identity_sign_key: bundle.identity_sign_key,

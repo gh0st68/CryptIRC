@@ -2,6 +2,8 @@
   "name": "CryptIRC",
   "short_name": "CryptIRC",
   "description": "End-to-end encrypted IRC client",
+  "lang": "en",
+  "dir": "ltr",
   "id": "/cryptirc/",
   "start_url": "/cryptirc/",
   "scope": "/cryptirc/",

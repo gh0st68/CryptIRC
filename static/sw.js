@@ -1,14 +1,23 @@
 // CryptIRC Service Worker v10
 // Handles: offline caching, push notifications, notification click actions
 
-const CACHE = 'cryptirc-v206';
+const CACHE = 'cryptirc-v207';
 const STATIC = ['/cryptirc/manifest.json', '/cryptirc/icon.svg', '/cryptirc/icon-192.png', '/cryptirc/icon-512.png'];
+// App scripts: needed for an offline launch to actually boot (audit #95). Served
+// network-first with a cache fallback so online deploys always take effect immediately
+// while a cached copy remains available offline.
+const APP_SCRIPTS = ['/cryptirc/app.js', '/cryptirc/e2e.js', '/cryptirc/Sortable.min.js'];
 
 // ─── Install ──────────────────────────────────────────────────────────────────
 self.addEventListener('install', e => {
   e.waitUntil(
     caches.open(CACHE)
-      .then(c => c.addAll(STATIC))
+      .then(async c => {
+        await c.addAll(STATIC);
+        // Precache app scripts so the PWA can boot offline (audit #95). Best-effort:
+        // a single failing script must not abort the whole install.
+        await Promise.all(APP_SCRIPTS.map(p => c.add(p).catch(() => {})));
+      })
       .then(() => self.skipWaiting())
   );
 });
@@ -33,6 +42,18 @@ self.addEventListener('fetch', e => {
 
   // Main HTML page — always network-first so deploys take effect immediately
   if (url.pathname === '/cryptirc/' || url.pathname === '/cryptirc') {
+    e.respondWith(
+      fetch(e.request).then(res => {
+        if (res.ok) { const c = res.clone(); caches.open(CACHE).then(cache => cache.put(e.request, c)); }
+        return res;
+      }).catch(() => caches.match(e.request))
+    );
+    return;
+  }
+
+  // App scripts — network-first so deploys take effect immediately, but fall back
+  // to the cached copy when offline so the PWA can still boot (audit #95).
+  if (APP_SCRIPTS.includes(url.pathname)) {
     e.respondWith(
       fetch(e.request).then(res => {
         if (res.ok) { const c = res.clone(); caches.open(CACHE).then(cache => cache.put(e.request, c)); }

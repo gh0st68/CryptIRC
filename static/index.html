@@ -28,7 +28,8 @@
   /* Theme defaults (Starfield Warp) — overridden by applyThemeCSS() after login */
   --bg0:#000004; --bg1:#04040c; --bg2:#080814; --bg3:#0c0c1e; --bg4:#121228;
   --border:#1a1a38; --border2:#2a2a50;
-  --text:#d0d0e8; --text2:#8888cc; --text3:#4a4a78;
+  /* --text3 lightened from #4a4a78 to meet WCAG AA contrast (~4.5:1) for muted/secondary text (audit #92) */
+  --text:#d0d0e8; --text2:#8888cc; --text3:#7d7db5;
   --accent:#00d4aa; --accent2:#0099ff;
   --warn:#ffaa00; --error:#ff4466; --join:#44cc88; --part:#cc6644;
   --notice:#9988cc; --action:#ffcc44;
@@ -855,7 +856,9 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   -webkit-appearance:none; appearance:none;
   padding:2px; box-sizing:border-box;
 }
-#send-btn:focus { outline:none; }
+/* a11y: keep no outline for mouse focus, but show a visible ring for keyboard focus (audit #91) */
+#send-btn:focus:not(:focus-visible) { outline:none; }
+#send-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:6px; }
 #send-btn:hover { color:var(--accent); }
 #send-btn:active { color:var(--accent); }
 #emoji-picker {
@@ -906,7 +909,9 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   transition:color .15s; flex-shrink:0; box-sizing:border-box;
   -webkit-appearance:none; appearance:none;
 }
-.upload-btn:focus { outline:none; }
+/* a11y: keep no outline for mouse focus, but show a visible ring for keyboard focus (audit #91) */
+.upload-btn:focus:not(:focus-visible) { outline:none; }
+.upload-btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:6px; }
 .upload-btn:hover, .upload-btn:active { color:var(--text); }
 #file-input { display:none; }
 .upload-progress {
@@ -1386,7 +1391,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 // Apply theme colors immediately — :root no longer sets theme defaults,
 // so this MUST run to provide bg/border/text/accent values.
 (function(){try{var c=JSON.parse(localStorage.getItem('cryptirc_appear')||'{}');
-var T={midnight:{bg0:'#0b0d0f',bg1:'#111418',bg2:'#181d24',bg3:'#1e242e',bg4:'#252c38',border:'#2a3444',border2:'#3a4a60',text:'#c8d8e8',text2:'#7a9ab8',text3:'#4a6278'},dracula:{bg0:'#282a36',bg1:'#2d303e',bg2:'#343746',bg3:'#3b3f51',bg4:'#44495e',border:'#44475a',border2:'#6272a4',text:'#f8f8f2',text2:'#bd93f9',text3:'#6272a4'},monokai:{bg0:'#272822',bg1:'#2d2e27',bg2:'#383830',bg3:'#3e3d32',bg4:'#49483e',border:'#49483e',border2:'#75715e',text:'#f8f8f2',text2:'#a6e22e',text3:'#75715e'},nord:{bg0:'#2e3440',bg1:'#3b4252',bg2:'#434c5e',bg3:'#4c566a',bg4:'#576279',border:'#4c566a',border2:'#5e6779',text:'#eceff4',text2:'#88c0d0',text3:'#616e88'},solarize:{bg0:'#002b36',bg1:'#073642',bg2:'#0a3f4e',bg3:'#0d4a5a',bg4:'#1a5c6e',border:'#2aa198',border2:'#586e75',text:'#93a1a1',text2:'#839496',text3:'#586e75'},gruvbox:{bg0:'#282828',bg1:'#3c3836',bg2:'#504945',bg3:'#665c54',bg4:'#7c6f64',border:'#504945',border2:'#665c54',text:'#ebdbb2',text2:'#b8bb26',text3:'#928374'},abyss:{bg0:'#000',bg1:'#080808',bg2:'#101010',bg3:'#181818',bg4:'#222',border:'#1a1a1a',border2:'#333',text:'#ccc',text2:'#888',text3:'#555'},light:{bg0:'#f5f5f5',bg1:'#ebebeb',bg2:'#e0e0e0',bg3:'#d5d5d5',bg4:'#cacaca',border:'#c0c0c0',border2:'#aaa',text:'#1a1a1a',text2:'#444',text3:'#888'},cobalt:{bg0:'#002240',bg1:'#002b50',bg2:'#003460',bg3:'#003d70',bg4:'#004880',border:'#0050a0',border2:'#1a6ab5',text:'#fff',text2:'#80d4ff',text3:'#4488aa'}};
+var T={midnight:{bg0:'#0b0d0f',bg1:'#111418',bg2:'#181d24',bg3:'#1e242e',bg4:'#252c38',border:'#2a3444',border2:'#3a4a60',text:'#c8d8e8',text2:'#7a9ab8',text3:'#82a0b8'/* lightened from #4a6278 for WCAG AA contrast (audit #92) */},dracula:{bg0:'#282a36',bg1:'#2d303e',bg2:'#343746',bg3:'#3b3f51',bg4:'#44495e',border:'#44475a',border2:'#6272a4',text:'#f8f8f2',text2:'#bd93f9',text3:'#6272a4'},monokai:{bg0:'#272822',bg1:'#2d2e27',bg2:'#383830',bg3:'#3e3d32',bg4:'#49483e',border:'#49483e',border2:'#75715e',text:'#f8f8f2',text2:'#a6e22e',text3:'#75715e'},nord:{bg0:'#2e3440',bg1:'#3b4252',bg2:'#434c5e',bg3:'#4c566a',bg4:'#576279',border:'#4c566a',border2:'#5e6779',text:'#eceff4',text2:'#88c0d0',text3:'#616e88'},solarize:{bg0:'#002b36',bg1:'#073642',bg2:'#0a3f4e',bg3:'#0d4a5a',bg4:'#1a5c6e',border:'#2aa198',border2:'#586e75',text:'#93a1a1',text2:'#839496',text3:'#586e75'},gruvbox:{bg0:'#282828',bg1:'#3c3836',bg2:'#504945',bg3:'#665c54',bg4:'#7c6f64',border:'#504945',border2:'#665c54',text:'#ebdbb2',text2:'#b8bb26',text3:'#928374'},abyss:{bg0:'#000',bg1:'#080808',bg2:'#101010',bg3:'#181818',bg4:'#222',border:'#1a1a1a',border2:'#333',text:'#ccc',text2:'#888',text3:'#555'},light:{bg0:'#f5f5f5',bg1:'#ebebeb',bg2:'#e0e0e0',bg3:'#d5d5d5',bg4:'#cacaca',border:'#c0c0c0',border2:'#aaa',text:'#1a1a1a',text2:'#444',text3:'#888'},cobalt:{bg0:'#002240',bg1:'#002b50',bg2:'#003460',bg3:'#003d70',bg4:'#004880',border:'#0050a0',border2:'#1a6ab5',text:'#fff',text2:'#80d4ff',text3:'#4488aa'}};
 var t=T[c.theme]||T.midnight;var r=document.documentElement.style;
 r.setProperty('--bg0',t.bg0);r.setProperty('--bg1',t.bg1);r.setProperty('--bg2',t.bg2);r.setProperty('--bg3',t.bg3);r.setProperty('--bg4',t.bg4);
 r.setProperty('--border',t.border);r.setProperty('--border2',t.border2);r.setProperty('--text',t.text);r.setProperty('--text2',t.text2);r.setProperty('--text3',t.text3);
@@ -1394,7 +1399,7 @@ r.setProperty('--accent',c.accent||'#00d4aa');r.setProperty('--accent2',c.accent
 if(c.sidebarW)r.setProperty('--sidebar-w',c.sidebarW+'px');if(c.nickPanelW)r.setProperty('--nicks-w',c.nickPanelW+'px');
 }catch(e){var r=document.documentElement.style;
 r.setProperty('--bg0','#0b0d0f');r.setProperty('--bg1','#111418');r.setProperty('--bg2','#181d24');r.setProperty('--bg3','#1e242e');r.setProperty('--bg4','#252c38');
-r.setProperty('--border','#2a3444');r.setProperty('--border2','#3a4a60');r.setProperty('--text','#c8d8e8');r.setProperty('--text2','#7a9ab8');r.setProperty('--text3','#4a6278');
+r.setProperty('--border','#2a3444');r.setProperty('--border2','#3a4a60');r.setProperty('--text','#c8d8e8');r.setProperty('--text2','#7a9ab8');r.setProperty('--text3','#82a0b8');/* lightened from #4a6278 for WCAG AA contrast (audit #92) */
 r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 }})();
 </script>
@@ -1474,8 +1479,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 
 <!-- ── LIGHTBOX ──────────────── -->
 <div id="lightbox" onclick="if(event.target===this)closeLightbox()">
-  <button id="lightbox-close" onclick="closeLightbox();event.stopPropagation()">✕</button>
-  <img id="lightbox-img" src="" alt="" ondblclick="toggleLightboxZoom(event)">
+  <button id="lightbox-close" onclick="closeLightbox();event.stopPropagation()" title="Close" aria-label="Close image viewer">✕</button>
+  <img id="lightbox-img" src="" alt="Enlarged image preview" ondblclick="toggleLightboxZoom(event)">
 </div>
 
 <!-- ── DROP OVERLAY ──────────── -->
@@ -2237,9 +2242,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
       <span id="led-tx" style="display:none"></span>
       <span id="led-rx" style="display:none"></span>
       <span id="usercount" style="display:none"></span>
-      <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text2);cursor:pointer;padding:4px;flex-shrink:0;outline:none" onclick="showTopicMenu(event)" title="Options"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
+      <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text2);cursor:pointer;padding:4px;flex-shrink:0;outline:none" onclick="showTopicMenu(event)" title="Options" aria-label="Conversation options"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
       <button id="reattach-btn" onclick="_detachedReattachSelf()" title="Close this popped-out window and return to main">⧉ Reattach</button>
-      <button id="nick-toggle" onclick="toggleNickPanel()" title="Toggle user list"><span class="toggle-icon"><svg id="nick-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></span><span class="toggle-mobile"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span></button>
+      <button id="nick-toggle" onclick="toggleNickPanel()" title="Toggle user list" aria-label="Toggle user list"><span class="toggle-icon"><svg id="nick-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="9 18 15 12 9 6"/></svg></span><span class="toggle-mobile"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span></button>
       <div id="topic-menu"></div>
       <div id="mentions-panel">
         <div id="mentions-panel-hdr">Notices <div style="display:flex;gap:8px;align-items:center"><span style="cursor:pointer;font-size:10px;color:var(--text3)" onclick="clearMentions()">Clear</span><span style="cursor:pointer;font-size:16px;color:var(--text3);padding:2px 4px" onclick="toggleMentionsPanel()">✕</span></div></div>
@@ -2253,9 +2258,10 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
         <div id="search-results"><div class="search-empty">Type to search current conversation</div></div>
       </div>
     </div>
-    <div id="chat-area" style="display:none"></div>
+    <!-- a11y: log role + polite live region so screen readers announce incoming messages (audit #48) -->
+    <div id="chat-area" style="display:none" role="log" aria-live="polite" aria-label="Conversation"></div>
     <div id="split-panel"><div class="split-header"><span>Split:</span><select id="split-chan-select" onchange="_splitTarget=this.value;renderSplitChat()"></select><button onclick="toggleSplitView()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px" title="Close split">✕</button></div><div class="split-chat" id="split-chat-area"></div></div>
-    <button id="scroll-bottom-btn" onclick="scrollForce()" title="Jump to latest">↓</button>
+    <button id="scroll-bottom-btn" onclick="scrollForce()" title="Jump to latest" aria-label="Jump to latest message">↓</button>
     <div id="welcome">
       <div class="welcome-logo">CryptIRC</div>
       <div class="welcome-sub">Select a channel to start chatting, or add a new network.</div>
@@ -2271,15 +2277,15 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
     <div id="typing-indicator"></div>
     <div id="input-wrap">
       <div id="input-inner">
-        <input id="msg-input" placeholder="Select a channel…" disabled autocomplete="off" aria-autocomplete="none" data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore data-form-type="other" spellcheck="true" autocorrect="on" autocapitalize="none" enterkeyhint="send" type="text" name="msg-input-irc-x" inputmode="text">
-        <button id="send-btn" onclick="doSend()" title="Send">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="pointer-events:none"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        <input id="msg-input" aria-label="Message" placeholder="Select a channel…" disabled autocomplete="off" aria-autocomplete="none" data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore data-form-type="other" spellcheck="true" autocorrect="on" autocapitalize="none" enterkeyhint="send" type="text" name="msg-input-irc-x" inputmode="text">
+        <button id="send-btn" onclick="doSend()" title="Send" aria-label="Send message">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="pointer-events:none" aria-hidden="true" focusable="false"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
-        <button class="upload-btn" title="Upload file" onclick="triggerUpload()">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+        <button class="upload-btn" title="Upload file" onclick="triggerUpload()" aria-label="Upload file">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
         </button>
-        <button class="upload-btn" title="Paste snippet" onclick="showPasteModal()">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        <button class="upload-btn" title="Paste snippet" onclick="showPasteModal()" aria-label="Paste snippet">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
         </button>
       </div>
       <input type="file" id="file-input" multiple accept="*/*" onchange="handleFileSelect(this.files)">
