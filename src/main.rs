@@ -319,10 +319,12 @@ pub enum ServerEvent {
     IrcNames         { conn_id: String, channel: String, names: Vec<String> },
     IrcMode          { conn_id: String, target: String,  modes: String, ts: i64 },
     IrcKick          { conn_id: String, channel: String, kicked: String, by: String, reason: String, ts: i64 },
-    /// 367 — single ban list entry (for /unbanall accumulation)
-    IrcBanEntry      { conn_id: String, channel: String, mask: String, set_by: String, ts: i64 },
-    /// 368 — end of ban list
-    IrcBanEnd        { conn_id: String, channel: String },
+    /// 367/348/346 — single list entry; `list` is "b" (ban), "e" (exempt) or "I" (invex)
+    IrcBanEntry      { conn_id: String, channel: String, mask: String, set_by: String, ts: i64, list: String },
+    /// 368/349/347 — end of a list; `list` matches the entry list letter
+    IrcBanEnd        { conn_id: String, channel: String, list: String },
+    /// 324 — RPL_CHANNELMODEIS: the channel's current mode string (e.g. "+mnt" or "+ntkl key 50")
+    IrcChannelModes  { conn_id: String, channel: String, modes: String },
     /// 322 — channel list entry
     IrcListEntry     { conn_id: String, channel: String, users: u32, topic: String },
     /// 323 — end of channel list

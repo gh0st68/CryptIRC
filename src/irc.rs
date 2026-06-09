@@ -1322,32 +1322,22 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Certificate: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
                     }
                     // 367 = RPL_BANLIST — one entry in the ban list
-                    "367" => {
+                    // 367 = RPL_BANLIST, 348 = RPL_EXCEPTLIST, 346 = RPL_INVITELIST (invex).
+                    // All three are single list entries; `list` tags which list.
+                    "367" | "348" | "346" => {
                         let channel = p.params.get(1).cloned().unwrap_or_default();
                         let mask    = p.params.get(2).cloned().unwrap_or_default();
                         let set_by  = p.params.get(3).cloned().unwrap_or_default();
+                        let list = match p.command.as_str() { "348" => "e", "346" => "I", _ => "b" }.to_string();
                         send(ServerEvent::IrcBanEntry {
-                            conn_id: conn_id.to_string(), channel, mask, set_by, ts,
+                            conn_id: conn_id.to_string(), channel, mask, set_by, ts, list,
                         });
                     }
-                    // 368 = RPL_ENDOFBANLIST
-                    "368" => {
+                    // 368 = end ban list, 349 = end exempt list, 347 = end invex list
+                    "368" | "349" | "347" => {
                         let channel = p.params.get(1).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcBanEnd { conn_id: conn_id.to_string(), channel });
-                    }
-                    // 348 = RPL_EXCEPTLIST (exempt list entry)
-                    "348" => {
-                        let channel = p.params.get(1).cloned().unwrap_or_default();
-                        let mask    = p.params.get(2).cloned().unwrap_or_default();
-                        let set_by  = p.params.get(3).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcBanEntry {
-                            conn_id: conn_id.to_string(), channel, mask, set_by, ts,
-                        });
-                    }
-                    // 349 = RPL_ENDOFEXCEPTLIST
-                    "349" => {
-                        let channel = p.params.get(1).cloned().unwrap_or_default();
-                        send(ServerEvent::IrcBanEnd { conn_id: conn_id.to_string(), channel });
+                        let list = match p.command.as_str() { "349" => "e", "347" => "I", _ => "b" }.to_string();
+                        send(ServerEvent::IrcBanEnd { conn_id: conn_id.to_string(), channel, list });
                     }
                     // 321 = RPL_LISTSTART — ignore
                     "321" => {}
@@ -1391,12 +1381,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "324" => {
                         let chan = p.params.get(1).cloned().unwrap_or_default();
                         let modes = params_from(&p.params, 2); // #19: guard against <2 params
-                        let text = format!("{} {}", chan, modes);
-                        let display_target = if chan.starts_with(['#','&','+','!']) { chan } else { "status".to_string() };
-                        send(ServerEvent::IrcMessage {
-                            conn_id: conn_id.to_string(), from: "*".into(),
-                            target: display_target, text, ts,
-                            kind: MessageKind::Notice, msg_id: 0, prefix: None,
+                        // Structured event so the Channel Modes GUI can parse current
+                        // modes; the frontend also shows a sysMsg for manual /mode users.
+                        send(ServerEvent::IrcChannelModes {
+                            conn_id: conn_id.to_string(), channel: chan, modes,
                         });
                     }
                     // 329 RPL_CREATIONTIME — route to channel

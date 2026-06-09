@@ -1158,6 +1158,8 @@ function handleEvent(ev) {
         renderSidebar(); refreshUserCount(ev.conn_id,ev.target);
         if(isActive(ev.conn_id,ev.target)) renderNickPanel(mCh.names);
       }
+      // Keep the Channel Modes dialog in sync when modes change live.
+      if(_cmMatch(ev.conn_id,ev.target)) cmRefresh();
       break;
     }
     // ── IRCv3: away-notify ──────────────────────────────
@@ -1258,8 +1260,22 @@ function handleEvent(ev) {
     }
     case 'irc_list_entry': handleListEntry(ev); break;
     case 'irc_list_end': handleListEnd(); break;
+    case 'irc_channel_modes': {
+      // Current channel modes (324). Feed the dialog if open for this channel;
+      // otherwise show it for manual /mode users.
+      if (_cmMatch(ev.conn_id, ev.channel)) { cmParseModes(ev.modes); cmRender(); }
+      else sysMsg(ev.conn_id, ev.channel, `Modes: ${ev.modes || '(none)'}`, 'mode', { ts: Math.floor(Date.now()/1000), from: '*' });
+      break;
+    }
     case 'irc_ban_entry': {
       const key = ev.conn_id + '/' + ev.channel;
+      // Channel Modes dialog is collecting this list — route the entry into it
+      // and suppress the per-entry channel sysMsg.
+      if (_cmMatch(ev.conn_id, ev.channel) && _cm.collecting && _cm.collecting[ev.list]) {
+        _cm.lists[ev.list].push({ mask: ev.mask, by: ev.set_by, ts: ev.ts });
+        cmRenderList();
+        break;
+      }
       // Check if this is for /unbanall
       if (pendingUnbanAll[key]) {
         if (!banListAccum[key]) banListAccum[key] = [];
@@ -1277,6 +1293,12 @@ function handleEvent(ev) {
     }
     case 'irc_ban_end': {
       const key  = ev.conn_id + '/' + ev.channel;
+      // Channel Modes dialog finished collecting this list
+      if (_cmMatch(ev.conn_id, ev.channel) && _cm.collecting && _cm.collecting[ev.list]) {
+        _cm.collecting[ev.list] = false;
+        cmRenderList();
+        break;
+      }
       // Check if this is for /unbanall (368)
       if (pendingUnbanAll[key]) {
         delete pendingUnbanAll[key];
@@ -8181,6 +8203,7 @@ function _favMenuItems(connId,target,isChannel){
     });
   }
   if(isChannel){
+    items.push({text:'⚙ Channel Modes',action:()=>openChanModes(connId,target)});
     items.push({text:'Leave',action:()=>wsend({type:'part_channel',conn_id:connId,channel:target}),style:'color:#f87171'});
   } else {
     items.push({text:'Close',action:()=>{toggleFavorite(connId,target);closeQuery(connId,target.toLowerCase());},style:'color:#f87171'});
@@ -8448,12 +8471,131 @@ function _chanMenuItems(connId,target,kind){
       },
     });
   }
+  if(kind==='channel') items.push({text:'⚙ Channel Modes',action:()=>openChanModes(connId,target)});
   if(kind==='channel') items.push({text:'Leave',action:()=>wsend({type:'part_channel',conn_id:connId,channel:target}),style:'color:#f87171'});
   else items.push({text:'Close',action:()=>closeQuery(connId,target),style:'color:#f87171'});
   return items;
 }
 function toggleChanMenu(btn,connId,target,kind){toggleFloatDd(btn,_chanMenuItems(connId,target,kind));}
 function closeChanMenus(){closeFloatDd();}
+
+// ── Channel Modes dialog (mIRC-style; opened from the channel ⋮ menu) ───────
+let _cm=null, _cmRefreshT=null;
+const _CM_FLAGS=[
+  ['n','No external messages','Block messages from users not in the channel'],
+  ['t','Topic locked','Only operators can change the topic'],
+  ['m','Moderated','Only voiced (+v) users and operators may speak'],
+  ['i','Invite only','Users must be invited (or match +I) to join'],
+  ['s','Secret','Hide the channel from /list and /whois'],
+  ['p','Private','Restrict channel visibility / knock'],
+  ['r','Registered only','Only registered (logged-in) users may join'],
+];
+const _CM_LISTS=[['b','Bans','🚫'],['e','Exempts','✅'],['I','Invex','✉']];
+function _cmIsOp(connId,target){return /[~&@]/.test(getMyPrefix(connId,target));}
+function _cmMatch(conn_id,channel){return _cm&&_cm.connId===conn_id&&String(_cm.target).toLowerCase()===String(channel||'').toLowerCase();}
+function openChanModes(connId,target){
+  _cm={connId,target,flags:new Set(),key:'',limit:'',lists:{b:[],e:[],I:[]},collecting:{b:true,e:true,I:true},tab:'b',isOp:_cmIsOp(connId,target),loaded:false};
+  document.getElementById('chanmodes-overlay').classList.add('show');
+  if(typeof _overlayOpen==='function')_overlayOpen('chanModes',closeChanModes);
+  cmRender();
+  cmQueryAll();
+  // Safety: if the ircd never ends a list (e.g. +I unsupported), stop "Loading…".
+  setTimeout(()=>{ if(_cm){ _cm.collecting={b:false,e:false,I:false}; cmRenderList(); } },5000);
+}
+function closeChanModes(){
+  _cm=null; clearTimeout(_cmRefreshT);
+  document.getElementById('chanmodes-overlay').classList.remove('show');
+  document.getElementById('chanmodes-overlay').innerHTML='';
+  if(typeof _overlayClose==='function')_overlayClose('chanModes');
+}
+function cmQueryAll(){
+  if(!_cm)return;
+  const t=_cm.target,c=_cm.connId;
+  wsend({type:'send',conn_id:c,raw:`MODE ${t}`});
+  wsend({type:'send',conn_id:c,raw:`MODE ${t} +b`});
+  wsend({type:'send',conn_id:c,raw:`MODE ${t} +e`});
+  wsend({type:'send',conn_id:c,raw:`MODE ${t} +I`});
+}
+function cmRefresh(){
+  if(!_cm)return; clearTimeout(_cmRefreshT);
+  _cmRefreshT=setTimeout(()=>{ if(!_cm)return; _cm.lists={b:[],e:[],I:[]}; _cm.collecting={b:true,e:true,I:true}; cmQueryAll();
+    setTimeout(()=>{ if(_cm){ _cm.collecting={b:false,e:false,I:false}; cmRenderList(); } },5000); },250);
+}
+function cmParseModes(s){
+  if(!_cm)return;
+  _cm.flags=new Set(); _cm.key=''; _cm.limit=''; _cm.loaded=true;
+  if(!s)return;
+  const parts=String(s).trim().split(/\s+/); const flags=parts[0]||''; let argi=1, adding=true;
+  for(const ch of flags){
+    if(ch==='+'){adding=true;continue;} if(ch==='-'){adding=false;continue;}
+    if(ch==='k'){const v=parts[argi++]||''; if(adding)_cm.key=v; continue;}
+    if(ch==='l'){const v=parts[argi++]||''; if(adding)_cm.limit=v; continue;}
+    if(adding)_cm.flags.add(ch);
+  }
+}
+function _cmSend(raw){ if(_cm)wsend({type:'send',conn_id:_cm.connId,raw}); }
+function cmToggleFlag(letter,on){ if(_cm&&_cm.isOp)_cmSend(`MODE ${_cm.target} ${on?'+':'-'}${letter}`); }
+function cmSetKey(){ if(!_cm||!_cm.isOp)return; const v=(document.getElementById('cm-key-input').value||'').trim(); if(!v){showToast('Enter a key');return;} if(/\s/.test(v)){showToast('Key cannot contain spaces');return;} _cmSend(`MODE ${_cm.target} +k ${v}`); }
+function cmClearKey(){ if(_cm&&_cm.isOp)_cmSend(`MODE ${_cm.target} -k ${_cm.key||'*'}`); }
+function cmSetLimit(){ if(!_cm||!_cm.isOp)return; const v=parseInt(document.getElementById('cm-limit-input').value,10); if(!v||v<1){showToast('Enter a positive number');return;} _cmSend(`MODE ${_cm.target} +l ${v}`); }
+function cmClearLimit(){ if(_cm&&_cm.isOp)_cmSend(`MODE ${_cm.target} -l`); }
+function cmAddEntry(){ if(!_cm||!_cm.isOp)return; const inp=document.getElementById('cm-add-input'); let m=(inp.value||'').trim(); if(!m)return; if(!/[!@]/.test(m))m=m+'!*@*'; _cmSend(`MODE ${_cm.target} +${_cm.tab} ${m}`); inp.value=''; }
+function cmRemoveEntry(mask){ if(_cm&&_cm.isOp&&mask)_cmSend(`MODE ${_cm.target} -${_cm.tab} ${mask}`); }
+function cmSwitchTab(list){ if(_cm){_cm.tab=list; cmRender();} }
+function cmListHtml(){
+  const L=_cm.lists[_cm.tab];
+  if(_cm.collecting[_cm.tab]&&!L.length)return `<div class="cm-list-empty">Loading…</div>`;
+  if(!L.length)return `<div class="cm-list-empty">No entries</div>`;
+  let h='';
+  for(const e of L){
+    const meta=e.by?`<span class="cm-meta">by ${esc(e.by)}</span>`:'';
+    h+=`<div class="cm-list-row"><span class="cm-mask">${esc(e.mask)}</span>${meta}${_cm.isOp?`<button class="cm-del" data-mask="${esc(e.mask)}" aria-label="Remove ${esc(e.mask)}">✕</button>`:''}</div>`;
+  }
+  return h;
+}
+function cmRenderList(){
+  if(!_cm)return;
+  const el=document.getElementById('cm-list'); if(el)el.innerHTML=cmListHtml();
+  const ov=document.getElementById('chanmodes-overlay');
+  if(ov)ov.querySelectorAll('.cm-tab').forEach(t=>{const l=t.dataset.tab,c=t.querySelector('.cm-count');if(c)c.textContent=_cm.collecting[l]?'…':_cm.lists[l].length;});
+  if(_cm.isOp){const db=ov&&ov.querySelectorAll('.cm-del');if(db)db.forEach(b=>b.addEventListener('click',()=>cmRemoveEntry(b.dataset.mask)));}
+}
+function cmRender(){
+  if(!_cm)return;
+  const ov=document.getElementById('chanmodes-overlay'); if(!ov.classList.contains('show'))return;
+  const ro=!_cm.isOp;
+  const prevAdd=(document.getElementById('cm-add-input')||{}).value||'';
+  const known=new Set(_CM_FLAGS.map(f=>f[0]));
+  let h=`<div class="cm-box"><div class="cm-header"><span class="cm-title">⚙ Channel Modes — ${esc(_cm.target)}</span><button class="cm-close" id="cm-close-btn" aria-label="Close">✕</button></div><div class="cm-body">`;
+  if(ro)h+=`<div class="cm-readonly">👁 You are not a channel operator — view only.</div>`;
+  h+=`<div class="cm-section"><div class="cm-section-title">Modes</div>`;
+  for(const [c,label,sub] of _CM_FLAGS){
+    h+=`<label class="cm-toggle"><input type="checkbox" data-flag="${c}"${_cm.flags.has(c)?' checked':''}${ro?' disabled':''}><span class="cm-switch"></span><span class="cm-toggle-label">${esc(label)}<div class="cm-toggle-sub">${esc(sub)}</div></span><span class="cm-flag">+${c}</span></label>`;
+  }
+  for(const c of _cm.flags){ if(!known.has(c)&&c!=='k'&&c!=='l'){ h+=`<label class="cm-toggle"><input type="checkbox" data-flag="${esc(c)}" checked${ro?' disabled':''}><span class="cm-switch"></span><span class="cm-toggle-label">Mode +${esc(c)}</span><span class="cm-flag">+${esc(c)}</span></label>`; } }
+  h+=`</div>`;
+  h+=`<div class="cm-section"><div class="cm-section-title">Channel key (+k)</div><div class="cm-row"><input class="cm-input" id="cm-key-input" placeholder="no key set" value="${esc(_cm.key)}"${ro?' disabled':''}><button class="cm-btn" id="cm-key-set"${ro?' disabled':''}>Set</button><button class="cm-btn" id="cm-key-clear"${ro||!_cm.key?' disabled':''}>Clear</button></div></div>`;
+  h+=`<div class="cm-section"><div class="cm-section-title">User limit (+l)</div><div class="cm-row"><input class="cm-input" id="cm-limit-input" type="number" min="1" inputmode="numeric" placeholder="no limit" value="${esc(_cm.limit)}"${ro?' disabled':''}><button class="cm-btn" id="cm-limit-set"${ro?' disabled':''}>Set</button><button class="cm-btn" id="cm-limit-clear"${ro||!_cm.limit?' disabled':''}>Clear</button></div></div>`;
+  h+=`<div class="cm-section"><div class="cm-tabs">`;
+  for(const [l,label,icon] of _CM_LISTS){ h+=`<div class="cm-tab${_cm.tab===l?' active':''}" data-tab="${l}">${icon} ${label} <span class="cm-count">${_cm.collecting[l]?'…':_cm.lists[l].length}</span></div>`; }
+  h+=`</div><div class="cm-list" id="cm-list">${cmListHtml()}</div>`;
+  if(!ro)h+=`<div class="cm-add"><input class="cm-input" id="cm-add-input" placeholder="nick!user@host" value="${esc(prevAdd)}"><button class="cm-btn primary" id="cm-add-btn">Add</button></div>`;
+  h+=`</div></div>`;
+  ov.innerHTML=h;
+  ov.querySelector('#cm-close-btn').addEventListener('click',closeChanModes);
+  if(!ro){
+    ov.querySelectorAll('input[data-flag]').forEach(cb=>cb.addEventListener('change',()=>cmToggleFlag(cb.dataset.flag,cb.checked)));
+    ov.querySelector('#cm-key-set').addEventListener('click',cmSetKey);
+    ov.querySelector('#cm-key-clear').addEventListener('click',cmClearKey);
+    ov.querySelector('#cm-limit-set').addEventListener('click',cmSetLimit);
+    ov.querySelector('#cm-limit-clear').addEventListener('click',cmClearLimit);
+    const ab=ov.querySelector('#cm-add-btn'); if(ab){ab.addEventListener('click',cmAddEntry); ov.querySelector('#cm-add-input').addEventListener('keydown',e=>{if(e.key==='Enter')cmAddEntry();});}
+    ov.querySelectorAll('.cm-del').forEach(b=>b.addEventListener('click',()=>cmRemoveEntry(b.dataset.mask)));
+  }
+  ov.querySelectorAll('.cm-tab').forEach(t=>t.addEventListener('click',()=>cmSwitchTab(t.dataset.tab)));
+}
+// Close when tapping the dark backdrop (not the box)
+document.getElementById('chanmodes-overlay')?.addEventListener('click',e=>{ if(e.target.id==='chanmodes-overlay')closeChanModes(); });
 document.addEventListener('click',e=>{
   if(!e.target.closest('.net-kebab')&&!e.target.closest('.chan-kebab')&&!e.target.closest('#float-dropdown'))
     closeFloatDd();
@@ -8703,6 +8845,7 @@ function showTopicMenu(e){
     const muteKey=conn_id+'/'+target;
     const muted=isMuted(muteKey);
     _mkItem(muted?'🔔 Unmute':'🔇 Mute',()=>toggleMute(muteKey));
+    _mkItem('⚙ Channel Modes',()=>openChanModes(conn_id,target));
     _mkItem('📋 Channel list',()=>_openChanList(conn_id));
     _mkItem('🗑 Clear History',()=>clearBufHistory(conn_id,target));
     _mkItem('🚪 Leave channel',()=>leaveCurrentChannel(),true);
