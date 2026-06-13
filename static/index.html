@@ -1265,6 +1265,10 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   15% { opacity:0; }
 }
 .msg-row { animation:fadeIn .15s ease; }
+/* Rows that arrive in a rapid burst (e.g. a WHOIS reply's ~10 numerics, paste
+   floods, history playback) skip the per-row fade so they don't visibly pulse/
+   flash one after another. Single messages still fade in. */
+.msg-row.no-anim { animation:none; }
 /* ── Highlight tags ── */
 .hl-tag { display:inline-flex; align-items:center; gap:4px; background:var(--bg4); border:1px solid var(--border); border-radius:12px; padding:3px 8px 3px 10px; font-size:11px; color:var(--text); }
 .hl-tag-x { background:none; border:none; color:var(--text3); cursor:pointer; font-size:14px; padding:0 2px; line-height:1; }

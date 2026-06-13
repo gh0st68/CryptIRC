@@ -2119,6 +2119,10 @@ function renderChat(){
     el.addEventListener('loadedmetadata',_mediaScrollFn,{once:true});
     el.addEventListener('error',()=>{},{once:true});
   });
+  // Seed the burst timer: a freshly-rendered buffer (e.g. the WHOIS auto-switch)
+  // is immediately followed by the reply's numerics — treat those first appends
+  // as part of the burst so they don't pulse in one-by-one after the view swap.
+  _lastAppendTs=Date.now();
 }
 function loadOlderMessages(){
   if(!active)return;
@@ -2152,8 +2156,19 @@ function _pruneChatDOM(area){
     toRemove--;
   }
 }
+// Rows appended within this many ms of the previous one are treated as a burst
+// and skip the fade-in animation (see .msg-row.no-anim). Tuned above typical
+// server numeric spacing (WHOIS) but well under conversational message spacing.
+const BURST_NO_ANIM_MS=120;
+let _lastAppendTs=0;
 function appendMsgRow(msg){
   const area=document.getElementById('chat-area');if(area.style.display==='none')return;
+  // Compute the burst window for EVERY append up front — including the condensed-
+  // status early-returns below — so _lastAppendTs is always current and a chat
+  // message right after a join/part still gets correct burst detection.
+  const _ts=Date.now();
+  const _burst=(_ts-_lastAppendTs)<BURST_NO_ANIM_MS;
+  _lastAppendTs=_ts;
   const statusMsgMode=(loadAppearance().statusMsg)||'condense';
   const isStatus=['away','back','join','kick','mode','nick','part','quit'].includes(msg.kind);
   const isCondensable=isStatus&&!msg.self&&!msg.mentioned;
@@ -2182,6 +2197,13 @@ function appendMsgRow(msg){
     }
   }
   const r=buildRow(msg);
+  // Burst suppression: when rows land back-to-back (a WHOIS reply's ~10 numerics,
+  // a paste flood, history playback), skip the per-row fade so the view doesn't
+  // visibly pulse/flash. Single messages (gap > BURST) keep their fade-in.
+  // Exclude mentions: their .flash highlight also uses the animation property, so
+  // a no-anim (animation:none) would swallow it. Mentions are never part of a
+  // WHOIS-style numeric burst anyway. (_burst/_ts computed at function top.)
+  if(_burst && !msg.mentioned) r.classList.add('no-anim');
   area.appendChild(r);
   if(msg.mentioned){r.classList.add('flash');setTimeout(()=>r.classList.remove('flash'),3000);}
   _pruneChatDOM(area);
@@ -3916,21 +3938,27 @@ async function _postJson(url,body){
 async function uploadFile(file){
   if(!sessionToken){showToast('Not authenticated');return;}
   if(!file){return;}
-  // Cloud "online-only" placeholders (Windows OneDrive Files On-Demand, macOS
-  // iCloud "Optimize Storage") hand the picker a File whose .size is 0 until the
-  // bytes are materialized. The chunk loop is gated on `offset < file.size`, so a
-  // 0-size file uploads nothing and the server finalize reports "No data uploaded".
-  // Don't trust a 0 size: read the bytes (which forces the OS to hydrate the file)
-  // and rebuild a real File. If it's still empty, it's genuinely 0 bytes.
+  // Some environments hand us a File whose .size is 0 even though the file has
+  // data — notably drag-and-drop on certain Linux/Chromium (Wayland, or sandboxed
+  // Flatpak/Snap) setups, and cloud "online-only" placeholders. The chunk loop is
+  // gated on `offset < file.size`, so a 0-size File uploads nothing and the server
+  // reports "No data uploaded". Don't trust a 0 size: try hard to read the real
+  // bytes (Blob.arrayBuffer, then a FileReader fallback — they use different code
+  // paths) and rebuild a proper File. Logs the actual numbers for diagnosis.
   if(file.size===0){
-    try{
-      const buf=await file.arrayBuffer();
-      if(buf && buf.byteLength>0){
-        file=new File([buf], file.name||'upload', {type:file.type||'application/octet-stream'});
-      }
-    }catch(_){}
-    if(file.size===0){
-      showToast(`Can't upload "${file.name||'file'}": it reads as 0 bytes. If it's a cloud file (OneDrive / iCloud "online-only"), open it once or set it to "Always keep on this device", then try again.`);
+    let buf=null;
+    try{ buf=await file.arrayBuffer(); }catch(e){ console.warn('[upload] arrayBuffer failed:', e&&e.name); }
+    if(!buf || buf.byteLength===0){
+      try{
+        buf=await new Promise((res,rej)=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.onerror=()=>rej(fr.error); fr.readAsArrayBuffer(file); });
+      }catch(e){ console.warn('[upload] FileReader failed:', e&&e.name); buf=null; }
+    }
+    const got=buf?buf.byteLength:0;
+    console.log('[upload] '+(file.name||'file')+' reportedSize='+file.size+' readableBytes='+got+' type='+(file.type||'?'));
+    if(got>0){
+      file=new File([buf], file.name||'upload', {type:file.type||'application/octet-stream'});
+    }else{
+      showToast(`Upload failed: "${file.name||'file'}" came through as 0 bytes — the browser couldn't read it. Try the upload button (📎) instead of drag-and-drop. (A Flatpak/Snap browser may lack permission to read dragged files.)`);
       return;
     }
   }
@@ -8980,14 +9008,27 @@ function closeChanMenus(){closeFloatDd();}
 
 // ── Channel Modes dialog (mIRC-style; opened from the channel ⋮ menu) ───────
 let _cm=null, _cmRefreshT=null;
+// Channel mode letters + labels per the UnrealIRCd "Channel Modes" docs. All of
+// these are no-parameter, operator-settable modes (+k key and +l limit have their
+// own inputs; +b/+e/+I are the list tabs). NOTE: +r (lowercase) is "channel is
+// registered at Services" and is set by Services only — the op-settable join
+// restriction is +R (uppercase): "only registered users may join".
 const _CM_FLAGS=[
-  ['n','No external messages','Block messages from users not in the channel'],
-  ['t','Topic locked','Only operators can change the topic'],
+  ['n','No external messages','Block messages from users who are not in the channel'],
+  ['t','Topic locked','Only channel operators may change the topic'],
   ['m','Moderated','Only voiced (+v) users and operators may speak'],
-  ['i','Invite only','Users must be invited (or match +I) to join'],
-  ['s','Secret','Hide the channel from /list and /whois'],
-  ['p','Private','Restrict channel visibility / knock'],
-  ['r','Registered only','Only registered (logged-in) users may join'],
+  ['i','Invite only','Users must be invited (or match the +I list) to join'],
+  ['R','Registered only','Only registered (Services-identified) users may join'],
+  ['z','TLS only','Only users connected over SSL/TLS may join'],
+  ['s','Secret','Hide the channel from /LIST and /WHOIS, as if it does not exist'],
+  ['p','Private','Partially conceal that the channel exists'],
+  ['c','Block colors','Reject messages containing mIRC/ANSI color codes'],
+  ['S','Strip colors','Strip color codes from messages instead of blocking them'],
+  ['C','Block CTCPs','Reject CTCPs sent to the channel'],
+  ['T','Block channel notices','Reject NOTICEs sent to the channel'],
+  ['N','No nick changes','Prevent users from changing nick while in the channel'],
+  ['G','Filter bad words','Censor words from the network badword list'],
+  ['Q','No kicks','Disallow /KICK (force kicks through Services)'],
 ];
 const _CM_LISTS=[['b','Bans','🚫'],['e','Exempts','✅'],['I','Invex','✉']];
 function _cmIsOp(connId,target){return /[~&@]/.test(getMyPrefix(connId,target));}
@@ -11400,7 +11441,18 @@ let _userScrolledAway=false;
 let _scrollForceTimers=[];
 let _scrollForceRO=null;
 function _isNearBottom(a,thresh){return a.scrollHeight-a.scrollTop-a.clientHeight<thresh;}
-function _iosFlushScroll(a){a.style.overflowY='hidden';void a.offsetHeight;a.scrollTop=a.scrollHeight;a.style.overflowY='';requestAnimationFrame(()=>{a.scrollTop=a.scrollHeight;});}
+// iPhone/iPad (incl. iPadOS reporting as Mac). Desktop Mac (no touch) is NOT iOS.
+const _IS_IOS=(function(){try{const ua=navigator.userAgent||'';return /iP(hone|ad|od)/.test(ua)||(/Mac/.test(navigator.platform||'')&&(navigator.maxTouchPoints||0)>1);}catch(e){return false;}})();
+// Force the chat to the bottom. The overflowY:hidden→'' toggle is an iOS-PWA-only
+// workaround (Safari can swallow a bare scrollTop); on desktop with classic, space-
+// reserving scrollbars that toggle reflows the view every message, which reads as a
+// flicker/blink during bursts (e.g. a WHOIS reply). So only toggle overflow on iOS;
+// everywhere else a plain scrollTop assignment (+ rAF re-pin) is enough and flicker-free.
+function _iosFlushScroll(a){
+  if(_IS_IOS){a.style.overflowY='hidden';void a.offsetHeight;a.scrollTop=a.scrollHeight;a.style.overflowY='';}
+  else{a.scrollTop=a.scrollHeight;}
+  requestAnimationFrame(()=>{a.scrollTop=a.scrollHeight;});
+}
 function scrollBottom(){
   const a=document.getElementById('chat-area');
   if(!a||_userScrolledAway)return;
