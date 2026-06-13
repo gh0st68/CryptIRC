@@ -617,7 +617,9 @@ function updateStarfieldTitle(){
       speed:Math.random()*0.02+0.01
     });
   }
+  let _sfRaf=0;
   function draw(){
+    if(document.hidden){_sfRaf=0;return;} // pause when tab/window hidden — don't burn a CPU core drawing an unseen canvas
     ctx.clearRect(0,0,W,H);
     const t=Date.now()*0.001;
     for(const s of stars){
@@ -634,9 +636,10 @@ function updateStarfieldTitle(){
       ctx.fillStyle=`rgba(${color},${alpha})`;
       ctx.fill();
     }
-    requestAnimationFrame(draw);
+    _sfRaf=requestAnimationFrame(draw);
   }
   draw();
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&!_sfRaf) _sfRaf=requestAnimationFrame(draw); });
 })();
 // Track pending log/sync requests so we ignore responses from other sessions.
 // _pendingLogs is a Map of "conn/target" -> send-time(ms) so jumpToMessage can
@@ -2148,11 +2151,12 @@ function appendMsgRow(msg){
     // Try to merge with an existing condensed row at the bottom
     const lastChild=area.lastElementChild;
     if(lastChild&&lastChild.classList.contains('status-condensed')){
-      // Stash the full message (so expanded view can re-render via buildRow) along with summary fields.
-      const grp=JSON.parse(lastChild.dataset.msgs||'[]');
-      grp.push(_condenseStashMsg(msg));
-      lastChild.dataset.msgs=JSON.stringify(grp);
-      _renderCondensed(lastChild,grp);
+      // Append one event in O(1): fold into running counts + append a single
+      // capped detail row. (Previously this JSON-parsed/stringified the whole
+      // group and rebuilt EVERY child via buildRow on every event — O(n²) growth
+      // with no size cap that froze long-lived tabs in channels with join/quit or
+      // away/back churn, since this one block evades the _pruneChatDOM cap too.)
+      _condenseAppend(lastChild,_condenseStashMsg(msg));
       scrollBottom();return;
     }
     // Previous element is a single status row — convert it + new one into condensed
@@ -2175,50 +2179,33 @@ function appendMsgRow(msg){
 }
 // Stash just the fields we need to (a) build the summary and (b) re-render via buildRow when expanded.
 function _condenseStashMsg(m){
-  return {kind:m.kind,ts:m.ts,from:m.from||'*',text:m.text||'',subject:m.subject||'',rawModes:m.rawModes||''};
+  return {kind:m.kind,ts:m.ts,from:m.from||'*',text:m.text||'',subject:m.subject||'',subject2:m.subject2||'',rawModes:m.rawModes||''};
 }
-function _renderCondensed(row,group){
-  const summary=buildCondensedSummary(group);
-  const lastTs=group[group.length-1]?.ts;
-  let tsTxt='';
-  if(lastTs){const t=new Date(lastTs*1000);const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';tsTxt=`${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}`;}
-  const tsEl=row.querySelector('.sc-summary .msg-ts');
-  if(tsEl) tsEl.textContent=tsTxt;
-  const txtEl=row.querySelector('.sc-summary .sc-summary-text');
-  if(txtEl) txtEl.textContent=summary;
-  // Expanded view re-renders each child via buildRow (full Lounge-style fidelity).
-  const expand=row.querySelector('.sc-expand');
-  expand.innerHTML='';
-  for(const m of group) expand.appendChild(buildRow(m));
-}
-// Match The Lounge's MessageCondensed phrasing exactly:
-//   "N user has joined" / "N users have joined"
-//   part includes quits ("N user has left")
-//   "N user has changed nick", "N user was kicked", "N modes were set",
-//   "marked away once" / "marked away N times" / same for back
-// Joiner: ", " between clauses, ", and " before the last.
-function buildCondensedSummary(group){
-  const c={join:0,part:0,quit:0,nick:0,kick:0,mode:0,away:0,back:0,chghost:0};
-  for(const m of group){
-    if(m.kind==='mode'){
-      // Lounge counts the mode-letters in the first whitespace-delimited modechunk
-      // (e.g. "+vv-t" → 3). We have m.rawModes when available; fall back to
-      // parsing the displayed text or counting the event as 1.
-      let chunk=m.rawModes||'';
-      if(!chunk){
-        const t=(m.text||'').replace(/^.*?(?:sets mode|MODE)\s+/,'');
-        chunk=t.split(/\s+/)[0]||'';
-      } else {
-        chunk=chunk.split(/\s+/)[0]||'';
-      }
-      const letters=chunk.replace(/[+\-]/g,'').length;
-      c.mode+=Math.max(1,letters);
-    } else if(c[m.kind]!==undefined){
-      c[m.kind]+=1;
-    }
+// Detail rows kept (and re-buildable) inside an expanded condensed block. The
+// SUMMARY counts stay exact regardless of this cap (they're folded incrementally,
+// never re-derived from the retained tail); only the expandable per-event history
+// is bounded so a long status run can't grow unbounded DOM/memory and freeze the
+// tab. This block is one top-level child, so _pruneChatDOM never trims it.
+const SC_CAP=300;
+function _condenseCounts(){return {join:0,part:0,quit:0,nick:0,kick:0,mode:0,away:0,back:0,chghost:0};}
+// Fold one stashed status msg into a running counts object (same per-kind logic
+// buildCondensedSummary used to run over the whole group on every event).
+function _condenseFold(c,m){
+  if(m.kind==='mode'){
+    // Lounge counts the mode-letters in the first whitespace-delimited modechunk.
+    let chunk=m.rawModes||'';
+    if(!chunk){const t=(m.text||'').replace(/^.*?(?:sets mode|MODE)\s+/,'');chunk=t.split(/\s+/)[0]||'';}
+    else chunk=chunk.split(/\s+/)[0]||'';
+    const letters=chunk.replace(/[+\-]/g,'').length;
+    c.mode+=Math.max(1,letters);
+  } else if(c[m.kind]!==undefined){
+    c[m.kind]+=1;
   }
-  // Lounge folds quit into part to reduce clutter
-  c.part+=c.quit; c.quit=0;
+}
+// Render the Lounge-style summary string from a counts object.
+function _condenseSummary(c0){
+  const c=Object.assign({},c0);
+  c.part+=c.quit; c.quit=0; // Lounge folds quit into part to reduce clutter
   const out=[];
   const push=(n,sing,plur)=>{ if(n>0) out.push(n===1?sing.replace('{n}',1):plur.replace('{n}',n)); };
   push(c.join,    '{n} user has joined',          '{n} users have joined');
@@ -2233,12 +2220,64 @@ function buildCondensedSummary(group){
   const last=out.pop();
   return out.join(', ')+', and '+last;
 }
+function _scWriteSummary(row){
+  const lastTs=row._scLastTs;
+  let tsTxt='';
+  if(lastTs){const t=new Date(lastTs*1000);const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';tsTxt=`${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}`;}
+  const tsEl=row.querySelector('.sc-summary .msg-ts');
+  if(tsEl) tsEl.textContent=tsTxt;
+  const txtEl=row.querySelector('.sc-summary .sc-summary-text');
+  if(txtEl) txtEl.textContent=_condenseSummary(row._scCounts);
+}
+// Initial render of a condensed block from a (bounded) group: exact counts over
+// the whole group, but only the last SC_CAP entries materialized as detail DOM.
+function _renderCondensed(row,group){
+  const counts=_condenseCounts();
+  for(const m of group) _condenseFold(counts,m);
+  row._scCounts=counts;
+  row._scTail=group.length>SC_CAP?group.slice(-SC_CAP):group.slice();
+  row._scLastTs=group.length?group[group.length-1].ts:0;
+  _scWriteSummary(row);
+  // Expanded view re-renders each retained child via buildRow (Lounge fidelity).
+  const expand=row.querySelector('.sc-expand');
+  expand.innerHTML='';
+  for(const m of row._scTail) expand.appendChild(buildRow(m));
+}
+// Append a single event to an existing condensed block in O(1): fold its counts,
+// refresh the summary, and append exactly one detail row (trimming the oldest
+// past SC_CAP). No whole-group re-parse or re-render.
+function _condenseAppend(row,stash){
+  if(!row._scCounts) row._scCounts=_condenseCounts();
+  if(!row._scTail) row._scTail=[];
+  _condenseFold(row._scCounts,stash);
+  row._scLastTs=stash.ts;
+  _scWriteSummary(row);
+  row._scTail.push(stash);
+  while(row._scTail.length>SC_CAP) row._scTail.shift();
+  const expand=row.querySelector('.sc-expand');
+  if(expand){
+    expand.appendChild(buildRow(stash));
+    while(expand.children.length>SC_CAP) expand.removeChild(expand.firstChild);
+  }
+}
+// Match The Lounge's MessageCondensed phrasing exactly:
+//   "N user has joined" / "N users have joined"
+//   part includes quits ("N user has left")
+//   "N user has changed nick", "N user was kicked", "N modes were set",
+//   "marked away once" / "marked away N times" / same for back
+// Joiner: ", " between clauses, ", and " before the last.
+function buildCondensedSummary(group){
+  const c=_condenseCounts();
+  for(const m of group) _condenseFold(c,m);
+  return _condenseSummary(c);
+}
 function buildCondensedRow(group){
   // Normalize each entry to the stash shape so re-renders stay consistent.
   const stash=group.map(m=>({kind:m.kind,ts:m.ts,from:m.from||'*',text:m.text||'',subject:m.subject||'',subject2:m.subject2||'',rawModes:m.rawModes||''}));
   const row=document.createElement('div');
   row.className='status-condensed';
-  row.dataset.msgs=JSON.stringify(stash);
+  // Block state (counts/tail) lives on the element via _renderCondensed below —
+  // no JSON blob in the DOM (a big stringified group used to grow per-event).
   // Summary uses the same .msg-row column structure (ts | nick | body) so it
   // aligns with normal chat rows. Chevron sits in the nick column.
   row.innerHTML=`<div class="msg-row sc-summary"><span class="msg-ts"></span><span class="msg-nick"><span class="sc-chevron">›</span></span><span class="msg-body sc-summary-text"></span></div><div class="sc-expand"></div>`;
