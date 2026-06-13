@@ -35,7 +35,7 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/client.png" width="900" alt="CryptIRC — Desktop Client">
+  <img src="screenshots/desktop.png" width="900" alt="CryptIRC — Desktop Client">
 </p>
 
 <p align="center">
