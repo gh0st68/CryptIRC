@@ -3423,15 +3423,16 @@ async function handleInput(raw){
       }
       case 'DND': {
         const sub=args[0]?.toLowerCase();
-        if(sub==='on'){localStorage.setItem('cryptirc_dnd','1');sysMsg(conn_id,target,'🔕 Do Not Disturb ON — notifications suppressed','system');}
-        else if(sub==='off'){localStorage.removeItem('cryptirc_dnd');sysMsg(conn_id,target,'🔔 Do Not Disturb OFF','system');}
+        if(sub==='on'){localStorage.setItem('cryptirc_dnd','1');savePrefsToServer();sysMsg(conn_id,target,'🔕 Do Not Disturb ON — notifications suppressed','system');}
+        else if(sub==='off'){const hadSched=!!(localStorage.getItem('cryptirc_dnd_start')||localStorage.getItem('cryptirc_dnd_end'));localStorage.removeItem('cryptirc_dnd');localStorage.removeItem('cryptirc_dnd_start');localStorage.removeItem('cryptirc_dnd_end');savePrefsToServer();sysMsg(conn_id,target,`🔔 Do Not Disturb OFF${hadSched?' — schedule cleared':''}`,'system');}
         else if(sub==='schedule'){
           const start=args[1],end=args[2];
           if(!start||!end){sysMsg(conn_id,target,'Usage: /dnd schedule <HH:MM> <HH:MM>  e.g. /dnd schedule 23:00 07:00','error');break;}
-          localStorage.setItem('cryptirc_dnd_start',start);localStorage.setItem('cryptirc_dnd_end',end);
+          localStorage.setItem('cryptirc_dnd_start',start);localStorage.setItem('cryptirc_dnd_end',end);savePrefsToServer();
           sysMsg(conn_id,target,`🔕 DND scheduled: ${start} — ${end}`,'system');
         }
-        else{const on=localStorage.getItem('cryptirc_dnd')==='1';sysMsg(conn_id,target,`DND is ${on?'ON':'OFF'}. Usage: /dnd on|off|schedule <start> <end>`,'system');}
+        else if(sub==='unschedule'){localStorage.removeItem('cryptirc_dnd_start');localStorage.removeItem('cryptirc_dnd_end');savePrefsToServer();sysMsg(conn_id,target,'🔔 DND schedule cleared','system');}
+        else{const on=localStorage.getItem('cryptirc_dnd')==='1';const hasSched=!!(localStorage.getItem('cryptirc_dnd_start')&&localStorage.getItem('cryptirc_dnd_end'));sysMsg(conn_id,target,`DND is ${on?'ON':'OFF'}${hasSched?' (schedule set)':''}. Usage: /dnd on|off|schedule <start> <end>|unschedule`,'system');}
         break;
       }
       case 'SPLIT': case 'SPLITVIEW': {
@@ -7950,7 +7951,7 @@ function restorePreferences(p){
     if(p.highlightWords) localStorage.setItem('cryptirc_highlight_words',JSON.stringify(p.highlightWords));
     if(p.userNotes) localStorage.setItem('cryptirc_user_notes',JSON.stringify(p.userNotes));
     if(p.channelKeys) localStorage.setItem('cryptirc_chankeys',JSON.stringify(p.channelKeys));
-    if(p.dnd) localStorage.setItem('cryptirc_dnd','1');
+    if(p.dnd!=null){if(p.dnd)localStorage.setItem('cryptirc_dnd','1');else localStorage.removeItem('cryptirc_dnd');}
     if(p.dndStart) localStorage.setItem('cryptirc_dnd_start',p.dndStart);
     if(p.dndEnd) localStorage.setItem('cryptirc_dnd_end',p.dndEnd);
     if(p.keepnicks) localStorage.setItem('cryptirc_keepnicks',JSON.stringify(p.keepnicks));
@@ -9074,6 +9075,7 @@ function toggleNickPanel(){
     const nIcon=document.getElementById('nick-toggle-icon');
     if(nIcon) nIcon.style.transform=collapsed?'rotate(180deg)':'';
     try{localStorage.setItem('cryptirc_nick_collapsed',collapsed?'1':'');}catch(e){}
+    savePrefsToServer();
   }
 }
 function toggleSidebarCollapse(){
@@ -9083,6 +9085,7 @@ function toggleSidebarCollapse(){
   const collapsed=sb.classList.contains('collapsed');
   if(icon) icon.style.transform=collapsed?'rotate(180deg)':'';
   try{localStorage.setItem('cryptirc_sidebar_collapsed',collapsed?'1':'');}catch(e){}
+  savePrefsToServer();
 }
 
 // ─── Certificate management ───────────────────────────────────────────────────
