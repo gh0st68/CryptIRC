@@ -1356,6 +1356,16 @@ function handleEvent(ev) {
       try{
         const cfg={...APPEAR_DEFAULTS,...JSON.parse(ev.settings)};
         localStorage.setItem('cryptirc_appear',ev.settings);
+        invalidateAppearCache(); // so an open Appearance modal / next load sees synced custom themes
+        // Reap device-local background blobs for themes deleted on another device,
+        // so localStorage doesn't accumulate orphans we can never reach again.
+        try{
+          const live=new Set(Object.keys(cfg.customThemes||{}));
+          for(let i=localStorage.length-1;i>=0;i--){
+            const k=localStorage.key(i);
+            if(k&&k.indexOf('cryptirc_cbg_')===0 && !live.has(k.slice(13))) localStorage.removeItem(k);
+          }
+        }catch(_){}
         applyThemeCSS(cfg);
       }catch(e){}
       break;
@@ -3905,6 +3915,25 @@ async function _postJson(url,body){
 // Kick off a brand-new upload for a File the user just picked or dropped.
 async function uploadFile(file){
   if(!sessionToken){showToast('Not authenticated');return;}
+  if(!file){return;}
+  // Cloud "online-only" placeholders (Windows OneDrive Files On-Demand, macOS
+  // iCloud "Optimize Storage") hand the picker a File whose .size is 0 until the
+  // bytes are materialized. The chunk loop is gated on `offset < file.size`, so a
+  // 0-size file uploads nothing and the server finalize reports "No data uploaded".
+  // Don't trust a 0 size: read the bytes (which forces the OS to hydrate the file)
+  // and rebuild a real File. If it's still empty, it's genuinely 0 bytes.
+  if(file.size===0){
+    try{
+      const buf=await file.arrayBuffer();
+      if(buf && buf.byteLength>0){
+        file=new File([buf], file.name||'upload', {type:file.type||'application/octet-stream'});
+      }
+    }catch(_){}
+    if(file.size===0){
+      showToast(`Can't upload "${file.name||'file'}": it reads as 0 bytes. If it's a cloud file (OneDrive / iCloud "online-only"), open it once or set it to "Always keep on this device", then try again.`);
+      return;
+    }
+  }
   // Source = the chat the user was last on (so even files dropped while
   // viewing the Uploads channel get a sensible "Insert into chat" target).
   const src = (active && !isUploadsConn(active.conn_id)) ? active : _lastIrcActive;
@@ -5265,6 +5294,47 @@ const THEMES={
   // ── ESHEEP: classic desktop pet, wanders the screen ────────────────────────
   esheep: {label:'🐑 eSheep',bg0:'#0f1418',bg1:'#161c22',bg2:'#1d242c',bg3:'#252d36',bg4:'#2e3842',border:'#3a4450',border2:'#52606e',text:'#e4ebf0',text2:'#a8b4c0',text3:'#5e6a76',animation:'esheep'},
 };
+// Default semantic message colors (mirror :root in index.html). Used to RESET
+// these vars when switching away from a custom theme that overrode them.
+const SEMANTIC_DEFAULTS={warn:'#ffaa00',error:'#ff4466',join:'#44cc88',part:'#cc6644',notice:'#9988cc',action:'#ffcc44'};
+// Every editable color in a custom theme, in display order, grouped for the editor UI.
+const CT_COLOR_GROUPS=[
+  {title:'Backgrounds', keys:[['bg0','Base'],['bg1','Layer 1'],['bg2','Layer 2'],['bg3','Layer 3'],['bg4','Layer 4']]},
+  {title:'Borders',     keys:[['border','Border'],['border2','Border 2']]},
+  {title:'Text',        keys:[['text','Primary'],['text2','Secondary'],['text3','Muted']]},
+  {title:'Accents',     keys:[['accent','Accent'],['accent2','Accent 2'],['link','Links']]},
+  {title:'Status colors',keys:[['warn','Warning'],['error','Error'],['join','Join'],['part','Part/Quit'],['notice','Notice'],['action','Action']]},
+];
+// Flat list of every color key a custom theme stores.
+const CT_COLOR_KEYS=CT_COLOR_GROUPS.flatMap(g=>g.keys.map(k=>k[0]));
+// Resolve a theme name to its color object. Custom themes (id "custom:<id>") come
+// from cfg.customThemes; everything else is a built-in from THEMES.
+function resolveThemeObj(name,cfg){
+  if(typeof name==='string' && name.indexOf('custom:')===0){
+    const ct=(cfg&&cfg.customThemes)?cfg.customThemes[name.slice(7)]:null;
+    if(ct) return {t:ct, custom:true};
+  }
+  return {t:THEMES[name]||THEMES.midnight, custom:false};
+}
+// Background image for a custom theme: syncable bgUrl wins, else the device-local
+// data URL (stored outside the 4KB-capped appearance config). Returns null/none.
+function _customThemeBgValue(themeName,t){
+  if(!t||!t.bgKind) return null;
+  if(t.bgUrl) return t.bgUrl;
+  if(typeof themeName==='string' && themeName.indexOf('custom:')===0){
+    try{ return localStorage.getItem('cryptirc_cbg_'+themeName.slice(7)); }catch(e){ return null; }
+  }
+  return null;
+}
+// Sanitize a background image value for safe use inside CSS url("..."). Allows only
+// https: URLs and data:image/* URLs (matches the CSP img-src directive). Strips any
+// quote/backslash that could break out of the url("...") wrapper.
+function _safeBgCss(v){
+  if(!v||typeof v!=='string') return 'none';
+  const s=v.trim();
+  if(!/^https:\/\//i.test(s) && !/^data:image\//i.test(s)) return 'none';
+  return 'url("'+s.replace(/["\\\n\r]/g,'')+'")';
+}
 const APPEAR_DEFAULTS={
   theme:'starwarp', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
@@ -5273,6 +5343,10 @@ const APPEAR_DEFAULTS={
   font:"'Spooky Magic',cursive", linkPreviews:true,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
+  // Hyperlink color. '' = follow Accent 2 (default). mobileLink '' = inherit desktop link.
+  linkColor:'', mobileLink:'',
+  // User-created themes, keyed by id. Selected via theme:'custom:<id>'.
+  customThemes:{},
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -5294,10 +5368,23 @@ function loadAppearance(){
   return _appearCache;
 }
 function invalidateAppearCache(){_appearCache=null;_appearCacheTs=0;}
+let _appearOversizeWarned=false;
 function saveAppearance(cfg){
   invalidateAppearCache();
   const json=JSON.stringify(cfg);
   try{localStorage.setItem('cryptirc_appear',json);}catch(e){}
+  // The server silently drops appearance payloads over 4KB (main.rs). Sending one
+  // anyway is worse than not sending: it gets dropped, then a later sync from the
+  // server's last-good copy can overwrite what we just changed. So when oversized,
+  // keep the full config in localStorage (works on THIS device) but DON'T sync it,
+  // and warn the user once. The custom-theme editor pre-checks at APPEAR_SYNC_BUDGET
+  // (3900) so this is only a backstop for pathological configs.
+  if(json.length>4096){
+    try{console.warn('[appearance] config '+json.length+'B exceeds 4KB server cap — not syncing across devices');}catch(_){}
+    if(!_appearOversizeWarned){ _appearOversizeWarned=true; try{showToast('Settings too large to sync across devices — saved on this device only');}catch(_){} }
+    return;
+  }
+  _appearOversizeWarned=false;
   wsend({type:'save_appearance',settings:json});
 }
 function applyAppearance(){
@@ -5326,6 +5413,11 @@ function applyAppearance(){
     inputH:     +el('a-input-h').value||prev.inputH||36,
     accent:     el('a-accent-color').value||prev.accent||'#00d4aa',
     accent2:    el('a-accent2-color').value||prev.accent2||'#0099ff',
+    // '' means "follow accent2" (the Match toggle is on).
+    linkColor:  el('a-link-match')?.classList.contains('on') ? '' : (el('a-link-color')?.value||''),
+    // Custom themes are not represented by DOM inputs here — carry them through
+    // untouched so a slider tweak never drops the user's saved themes.
+    customThemes: prev.customThemes||{},
     brightness: +el('a-brightness').value,
     mobileChatSize: +el('a-mobile-chat-size').value,
     mobileNickW:    +el('a-mobile-nick-w').value,
@@ -5333,6 +5425,8 @@ function applyAppearance(){
     mobileTheme:    el('a-mobile-theme').value||'',
     mobileAccent:   el('a-mobile-accent-color').value||'',
     mobileAccent2:  el('a-mobile-accent2-color').value||'',
+    // '' means "inherit the desktop link color" (the Inherit toggle is on).
+    mobileLink:     el('a-mobile-link-inherit')?.classList.contains('on') ? '' : (el('a-mobile-link-color')?.value||''),
     font:           el('a-font').value||prev.font||"'Spooky Magic',cursive",
     mediaShape:     el('a-media-shape')?.value || prev.mediaShape || 'rounded',
     mediaSize:      el('a-media-size')?.value || prev.mediaSize || 'medium',
@@ -5366,13 +5460,21 @@ function applyAppearance(){
   el('a-mobile-nick-w-val').textContent=(cfg.mobileNickW||60)+'px';
   el('a-mobile-accent-swatch').style.background=cfg.mobileAccent||cfg.accent;
   el('a-mobile-accent2-swatch').style.background=cfg.mobileAccent2||cfg.accent2;
+  // Keep link swatches/pickers tracking the effective color (accent2 while matched).
+  const _lEff=cfg.linkColor||cfg.accent2||'#0099ff';
+  if(el('a-link-swatch')) el('a-link-swatch').style.background=_lEff;
+  if(el('a-link-color')) el('a-link-color').value=_lEff;
+  if(el('a-link-match-hint')) el('a-link-match-hint').textContent=cfg.linkColor?'':'(using accent 2)';
+  const _mlEff=cfg.mobileLink||cfg.linkColor||cfg.accent2||'#0099ff';
+  if(el('a-mobile-link-swatch')) el('a-mobile-link-swatch').style.background=_mlEff;
 }
 function applyThemeCSS(cfg){
   const r=document.documentElement.style;
   const mob=isMobileView();
   // Pick theme: use mobile override if set
   const themeName=(mob&&cfg.mobileTheme)?cfg.mobileTheme:cfg.theme;
-  const t=THEMES[themeName]||THEMES.midnight;
+  const _rt=resolveThemeObj(themeName,cfg);
+  const t=_rt.t, isCustom=_rt.custom;
   // Keep the iOS PWA status-bar tint in sync with the active theme background,
   // otherwise a light theme shows a black status-bar seam above the app.
   const _tc=document.querySelector('meta[name="theme-color"]'); if(_tc&&t.bg0) _tc.setAttribute('content',t.bg0);
@@ -5380,16 +5482,37 @@ function applyThemeCSS(cfg){
   r.setProperty('--bg3',t.bg3); r.setProperty('--bg4',t.bg4);
   r.setProperty('--border',t.border); r.setProperty('--border2',t.border2);
   r.setProperty('--text',t.text); r.setProperty('--text2',t.text2); r.setProperty('--text3',t.text3);
-  // Pick accents: use mobile override if set
-  const accent=(mob&&cfg.mobileAccent)?cfg.mobileAccent:cfg.accent;
-  const accent2=(mob&&cfg.mobileAccent2)?cfg.mobileAccent2:cfg.accent2;
+  // Pick accents: mobile override wins; otherwise a custom theme carries its own
+  // accents, while built-in themes use the global accent prefs.
+  const accent=(mob&&cfg.mobileAccent)?cfg.mobileAccent:(isCustom?(t.accent||cfg.accent):cfg.accent);
+  const accent2=(mob&&cfg.mobileAccent2)?cfg.mobileAccent2:(isCustom?(t.accent2||cfg.accent2):cfg.accent2);
   r.setProperty('--accent',accent); r.setProperty('--accent2',accent2);
+  // Hyperlink color: mobile override → custom-theme link → global linkColor → accent2.
+  const link=(mob&&cfg.mobileLink)?cfg.mobileLink:(isCustom?(t.link||t.accent2||accent2):(cfg.linkColor||accent2));
+  r.setProperty('--link',link||accent2);
+  // Semantic message colors: custom themes may override them; built-ins keep the
+  // :root defaults, so always reset to default first then apply any custom value.
+  ['warn','error','join','part','notice','action'].forEach(k=>{
+    if(isCustom && t[k]) r.setProperty('--'+k,t[k]);
+    else r.setProperty('--'+k,SEMANTIC_DEFAULTS[k]);
+  });
   r.setProperty('--sidebar-w',cfg.sidebarW+'px');
   r.setProperty('--nicks-w',cfg.nickPanelW+'px');
   r.setProperty('--input-h',(cfg.inputH!=null?cfg.inputH:36)+'px');
   // Picture-backdrop layer — themes with bgImage render an SVG scene at low
   // opacity behind the chat. Themes without bgImage clear the var so solid color wins.
-  r.setProperty('--theme-bg-image', t.bgImage || 'none');
+  if(isCustom){
+    const _cbg=_customThemeBgValue(themeName,t);
+    r.setProperty('--theme-bg-image', _cbg ? _safeBgCss(_cbg) : 'none');
+    r.setProperty('--theme-bg-opacity', t.bgOpacity!=null ? (Math.max(0,Math.min(100,t.bgOpacity))/100) : .25);
+    const _bgl=document.getElementById('theme-bg-layer');
+    if(_bgl) _bgl.classList.toggle('repeat', !!t.bgRepeat);
+  }else{
+    r.setProperty('--theme-bg-image', t.bgImage || 'none');
+    r.setProperty('--theme-bg-opacity', .25);
+    const _bgl=document.getElementById('theme-bg-layer');
+    if(_bgl) _bgl.classList.remove('repeat');
+  }
   // Media & preview variables — shape/size/border/aspect/max-height/YT play overlay
   const _sizeMap = { small: 200, medium: 320, large: 400, xlarge: 480 };
   const _mMaxW = _sizeMap[cfg.mediaSize] || _sizeMap.medium;
@@ -6013,6 +6136,11 @@ function populateAppearanceModal(cfg){
   el('a-accent2-color').value=cfg.accent2;
   el('a-accent-swatch').style.background=cfg.accent;
   el('a-accent2-swatch').style.background=cfg.accent2;
+  // Link color: empty linkColor => "Match accent 2" toggle on, swatch previews accent2.
+  const _linkEff=cfg.linkColor||cfg.accent2||'#0099ff';
+  el('a-link-match').classList.toggle('on', !cfg.linkColor);
+  el('a-link-color').value=_linkEff;
+  el('a-link-swatch').style.background=_linkEff;
   el('a-chat-size-val').textContent=cfg.chatSize+'px';
   el('a-sidebar-font-val').textContent=cfg.sidebarFont+'px';
   el('a-nick-font-val').textContent=cfg.nickFont+'px';
@@ -6028,9 +6156,16 @@ function populateAppearanceModal(cfg){
   el('a-mobile-nick-w').value=cfg.mobileNickW||60;
   el('a-mobile-nick-w-val').textContent=(cfg.mobileNickW||60)+'px';
   cfg.mobileTimestamps ? el('a-mobile-timestamps').classList.add('on') : el('a-mobile-timestamps').classList.remove('on');
-  // Mobile theme dropdown
+  // Mobile theme dropdown — custom themes first, then built-ins.
   const mts=el('a-mobile-theme');
   mts.innerHTML='<option value="">Same as desktop</option>';
+  const _custom=cfg.customThemes||{};
+  for(const cid of Object.keys(_custom)){
+    const ct=_custom[cid]; if(!ct) continue;
+    const opt=document.createElement('option');opt.value='custom:'+cid;opt.textContent='★ '+(ct.label||'Custom');
+    if(cfg.mobileTheme==='custom:'+cid)opt.selected=true;
+    mts.appendChild(opt);
+  }
   for(const[key,t] of Object.entries(THEMES)){
     const opt=document.createElement('option');opt.value=key;opt.textContent=t.label;
     if(cfg.mobileTheme===key)opt.selected=true;
@@ -6040,6 +6175,11 @@ function populateAppearanceModal(cfg){
   el('a-mobile-accent-swatch').style.background=cfg.mobileAccent||cfg.accent;
   el('a-mobile-accent2-color').value=cfg.mobileAccent2||cfg.accent2;
   el('a-mobile-accent2-swatch').style.background=cfg.mobileAccent2||cfg.accent2;
+  // Mobile link: empty => "Inherit" toggle on, swatch previews the desktop link color.
+  const _mlEff=cfg.mobileLink||cfg.linkColor||cfg.accent2||'#0099ff';
+  el('a-mobile-link-inherit').classList.toggle('on', !cfg.mobileLink);
+  el('a-mobile-link-color').value=_mlEff;
+  el('a-mobile-link-swatch').style.background=_mlEff;
   // Media & previews
   if (el('a-media-shape'))  el('a-media-shape').value  = cfg.mediaShape  || 'rounded';
   if (el('a-media-size'))   el('a-media-size').value   = cfg.mediaSize   || 'medium';
@@ -6055,14 +6195,44 @@ function populateAppearanceModal(cfg){
   // Privacy/Security/Behavior settings are now in the standalone Security panel
   // Theme cards
   const grid=el('theme-grid'); grid.innerHTML='';
+  const selectCard=(card)=>{grid.querySelectorAll('.theme-card').forEach(c=>c.classList.remove('active'));card.classList.add('active');applyAppearance();};
+  // 1) User-created custom themes first (with an edit pencil). Labels are user
+  //    input, so build them with textContent — never innerHTML — to avoid XSS.
+  const custom=cfg.customThemes||{};
+  for(const id of Object.keys(custom)){
+    const t=custom[id]; if(!t) continue;
+    const themeKey='custom:'+id;
+    const card=document.createElement('div');
+    card.className='theme-card'+(cfg.theme===themeKey?' active':'');
+    card.dataset.theme=themeKey;
+    const prev=document.createElement('div'); prev.className='theme-preview';
+    for(const c of [t.bg0,t.accent||t.bg2,t.text||t.bg4]){const s=document.createElement('span');s.style.background=c||'#000';prev.appendChild(s);}
+    const name=document.createElement('div'); name.className='theme-name'; name.textContent=t.label||'Custom';
+    const edit=document.createElement('button'); edit.className='tc-edit'; edit.title='Edit theme'; edit.textContent='✎';
+    edit.onclick=(e)=>{e.stopPropagation();openThemeEditor(id);};
+    card.appendChild(prev); card.appendChild(name); card.appendChild(edit);
+    card.onclick=()=>selectCard(card);
+    grid.appendChild(card);
+  }
+  // 2) "Create custom theme" card.
+  const create=document.createElement('div');
+  create.className='theme-card theme-card-create';
+  create.innerHTML='<div class="tc-plus">+</div><div class="theme-name">Create theme</div>';
+  create.onclick=()=>openThemeEditor(null);
+  grid.appendChild(create);
+  // 3) Built-in themes (labels are static/trusted).
   for(const[key,t] of Object.entries(THEMES)){
     const card=document.createElement('div');
     card.className='theme-card'+(cfg.theme===key?' active':'');
     card.dataset.theme=key;
     card.innerHTML=`<div class="theme-preview"><span style="background:${t.bg0}"></span><span style="background:${t.bg2}"></span><span style="background:${t.bg4}"></span></div><div class="theme-name">${t.label}</div>`;
-    card.onclick=()=>{grid.querySelectorAll('.theme-card').forEach(c=>c.classList.remove('active'));card.classList.add('active');applyAppearance();};
+    card.onclick=()=>selectCard(card);
     grid.appendChild(card);
   }
+  // While a custom theme is active, the global accent/link pickers are inert
+  // (the theme owns those colors) — surface a hint so the controls don't look broken.
+  const _ch=el('a-colors-customhint');
+  if(_ch) _ch.style.display=(typeof cfg.theme==='string'&&cfg.theme.indexOf('custom:')===0)?'':'none';
 }
 function showAppearanceModal(){
   const cfg=loadAppearance();
@@ -6075,9 +6245,298 @@ function closeAppearanceModal(){
   document.getElementById('appearance-overlay').classList.remove('show');
 }
 function resetAppearance(){
-  saveAppearance(APPEAR_DEFAULTS);
-  populateAppearanceModal(APPEAR_DEFAULTS);
-  applyThemeCSS(APPEAR_DEFAULTS);
+  // Preserve the user's hand-built custom themes across a defaults reset — they're
+  // creations, not settings. (Their device-local background blobs stay in place too.)
+  const prev=loadAppearance();
+  const cfg={...APPEAR_DEFAULTS, customThemes: prev.customThemes||{}};
+  saveAppearance(cfg);
+  populateAppearanceModal(cfg);
+  applyThemeCSS(cfg);
+}
+
+// ─── Custom theme editor ────────────────────────────────────────────────────
+let _teId=null;        // id of the custom theme being edited (always assigned)
+let _teState=null;     // working copy of the theme object
+let _teBgData=null;    // device-local uploaded background data URL (held until save)
+let _teIsNew=false;    // true when creating (vs editing an existing theme)
+const TE_MAX_BG_DIM=1600;   // downscale uploads so the localStorage blob stays small
+const APPEAR_SYNC_BUDGET=3900; // keep synced config under the server's 4KB cap
+
+function _teNewId(){
+  if(self.crypto&&self.crypto.randomUUID) return self.crypto.randomUUID().replace(/-/g,'').slice(0,10);
+  return (Date.now().toString(36)+Math.floor((performance.now()*1000)%1e6).toString(36)).slice(0,10);
+}
+// Build a complete theme object, filling any missing color from the current
+// effective theme / global prefs so a custom theme is always fully specified.
+function _teSeedFrom(t,isCustom,cfg){
+  const out={};
+  for(const k of ['bg0','bg1','bg2','bg3','bg4','border','border2','text','text2','text3']) out[k]=t[k]||THEMES.midnight[k];
+  out.accent = isCustom?(t.accent||cfg.accent||'#00d4aa'):(cfg.accent||'#00d4aa');
+  out.accent2= isCustom?(t.accent2||cfg.accent2||'#0099ff'):(cfg.accent2||'#0099ff');
+  out.link   = isCustom?(t.link||t.accent2||out.accent2):(cfg.linkColor||out.accent2);
+  for(const k of ['warn','error','join','part','notice','action']) out[k]=(isCustom&&t[k])?t[k]:SEMANTIC_DEFAULTS[k];
+  out.animation = t.animation||'';
+  out.bgUrl = isCustom?(t.bgUrl||''):'';
+  out.bgKind = isCustom?(t.bgKind||''):'';
+  out.bgRepeat = isCustom?!!t.bgRepeat:false;
+  out.bgOpacity = isCustom&&t.bgOpacity!=null?t.bgOpacity:25;
+  return out;
+}
+function openThemeEditor(id){
+  const cfg=loadAppearance();
+  _teIsNew=!id;
+  if(id && cfg.customThemes && cfg.customThemes[id]){
+    _teId=id;
+    // _teSeedFrom returns a fresh object, so edits never mutate the stored theme.
+    _teState=_teSeedFrom(cfg.customThemes[id],true,cfg);
+    _teState.label=cfg.customThemes[id].label||'Custom';
+    try{_teBgData=localStorage.getItem('cryptirc_cbg_'+id);}catch(e){_teBgData=null;}
+  }else{
+    _teId=_teNewId();
+    // Seed from whatever theme is currently active so "create" starts from a sane palette.
+    const rt=resolveThemeObj(cfg.theme,cfg);
+    _teState=_teSeedFrom(rt.t,rt.custom,cfg);
+    _teState.label='My Theme';
+    _teBgData=null;
+  }
+  _renderThemeEditor();
+  document.getElementById('theme-editor-overlay').classList.add('show');
+  if(typeof _overlayOpen==='function') _overlayOpen('theme-editor', closeThemeEditor);
+}
+function closeThemeEditor(){
+  if(typeof _overlayClose==='function') _overlayClose('theme-editor');
+  document.getElementById('theme-editor-overlay').classList.remove('show');
+  _teState=null; _teBgData=null;
+}
+function _renderThemeEditor(){
+  const el=id=>document.getElementById(id);
+  el('te-title').textContent=_teIsNew?'New Custom Theme':'Edit Custom Theme';
+  el('te-name').value=_teState.label||'';
+  el('te-delete').style.display=_teIsNew?'none':'';
+  // Base dropdown (clone source): current + built-ins
+  const base=el('te-base');
+  base.innerHTML='<option value="">— current colors —</option>';
+  for(const[key,t] of Object.entries(THEMES)){
+    const o=document.createElement('option'); o.value=key; o.textContent=t.label; base.appendChild(o);
+  }
+  base.value='';
+  // Animation dropdown — built live from the real animation registry.
+  const anim=el('te-anim');
+  anim.innerHTML='<option value="">None</option>';
+  try{
+    Object.keys(_ANIM).sort().forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;anim.appendChild(o);});
+  }catch(e){}
+  anim.value=_teState.animation||'';
+  // Color rows
+  const wrap=el('te-colors'); wrap.innerHTML='';
+  for(const grp of CT_COLOR_GROUPS){
+    const sec=document.createElement('div'); sec.className='appear-section';
+    const title=document.createElement('div'); title.className='appear-section-title'; title.textContent=grp.title;
+    sec.appendChild(title);
+    const gridEl=document.createElement('div'); gridEl.className='te-color-grid';
+    for(const[key,label] of grp.keys){
+      const row=document.createElement('div'); row.className='te-color-row';
+      const lab=document.createElement('span'); lab.className='appear-label'; lab.textContent=label;
+      const w=document.createElement('div'); w.className='color-input-wrap';
+      const sw=document.createElement('div'); sw.className='color-swatch'; sw.id='te-sw-'+key; sw.style.background=_teState[key]||'#000';
+      const inp=document.createElement('input'); inp.type='color'; inp.value=_normHex(_teState[key]); inp.id='te-col-'+key;
+      inp.oninput=()=>teSetColor(key,inp.value);
+      sw.appendChild(inp); w.appendChild(sw); row.appendChild(lab); row.appendChild(w);
+      gridEl.appendChild(row);
+    }
+    sec.appendChild(gridEl); wrap.appendChild(sec);
+  }
+  // Background fields
+  el('te-bg-url').value=_teState.bgUrl||'';
+  el('te-bg-repeat').classList.toggle('on', !!_teState.bgRepeat);
+  el('te-bg-opacity').value=_teState.bgOpacity!=null?_teState.bgOpacity:25;
+  el('te-bg-opacity-val').textContent=(_teState.bgOpacity!=null?_teState.bgOpacity:25)+'%';
+  _teUpdateBgStatus();
+  _teApplyPreview();
+}
+// Color inputs require #rrggbb; coerce shorthand/invalid to a safe value.
+function _normHex(v){
+  if(typeof v==='string'){
+    const s=v.trim();
+    if(/^#[0-9a-fA-F]{6}$/.test(s)) return s;
+    if(/^#[0-9a-fA-F]{3}$/.test(s)) return '#'+s[1]+s[1]+s[2]+s[2]+s[3]+s[3];
+  }
+  return '#000000';
+}
+// Storage-time validation: keep any valid hex (incl. 4/8-digit alpha from cloned
+// built-ins like cyberpunk's border), otherwise fall back to a safe 6-digit value.
+function _storeColor(v){
+  if(typeof v==='string'){
+    const s=v.trim();
+    if(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s)) return s;
+  }
+  return _normHex(v);
+}
+// All te* handlers below guard on _teState: they're wired to live DOM controls,
+// and an in-flight async upload (teUploadBg) can resolve AFTER closeThemeEditor()
+// has nulled _teState — without the guard that callback would throw.
+function teSetColor(key,val){
+  if(!_teState) return;
+  _teState[key]=val;
+  const sw=document.getElementById('te-sw-'+key); if(sw) sw.style.background=val;
+  _teApplyPreview();
+}
+function teSetAnim(v){ if(!_teState) return; _teState.animation=v||''; }
+function teSetBgUrl(v){
+  if(!_teState) return;
+  v=(v||'').trim();
+  // A pasted data: URL is too large to sync — route it to device-local storage instead.
+  if(/^data:image\//i.test(v)){
+    _teBgData=v; _teState.bgUrl=''; _teState.bgKind='image';
+    document.getElementById('te-bg-url').value='';
+    _teUpdateBgStatus(); _teApplyPreview(); return;
+  }
+  _teState.bgUrl=v;
+  _teState.bgKind=(v||_teBgData)?'image':'';
+  _teUpdateBgStatus(); _teApplyPreview();
+}
+function teSetRepeat(){ if(!_teState) return; _teState.bgRepeat=document.getElementById('te-bg-repeat').classList.contains('on'); _teApplyPreview(); }
+function teSetOpacity(v){ if(!_teState) return; _teState.bgOpacity=Math.max(0,Math.min(100,+v||0)); document.getElementById('te-bg-opacity-val').textContent=_teState.bgOpacity+'%'; _teApplyPreview(); }
+function teClearBg(){
+  if(!_teState) return;
+  _teBgData=null; _teState.bgUrl=''; _teState.bgKind='';
+  document.getElementById('te-bg-url').value='';
+  _teUpdateBgStatus(); _teApplyPreview();
+}
+function _teUpdateBgStatus(){
+  const s=document.getElementById('te-bg-status');
+  if(!s||!_teState) return;
+  if(_teBgData) s.textContent='✓ Uploaded image (this device only, ~'+Math.round((_teBgData.length*0.75)/1024)+' KB)';
+  else if(_teState.bgUrl) s.textContent='✓ Using image URL (syncs across devices)';
+  else s.textContent='No background image.';
+}
+async function teUploadBg(file){
+  if(!file||!_teState) return;
+  if(!/^image\//.test(file.type)){ showToast('Please choose an image file'); return; }
+  const s=document.getElementById('te-bg-status'); if(s) s.textContent='Processing image…';
+  const editId=_teId; // bail if the editor closed or switched themes while decoding
+  try{
+    const dataUrl=await _downscaleImage(file,TE_MAX_BG_DIM);
+    if(!_teState||_teId!==editId) return;
+    _teBgData=dataUrl; _teState.bgUrl=''; _teState.bgKind='image';
+    document.getElementById('te-bg-url').value='';
+    _teUpdateBgStatus(); _teApplyPreview();
+  }catch(e){ if(s&&_teState&&_teId===editId) s.textContent='Could not read image.'; showToast('Image processing failed'); }
+}
+// Read an image File, downscale to maxDim, re-encode as JPEG to keep the
+// localStorage data URL small. Falls back to PNG for images with transparency.
+function _downscaleImage(file,maxDim){
+  return new Promise((resolve,reject)=>{
+    const fr=new FileReader();
+    fr.onerror=()=>reject(new Error('read'));
+    fr.onload=()=>{
+      const img=new Image();
+      img.onerror=()=>reject(new Error('decode'));
+      img.onload=()=>{
+        try{
+          let w=img.naturalWidth||img.width, h=img.naturalHeight||img.height;
+          if(!w||!h){reject(new Error('dim'));return;}
+          const scale=Math.min(1, maxDim/Math.max(w,h));
+          w=Math.round(w*scale); h=Math.round(h*scale);
+          const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+          const ctx=cv.getContext('2d'); ctx.drawImage(img,0,0,w,h);
+          // GIF/PNG may rely on transparency; everything else → JPEG (much smaller).
+          const useJpeg=!/image\/(png|gif|webp)/i.test(file.type);
+          resolve(cv.toDataURL(useJpeg?'image/jpeg':'image/png', useJpeg?0.82:undefined));
+        }catch(e){reject(e);}
+      };
+      img.src=fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+// Apply the working theme to the scoped preview pane (sets CSS vars locally so it
+// never touches the live document).
+function _teApplyPreview(){
+  const pv=document.getElementById('te-preview'); if(!pv||!_teState) return;
+  const st=pv.style;
+  for(const k of CT_COLOR_KEYS) st.setProperty('--'+k, _teState[k]||'#000');
+  const bg=_teBgData||_teState.bgUrl||'';
+  st.setProperty('--te-bg', bg?_safeBgCss(bg):'none');
+  st.setProperty('--te-bg-op', (_teState.bgOpacity!=null?_teState.bgOpacity:25)/100);
+  pv.classList.toggle('bg-repeat', !!_teState.bgRepeat);
+}
+function _teNameInput(){ if(!_teState) return; _teState.label=document.getElementById('te-name').value; }
+// "Start from" — replace the working palette (and animation) with a base theme's,
+// while preserving the user's name and background choices. Empty = no-op.
+function teStartFrom(name){
+  if(!name||!_teState) return;
+  const cfg=loadAppearance();
+  const rt=resolveThemeObj(name,cfg);
+  const seeded=_teSeedFrom(rt.t,rt.custom,cfg);
+  const keep={label:_teState.label, bgUrl:_teState.bgUrl, bgKind:_teState.bgKind, bgRepeat:_teState.bgRepeat, bgOpacity:_teState.bgOpacity};
+  _teState=Object.assign(seeded, keep);
+  _renderThemeEditor(); // re-renders color rows + resets the dropdown to "current"
+}
+function _appearByteSize(cfg){ try{return JSON.stringify(cfg).length;}catch(e){return 0;} }
+function saveCustomTheme(){
+  if(!_teState) return;
+  let label=(_teState.label||'').trim();
+  if(!label) label='My Theme';
+  if(label.length>32) label=label.slice(0,32);
+  _teState.label=label;
+  // Keep every color a valid hex (preserving alpha from cloned built-ins).
+  for(const k of CT_COLOR_KEYS) _teState[k]=_storeColor(_teState[k]);
+  // Drop an animation key that no longer exists in the registry (e.g. after a
+  // refactor, or hand-edited storage) so it degrades to "None" rather than an
+  // empty animation overlay.
+  if(_teState.animation && (typeof _ANIM==='undefined' || !_ANIM[_teState.animation])) _teState.animation='';
+  // Validate/limit the syncable bgUrl (https only, length-capped). data:/http: rejected.
+  let bgUrl=(_teState.bgUrl||'').trim();
+  if(bgUrl && !/^https:\/\//i.test(bgUrl)){
+    if(/^data:image\//i.test(bgUrl)){ _teBgData=bgUrl; bgUrl=''; }
+    else { showToast('Background URL must start with https://'); return; }
+  }
+  if(bgUrl.length>1024){ showToast('Background URL too long'); return; }
+  _teState.bgUrl=bgUrl;
+  _teState.bgKind=(bgUrl||_teBgData)?'image':'';
+  // Build the prospective config and enforce the 4KB server cap BEFORE committing.
+  const cfg=loadAppearance();
+  const customThemes={...(cfg.customThemes||{})};
+  customThemes[_teId]={...(_teState)};
+  const next={...cfg, customThemes, theme:'custom:'+_teId};
+  if(_appearByteSize(next)>APPEAR_SYNC_BUDGET){
+    const warn=document.getElementById('te-size-warn');
+    if(warn){warn.style.display='';warn.textContent='⚠ Your themes exceed the 4 KB sync limit, so this can\'t be saved across devices. Delete a custom theme or use shorter image URLs (uploaded images don\'t count — they stay on this device).';}
+    return;
+  }
+  // Persist the device-local uploaded background (if any) keyed by theme id.
+  if(_teBgData){
+    try{ localStorage.setItem('cryptirc_cbg_'+_teId, _teBgData); }
+    catch(e){ showToast('Image too large for this device\'s storage'); return; }
+  }else{
+    try{ localStorage.removeItem('cryptirc_cbg_'+_teId); }catch(e){}
+  }
+  saveAppearance(next);
+  applyThemeCSS(next);
+  populateAppearanceModal(next);
+  closeThemeEditor();
+  showToast('Theme saved');
+}
+function deleteCustomTheme(){
+  if(_teIsNew||!_teId){ closeThemeEditor(); return; }
+  const id=_teId;
+  customConfirm('Delete this custom theme?').then(ok=>{
+    if(!ok) return;
+    const cfg=loadAppearance();
+    const customThemes={...(cfg.customThemes||{})};
+    delete customThemes[id];
+    const next={...cfg, customThemes};
+    // If the deleted theme was active (desktop or mobile), fall back to a built-in.
+    if(next.theme==='custom:'+id) next.theme='starwarp';
+    if(next.mobileTheme==='custom:'+id) next.mobileTheme='';
+    try{ localStorage.removeItem('cryptirc_cbg_'+id); }catch(e){}
+    saveAppearance(next);
+    applyThemeCSS(next);
+    populateAppearanceModal(next);
+    closeThemeEditor();
+    showToast('Theme deleted');
+  });
 }
 // Apply saved appearance on load and on resize (mobile/desktop switch)
 (function(){
@@ -10945,7 +11404,12 @@ function _iosFlushScroll(a){a.style.overflowY='hidden';void a.offsetHeight;a.scr
 function scrollBottom(){
   const a=document.getElementById('chat-area');
   if(!a||_userScrolledAway)return;
-  if(_isNearBottom(a,150)){_iosFlushScroll(a);}
+  // `_userScrolledAway` (kept current by _onChatScroll) is the source of truth for
+  // "user is reading history, don't yank them down." DON'T re-measure distance here:
+  // scrollBottom runs AFTER the new row is in the DOM, so a tall message (several
+  // lines pasted at once, or a just-loaded image) already pushes the distance past
+  // any threshold — which used to make auto-scroll bail and force a manual scroll.
+  _iosFlushScroll(a);
   updateScrollBtn();
 }
 function scrollForce(){

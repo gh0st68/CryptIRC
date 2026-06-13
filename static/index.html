@@ -31,6 +31,8 @@
   /* --text3 lightened from #4a4a78 to meet WCAG AA contrast (~4.5:1) for muted/secondary text (audit #92) */
   --text:#d0d0e8; --text2:#8888cc; --text3:#7d7db5;
   --accent:#00d4aa; --accent2:#0099ff;
+  /* Hyperlink color in chat. Defaults to accent2 unless the user picks a custom link color. */
+  --link:#0099ff;
   --warn:#ffaa00; --error:#ff4466; --join:#44cc88; --part:#cc6644;
   --notice:#9988cc; --action:#ffcc44;
   --mono:'JetBrains Mono',monospace; --sans:'Syne',sans-serif;
@@ -564,6 +566,81 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   font-family:var(--mono); font-size:11px; padding:8px 14px; cursor:pointer; transition:all .15s;
 }
 .appear-reset:hover { border-color:var(--text3); color:var(--text2); }
+/* ── Custom theme editor ─────────────────────────────────────────────────── */
+#theme-editor-overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,.7); display:none; align-items:center; justify-content:center;
+  z-index:170; padding:20px;
+}
+#theme-editor-overlay.show { display:flex; }
+.te-input {
+  background:var(--bg3); border:1px solid var(--border); border-radius:4px;
+  color:var(--text); font-size:12px; padding:5px 8px; font-family:var(--mono);
+}
+.te-input:focus { outline:none; border-color:var(--accent); }
+.te-btn {
+  background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text2);
+  font-family:var(--mono); font-size:11px; padding:6px 12px; cursor:pointer; transition:all .15s;
+  min-height:32px;
+}
+.te-btn:hover { border-color:var(--text3); color:var(--text); }
+.te-save {
+  background:var(--accent); border:1px solid var(--accent); border-radius:6px; color:#000;
+  font-family:var(--mono); font-size:11px; font-weight:700; padding:8px 16px; cursor:pointer; transition:filter .15s;
+  min-height:36px;
+}
+.te-save:hover { filter:brightness(1.1); }
+/* Editor color rows reuse the appearance color swatch widget */
+.te-color-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:8px 14px; }
+.te-color-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.te-color-row .appear-label { font-size:12px; }
+@media (max-width:520px){ .te-color-grid { grid-template-columns:1fr; } #te-preview { height:120px; } }
+/* On very narrow phones, let label+controls stack instead of overflowing. */
+@media (max-width:400px){ .appear-row { flex-wrap:wrap; } }
+/* Live preview pane */
+#te-preview {
+  position:relative; display:flex; height:170px; border-radius:8px; overflow:hidden;
+  border:1px solid var(--border); background:var(--bg0); isolation:isolate;
+}
+#te-preview-bg {
+  position:absolute; inset:0; z-index:0; pointer-events:none;
+  background-image:var(--te-bg,none); background-size:cover; background-position:center;
+  background-repeat:no-repeat; opacity:var(--te-bg-op,.25);
+}
+#te-preview.bg-repeat #te-preview-bg { background-size:auto; background-repeat:repeat; }
+.te-pv-side {
+  position:relative; z-index:1; width:88px; flex-shrink:0; background:var(--bg1);
+  border-right:1px solid var(--border); padding:8px 6px; font-size:10px; overflow:hidden;
+}
+.te-pv-net { color:var(--text3); font-size:8px; letter-spacing:.08em; margin-bottom:6px; text-transform:uppercase; }
+.te-pv-chan { color:var(--text2); padding:3px 5px; border-radius:4px; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.te-pv-chan-active { background:var(--bg4); color:var(--accent); }
+.te-pv-main { position:relative; z-index:1; flex:1; background:var(--bg0); padding:8px 10px; font-size:11px; overflow:hidden; display:flex; flex-direction:column; gap:4px; }
+.te-pv-topic { color:var(--accent); font-size:9px; padding-bottom:4px; border-bottom:1px solid var(--border); margin-bottom:2px; }
+.te-pv-msg { display:flex; gap:6px; line-height:1.4; }
+.te-pv-nick { color:var(--accent); font-weight:600; flex-shrink:0; }
+.te-pv-nick2 { color:var(--accent2); }
+.te-pv-nick3 { color:var(--text2); }
+.te-pv-text { color:var(--text); min-width:0; overflow:hidden; }
+.te-pv-text.te-pv-muted { color:var(--text3); }
+.te-pv-link { color:var(--link,var(--accent2)); text-decoration:none; }
+.te-pv-status { font-size:9px; }
+.te-pv-join { color:var(--join); }
+.te-pv-part { color:var(--part); }
+.te-pv-error { color:var(--error); }
+/* "Create custom theme" card + custom-theme card affordances in the theme grid */
+.theme-card.theme-card-create {
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  border-style:dashed; color:var(--text2); min-height:64px; gap:2px;
+}
+.theme-card.theme-card-create .tc-plus { font-size:20px; line-height:1; color:var(--accent); }
+.theme-card { position:relative; }
+.theme-card .tc-edit {
+  position:absolute; top:3px; right:3px; width:20px; height:20px; border-radius:4px;
+  background:rgba(0,0,0,.45); color:#fff; border:none; cursor:pointer; font-size:11px; line-height:20px;
+  padding:0; display:none; align-items:center; justify-content:center; text-align:center;
+}
+.theme-card:hover .tc-edit, .theme-card.active .tc-edit { display:flex; }
+.theme-card .tc-edit:hover { background:var(--accent); color:#000; }
 /* encryption panel */
 #encrypt-overlay {
   position:fixed; inset:0; background:rgba(0,0,0,.7); display:none; align-items:center; justify-content:center;
@@ -710,7 +787,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .msg-nick { width:auto; max-width:120px; flex-shrink:0; text-align:right; padding-right:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; cursor:pointer; }
 .msg-nick:hover { text-decoration:underline; }
 .msg-body { flex:1; min-width:0; word-break:break-word; overflow-wrap:anywhere; }
-.msg-body a { color:var(--accent2); text-decoration:none; }
+.msg-body a { color:var(--link,var(--accent2)); text-decoration:none; }
 .msg-body a:hover { text-decoration:underline; }
 .msg-media {
   display:block; margin-top:6px;
@@ -1134,7 +1211,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   background-image: var(--theme-bg-image, none);
   background-size: cover; background-position: center center;
   background-repeat: no-repeat; background-attachment: fixed;
-  opacity:.25;
+  opacity:var(--theme-bg-opacity,.25);
 }
 #theme-bg-layer.repeat {
   background-size: auto; background-repeat: repeat;
@@ -1304,10 +1381,11 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   .chanlist-header { padding:12px 14px 10px; gap:8px; }
   .chanlist-body { padding:4px 8px; }
   .chanlist-row { padding:8px 4px; font-size:12px; }
-  #appearance-overlay { padding:8px; }
+  #appearance-overlay, #theme-editor-overlay { padding:8px; }
   .appear-box { max-width:100%; max-height:min(92vh, 92dvh); }
-  .appear-body { padding:14px 14px 18px; }
+  .appear-body { padding:14px 14px max(18px,var(--sab)); }
   .appear-header { padding:14px 14px 10px; }
+  #te-preview { height:130px; }
   #help-overlay > div { width:100% !important; max-width:100% !important; max-height:100dvh !important; border-radius:0 !important; padding-top:var(--sat); padding-bottom:var(--sab); padding-left:var(--sal); padding-right:var(--sar); }
   #help-body { padding:14px !important; font-size:12px !important; word-wrap:break-word; }
   #help-body pre, #help-body code { white-space:pre-wrap !important; word-wrap:break-word !important; overflow-wrap:anywhere !important; }
@@ -1346,6 +1424,14 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   .appear-toggle { min-height:44px; }
   .fav-star { padding:8px; }
   .hl-tag-x { padding:6px 8px; }
+  /* The custom-theme edit pencil only shows on hover — unreachable on touch, so
+     keep it visible on custom theme cards and give it a real hit area. */
+  .theme-card .tc-edit { display:flex !important; min-width:30px; min-height:30px; }
+  /* Color swatches stay 28px visually, but widen the invisible <input> overlay to a
+     44px tap target so the new link/theme-editor pickers are reliably tappable. */
+  .color-swatch input[type=color] { inset:-8px; width:calc(100% + 16px); height:calc(100% + 16px); }
+  /* Theme-editor form controls to 44px on touch. */
+  .te-input, .te-btn, .te-save { min-height:44px; }
 }
 
 /* Respect the OS "Reduce Motion" accessibility setting (also saves battery). */
@@ -1442,15 +1528,32 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 // so this MUST run to provide bg/border/text/accent values.
 (function(){try{var c=JSON.parse(localStorage.getItem('cryptirc_appear')||'{}');
 var T={midnight:{bg0:'#0b0d0f',bg1:'#111418',bg2:'#181d24',bg3:'#1e242e',bg4:'#252c38',border:'#2a3444',border2:'#3a4a60',text:'#c8d8e8',text2:'#7a9ab8',text3:'#82a0b8'/* lightened from #4a6278 for WCAG AA contrast (audit #92) */},dracula:{bg0:'#282a36',bg1:'#2d303e',bg2:'#343746',bg3:'#3b3f51',bg4:'#44495e',border:'#44475a',border2:'#6272a4',text:'#f8f8f2',text2:'#bd93f9',text3:'#6272a4'},monokai:{bg0:'#272822',bg1:'#2d2e27',bg2:'#383830',bg3:'#3e3d32',bg4:'#49483e',border:'#49483e',border2:'#75715e',text:'#f8f8f2',text2:'#a6e22e',text3:'#75715e'},nord:{bg0:'#2e3440',bg1:'#3b4252',bg2:'#434c5e',bg3:'#4c566a',bg4:'#576279',border:'#4c566a',border2:'#5e6779',text:'#eceff4',text2:'#88c0d0',text3:'#616e88'},solarize:{bg0:'#002b36',bg1:'#073642',bg2:'#0a3f4e',bg3:'#0d4a5a',bg4:'#1a5c6e',border:'#2aa198',border2:'#586e75',text:'#93a1a1',text2:'#839496',text3:'#586e75'},gruvbox:{bg0:'#282828',bg1:'#3c3836',bg2:'#504945',bg3:'#665c54',bg4:'#7c6f64',border:'#504945',border2:'#665c54',text:'#ebdbb2',text2:'#b8bb26',text3:'#928374'},abyss:{bg0:'#000',bg1:'#080808',bg2:'#101010',bg3:'#181818',bg4:'#222',border:'#1a1a1a',border2:'#333',text:'#ccc',text2:'#888',text3:'#555'},light:{bg0:'#f5f5f5',bg1:'#ebebeb',bg2:'#e0e0e0',bg3:'#d5d5d5',bg4:'#cacaca',border:'#c0c0c0',border2:'#aaa',text:'#1a1a1a',text2:'#444',text3:'#888'},cobalt:{bg0:'#002240',bg1:'#002b50',bg2:'#003460',bg3:'#003d70',bg4:'#004880',border:'#0050a0',border2:'#1a6ab5',text:'#fff',text2:'#80d4ff',text3:'#4488aa'}};
-var t=T[c.theme]||T.midnight;var r=document.documentElement.style;
+var r=document.documentElement.style;
+// Resolve the active theme name (respect mobile override if a phone-width viewport).
+var mob=(window.innerWidth<=768);
+var themeName=(mob&&c.mobileTheme)?c.mobileTheme:c.theme;
+// Custom themes (id form "custom:<id>") live in c.customThemes — apply them here too so
+// there's no flash of a built-in fallback before app.js runs applyThemeCSS().
+var ct=null;
+if(typeof themeName==='string'&&themeName.indexOf('custom:')===0&&c.customThemes){ct=c.customThemes[themeName.slice(7)]||null;}
+var t=ct||T[themeName]||T.midnight;
 r.setProperty('--bg0',t.bg0);r.setProperty('--bg1',t.bg1);r.setProperty('--bg2',t.bg2);r.setProperty('--bg3',t.bg3);r.setProperty('--bg4',t.bg4);
 r.setProperty('--border',t.border);r.setProperty('--border2',t.border2);r.setProperty('--text',t.text);r.setProperty('--text2',t.text2);r.setProperty('--text3',t.text3);
-r.setProperty('--accent',c.accent||'#00d4aa');r.setProperty('--accent2',c.accent2||'#0099ff');
+// Accent/accent2/link: a custom theme carries its own; built-in themes use the global prefs.
+var accent=(mob&&c.mobileAccent)?c.mobileAccent:(ct?(ct.accent||c.accent):c.accent)||'#00d4aa';
+var accent2=(mob&&c.mobileAccent2)?c.mobileAccent2:(ct?(ct.accent2||c.accent2):c.accent2)||'#0099ff';
+var link=(mob&&c.mobileLink)?c.mobileLink:(ct?(ct.link||ct.accent2||accent2):(c.linkColor||accent2));
+r.setProperty('--accent',accent);r.setProperty('--accent2',accent2);r.setProperty('--link',link||'#0099ff');
+// Semantic colors only differ for custom themes; built-ins keep the :root defaults.
+if(ct){['warn','error','join','part','notice','action'].forEach(function(k){if(ct[k])r.setProperty('--'+k,ct[k]);});}
+// Custom background (no flash): prefer the syncable bgUrl, else the device-local data URL.
+var bg=ct?(ct.bgUrl||localStorage.getItem('cryptirc_cbg_'+themeName.slice(7))):null;
+if(ct&&ct.bgKind&&bg){var _bs=String(bg).trim();if(/^https:\/\//i.test(_bs)||/^data:image\//i.test(_bs)){r.setProperty('--theme-bg-image','url("'+_bs.replace(/["\\\n\r]/g,'')+'")');}if(ct.bgOpacity!=null)r.setProperty('--theme-bg-opacity',(ct.bgOpacity/100));}
 if(c.sidebarW)r.setProperty('--sidebar-w',c.sidebarW+'px');if(c.nickPanelW)r.setProperty('--nicks-w',c.nickPanelW+'px');
 }catch(e){var r=document.documentElement.style;
 r.setProperty('--bg0','#0b0d0f');r.setProperty('--bg1','#111418');r.setProperty('--bg2','#181d24');r.setProperty('--bg3','#1e242e');r.setProperty('--bg4','#252c38');
 r.setProperty('--border','#2a3444');r.setProperty('--border2','#3a4a60');r.setProperty('--text','#c8d8e8');r.setProperty('--text2','#7a9ab8');r.setProperty('--text3','#82a0b8');/* lightened from #4a6278 for WCAG AA contrast (audit #92) */
-r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
+r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setProperty('--link','#0099ff');
 }})();
 </script>
 </head>
@@ -1987,6 +2090,14 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           </div>
         </div>
         <div class="appear-row">
+          <span class="appear-label">Links</span>
+          <div class="color-input-wrap">
+            <span style="font-size:10px;color:var(--text3)">Inherit</span>
+            <button class="appear-toggle" id="a-mobile-link-inherit" onclick="this.classList.toggle('on');applyAppearance()" title="Use the desktop link color on mobile"></button>
+            <div class="color-swatch" id="a-mobile-link-swatch"><input type="color" id="a-mobile-link-color" oninput="document.getElementById('a-mobile-link-inherit').classList.remove('on');applyAppearance()"></div>
+          </div>
+        </div>
+        <div class="appear-row">
           <span class="appear-label">Chat font size</span>
           <input type="range" class="appear-slider" id="a-mobile-chat-size" min="11" max="22" oninput="applyAppearance()">
           <span class="appear-value" id="a-mobile-chat-size-val">15px</span>
@@ -2004,6 +2115,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 
       <div class="appear-section">
         <div class="appear-section-title">Colors</div>
+        <div id="a-colors-customhint" style="display:none;font-size:10px;color:var(--text3);margin-bottom:8px;line-height:1.5">A custom theme is active — these accent/link colors come from the theme. Edit them with the ✎ on the theme card.</div>
         <div class="appear-row">
           <span class="appear-label">Accent</span>
           <div class="color-input-wrap">
@@ -2017,6 +2129,14 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
           </div>
         </div>
         <div class="appear-row">
+          <span class="appear-label">Links <span id="a-link-match-hint" style="font-size:10px;color:var(--text3)"></span></span>
+          <div class="color-input-wrap">
+            <span style="font-size:10px;color:var(--text3)">Match accent 2</span>
+            <button class="appear-toggle" id="a-link-match" onclick="this.classList.toggle('on');applyAppearance()" title="Use the Accent 2 color for hyperlinks"></button>
+            <div class="color-swatch" id="a-link-swatch"><input type="color" id="a-link-color" oninput="document.getElementById('a-link-match').classList.remove('on');applyAppearance()"></div>
+          </div>
+        </div>
+        <div class="appear-row">
           <span class="appear-label">Brightness</span>
           <input type="range" class="appear-slider" id="a-brightness" min="50" max="150" step="5" oninput="applyAppearance()">
           <span class="appear-value" id="a-brightness-val"></span>
@@ -2027,6 +2147,101 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');
 
       <div style="display:flex;justify-content:center;padding-top:8px;">
         <button class="appear-reset" onclick="resetAppearance()">Reset to Defaults</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── CUSTOM THEME EDITOR ──────── -->
+<div id="theme-editor-overlay">
+  <div class="appear-box te-box">
+    <div class="appear-header">
+      <button class="appear-close" onclick="closeThemeEditor()" title="Back to Appearance" style="font-size:20px">&larr;</button>
+      <span class="appear-title" id="te-title">Custom Theme</span>
+      <button class="appear-close" onclick="closeThemeEditor()" title="Close">&times;</button>
+    </div>
+    <div class="appear-body">
+      <div class="appear-section">
+        <div class="appear-row">
+          <span class="appear-label">Name</span>
+          <input id="te-name" type="text" maxlength="32" placeholder="My Theme" oninput="_teNameInput()" class="te-input" style="flex:1;max-width:220px">
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Start from</span>
+          <select id="te-base" onchange="teStartFrom(this.value)" class="te-input" style="flex:1;max-width:220px">
+            <option value="">— current colors —</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="appear-section">
+        <div class="appear-section-title">Live preview</div>
+        <div id="te-preview">
+          <div id="te-preview-bg"></div>
+          <div class="te-pv-side">
+            <div class="te-pv-net">NETWORK</div>
+            <div class="te-pv-chan te-pv-chan-active"># general</div>
+            <div class="te-pv-chan"># random</div>
+          </div>
+          <div class="te-pv-main">
+            <div class="te-pv-topic">Topic: welcome to the channel</div>
+            <div class="te-pv-msg"><span class="te-pv-nick">alice</span><span class="te-pv-text">hey, check this <a href="#" onclick="return false" class="te-pv-link">https://example.com</a></span></div>
+            <div class="te-pv-msg"><span class="te-pv-nick te-pv-nick2">bob</span><span class="te-pv-text">looks great 🎉</span></div>
+            <div class="te-pv-status te-pv-join">→ carol has joined</div>
+            <div class="te-pv-status te-pv-part">← dave has quit</div>
+            <div class="te-pv-status te-pv-error">⚠ connection error</div>
+            <div class="te-pv-msg"><span class="te-pv-nick te-pv-nick3">you</span><span class="te-pv-text te-pv-muted">muted secondary text</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="te-colors"></div>
+
+      <div class="appear-section">
+        <div class="appear-section-title">Animation</div>
+        <div class="appear-row">
+          <span class="appear-label">Background animation</span>
+          <select id="te-anim" onchange="teSetAnim(this.value)" class="te-input" style="flex:1;max-width:220px">
+            <option value="">None</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="appear-section">
+        <div class="appear-section-title">Background image</div>
+        <div style="font-size:10px;color:var(--text3);margin-bottom:8px;line-height:1.5">Upload an image (stored on <b>this device only</b>) or paste an <b>https</b> image URL (syncs across your devices).</div>
+        <div class="appear-row">
+          <span class="appear-label">Image</span>
+          <div style="display:flex;gap:6px">
+            <button class="te-btn" type="button" onclick="document.getElementById('te-bg-file').click()">Upload</button>
+            <button class="te-btn" type="button" onclick="teClearBg()">Clear</button>
+          </div>
+        </div>
+        <input type="file" id="te-bg-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" onchange="teUploadBg(this.files&&this.files[0]);this.value=''">
+        <div class="appear-row">
+          <span class="appear-label">Image URL</span>
+          <input id="te-bg-url" type="text" placeholder="https://… (or leave blank)" oninput="teSetBgUrl(this.value)" class="te-input" style="flex:1;max-width:220px">
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Tile / repeat</span>
+          <button class="appear-toggle" id="te-bg-repeat" type="button" onclick="this.classList.toggle('on');teSetRepeat()"></button>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Opacity</span>
+          <input type="range" class="appear-slider" id="te-bg-opacity" min="0" max="100" step="5" value="25" oninput="teSetOpacity(this.value)">
+          <span class="appear-value" id="te-bg-opacity-val">25%</span>
+        </div>
+        <div id="te-bg-status" style="font-size:10px;color:var(--text3);min-height:14px"></div>
+      </div>
+
+      <div id="te-size-warn" style="display:none;font-size:11px;color:var(--warn);background:rgba(255,170,0,.1);border:1px solid rgba(255,170,0,.3);border-radius:6px;padding:8px 10px;margin-bottom:12px"></div>
+
+      <div style="display:flex;gap:8px;justify-content:space-between;padding-top:4px;align-items:center;">
+        <button class="appear-reset" id="te-delete" type="button" onclick="deleteCustomTheme()" style="color:var(--error);border-color:var(--error)">Delete</button>
+        <div style="display:flex;gap:8px">
+          <button class="appear-reset" type="button" onclick="closeThemeEditor()">Cancel</button>
+          <button class="te-save" type="button" onclick="saveCustomTheme()">Save &amp; Apply</button>
+        </div>
       </div>
     </div>
   </div>
