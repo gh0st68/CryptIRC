@@ -5376,7 +5376,7 @@ const APPEAR_DEFAULTS={
   // User-created themes, keyed by id. Selected via theme:'custom:<id>'.
   customThemes:{},
   // Desktop pet (eSheep) — a little sheep wanders the client window. Off by default.
-  esheep:false,
+  esheep:'off',
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -5388,6 +5388,9 @@ const APPEAR_DEFAULTS={
   ytPlayOverlay:true,      // show ▶ overlay on YouTube thumbs
 };
 function isMobileView(){return window.innerWidth<=768;}
+// eSheep enablement mode: 'off' | 'desktop' | 'mobile' | 'both' (legacy boolean true => 'both').
+function _esheepMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
+function _esheepOn(v){ var m=_esheepMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
 let _appearCache=null,_appearCacheTs=0;
 function loadAppearance(){
   const now=Date.now();
@@ -5468,7 +5471,7 @@ function applyAppearance(){
     mediaMaxHeight: (()=>{const v=el('a-media-max-h')?.value; const n=v==null||v===''?NaN:+v; return Number.isFinite(n)?n:(prev.mediaMaxHeight??280);})(),
     ytPlayOverlay:  el('a-yt-play')?.classList.contains('on') ?? true,
     // Desktop pet toggle. Carry the previous value through if the row is absent.
-    esheep:     el('a-esheep') ? el('a-esheep').classList.contains('on') : (prev.esheep??false),
+    esheep:     el('a-esheep') ? el('a-esheep').value : _esheepMode(prev.esheep),
   };
   // Show/hide the custom radius slider based on shape
   const _radiusRow = el('a-media-radius-row');
@@ -5655,14 +5658,14 @@ function applyThemeCSS(cfg){
   // idempotent. Guarded: esheep.js is a deferred script, so on the first
   // app.js apply it may not be defined yet — the window 'load' handler below
   // re-applies the saved state once it is.
-  if(window.CryptIRCSheep){ cfg.esheep ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); }
+  if(window.CryptIRCSheep){ _esheepOn(cfg.esheep) ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); }
 }
 
 // Apply the saved eSheep state once everything (including the deferred
 // esheep.js) has loaded — covers returning users who left the pet enabled,
 // regardless of the app.js-runs-before-deferred-scripts execution order.
 window.addEventListener('load', function(){
-  try{ if(window.CryptIRCSheep){ var _c=loadAppearance(); _c.esheep ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); } }catch(_){}
+  try{ if(window.CryptIRCSheep){ var _c=loadAppearance(); _esheepOn(_c.esheep) ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); } }catch(_){}
 });
 
 // ─── Animation System ─────────────────────────────────────────────────────────
@@ -6176,7 +6179,7 @@ function populateAppearanceModal(cfg){
   cfg.compact ? el('a-compact').classList.add('on') : el('a-compact').classList.remove('on');
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
-  { const _es=el('a-esheep'); if(_es){ cfg.esheep ? _es.classList.add('on') : _es.classList.remove('on'); } }
+  { const _es=el('a-esheep'); if(_es){ _es.value=_esheepMode(cfg.esheep); } }
   // spellcheck and linkPreviews toggles are now in the Security panel
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;
@@ -11179,13 +11182,43 @@ function showHelpPanel(){
     <div class="help-support-text">
       Join us on <span class="help-support-server">irc.twistednet.org</span><br>
       Channels: <span class="help-support-chan">#dev</span> and <span class="help-support-chan">#twisted</span><br><br>
-      <span style="font-size:11px;color:var(--text3)">CryptIRC v0.3 — Created by gh0st with Hallucinate</span>
+      <span style="font-size:11px;color:var(--text3)">CryptIRC v${CRYPTIRC_VERSION} — Created by gh0st with Hallucinate</span>
     </div>`;
   body.appendChild(sup);
+  var _hvp=document.getElementById('help-ver-pill'); if(_hvp) _hvp.textContent='v'+CRYPTIRC_VERSION;
   document.getElementById('help-overlay').classList.add('show');
   _overlayOpen('helpPanel', closeHelpPanel);
 }
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
+
+// ─── What's New / changelog ────────────────────────────────────────────────
+const CRYPTIRC_VERSION='0.3.0';
+// Newest release first; each item tagged new|fix|sec. Add new releases on top.
+const NEWS=[
+  {version:'0.3.0', date:'June 2026', items:[
+    {tag:'new', text:'eSheep desktop pet — a little sheep wanders your client window: climbs the edges, naps, gets abducted by a UFO, and is draggable. Enable it for desktop, mobile, or both in Appearance ▸ Desktop Pet (off by default).'},
+    {tag:'new', text:'Custom theme editor with 50+ built-in themes, animated scene backgrounds, your own background image, and a customizable chat link colour.'},
+    {tag:'fix', text:'Fixed a freeze that could hit the web (PWA) and desktop apps when left open for a long time.'},
+    {tag:'fix', text:'WHOIS results no longer flicker, and the channel-modes menu now matches UnrealIRCd (e.g. +R for registered-only join).'},
+    {tag:'fix', text:'Uploads now work with cloud “online-only” placeholder files (OneDrive / iCloud) instead of failing with “No data uploaded.”'},
+    {tag:'fix', text:'The user-list collapse state and Do-Not-Disturb settings now stay in sync across all your devices.'},
+  ]},
+];
+function showNewsPanel(){
+  var body=document.getElementById('news-body'); if(!body) return;
+  var pill=document.getElementById('news-ver-pill'); if(pill) pill.textContent='v'+CRYPTIRC_VERSION;
+  var label={new:'New', fix:'Fix', sec:'Security'};
+  body.innerHTML=NEWS.map(function(rel){
+    return '<div class="news-rel"><div class="news-rel-head"><span class="news-rel-ver">v'+esc(rel.version)+'</span><span class="news-rel-date">'+esc(rel.date)+'</span></div>'+
+      rel.items.map(function(it){
+        return '<div class="news-item"><span><span class="news-tag '+esc(it.tag)+'">'+esc(label[it.tag]||it.tag)+'</span>'+esc(it.text)+'</span></div>';
+      }).join('')+
+    '</div>';
+  }).join('');
+  document.getElementById('news-overlay').classList.add('show');
+  _overlayOpen('newsPanel', closeNewsPanel);
+}
+function closeNewsPanel(){_overlayClose('newsPanel');document.getElementById('news-overlay').classList.remove('show');}
 
 // ─── Admin Panel ──────────────────────────────────────────────────────────────
 let _isAdmin=false;
