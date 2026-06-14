@@ -5379,6 +5379,7 @@ const APPEAR_DEFAULTS={
   customThemes:{},
   // Desktop pet (eSheep) — a little sheep wanders the client window. Off by default.
   esheep:'off',
+  crab:'off',
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -5393,6 +5394,8 @@ function isMobileView(){return window.innerWidth<=768;}
 // eSheep enablement mode: 'off' | 'desktop' | 'mobile' | 'both' (legacy boolean true => 'both').
 function _esheepMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
 function _esheepOn(v){ var m=_esheepMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
+function _crabMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
+function _crabOn(v){ var m=_crabMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
 let _appearCache=null,_appearCacheTs=0;
 function loadAppearance(){
   const now=Date.now();
@@ -5474,6 +5477,7 @@ function applyAppearance(){
     ytPlayOverlay:  el('a-yt-play')?.classList.contains('on') ?? true,
     // Desktop pet toggle. Carry the previous value through if the row is absent.
     esheep:     el('a-esheep') ? el('a-esheep').value : _esheepMode(prev.esheep),
+    crab:       el('a-crab') ? el('a-crab').value : _crabMode(prev.crab),
   };
   // Show/hide the custom radius slider based on shape
   const _radiusRow = el('a-media-radius-row');
@@ -5661,6 +5665,7 @@ function applyThemeCSS(cfg){
   // app.js apply it may not be defined yet — the window 'load' handler below
   // re-applies the saved state once it is.
   if(window.CryptIRCSheep){ _esheepOn(cfg.esheep) ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); }
+  if(window.CryptIRCCrab){ _crabOn(cfg.crab) ? window.CryptIRCCrab.enable() : window.CryptIRCCrab.disable(); }
 }
 
 // Apply the saved eSheep state once everything (including the deferred
@@ -5668,6 +5673,7 @@ function applyThemeCSS(cfg){
 // regardless of the app.js-runs-before-deferred-scripts execution order.
 window.addEventListener('load', function(){
   try{ if(window.CryptIRCSheep){ var _c=loadAppearance(); _esheepOn(_c.esheep) ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); } }catch(_){}
+  try{ if(window.CryptIRCCrab){ var _cc=loadAppearance(); _crabOn(_cc.crab) ? window.CryptIRCCrab.enable() : window.CryptIRCCrab.disable(); } }catch(_){}
 });
 
 // ─── Animation System ─────────────────────────────────────────────────────────
@@ -6099,6 +6105,7 @@ function populateAppearanceModal(cfg){
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
   { const _es=el('a-esheep'); if(_es){ _es.value=_esheepMode(cfg.esheep); } }
+  { const _cr=el('a-crab'); if(_cr){ _cr.value=_crabMode(cfg.crab); } }
   // spellcheck and linkPreviews toggles are now in the Security panel
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;

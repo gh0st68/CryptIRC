@@ -1672,6 +1672,17 @@ var _enabled=false;
 var Z_INDEX=90;                 // above chat content (≤60) + sidebar (50); below every panel/picker/menu/overlay/modal (≥100)
 var COLLISION_SELECTOR='.esheep-perch'; // curated ledges only — never scans the chat DOM
 
+// Effective floor height: on DESKTOP, treat the TOP of the input bar as the
+// bottom of the play area so the sheep never walks over the typing bar. On
+// mobile (≤768px) use the real window height (overlap there is fine).
+function _esFloorH(fallbackH){
+  if((window.innerWidth||0) > 768){
+    var iw = document.querySelector(COLLISION_SELECTOR) || document.getElementById('input-wrap');
+    if(iw){ var r = iw.getBoundingClientRect(); if(r.height>0 && r.top>0) return Math.round(r.top); }
+  }
+  return fallbackH;
+}
+
 // ── eSheep instance ──────────────────────────────────────────────────────────
 function ESheep(isChild){
   this.isChild=!!isChild;
@@ -1688,7 +1699,7 @@ function ESheep(isChild){
   this._timer=null;             // pending setTimeout for _nextESheepStep
   this._listeners=[];           // {t,e,fn,opts} removed on destroy
   this.screenW=window.innerWidth||document.documentElement.clientWidth||document.body.clientWidth;
-  this.screenH=window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight;
+  this.screenH=_esFloorH(window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight);
   _instances.add(this);
 }
 
@@ -1707,6 +1718,7 @@ ESheep.prototype.destroy=function(){
     try{ L.t.removeEventListener(L.e,L.fn,L.opts); }catch(_){}
   }
   this._listeners.length=0;
+  if(this._ro){ try{ this._ro.disconnect(); }catch(_){} this._ro=null; }
   if(this.DOMdiv && this.DOMdiv.parentNode) this.DOMdiv.parentNode.removeChild(this.DOMdiv);
   this.DOMdiv=null; this.DOMimg=null;
   _instances.delete(this);
@@ -1808,13 +1820,25 @@ ESheep.prototype._wire=function(){
   this._on(window,'resize',function(){
     if(!self.DOMdiv) return;
     self.screenW=window.innerWidth||document.documentElement.clientWidth||document.body.clientWidth;
-    self.screenH=window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight;
+    self.screenH=_esFloorH(window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight);
     // Pull the sprite in only from the right/bottom as the window shrinks; do NOT
     // floor at 0 here so a sprite that is legitimately off-screen mid-animation
     // (e.g. the UFO abduction) isn't snapped back into view by a stray resize.
     if(self.imageX+self.imageW>self.screenW){ self.imageX=self.screenW-self.imageW; self.DOMdiv.style.left=self.imageX+'px'; }
     if(self.imageY+self.imageH>self.screenH){ self.imageY=self.screenH-self.imageH; self.DOMdiv.style.top=self.imageY+'px'; }
   });
+  // The reply bar / typing indicator push the input bar UP without firing a window
+  // 'resize', so the floor would go stale. Watch the layout column so screenH tracks
+  // it. (An observer, not addEventListener — disconnected explicitly in destroy().)
+  if(window.ResizeObserver){
+    this._ro = new ResizeObserver(function(){
+      if(!self.DOMdiv) return;
+      self.screenH=_esFloorH(window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight);
+      if(self.imageY+self.imageH>self.screenH){ self.imageY=self.screenH-self.imageH; self.DOMdiv.style.top=self.imageY+'px'; }
+    });
+    var _col=document.getElementById('main')||document.querySelector(COLLISION_SELECTOR)||document.getElementById('input-wrap');
+    if(_col) try{ this._ro.observe(_col); }catch(_){}
+  }
 };
 
 ESheep.prototype._setPosition=function(x,y,absolute){

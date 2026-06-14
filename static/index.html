@@ -18,6 +18,7 @@
 <script src="/cryptirc/Sortable.min.js"></script>
 <script src="/cryptirc/e2e.js" defer></script>
 <script src="/cryptirc/esheep.js" defer></script>
+<script src="/cryptirc/crab.js" defer></script>
 <style>
 /* ── Locally-hosted display fonts (dafont) ─────────────────────────────────── */
 @font-face { font-family:'Spooky';           src:url('fonts/spooky.ttf') format('truetype'); font-display:swap; }
@@ -2078,6 +2079,15 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <span class="appear-label">🐑 eSheep<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A little sheep wanders your client — climbs the edges, naps, gets abducted by a UFO, and more. The classic '95 desktop pet. Silent. Choose where it runs.</div></span>
           <select id="a-esheep" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+            <option value="off">Off</option>
+            <option value="desktop">Desktop only</option>
+            <option value="mobile">Mobile only</option>
+            <option value="both">Both</option>
+          </select>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">🦀 Angry Crab<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A furious little crab scuttles sideways across your client — snaps its claws, rages, blows bubbles, charges, and mutters threats. Poke near it and it gets ANGRY. Silent.</div></span>
+          <select id="a-crab" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>
