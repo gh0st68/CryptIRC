@@ -12,11 +12,17 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.9.0-brightgreen" alt="Version">
-  <img src="https://img.shields.io/badge/themes-121-purple" alt="Themes">
-  <img src="https://img.shields.io/badge/fonts-135-blue" alt="Fonts">
+  <img src="https://img.shields.io/badge/version-0.3.0-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/themes-171-9b59ff" alt="Themes">
+  <img src="https://img.shields.io/badge/fonts-139-blue" alt="Fonts">
   <img src="https://img.shields.io/badge/commands-100+-red" alt="Commands">
   <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
+</p>
+
+<p align="center">
+  <a href="https://gh0st68.github.io/CryptIRC/"><b>🎨 Browse the live Theme Gallery</b></a> ·
+  <a href="https://client.twistednet.org/cryptirc"><b>Launch the hosted client</b></a> ·
+  <a href="https://github.com/gh0st68/CryptIRC/releases"><b>Download apps</b></a>
 </p>
 
 <p align="center">
@@ -83,7 +89,9 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 - **Multi-network** — connect to as many IRC networks as you want simultaneously
 - **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
 - **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
-- **121 themes** (32 with animations like starfields, rain, aurora, matrix rain) and **135 fonts**
+- **171 themes** (32 animated — starfields, rain, aurora, Matrix code) + **139 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
+- **🐑 eSheep desktop pet** — the classic '95 pet wanders your client (desktop, mobile, or both); climbs walls, naps, gets abducted by a UFO
+- **In-app News & changelog** with an auto-versioning build badge, so you always see exactly what changed
 - **Full IRCv3 support** — 17 capabilities including typing indicators, away-notify, SASL, MONITOR
 - **100+ slash commands** — everything from `/ascii` art to `/ud` Urban Dictionary lookups
 - **Nick monitoring** — track when specific users come online/offline with push alerts
@@ -114,91 +122,31 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 
 ## Features
 
-### Themes (121)
+### Themes & Personalization
 
-**89 static themes** and **32 animated themes** with real-time canvas effects.
+**171 built-in themes** — 139 static + 32 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more). Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
 
-| Theme | Description |
-|-------|-------------|
-| Starfield Warp | Stars zooming toward you (default) |
-| Midnight | Deep dark blue |
-| Dracula | Classic purple-accented dark |
-| Monokai | Warm syntax-inspired dark |
-| Nord | Cool Arctic blue palette |
-| Solarized Dark | Ethan Schoonover's classic |
-| Gruvbox Dark | Retro warm brown tones |
-| Abyss | Pure black void |
-| Light | Clean light theme |
-| Cobalt | Rich blue editor |
-| One Dark | Atom editor inspired |
-| Catppuccin Mocha | Pastel dark with lavender accents |
-| Rose Pine | Soft muted rose |
-| Tokyo Night | Vibrant purple-blue cityscape |
-| Cyberpunk | Neon pink and cyan |
-| Matrix | Green-on-black terminal |
-| Ocean / Ocean Deep / Deep Sea | Sea blue depths |
-| Sunset | Warm purple-orange dusk |
-| Blumhouse | Horror-inspired dark red |
-| Scream | Ghostface neon green |
-| Neon Tokyo / Neon Blue / Neon Mint | Neon cityscape / glow themes |
-| Vaporwave | Retro pastel purple-pink |
-| Blood Moon | Deep crimson dark |
-| Arctic / Frost / Glacier / Winterfell / Tundra | Icy cold tones |
-| Golden Hour / Solar Flare / Sunflower | Warm amber / golden |
-| Midnight Purple / Ultraviolet / Indigo Night | Deep violet / purple |
-| Terminal Green / Retro Terminal / Hacker | Green CRT styles |
-| Stealth / Charcoal / Graphite / Slate / Zinc / Ash / Noir | Monochrome / gray |
-| Lava / Copper / Coffee / Oxide / Pumpkin Spice | Warm earth tones |
-| Cyberdeck / Cybernetic | Dark with neon accents |
-| Phantom / Obsidian / Darkwave / Storm | Dark mysterious |
-| Emerald / Ruby / Sapphire / Amethyst / Coral | Gemstone colors |
-| Rose Gold / Sakura / Bubblegum / Candy / Salmon | Pink / rose tones |
-| Blade Runner / Outrun / Hotline Miami | Retro neon |
-| Lo-fi / Sepia / Desert / Warm Gray | Warm muted vintage |
-| Twilight / Dusk / Mauve | Evening purples / soft |
-| Wine / Burgundy | Deep red elegance |
-| Teal / Spearmint / Verdant / Pine Forest / Wasabi | Green / teal tones |
-| Petrol / Mango / Volcanic | Bold accent colors |
-| Ivory Tower | Light warm theme |
+<p align="center">
+  <a href="https://gh0st68.github.io/CryptIRC/">
+    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 171 live theme previews">
+  </a>
+  <br>
+  <b><a href="https://gh0st68.github.io/CryptIRC/">🎨 Browse the live Theme Gallery →</a></b><br>
+  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter, and preview all 171</sub>
+</p>
 
-**Animated themes** (32 with canvas overlay effects):
+A taste of the range:
 
-| Theme | Effect |
-|-------|--------|
-| Starfield Warp | Stars zooming from center toward you |
-| Forest Rain | Rain drops with lightning flashes |
-| Deep Space | Drifting stars with shooting stars |
-| Snowfall | Gentle falling snowflakes |
-| Fireflies | Pulsing, drifting glow dots |
-| Aurora | Wavy green/purple light bands |
-| Digital Rain | Matrix-style falling characters |
-| Neon Grid | 80s Tron perspective grid |
-| Underwater | Rising bubbles |
-| Cherry Blossom | Pink petals falling |
-| Ember | Floating orange sparks |
-| Nebula | Colorful drifting gas clouds |
-| Confetti | Colorful falling confetti |
-| Campfire | Warm embers rising with glow |
-| Ocean Waves | Gentle wave motion |
-| Plasma | Morphing color gradients |
-| Alien | UFOs with tractor beams abducting eSheep |
-| Lightning | Storm with zigzag lightning bolts and rain |
-| Sandstorm | Desert sand particles blowing across |
-| Hologram | Cyan scan lines with shimmer effect |
-| Meteors | Streaking meteors across starry sky |
-| Pixel Rain | Retro pixel blocks falling |
-| Synthwave | Retro sun with perspective grid |
-| Toxic Rain | Green acid rain droplets |
-| Fairy Dust | Sparkly particles that pulse and drift |
-| Comets | Glowing comets with trailing tails |
-| Lava Lamp | Soft morphing color blobs |
-| Electric | Arcing electric bolts between nodes |
-| Galaxy | Spiral galaxy with orbiting stars |
-| Glitch | Random colored static and offset glitches |
-| Firewall | Scrolling amber hex characters |
-| Northern | Vivid multi-color aurora curtains |
+| Family | Examples |
+|--------|----------|
+| **Editor classics** | Dracula · Monokai · Nord · Gruvbox · One Dark · Catppuccin · Solarized · Tokyo Night |
+| **Neon / cyberpunk** | Cyberpunk · Outrun · Blade Runner · Vaporwave · Hotline Miami · Neon Tokyo |
+| **Terminal / hacker** | Matrix · Hacker · Retro Terminal · Cyberdeck · Firewall |
+| **Nature / seasonal** | Aurora · Snowfall · Cherry Blossom · Ocean · Forest Rain · Northern Lights |
+| **Mono / metal** | Stealth · Charcoal · Graphite · Slate · Noir · Obsidian |
+| **Gemstone / warm** | Emerald · Ruby · Sapphire · Amethyst · Lava · Copper · Golden Hour |
 
-**Separate mobile theme** -- independent colors, accents, and font sizes for phone vs desktop.
+…and ~140 more — [see them all in the gallery](https://gh0st68.github.io/CryptIRC/).
 
 ### Encryption & Security
 - **Per-user vaults** -- each user has their own passphrase and encryption key (Argon2id KDF + AES-256-GCM)
@@ -291,7 +239,7 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 - **Mobile lag indicator** -- ping time shown next to channel name in topbar
 - **SVG icon settings menu** -- clean Lucide-style line icons, scrollable on small screens
 - **Standalone security panel** -- vault auto-lock, message expiry, rate limit, PM blocking, spellcheck, link previews
-- **135 fonts** -- 41 monospace, 45 sans-serif, 20 serif, 17 display, 12 cursive/handwriting from Google Fonts
+- **139 fonts** -- monospace, sans-serif, serif, display, and cursive/handwriting, mostly from Google Fonts
 - **Clear all data** -- one-click deletion of logs, notepad, and pastes with confirmation
 
 ### Admin
@@ -496,7 +444,7 @@ Accessible from the sidebar gear menu:
 | Panel | Contents |
 |-------|----------|
 | Notifications | Push alerts, desktop popups, sounds, trigger rules, custom highlight words (tag UI), per-network mute |
-| Theme | 121 themes (32 animated), 135 fonts, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
+| Theme | 171 themes (32 animated), 139 fonts, custom theme editor, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
 | Security | Vault auto-lock timer, message expiry, rate limit, block PMs (+g), auto-rejoin, link previews, spellcheck |
 | Monitor | Nick online/offline tracking with push notifications |
 | Notepad | Private encrypted auto-saving notes |
