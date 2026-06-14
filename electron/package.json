@@ -36,9 +36,7 @@
     "linux": {
       "target": "AppImage",
       "icon": "icons/icon.png",
-      "category": "Network",
-      "desktopName": "cryptirc.desktop",
-      "synopsis": "Encrypted IRC client"
+      "category": "Network"
     },
     "mac": {
       "target": [
