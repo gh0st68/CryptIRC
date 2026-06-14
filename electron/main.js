@@ -1,6 +1,7 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, Notification } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, Notification, dialog, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { autoUpdater } = require('electron-updater');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
@@ -14,15 +15,45 @@ function loadConfig() {
 }
 
 function saveConfig(cfg) {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  } catch (err) {
+    console.error('[config] save failed:', err && err.message);
+  }
+}
+
+// HTML-escape for any value interpolated into our local data: chrome pages.
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// Hosts where a self-signed / local cert is legitimately expected (self-hosting
+// on a LAN or localhost). Everything else MUST present a valid TLS cert.
+function isLocalOrLan(hostname) {
+  if (!hostname) return false;
+  const h = hostname.replace(/^\[|\]$/g, '');
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1') return true;
+  if (/^10\./.test(h)) return true;
+  if (/^192\.168\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+  if (/\.local$/i.test(h)) return true;
+  return false;
 }
 
 // ─── App state ───────────────────────────────────────────────────────────────
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
+let saveBoundsTimer = null;
 
-// ─── Setup prompt (first launch) ─────────────────────────────────────────────
+// ─── Branding ────────────────────────────────────────────────────────────────
+const TEAL = '#00d4aa';
+const TEAL_DK = '#00b894';
+const BLUE = '#0099ff';
+
+// ─── Setup prompt (first launch / change server) ─────────────────────────────
 function showSetupPrompt(existingUrl) {
   return new Promise((resolve) => {
     const setup = new BrowserWindow({
@@ -34,26 +65,46 @@ function showSetupPrompt(existingUrl) {
       autoHideMenuBar: true,
       title: 'CryptIRC — Server Setup',
       icon: path.join(__dirname, 'icons', 'icon.png'),
-      webPreferences: { nodeIntegration: true, contextIsolation: false },
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
     });
 
-    const val = existingUrl || '';
-    const html = `<!DOCTYPE html><html><head><style>
+    let done = false;
+    const onUrl = (e, url) => finish((url || '').endsWith('/') ? url : url + '/');
+    const onQuit = () => finish(null);
+    function finish(result) {
+      if (done) return;
+      done = true;
+      ipcMain.removeListener('setup-url', onUrl);
+      ipcMain.removeListener('setup-quit', onQuit);
+      if (!setup.isDestroyed()) { setup.removeAllListeners('closed'); setup.close(); }
+      resolve(result);
+    }
+    ipcMain.on('setup-url', onUrl);
+    ipcMain.on('setup-quit', onQuit);
+    setup.on('closed', () => finish(null));
+
+    const val = esc(existingUrl || '');
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
       *{box-sizing:border-box;margin:0;padding:0}
-      body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a14;color:#e0e0e0;display:flex;align-items:center;justify-content:center;height:100vh}
+      body{font-family:system-ui,-apple-system,sans-serif;background:#0a0e13;color:#dce6f2;display:flex;align-items:center;justify-content:center;height:100vh}
       .card{width:100%;padding:32px;display:flex;flex-direction:column;gap:16px}
-      h2{font-size:18px;color:#a78bfa;font-weight:600}
-      p{font-size:13px;color:#888;line-height:1.4}
-      label{font-size:13px;color:#aaa}
-      input{padding:10px 12px;border-radius:8px;border:1px solid #333;background:#12121f;color:#e0e0e0;font-size:14px;width:100%;outline:none}
-      input:focus{border-color:#7c3aed}
+      h2{font-size:18px;color:${TEAL};font-weight:700}
+      p{font-size:13px;color:#8aa0b6;line-height:1.4}
+      label{font-size:13px;color:#8aa0b6}
+      input{padding:10px 12px;border-radius:8px;border:1px solid #26344a;background:#0f1622;color:#dce6f2;font-size:14px;width:100%;outline:none}
+      input:focus{border-color:${TEAL}}
       .btns{display:flex;gap:10px;justify-content:flex-end;margin-top:4px}
-      button{padding:9px 24px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:500}
-      .connect{background:#7c3aed;color:white}
-      .connect:hover{background:#6d28d9}
-      .quit{background:#1e1e2e;color:#888;border:1px solid #333}
-      .quit:hover{background:#2a2a3a}
-      .err{color:#f87171;font-size:12px;min-height:16px}
+      button{padding:9px 24px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600}
+      .connect{background:${TEAL};color:#04110d}
+      .connect:hover{background:${TEAL_DK}}
+      .quit{background:#0f1622;color:#8aa0b6;border:1px solid #26344a}
+      .quit:hover{background:#16202e}
+      .err{color:#ff7a7a;font-size:12px;min-height:16px}
     </style></head><body>
     <div class="card">
       <h2>CryptIRC</h2>
@@ -67,372 +118,332 @@ function showSetupPrompt(existingUrl) {
       </div>
     </div>
     <script>
-      const {ipcRenderer}=require('electron');
       const urlEl=document.getElementById('url');
       const errEl=document.getElementById('err');
-      urlEl.focus();
-      urlEl.select();
+      urlEl.focus(); urlEl.select();
       function submit(){
         const v=urlEl.value.trim();
         if(!v){errEl.textContent='Please enter a URL';return;}
-        if(!v.startsWith('http://')&&!v.startsWith('https://')){errEl.textContent='URL must start with http:// or https://';return;}
-        ipcRenderer.send('setup-url',v);
+        if(!/^https?:\\/\\//.test(v)){errEl.textContent='URL must start with http:// or https://';return;}
+        window.electronAPI.setupSubmit(v);
       }
       document.getElementById('connBtn').addEventListener('click',submit);
-      document.getElementById('quitBtn').addEventListener('click',()=>ipcRenderer.send('setup-quit'));
+      document.getElementById('quitBtn').addEventListener('click',()=>window.electronAPI.setupQuit());
       urlEl.addEventListener('keydown',e=>{if(e.key==='Enter')submit();});
     </script></body></html>`;
 
     setup.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
-
-    ipcMain.once('setup-url', (e, url) => {
-      setup.close();
-      resolve(url.endsWith('/') ? url : url + '/');
-    });
-
-    ipcMain.once('setup-quit', () => {
-      setup.close();
-      resolve(null);
-    });
-
-    setup.on('closed', () => {
-      resolve(null);
-    });
   });
+}
+
+// ─── Connection-error page (loaded INTO the secure main window) ──────────────
+function showErrorPage(failedUrl, desc, code) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+    body{font-family:system-ui;background:#0a0e13;color:#dce6f2;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+    .box{text-align:center;max-width:420px;padding:24px}
+    h2{color:#ff7a7a;margin-bottom:12px}
+    p{color:#8aa0b6;font-size:14px;line-height:1.5}
+    code{background:#0f1622;padding:2px 8px;border-radius:4px;color:${BLUE};word-break:break-all}
+    .btns{display:flex;gap:10px;justify-content:center;margin-top:20px}
+    button{padding:10px 24px;border-radius:8px;border:none;cursor:pointer;font-size:14px;font-weight:600}
+    .retry{background:${TEAL};color:#04110d}
+    .retry:hover{background:${TEAL_DK}}
+    .change{background:#0f1622;color:#dce6f2;border:1px solid #26344a}
+    .change:hover{background:#16202e}
+  </style></head><body><div class="box">
+    <h2>Connection Failed</h2>
+    <p>Could not connect to:<br><code>${esc(failedUrl)}</code></p>
+    <p>Error: ${esc(desc)} (${esc(code)})</p>
+    <div class="btns">
+      <button class="change" id="changeBtn">Change Server</button>
+      <button class="retry" id="retryBtn">Retry</button>
+    </div>
+  </div>
+  <script>
+    document.getElementById('changeBtn').addEventListener('click',()=>window.electronAPI.changeServer());
+    document.getElementById('retryBtn').addEventListener('click',()=>window.electronAPI.retryLoad());
+  </script></body></html>`;
+  mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 }
 
 // ─── Main window ─────────────────────────────────────────────────────────────
 function createWindow(url) {
+  const cfg = loadConfig();
+  const saved = cfg.bounds || {};
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: saved.width || 1200,
+    height: saved.height || 800,
+    x: saved.x,
+    y: saved.y,
     minWidth: 400,
     minHeight: 300,
     title: 'CryptIRC',
     icon: path.join(__dirname, 'icons', 'icon.png'),
     autoHideMenuBar: true,
-    backgroundColor: '#0a0a0f',
+    backgroundColor: '#080b11',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       spellcheck: true,
     },
   });
+  if (cfg.isMaximized) mainWindow.maximize();
 
-  // Ensure spellcheck language is set (Electron doesn't always auto-detect)
   mainWindow.webContents.session.setSpellCheckerLanguages(['en-US']);
 
-  // Handle load errors — show error page with working buttons
-  mainWindow.webContents.on('did-fail-load', (e, code, desc, failedUrl) => {
-    // Destroy the main window and show error in a node-enabled window
-    const bounds = mainWindow.getBounds();
-    mainWindow.removeAllListeners('close');
-    mainWindow.destroy();
-    mainWindow = new BrowserWindow({
-      ...bounds,
-      title: 'CryptIRC — Connection Failed',
-      icon: path.join(__dirname, 'icons', 'icon.png'),
-      autoHideMenuBar: true,
-      backgroundColor: '#0a0a14',
-      webPreferences: { nodeIntegration: true, contextIsolation: false },
-    });
-    mainWindow.loadURL('data:text/html,' + encodeURIComponent(`<!DOCTYPE html><html><head><style>
-      body{font-family:system-ui;background:#0a0a14;color:#e0e0e0;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
-      .box{text-align:center;max-width:400px}
-      h2{color:#f87171;margin-bottom:12px}
-      p{color:#888;font-size:14px;line-height:1.5}
-      code{background:#1e1e2e;padding:2px 8px;border-radius:4px;color:#a78bfa}
-      .btns{display:flex;gap:10px;justify-content:center;margin-top:20px}
-      button{padding:10px 24px;border-radius:8px;border:none;cursor:pointer;font-size:14px}
-      .retry{background:#7c3aed;color:white}
-      .change{background:#1e1e2e;color:#ccc;border:1px solid #333}
-    </style></head><body><div class="box">
-      <h2>Connection Failed</h2>
-      <p>Could not connect to:<br><code>${failedUrl}</code></p>
-      <p>Error: ${desc} (${code})</p>
-      <div class="btns">
-        <button class="change" onclick="require('electron').ipcRenderer.send('change-server')">Change Server</button>
-        <button class="retry" onclick="require('electron').ipcRenderer.send('retry-load')">Retry</button>
-      </div>
-    </div></body></html>`));
+  // Only allow camera/mic/etc. that the client actually needs; deny the rest.
+  const ALLOWED_PERMS = new Set(['notifications', 'clipboard-read', 'clipboard-sanitized-write', 'fullscreen']);
+  mainWindow.webContents.session.setPermissionRequestHandler((wc, permission, cb) => cb(ALLOWED_PERMS.has(permission)));
+  mainWindow.webContents.session.setPermissionCheckHandler((wc, permission) => ALLOWED_PERMS.has(permission));
+
+  // Connection error → show the error page IN this window (keeps tray/close
+  // wiring intact). Ignore subframe failures and benign aborts (ERR_ABORTED).
+  mainWindow.webContents.on('did-fail-load', (e, code, desc, failedUrl, isMainFrame) => {
+    if (!isMainFrame || code === -3) return;
+    showErrorPage(failedUrl, desc, code);
   });
+
+  // Restore zoom, then persist it on change.
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (typeof cfg.zoomLevel === 'number') mainWindow.webContents.setZoomLevel(cfg.zoomLevel);
+  });
+  mainWindow.webContents.on('zoom-changed', () => persistBounds());
 
   mainWindow.loadURL(url);
 
-  // Open external links in default browser
+  // External links open in the browser; same-origin stays in-app.
+  const sameOrigin = (a, b) => { try { return new URL(a).origin === new URL(b).origin; } catch { return false; } };
   mainWindow.webContents.setWindowOpenHandler(({ url: linkUrl }) => {
-    if (!linkUrl.startsWith(url)) {
-      shell.openExternal(linkUrl);
-      return { action: 'deny' };
-    }
+    if (!sameOrigin(linkUrl, url)) { shell.openExternal(linkUrl); return { action: 'deny' }; }
     return { action: 'allow' };
   });
+  // Keep the shell pinned to the server origin; anything else opens externally.
+  const guardNav = (e, navUrl) => {
+    if (navUrl.startsWith('data:')) return; // our own error/setup chrome
+    if (!sameOrigin(navUrl, url)) { e.preventDefault(); shell.openExternal(navUrl); }
+  };
+  mainWindow.webContents.on('will-navigate', guardNav);
+  mainWindow.webContents.on('will-redirect', guardNav);
 
-  // Minimize to tray instead of closing
+  // Persist window bounds (debounced).
+  const onBoundsChange = () => persistBounds();
+  mainWindow.on('resize', onBoundsChange);
+  mainWindow.on('move', onBoundsChange);
+  mainWindow.on('maximize', onBoundsChange);
+  mainWindow.on('unmaximize', onBoundsChange);
+
+  // Minimize to tray instead of closing.
   mainWindow.on('close', (e) => {
-    if (!isQuitting) {
-      e.preventDefault();
-      mainWindow.hide();
-    }
+    if (!isQuitting) { e.preventDefault(); persistBounds(); mainWindow.hide(); }
   });
+  mainWindow.on('closed', () => { mainWindow = null; });
 
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  // Flash taskbar on notification
+  // Flash + badge on unread/mention via the page title.
   mainWindow.webContents.on('page-title-updated', (e, title) => {
-    if (title.includes('*')) {
-      mainWindow.flashFrame(true);
-    }
+    if (title.includes('*')) mainWindow.flashFrame(true);
+    const m = title.match(/[([](\d+)[)\]]/);
+    setBadge(m ? parseInt(m[1], 10) : 0);
   });
 
-  // ── Right-click context menu with spell check suggestions ──────────────────
+  // Right-click context menu with spell-check suggestions.
   mainWindow.webContents.on('context-menu', (e, params) => {
-    const menuItems = [];
-
-    // Spelling suggestions
+    const items = [];
     if (params.misspelledWord) {
-      if (params.dictionarySuggestions.length > 0) {
-        for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
-          menuItems.push({
-            label: suggestion,
-            click: () => mainWindow.webContents.replaceMisspelling(suggestion),
-          });
-        }
-      } else {
-        menuItems.push({ label: '(no suggestions)', enabled: false });
-      }
-      menuItems.push({ type: 'separator' });
-      menuItems.push({
-        label: 'Add to Dictionary',
-        click: () => mainWindow.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
-      });
-      menuItems.push({ type: 'separator' });
+      if (params.dictionarySuggestions.length) {
+        for (const s of params.dictionarySuggestions.slice(0, 5))
+          items.push({ label: s, click: () => mainWindow.webContents.replaceMisspelling(s) });
+      } else items.push({ label: '(no suggestions)', enabled: false });
+      items.push({ type: 'separator' });
+      items.push({ label: 'Add to Dictionary', click: () => mainWindow.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord) });
+      items.push({ type: 'separator' });
     }
-
-    // Edit actions — only show relevant ones
     if (params.isEditable) {
-      menuItems.push({ label: 'Cut', role: 'cut', enabled: params.editFlags.canCut });
-      menuItems.push({ label: 'Copy', role: 'copy', enabled: params.editFlags.canCopy });
-      menuItems.push({ label: 'Paste', role: 'paste', enabled: params.editFlags.canPaste });
-      menuItems.push({ label: 'Select All', role: 'selectAll', enabled: params.editFlags.canSelectAll });
+      items.push({ label: 'Cut', role: 'cut', enabled: params.editFlags.canCut });
+      items.push({ label: 'Copy', role: 'copy', enabled: params.editFlags.canCopy });
+      items.push({ label: 'Paste', role: 'paste', enabled: params.editFlags.canPaste });
+      items.push({ label: 'Select All', role: 'selectAll', enabled: params.editFlags.canSelectAll });
     } else if (params.selectionText) {
-      menuItems.push({ label: 'Copy', role: 'copy' });
+      items.push({ label: 'Copy', role: 'copy' });
     }
-
-    // Link actions
     if (params.linkURL) {
-      if (menuItems.length > 0) menuItems.push({ type: 'separator' });
-      menuItems.push({
-        label: 'Open Link in Browser',
-        click: () => shell.openExternal(params.linkURL),
-      });
-      menuItems.push({
-        label: 'Copy Link',
-        click: () => { require('electron').clipboard.writeText(params.linkURL); },
-      });
+      if (items.length) items.push({ type: 'separator' });
+      items.push({ label: 'Open Link in Browser', click: () => shell.openExternal(params.linkURL) });
+      items.push({ label: 'Copy Link', click: () => require('electron').clipboard.writeText(params.linkURL) });
     }
-
-    // Image actions
     if (params.hasImageContents) {
-      if (menuItems.length > 0) menuItems.push({ type: 'separator' });
-      menuItems.push({
-        label: 'Copy Image',
-        click: () => mainWindow.webContents.copyImageAt(params.x, params.y),
-      });
-      menuItems.push({
-        label: 'Open Image in Browser',
-        click: () => shell.openExternal(params.srcURL),
-      });
+      if (items.length) items.push({ type: 'separator' });
+      items.push({ label: 'Copy Image', click: () => mainWindow.webContents.copyImageAt(params.x, params.y) });
+      items.push({ label: 'Open Image in Browser', click: () => shell.openExternal(params.srcURL) });
     }
-
-    if (menuItems.length > 0) {
-      Menu.buildFromTemplate(menuItems).popup({ window: mainWindow });
-    }
+    if (items.length) Menu.buildFromTemplate(items).popup({ window: mainWindow });
   });
 }
 
-// ─── IPC: native notifications ───────────────────────────────────────────────
-// Keep a reference to active notifications so they don't get GC'd before click.
-const _activeNotifs = new Set();
+function persistBounds() {
+  if (saveBoundsTimer) clearTimeout(saveBoundsTimer);
+  saveBoundsTimer = setTimeout(() => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const cfg = loadConfig();
+    cfg.isMaximized = mainWindow.isMaximized();
+    if (!cfg.isMaximized) cfg.bounds = mainWindow.getBounds();
+    try { cfg.zoomLevel = mainWindow.webContents.getZoomLevel(); } catch {}
+    saveConfig(cfg);
+  }, 400);
+}
 
+function setBadge(n) {
+  try { app.setBadgeCount(n > 0 ? n : 0); } catch {}
+}
+
+// ─── Change-server flow (shared by tray, menu, error page) ───────────────────
+async function changeServerFlow() {
+  const cfg = loadConfig();
+  const url = await showSetupPrompt(cfg.url);
+  if (!url) return;
+  cfg.url = url;
+  saveConfig(cfg);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(url);
+  else createWindow(url);
+}
+
+// ─── Application menu (visible Quit/Ctrl+Q, copy/paste, zoom, reload) ─────────
+function buildMenu() {
+  const isMac = process.platform === 'darwin';
+  const template = [
+    ...(isMac ? [{ role: 'appMenu' }] : []),
+    {
+      label: 'File',
+      submenu: [
+        { label: 'Change Server URL…', click: () => changeServerFlow() },
+        { type: 'separator' },
+        { label: 'Quit', accelerator: 'CmdOrCtrl+Q', click: () => { isQuitting = true; app.quit(); } },
+      ],
+    },
+    { role: 'editMenu' },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' }, { role: 'forceReload' }, { type: 'separator' },
+        { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' },
+        { role: 'togglefullscreen' }, { role: 'toggleDevTools' },
+      ],
+    },
+    { role: 'windowMenu' },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+// ─── IPC: native notifications ───────────────────────────────────────────────
+const _activeNotifs = new Set();
 ipcMain.on('show-notification', (e, title, body, meta) => {
   try {
-    if (!Notification.isSupported()) {
-      console.error('[NOTIF] Notifications not supported on this system');
-      return;
-    }
-    const notif = new Notification({
-      title: title || 'CryptIRC',
-      body: body || '',
-      icon: path.join(__dirname, 'icons', 'icon.png'),
-      silent: true,
-    });
+    if (!Notification.isSupported()) return;
+    const notif = new Notification({ title: title || 'CryptIRC', body: body || '', icon: path.join(__dirname, 'icons', 'icon.png'), silent: true });
     _activeNotifs.add(notif);
     const cleanup = () => _activeNotifs.delete(notif);
     notif.on('click', () => {
-      console.log('[NOTIF] Clicked:', title, 'meta:', meta ? JSON.stringify(meta) : 'none');
       if (mainWindow) {
         if (mainWindow.isMinimized()) mainWindow.restore();
-        mainWindow.show();
-        mainWindow.focus();
+        mainWindow.show(); mainWindow.focus();
         if (meta) {
-          // Primary path: inject JavaScript directly into the renderer. Doesn't
-          // require any preload wiring, so works across Electron shell versions.
-          const js = `(function(){try{if(typeof jumpToMessage==='function'){jumpToMessage(${JSON.stringify(meta.conn_id)},${JSON.stringify(meta.target)},${JSON.stringify(meta.ts)},${JSON.stringify(meta.from)});}else if(typeof setActive==='function'){setActive(${JSON.stringify(meta.conn_id)},${JSON.stringify(meta.target)});}}catch(e){console.error('[NOTIF] nav failed:',e);}})();`;
-          mainWindow.webContents.executeJavaScript(js).catch(err => console.error('[NOTIF] executeJavaScript failed:', err));
-          // Fallback: also send via IPC (for preload-based listeners if present)
-          try { mainWindow.webContents.send('notification-click', meta); } catch (err) {}
+          const js = `(function(){try{if(typeof jumpToMessage==='function'){jumpToMessage(${JSON.stringify(meta.conn_id)},${JSON.stringify(meta.target)},${JSON.stringify(meta.ts)},${JSON.stringify(meta.from)});}else if(typeof setActive==='function'){setActive(${JSON.stringify(meta.conn_id)},${JSON.stringify(meta.target)});}}catch(e){}})();`;
+          mainWindow.webContents.executeJavaScript(js).catch(() => {});
+          try { mainWindow.webContents.send('notification-click', meta); } catch {}
         }
       }
       cleanup();
     });
     notif.on('close', cleanup);
-    notif.on('show', () => console.log('[NOTIF] Notification shown:', title));
-    notif.on('failed', (e, err) => { console.error('[NOTIF] Failed:', err); cleanup(); });
+    notif.on('failed', cleanup);
     notif.show();
-  } catch (err) {
-    console.error('[NOTIF] Exception:', err);
-  }
+  } catch (err) { console.error('[notif]', err && err.message); }
 });
 
-// ─── IPC: retry / change server ──────────────────────────────────────────────
-ipcMain.on('retry-load', () => {
-  const cfg = loadConfig();
-  if (cfg.url) {
-    if (mainWindow) { mainWindow.removeAllListeners('close'); mainWindow.destroy(); mainWindow = null; }
-    createWindow(cfg.url);
-  }
-});
-
-ipcMain.on('change-server', async () => {
-  const cfg = loadConfig();
-  const url = await showSetupPrompt(cfg.url);
-  if (url) {
-    cfg.url = url;
-    saveConfig(cfg);
-    if (mainWindow) { mainWindow.removeAllListeners('close'); mainWindow.destroy(); mainWindow = null; }
-    createWindow(url);
-  }
-});
+// ─── IPC: unread badge / retry / change server ───────────────────────────────
+ipcMain.on('set-unread', (e, n) => setBadge(parseInt(n, 10) || 0));
+ipcMain.on('retry-load', () => { const cfg = loadConfig(); if (cfg.url && mainWindow) mainWindow.loadURL(cfg.url); });
+ipcMain.on('change-server', () => { changeServerFlow(); });
 
 // ─── System tray ─────────────────────────────────────────────────────────────
 function createTray() {
   const iconPath = path.join(__dirname, 'icons', 'icon.png');
-  let trayIcon;
-  try {
-    trayIcon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
-  } catch {
-    trayIcon = nativeImage.createEmpty();
-  }
-
-  tray = new Tray(trayIcon);
+  let trayIcon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+  if (trayIcon.isEmpty()) trayIcon = nativeImage.createFromPath(iconPath);
+  tray = new Tray(trayIcon.isEmpty() ? nativeImage.createEmpty() : trayIcon);
   tray.setToolTip('CryptIRC');
-
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: 'Show CryptIRC',
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
-        }
-      },
-    },
-    {
-      label: 'Change Server URL',
-      click: async () => {
-        const cfg = loadConfig();
-        const url = await showSetupPrompt(cfg.url);
-        if (url) {
-          cfg.url = url;
-          saveConfig(cfg);
-          if (mainWindow) mainWindow.loadURL(url);
-        }
-      },
-    },
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Show CryptIRC', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+    { label: 'Change Server URL…', click: () => changeServerFlow() },
     { type: 'separator' },
-    {
-      label: 'Quit',
-      click: () => {
-        isQuitting = true;
-        app.quit();
-      },
-    },
-  ]);
+    { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
+  ]));
+  tray.on('click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });
+}
 
-  tray.setContextMenu(contextMenu);
-
-  tray.on('click', () => {
-    if (mainWindow) {
-      if (mainWindow.isVisible()) {
-        mainWindow.focus();
-      } else {
-        mainWindow.show();
-        mainWindow.focus();
-      }
-    }
+// ─── Auto-update (electron-updater, GitHub feed) ─────────────────────────────
+function setupAutoUpdate() {
+  if (!app.isPackaged) return; // no app-update.yml in dev
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('update-downloaded', (info) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const r = dialog.showMessageBoxSync(mainWindow, {
+      type: 'info',
+      buttons: ['Restart now', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'Update ready',
+      message: `CryptIRC ${info.version} is ready to install.`,
+      detail: 'Restart now to update, or it will be installed automatically when you quit.',
+    });
+    if (r === 0) { isQuitting = true; autoUpdater.quitAndInstall(); }
   });
+  autoUpdater.on('error', (err) => console.error('[updater]', err && err.message));
+  autoUpdater.checkForUpdates().catch(() => {});
+  setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 6 * 60 * 60 * 1000);
 }
 
-// ─── Windows notification setup ──────────────────────────────────────────────
-// Required for Windows toast notifications to work
-if (process.platform === 'win32') {
-  app.setAppUserModelId('com.cryptirc.app');
-}
+// ─── Process-level safety nets ───────────────────────────────────────────────
+process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+
+// ─── Windows notification app id ─────────────────────────────────────────────
+if (process.platform === 'win32') app.setAppUserModelId('com.cryptirc.app');
 
 // ─── App lifecycle ───────────────────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
-      mainWindow.show();
-      mainWindow.focus();
-    }
-  });
+  app.on('second-instance', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });
 
-  // Accept self-signed / local certs
+  // Only accept self-signed/invalid certs for localhost / private-LAN hosts.
+  // Remote servers MUST present a valid TLS cert (this is an encrypted client).
   app.on('certificate-error', (event, webContents, url, error, cert, callback) => {
-    event.preventDefault();
-    callback(true);
+    let host = '';
+    try { host = new URL(url).hostname; } catch {}
+    if (isLocalOrLan(host)) { event.preventDefault(); callback(true); }
+    else callback(false);
   });
 
   app.on('ready', async () => {
     const cfg = loadConfig();
-
-    // First launch or no URL saved — show setup prompt
     if (!cfg.url) {
       const url = await showSetupPrompt();
-      if (!url) {
-        app.quit();
-        return;
-      }
+      if (!url) { app.quit(); return; }
       cfg.url = url;
       saveConfig(cfg);
     }
-
+    buildMenu();
     createWindow(cfg.url);
     createTray();
+    setupAutoUpdate();
   });
 
-  app.on('before-quit', () => {
-    isQuitting = true;
-  });
-
-  app.on('activate', () => {
-    if (!mainWindow) {
-      const cfg = loadConfig();
-      if (cfg.url) createWindow(cfg.url);
-    }
-  });
-
-  app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') {
-      // Don't quit — tray keeps running
-    }
-  });
+  app.on('before-quit', () => { isQuitting = true; });
+  app.on('activate', () => { if (!mainWindow) { const cfg = loadConfig(); if (cfg.url) createWindow(cfg.url); } });
+  app.on('window-all-closed', () => { /* tray keeps the app alive; quit only via menu/tray */ });
 }

@@ -1,6 +1,6 @@
 {
   "name": "cryptirc",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "CryptIRC — Encrypted IRC Client",
   "main": "main.js",
   "author": "gh0st",
@@ -10,7 +10,11 @@
     "build": "electron-builder",
     "build:win": "electron-builder --win",
     "build:linux": "electron-builder --linux",
-    "build:mac": "electron-builder --mac"
+    "build:mac": "electron-builder --mac",
+    "publish": "electron-builder --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
   },
   "build": {
     "appId": "com.cryptirc.app",
@@ -18,17 +22,30 @@
     "directories": {
       "output": "dist"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "gh0st68",
+        "repo": "CryptIRC"
+      }
+    ],
     "win": {
       "target": "nsis",
       "icon": "icons/icon.ico"
     },
     "linux": {
       "target": "AppImage",
-      "icon": "icons/icon.png"
+      "icon": "icons/icon.png",
+      "category": "Network",
+      "desktopName": "cryptirc.desktop",
+      "synopsis": "Encrypted IRC client"
     },
     "mac": {
-      "target": "zip",
-      "icon": "icons/icon.png"
+      "target": [
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "icon": "icons/icon.png",
+      "category": "public.app-category.social-networking"
     },
     "nsis": {
       "oneClick": true,
@@ -36,7 +53,7 @@
     }
   },
   "devDependencies": {
-    "electron": "^33.0.0",
-    "electron-builder": "^25.0.0"
+    "electron": "^42.0.0",
+    "electron-builder": "^26.0.0"
   }
 }

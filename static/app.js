@@ -1845,6 +1845,9 @@ function renderSidebar(){
   _sidebarRenderTimer=setTimeout(()=>{_sidebarRenderTimer=null;_renderSidebarNow();},50);
 }
 function _renderSidebarNow(){
+  // Native desktop unread badge (Electron v0.3.1+): count of mentions/DMs awaiting.
+  // Old shells lack setUnread — the optional check makes this a no-op there.
+  try{ if(window.electronAPI&&window.electronAPI.setUnread){ let _b=0; for(const v of mentionUnread.values()) _b+=(v||0); window.electronAPI.setUnread(_b); } }catch(_){}
   const el=document.getElementById('network-list');
   el.innerHTML='';
   for(const net of networks){
