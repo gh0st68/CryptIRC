@@ -5375,6 +5375,8 @@ const APPEAR_DEFAULTS={
   linkColor:'', mobileLink:'',
   // User-created themes, keyed by id. Selected via theme:'custom:<id>'.
   customThemes:{},
+  // Desktop pet (eSheep) — a little sheep wanders the client window. Off by default.
+  esheep:false,
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -5465,6 +5467,8 @@ function applyAppearance(){
     mediaAspect:    el('a-media-aspect')?.value || prev.mediaAspect || 'natural',
     mediaMaxHeight: (()=>{const v=el('a-media-max-h')?.value; const n=v==null||v===''?NaN:+v; return Number.isFinite(n)?n:(prev.mediaMaxHeight??280);})(),
     ytPlayOverlay:  el('a-yt-play')?.classList.contains('on') ?? true,
+    // Desktop pet toggle. Carry the previous value through if the row is absent.
+    esheep:     el('a-esheep') ? el('a-esheep').classList.contains('on') : (prev.esheep??false),
   };
   // Show/hide the custom radius slider based on shape
   const _radiusRow = el('a-media-radius-row');
@@ -5646,7 +5650,20 @@ function applyThemeCSS(cfg){
       stopAnimation();
     }
   }
+  // Desktop pet (eSheep): mirror the toggle through the one universal apply
+  // funnel (initial load + sync + every change). enable()/disable() are
+  // idempotent. Guarded: esheep.js is a deferred script, so on the first
+  // app.js apply it may not be defined yet — the window 'load' handler below
+  // re-applies the saved state once it is.
+  if(window.CryptIRCSheep){ cfg.esheep ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); }
 }
+
+// Apply the saved eSheep state once everything (including the deferred
+// esheep.js) has loaded — covers returning users who left the pet enabled,
+// regardless of the app.js-runs-before-deferred-scripts execution order.
+window.addEventListener('load', function(){
+  try{ if(window.CryptIRCSheep){ var _c=loadAppearance(); _c.esheep ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); } }catch(_){}
+});
 
 // ─── Animation System ─────────────────────────────────────────────────────────
 let _animId=null,_animTimers=[],_animResizeFn=null,_animCurType=null,_desiredAnimType=null;
@@ -6159,6 +6176,7 @@ function populateAppearanceModal(cfg){
   cfg.compact ? el('a-compact').classList.add('on') : el('a-compact').classList.remove('on');
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
+  { const _es=el('a-esheep'); if(_es){ cfg.esheep ? _es.classList.add('on') : _es.classList.remove('on'); } }
   // spellcheck and linkPreviews toggles are now in the Security panel
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;

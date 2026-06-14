@@ -643,6 +643,7 @@ async fn main() -> Result<()> {
         .route("/",                      get(serve_index))
         .route("/Sortable.min.js",       get(serve_sortable_js))
         .route("/e2e.js",                get(serve_e2e_js))
+        .route("/esheep.js",             get(serve_esheep_js))
         .route("/app.js",                get(serve_app_js))
         .route("/manifest.json",         get(serve_manifest))
         .route("/sw.js",                 get(serve_sw))
@@ -740,6 +741,9 @@ async fn serve_icon_512() -> impl IntoResponse { ([(header::CONTENT_TYPE,"image/
 async fn serve_e2e_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/e2e.js")) }
 async fn serve_app_js(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], (*state.static_app_js).clone()) }
 async fn serve_sortable_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/Sortable.min.js")) }
+// Self-contained eSheep desktop-pet engine (sprite + behaviours embedded). No base-path
+// rewrite needed: it has no /cryptirc refs and loads its pet inline (no network).
+async fn serve_esheep_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/esheep.js")) }
 
 // Bundled notification sounds — shipped in the binary so deploys don't need
 // external asset files. Served at /sounds/<name>.mp3.
