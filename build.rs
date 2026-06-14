@@ -26,13 +26,7 @@ fn main() {
 
     // Refresh the stamp when HEAD moves (commit/checkout), the index changes
     // (stage/commit), or the main sources are edited (affects the -dirty flag).
-    for p in [
-        ".git/HEAD",
-        ".git/index",
-        "src/main.rs",
-        "static/app.js",
-        "static/index.html",
-    ] {
+    for p in [".git/HEAD", ".git/index", "src", "static"] {
         println!("cargo:rerun-if-changed={p}");
     }
 }

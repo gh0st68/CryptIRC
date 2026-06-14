@@ -805,8 +805,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                 // strip_crlf on `from` for defense-in-depth against IRC-line injection
                                 // into the outbound NOTICE (the reader already splits on \r\n).
                                 conn.lock().await.send_raw(&format!(
-                                    "NOTICE {} :\x01VERSION CryptIRC v0.9.0 - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
-                                    strip_crlf(&from)
+                                    "NOTICE {} :\x01VERSION CryptIRC v{} · {} - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
+                                    strip_crlf(&from),
+                                    env!("CARGO_PKG_VERSION"),
+                                    option_env!("CRYPTIRC_BUILD").unwrap_or("dev"),
                                 )).await?;
                             }
                             continue;
