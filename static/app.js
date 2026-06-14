@@ -5320,7 +5320,6 @@ const THEMES={
   falling_leaves: {label:'🍂 Autumn Leaves',bg0:'#120906',bg1:'#1c120a',bg2:'#281c10',bg3:'#342618',bg4:'#423222',border:'#4e3c2a',border2:'#785a40',text:'#f0e0cc',text2:'#c8a888',text3:'#8a7458',animation:'fallingLeaves'},
   firefly_meadow: {label:'✨ Firefly Meadow',bg0:'#050a06',bg1:'#0a120c',bg2:'#101a12',bg3:'#16241a',bg4:'#1e3022',border:'#263a2c',border2:'#3e5a44',text:'#e4efd8',text2:'#a4b898',text3:'#687c5c',animation:'fireflyMeadow'},
   // ── ESHEEP: classic desktop pet, wanders the screen ────────────────────────
-  esheep: {label:'🐑 eSheep',bg0:'#0f1418',bg1:'#161c22',bg2:'#1d242c',bg3:'#252d36',bg4:'#2e3842',border:'#3a4450',border2:'#52606e',text:'#e4ebf0',text2:'#a8b4c0',text3:'#5e6a76',animation:'esheep'},
 };
 // Default semantic message colors (mirror :root in index.html). Used to RESET
 // these vars when switching away from a custom theme that overrode them.
@@ -6075,89 +6074,6 @@ fireflyMeadow(cv,ctx){
   _animResizeFn=(()=>{const old=_animResizeFn;return function(){if(old)old();};})();
   _animTimers.push({isListener:true,cancel:()=>window.removeEventListener('mousemove',onMove)});
   (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const f of flies){const dx=mx-f.x,dy=my-f.y,d=Math.sqrt(dx*dx+dy*dy)+0.1;const pull=Math.min(0.04,30/d);f.vx+=dx/d*pull+(Math.random()-0.5)*0.2;f.vy+=dy/d*pull+(Math.random()-0.5)*0.2;f.vx*=0.94;f.vy*=0.94;f.x+=f.vx;f.y+=f.vy;f.phase+=0.06;const a=0.3+0.7*Math.abs(Math.sin(f.phase));const g=ctx.createRadialGradient(f.x,f.y,0,f.x,f.y,10);g.addColorStop(0,`rgba(228,239,136,${a})`);g.addColorStop(1,'rgba(228,239,136,0)');ctx.beginPath();ctx.arc(f.x,f.y,10,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();ctx.beginPath();ctx.arc(f.x,f.y,2,0,Math.PI*2);ctx.fillStyle=`rgba(255,255,200,${a})`;ctx.fill();}_animId=requestAnimationFrame(draw);})();
-},
-// ── eSheep: classic desktop pet that wanders, sleeps, climbs walls ─────────
-esheep(cv,ctx){
-  // States: walk_left, walk_right, climb_up, climb_down, hang, sit, sleep, fall
-  const sheep={x:cv.width*0.3,y:cv.height-60,vx:1.2,vy:0,state:'walk_right',stateTimer:0,animFrame:0,scale:1};
-  // Draw a cute sheep sprite procedurally
-  function drawSheep(s){
-    ctx.save();ctx.translate(s.x,s.y);
-    const flip=s.state==='walk_left'||s.state==='climb_down';
-    if(flip)ctx.scale(-1,1);
-    const bounce=['walk_left','walk_right','climb_up','climb_down'].includes(s.state)?Math.sin(s.animFrame*0.3)*1.5:0;
-    // Body (fluffy cloud)
-    ctx.fillStyle='#f8f8f0';
-    ctx.beginPath();
-    ctx.arc(-8,-4+bounce,6,0,Math.PI*2);
-    ctx.arc(0,-6+bounce,7,0,Math.PI*2);
-    ctx.arc(8,-4+bounce,6,0,Math.PI*2);
-    ctx.arc(-4,-10+bounce,5,0,Math.PI*2);
-    ctx.arc(4,-10+bounce,5,0,Math.PI*2);
-    ctx.fill();
-    // Head
-    ctx.fillStyle='#2a2222';
-    ctx.beginPath();ctx.arc(12,-6+bounce,5,0,Math.PI*2);ctx.fill();
-    // Ears
-    ctx.beginPath();ctx.ellipse(10,-10+bounce,2,3,-0.3,0,Math.PI*2);ctx.fill();
-    // Eye
-    ctx.fillStyle='#fff';
-    ctx.beginPath();ctx.arc(14,-7+bounce,1.2,0,Math.PI*2);ctx.fill();
-    ctx.fillStyle='#000';
-    ctx.beginPath();ctx.arc(14.3,-7+bounce,0.6,0,Math.PI*2);ctx.fill();
-    // Legs
-    ctx.fillStyle='#2a2222';
-    const legOff=['walk_left','walk_right'].includes(s.state)?Math.sin(s.animFrame*0.4)*2:0;
-    ctx.fillRect(-8,0+bounce,2,8+legOff);
-    ctx.fillRect(-3,0+bounce,2,8-legOff);
-    ctx.fillRect(3,0+bounce,2,8+legOff);
-    ctx.fillRect(8,0+bounce,2,8-legOff);
-    // ZZZ when sleeping
-    if(s.state==='sleep'){
-      ctx.font='bold 10px serif';
-      ctx.fillStyle='rgba(180,200,240,'+(0.4+Math.sin(s.stateTimer*0.05)*0.3)+')';
-      ctx.fillText('z',18,-14);
-      ctx.fillText('Z',24,-20);
-      ctx.fillText('z',30,-28);
-    }
-    ctx.restore();
-  }
-  function pickState(){
-    const choices=['walk_right','walk_left','sit','sleep','climb_up'];
-    return choices[Math.floor(Math.random()*choices.length)];
-  }
-  (function draw(){
-    ctx.clearRect(0,0,cv.width,cv.height);
-    sheep.stateTimer++;sheep.animFrame++;
-    const st=sheep.state;
-    // State behaviors
-    if(st==='walk_right'){
-      sheep.vx=1.2;sheep.vy=0;sheep.x+=sheep.vx;
-      if(sheep.x>=cv.width-12){sheep.x=cv.width-12;sheep.state='climb_up';sheep.stateTimer=0;}
-      if(sheep.stateTimer>600&&Math.random()<0.01){sheep.state=pickState();sheep.stateTimer=0;}
-    } else if(st==='walk_left'){
-      sheep.vx=-1.2;sheep.vy=0;sheep.x+=sheep.vx;
-      if(sheep.x<=12){sheep.x=12;sheep.state='walk_right';sheep.stateTimer=0;}
-      if(sheep.stateTimer>600&&Math.random()<0.01){sheep.state=pickState();sheep.stateTimer=0;}
-    } else if(st==='climb_up'){
-      sheep.vx=0;sheep.vy=-1;sheep.y+=sheep.vy;
-      if(sheep.y<=50){sheep.y=50;sheep.state='hang';sheep.stateTimer=0;}
-    } else if(st==='hang'){
-      if(sheep.stateTimer>200){sheep.state='climb_down';sheep.stateTimer=0;}
-    } else if(st==='climb_down'){
-      sheep.vx=0;sheep.vy=1;sheep.y+=sheep.vy;
-      if(sheep.y>=cv.height-60){sheep.y=cv.height-60;sheep.state='walk_left';sheep.stateTimer=0;}
-    } else if(st==='sit'){
-      if(sheep.stateTimer>300){sheep.state=Math.random()<0.5?'walk_right':'walk_left';sheep.stateTimer=0;}
-    } else if(st==='sleep'){
-      if(sheep.stateTimer>500){sheep.state=Math.random()<0.5?'walk_right':'walk_left';sheep.stateTimer=0;}
-    } else if(st==='fall'){
-      sheep.vy+=0.3;sheep.y+=sheep.vy;
-      if(sheep.y>=cv.height-60){sheep.y=cv.height-60;sheep.vy=0;sheep.state='sit';sheep.stateTimer=0;}
-    }
-    drawSheep(sheep);
-    _animId=requestAnimationFrame(draw);
-  })();
 },
 };
 
@@ -11185,7 +11101,7 @@ function showHelpPanel(){
       <span style="font-size:11px;color:var(--text3)">CryptIRC v${CRYPTIRC_VERSION} — Created by gh0st with Hallucinate</span>
     </div>`;
   body.appendChild(sup);
-  var _hvp=document.getElementById('help-ver-pill'); if(_hvp) _hvp.textContent='v'+CRYPTIRC_VERSION;
+  var _hvp=document.getElementById('help-ver-pill'); if(_hvp) _hvp.textContent=_verLabel();
   document.getElementById('help-overlay').classList.add('show');
   _overlayOpen('helpPanel', closeHelpPanel);
 }
@@ -11193,6 +11109,11 @@ function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('he
 
 // ─── What's New / changelog ────────────────────────────────────────────────
 const CRYPTIRC_VERSION='0.3.0';
+// Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
+// placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
+// If served un-replaced (still starts with '_'), the pill shows just the version.
+const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
+function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
   {version:'0.3.0', date:'June 2026', items:[
@@ -11206,7 +11127,7 @@ const NEWS=[
 ];
 function showNewsPanel(){
   var body=document.getElementById('news-body'); if(!body) return;
-  var pill=document.getElementById('news-ver-pill'); if(pill) pill.textContent='v'+CRYPTIRC_VERSION;
+  var pill=document.getElementById('news-ver-pill'); if(pill) pill.textContent=_verLabel();
   var label={new:'New', fix:'Fix', sec:'Security'};
   body.innerHTML=NEWS.map(function(rel){
     return '<div class="news-rel"><div class="news-rel-head"><span class="news-rel-ver">v'+esc(rel.version)+'</span><span class="news-rel-date">'+esc(rel.date)+'</span></div>'+

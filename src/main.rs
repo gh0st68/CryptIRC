@@ -585,7 +585,7 @@ async fn main() -> Result<()> {
     let static_sw       = Arc::new(include_str!("../static/sw.js").replace("/cryptirc", bp_trimmed));
     // app.js holds the main frontend script (extracted verbatim from index.html).
     // It contains /cryptirc asset/WS paths, so it needs the same base-path rewrite.
-    let static_app_js   = Arc::new(include_str!("../static/app.js").replace("/cryptirc", bp_trimmed));
+    let static_app_js   = Arc::new(include_str!("../static/app.js").replace("/cryptirc", bp_trimmed).replace("__CRYPTIRC_BUILD__", option_env!("CRYPTIRC_BUILD").unwrap_or("dev")));
 
     let state = AppState {
         connections:         Arc::new(DashMap::new()),
