@@ -45,7 +45,7 @@
 </p>
 
 <p align="center">
-  <img src="screenshots/mobile.jpg" width="300" alt="CryptIRC — Mobile (PWA)">
+  <img src="screenshots/mobile.png" width="300" alt="CryptIRC — Mobile (PWA)">
   <br>
   <sub>Installable PWA — same client, on your phone.</sub>
 </p>
