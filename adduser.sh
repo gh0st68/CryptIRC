@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
 # Add a CryptIRC user from the command line (pre-verified, no email needed)
 # Usage: sudo bash adduser.sh <username> <email> <password>
+#   or:  sudo CRYPTIRC_NEW_PASS=<password> bash adduser.sh <username> <email>
+#
+# Prefer the env form — a password passed as the 3rd argument is briefly visible
+# to other local users via `ps` / /proc/<pid>/cmdline.
 set -euo pipefail
 
 DATA_DIR="${CRYPTIRC_DATA:-/var/lib/cryptirc}"
 USERNAME="${1:-}"
 EMAIL="${2:-}"
-PASSWORD="${3:-}"
+PASSWORD="${3:-${CRYPTIRC_NEW_PASS:-}}"
 
 if [[ -z "$USERNAME" || -z "$EMAIL" || -z "$PASSWORD" ]]; then
     echo "Usage: sudo bash adduser.sh <username> <email> <password>"
-    echo "Example: sudo bash adduser.sh gh0st gh0st@example.com MySecurePass123"
+    echo "   or: sudo CRYPTIRC_NEW_PASS=<password> bash adduser.sh <username> <email>"
+    echo "Example: sudo CRYPTIRC_NEW_PASS=MySecurePass123 bash adduser.sh gh0st gh0st@example.com"
     exit 1
 fi
 

@@ -96,8 +96,18 @@ function injectStyle(){
     /* dug-up sand grains */
     '.cc-sand{position:fixed;z-index:'+(Z-1)+';pointer-events:none;background:#caa46a;border-radius:50%;animation:ccSand .7s ease-out forwards}',
     '@keyframes ccSand{0%{opacity:.9;transform:translateY(0)}100%{opacity:0;transform:translateY(-14px)}}',
+    '.cc-shrimp.pop{animation:ccPop .4s cubic-bezier(.2,1.4,.5,1)}',           /* shrimp hops into view */
+    '@keyframes ccPop{0%{transform:translateY(-10px) scale(.4);opacity:0}60%{transform:translateY(2px) scale(1.1)}100%{transform:none;opacity:1}}',
     /* napping: eyes droop */
     '.cryptirc-crab.nap .pupil{opacity:.25}',
+    /* dizzy stars after a wall bonk / flip */
+    '.cc-dizzy{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:13px;animation:ccDizzy .9s ease-out forwards}',
+    '@keyframes ccDizzy{0%{opacity:0;transform:translate(0,0) rotate(0) scale(.5)}25%{opacity:1}100%{opacity:0;transform:translate(8px,-20px) rotate(160deg) scale(1)}}',
+    /* flipped onto its back: rock side to side, legs flailing in the air */
+    '.cryptirc-crab.flipped{animation:ccFlip .42s ease-in-out infinite}',
+    '@keyframes ccFlip{0%,100%{transform:rotate(173deg)}50%{transform:rotate(187deg)}}',
+    '.cryptirc-crab.flipped .ccleg{animation:ccLeg .13s ease-in-out infinite}',
+    '.cryptirc-crab.flipped .ccleg.b{animation-delay:.06s}',
     '@media(prefers-reduced-motion:reduce){.cryptirc-crab *,.cryptirc-crab{animation:none!important}}'
   ].join('');
   document.head.appendChild(s);
@@ -166,6 +176,11 @@ function Crab(){
   this._talkGate = 0;                              // frames of quiet remaining (talks less)
   this._encGate = 600 + (Math.random()*900|0);     // frames until it may go pester the sheep
   this._seekT = 0;
+  this._shrimp = null;                             // a real shrimp element on the floor, when one's out
+  this._shrimpX = 0;                               // its center x
+  this._shrimpTtl = 0;                             // frames before an uneaten shrimp scuttles off
+  this._shrimpGate = 500 + (Math.random()*1200|0); // frames until the next shrimp appears
+  this._pendDir = 1;                               // direction to amble after a wall bonk / flip
   this._bounds();
   // start somewhere along the floor
   this.x = Math.random()*Math.max(1,(this.screenW-this.W));
@@ -203,6 +218,7 @@ Crab.prototype._applyTransform = function(){
   var rot = 0, sx = this.dir;
   if(this.state==='climb'){ rot = (this.wall==='L' ? 90 : -90); sx = 1; }
   else if(this.state==='ceil'){ rot = 180; }
+  else if(this.state==='flipped'){ rot = 180; sx = 1; }   // bonked onto its back, legs in the air
   // consistent rotate()+scaleX() so the orientation TWEENS (see transition on .cryptirc-crab)
   this.el.style.transform = 'rotate('+rot+'deg) scaleX('+sx+')';
 };
@@ -256,10 +272,10 @@ Crab.prototype._wire = function(){
     if(self._didDrag){ self._didDrag=false; return; }   // it was a drag, not a click
     self.poke();
     e.stopPropagation();
-    // Forward the click to the real UI underneath: hide the crab (and any sheep)
+    // Forward the click to the real UI underneath: hide the crab AND the other pets
     // from the hit-test, resolve elementFromPoint, then re-dispatch the click.
     var prev=self.el.style.pointerEvents; self.el.style.pointerEvents='none';
-    var sheep=document.querySelectorAll('.cryptirc-esheep'), saved=[];
+    var sheep=document.querySelectorAll('.cryptirc-esheep, .cryptirc-ghost, .gh-friend'), saved=[];
     for(var i=0;i<sheep.length;i++){ saved.push([sheep[i],sheep[i].style.pointerEvents]); sheep[i].style.pointerEvents='none'; }
     var under=document.elementFromPoint(e.clientX,e.clientY);
     self.el.style.pointerEvents=prev;
@@ -304,16 +320,33 @@ Crab.prototype.frame = function(ts){
 
   if(this._talkGate > 0) this._talkGate -= k;
 
-  // Every now and then, when the eSheep is ALSO on, go pester it. Only kicks off
-  // from a calm floor state so it never interrupts a climb/charge/drag.
+  // Keep a live shrimp sitting on the floor; if one goes uneaten too long it scuttles off.
+  if(this._shrimp){
+    this._shrimp.style.top = (this._floorY() + this.H - 18) + 'px';
+    if(this.state!=='eat'){ if(this._shrimpTtl > 0) this._shrimpTtl -= k; else this.removeShrimp(); }
+  }
+
+  // From a calm floor state the crab decides what to do: chase FOOD first (a shrimp
+  // that randomly appeared), otherwise occasionally go pester the eSheep if it's on.
   if(this.state==='walk' || this.state==='idle'){
-    if(this._encGate > 0) this._encGate -= k;
+    if(!this._shrimp){
+      if(this._shrimpGate > 0) this._shrimpGate -= k;
+      else { this.spawnShrimp(); this._shrimpGate = 1400 + (Math.random()*2600|0); }   // a shrimp every ~25–70s
+    }
+    if(this._shrimp){ this.setState('toshrimp'); }                                      // food! go get it
+    else if(this._encGate > 0) this._encGate -= k;
     else if(this._sheepTarget()){ this.setState('seek'); this._seekT = 0; }
-    else this._encGate = 240;                       // sheep off — re-check in a few seconds
+    else this._encGate = 240;                                                           // sheep off — re-check soon
   }
 
   this.t++;
-  if(this.t >= this.next){ this.pickState(); }
+  if(this.t >= this.next){
+    if(this.state==='bonk'){                              // impact over → flop onto its back, or shake it off
+      if(Math.random()<0.6) this.setState('flipped');
+      else { this.face(this._pendDir); this.setState('walk'); }
+    } else if(this.state==='flipped'){ this.face(this._pendDir); this.setState('walk'); }   // right itself, amble away
+    else this.pickState();
+  }
 
   switch(this.state){
     case 'walk':    this.x += this.vx*k; break;
@@ -332,7 +365,16 @@ Crab.prototype.frame = function(ts){
       if(Math.abs(d) < this.W*0.7 || this._seekT > 1200){ this._encounter(tgt); }   // arrived (or gave up ~20s)
       break;
     }
-    // snap / rage / wave / idle / dance / eat / nap / dig: mostly stationary (dance shuffles)
+    case 'toshrimp': {
+      if(!this._shrimp){ this.setState('walk'); break; }              // shrimp gone — never mind
+      var sc = this.x + this.W/2, sd = this._shrimpX - sc;
+      this.face(sd<0 ? -1 : 1);
+      this.vx = (Math.abs(sd) < 8 ? 0 : (sd<0 ? -1 : 1)) * 0.45;      // a slow, deliberate approach
+      this.x += this.vx*k;
+      if(Math.abs(sd) < this.W*0.45){ this.setState('eat'); }         // reached it → chomp
+      break;
+    }
+    // snap / rage / wave / idle / dance / eat / nap / dig / bonk / flipped: mostly stationary (dance shuffles)
     case 'dance':   this.x += Math.sin(this.t*0.4)*1.1*this.dir; break;
   }
   // Floor states ride the LIVE input-bar floor (desktop) every frame, so the crab
@@ -370,25 +412,30 @@ Crab.prototype._floorY = function(){
 Crab.prototype.floorize = function(){ this.y = this._floorY(); };
 
 Crab.prototype.bounceOrClimb = function(newDir){
-  if(Math.random() < 0.4 && this.state==='walk'){ this.wall = (newDir>0?'L':'R'); this.x = (newDir>0?0:this.screenW-this.W); this.setState('climb'); this.vy = -0.85; }
+  var r = Math.random();
+  if(r < 0.16){ this._pendDir = newDir; this.setState('bonk'); }   // ran straight into the wall — bonk! (then maybe flips over)
+  else if(r < 0.48 && this.state==='walk'){ this.wall = (newDir>0?'L':'R'); this.x = (newDir>0?0:this.screenW-this.W); this.setState('climb'); this.vy = -0.85; }
   else { this.face(newDir); this.vx = Math.abs(this.vx||1.1) * newDir; if(Math.random()<0.5) this.setState('snap'); }
 };
 
 Crab.prototype.setState = function(st){
   this.state = st;
-  this.el.classList.remove('walk','snap','rage','charge','wave','dance','crawl','drag','nap');
+  this.el.classList.remove('walk','snap','rage','charge','wave','dance','crawl','drag','nap','flipped','bonk');
   this.t = 0;
   switch(st){
     case 'walk':   this.el.classList.add('walk'); this.vx = 0.3*this.dir; this.next = 180 + (Math.random()*200|0); break;   // slower, ambles longer
     case 'seek':   this.el.classList.add('walk'); this.vx = 0; this.next = 99999; break;   // ends via _encounter
+    case 'toshrimp': this.el.classList.add('walk'); this.vx = 0; this.next = 99999; break; // ends on arrival → eat
     case 'charge': this.el.classList.add('charge','rage'); this.vx = 1.5*this.dir; this.next = 65 + (Math.random()*50|0); if(Math.random()<0.3) this.speak(Math.random()<0.5?'CHARGE!':'WEEEE'); break;
     case 'snap':   this.el.classList.add('snap'); this.vx = 0; this.next = 24 + (Math.random()*20|0); if(Math.random()<0.18) this.speak('SNIP SNIP'); break;
     case 'rage':   this.el.classList.add('rage','snap'); this.vx = 0; this.next = 34 + (Math.random()*26|0); this.anger(); if(Math.random()<0.45) this.speak(pick()); break;
     case 'wave':   this.el.classList.add('wave'); this.vx = 0; this.next = 55; if(Math.random()<0.4) this.speak(Math.random()<0.5?'oi':'come here'); break;
     case 'dance':  this.el.classList.add('dance','walk'); this.vx = 0; this.next = 80; if(Math.random()<0.25) this.speak('sideways gang'); break;
-    case 'eat':    this.el.classList.add('snap'); this.vx = 0; this.next = 110; this.eatShrimp(); break;          // 🦐 nom
+    case 'eat':    this.el.classList.add('snap'); this.vx = 0; this.next = 110; this.chompShrimp(); break;        // chomp the floor shrimp
     case 'nap':    this.el.classList.add('nap');  this.vx = 0; this.next = 150 + (Math.random()*120|0); this.naptime(); if(Math.random()<0.4) this.speak('zzz'); break;
     case 'dig':    this.el.classList.add('snap'); this.vx = 0; this.next = 70; this.digSand(); if(Math.random()<0.4) this.speak(Math.random()<0.5?'digging':'treasure?'); break;
+    case 'bonk':   this.el.classList.add('snap'); this.vx = 0; this.next = 18 + (Math.random()*12|0); this.dizzy(); if(Math.random()<0.55) this.speak(Math.random()<0.5?'oof':'ow'); break;
+    case 'flipped':this.el.classList.add('flipped'); this.vx = 0; this.next = 80 + (Math.random()*90|0); this.dizzy(); if(Math.random()<0.5) this.speak(Math.random()<0.5?'help, stuck':'legs! legs!'); break;
     case 'idle':   this.vx = 0; this.next = 50 + (Math.random()*70|0); break;
     case 'bubble': this.el.classList.add('snap'); this.vx=0; this.next = 30; this.bubbles(); break;
     case 'climb':  this.el.classList.add('crawl'); break;
@@ -399,15 +446,17 @@ Crab.prototype.setState = function(st){
 };
 
 Crab.prototype.pickState = function(){
-  if(this.state==='climb'||this.state==='ceil'||this.state==='fall'||this.state==='seek'||this.dragging) return;
+  // climb/ceil/fall/seek/toshrimp/bonk/flipped run their own course; eating is driven
+  // by a real shrimp appearing (not picked at random here).
+  if(this.state==='climb'||this.state==='ceil'||this.state==='fall'||this.state==='seek'||
+     this.state==='toshrimp'||this.state==='bonk'||this.state==='flipped'||this.dragging) return;
   var r = Math.random();
-  if(r < 0.40)      this.setState('walk');
-  else if(r < 0.52) this.setState('snap');
-  else if(r < 0.60) this.setState('rage');
-  else if(r < 0.68) this.setState('charge');
-  else if(r < 0.76) this.setState('wave');
-  else if(r < 0.83) this.setState('dance');
-  else if(r < 0.90) this.setState('eat');     // find + eat a shrimp 🦐
+  if(r < 0.44)      this.setState('walk');
+  else if(r < 0.57) this.setState('snap');
+  else if(r < 0.65) this.setState('rage');
+  else if(r < 0.73) this.setState('charge');
+  else if(r < 0.81) this.setState('wave');
+  else if(r < 0.89) this.setState('dance');
   else if(r < 0.95) this.setState('nap');     // catch some Zzz
   else if(r < 0.99) this.setState('dig');     // dig in the sand
   else              this.setState('bubble');
@@ -479,20 +528,47 @@ Crab.prototype.bubbles = function(){
     self._after(1700, function(){ if(b.parentNode) b.parentNode.removeChild(b); });
   }); })(i); }
 };
-// 🦐 a shrimp appears in front of the crab; it nibbles it down to nothing.
-Crab.prototype.eatShrimp = function(){
-  if(this._dead) return;
-  var self=this, mirror = this.dir<0 ? 'scaleX(-1) ' : '';
+// 🦐 a real shrimp pops up at a random spot on the floor. The crab spots it
+// (toshrimp), walks over, and eats it (chompShrimp). One shrimp at a time.
+Crab.prototype.spawnShrimp = function(){
+  if(this._dead || this._shrimp) return;
   var sh = document.createElement('div');
-  sh.className = 'cc-shrimp'; sh.textContent = '🦐';
-  sh.style.left = (this.x + (this.dir>0 ? this.W-10 : -12)) + 'px';
-  sh.style.top  = (this.y + this.H*0.5) + 'px';
-  sh.style.transform = mirror + 'scale(1)';
+  sh.className = 'cc-shrimp pop'; sh.textContent = '🦐';
+  // a random spot along the floor (kept a little off the edges)
+  var sx = 24 + Math.random()*Math.max(40, this.screenW - this.W - 48);
+  this._shrimpX = sx + 9;                                   // ~center of the emoji
+  sh.style.left = sx + 'px';
+  sh.style.top  = (this._floorY() + this.H - 18) + 'px';
   document.body.appendChild(sh);
-  if(Math.random()<0.6) this.speak('ooh, shrimp', true);
-  this._after(650,  function(){ sh.style.transform = mirror + 'scale(.6)';  sh.style.opacity='.6';  });
-  this._after(1050, function(){ sh.style.transform = mirror + 'scale(.2)';  sh.style.opacity='.15'; });
-  this._after(1400, function(){ if(sh.parentNode) sh.parentNode.removeChild(sh); self.speak(Math.random()<0.5?'nom nom':'yum', true); });
+  this._shrimp = sh;
+  this._shrimpTtl = 1700 + (Math.random()*900|0);           // ~28–43s before it wanders off if ignored
+  if(Math.random()<0.5) this.speak(Math.random()<0.5?'ooh, a shrimp':'shrimp!', true);
+};
+Crab.prototype.removeShrimp = function(){
+  var sh = this._shrimp; this._shrimp = null; this._shrimpTtl = 0;
+  if(!sh) return;
+  sh.style.transform = 'scale(.2)'; sh.style.opacity = '0';
+  var self=this; this._after(320, function(){ if(sh.parentNode) sh.parentNode.removeChild(sh); });
+};
+// chomp the shrimp the crab walked up to — shrink it away, then "nom".
+Crab.prototype.chompShrimp = function(){
+  if(this._dead) return;
+  var self=this, sh=this._shrimp;
+  if(!sh){ this.setState('walk'); return; }                 // nothing to eat (it left)
+  this._after(420, function(){ if(sh.parentNode){ sh.style.transform='scale(.6)';  sh.style.opacity='.6';  } });
+  this._after(780, function(){ if(sh.parentNode){ sh.style.transform='scale(.22)'; sh.style.opacity='.15'; } });
+  this._after(1080,function(){ if(sh.parentNode) sh.parentNode.removeChild(sh); if(self._shrimp===sh){ self._shrimp=null; self._shrimpTtl=0; } self.speak(['nom nom','yum','tasty','🦐'][Math.random()*4|0], true); });
+};
+// little ✦/💫 stars spin off the crab's head when it bonks a wall or flips over.
+Crab.prototype.dizzy = function(){
+  if(this._dead) return;
+  var self=this;
+  for(var i=0;i<3;i++){ (function(n){ self._after(n*130, function(){
+    var d=document.createElement('div'); d.className='cc-dizzy'; d.textContent=(n%2?'✦':'💫');
+    d.style.left=(self.x + self.W*0.3 + n*10)+'px'; d.style.top=(self.y - 8)+'px';
+    document.body.appendChild(d);
+    self._after(900, function(){ if(d.parentNode) d.parentNode.removeChild(d); });
+  }); })(i); }
 };
 // drowsy Zzz drift up while the crab naps.
 Crab.prototype.naptime = function(){
@@ -529,8 +605,9 @@ Crab.prototype.destroy = function(){
   this._listeners.length = 0;
   if(this.el && this.el.parentNode) this.el.parentNode.removeChild(this.el);
   if(this.say && this.say.parentNode) this.say.parentNode.removeChild(this.say);
+  this._shrimp = null;
   // sweep any stray fx
-  var stray = document.querySelectorAll('.cc-bub, .cc-anger, .cc-shrimp, .cc-zzz, .cc-sand');
+  var stray = document.querySelectorAll('.cc-bub, .cc-anger, .cc-shrimp, .cc-zzz, .cc-sand, .cc-dizzy');
   for(var k=0;k<stray.length;k++){ if(stray[k].parentNode) stray[k].parentNode.removeChild(stray[k]); }
 };
 

@@ -7,7 +7,7 @@
 - **OS**: Debian 12, Ubuntu 22.04+, or Arch Linux
 - **RAM**: 512 MB minimum, 1 GB recommended
 - **Disk**: 1 GB free space minimum
-- **Domain**: A domain or subdomain with an A record pointing to the server's public IP
+- **Domain**: *Optional.* A domain (with an A record → your server's public IP) gets a free, browser-trusted Let's Encrypt certificate. **No domain? No problem** — the installer can serve on your server's **IP address with a self-signed certificate** instead (browsers show a one-time "proceed anyway" warning).
 - **Ports**: 80 and 443 open (for HTTPS via Caddy)
 - **Root access**: Required for installation
 
@@ -21,13 +21,19 @@ cd CryptIRC
 sudo bash deploy/deploy.sh
 ```
 
-The script is interactive — it asks for domain, email, registration mode, and creates the first admin user.
+The script is interactive — it asks for domain, email, registration mode, and creates the first admin user. **No domain?** Just press Enter at the domain prompt to serve on your server's IP with a self-signed certificate.
 
-For non-interactive install:
+For a **fully non-interactive** install (no prompts — registration defaults to invite-only, no first user created):
 
 ```bash
+# Domain + Let's Encrypt:
 sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
+
+# Bare IP + self-signed cert (no domain, no email needed):
+sudo bash deploy/deploy.sh 203.0.113.10
 ```
+
+With a self-signed cert your browser shows a one-time warning the first time — click **Advanced → Proceed**. That's expected and safe; the connection is still encrypted.
 
 ### Arch Linux
 
@@ -231,7 +237,8 @@ Create an admin user:
 
 ```bash
 cd /path/to/CryptIRC
-sudo bash adduser.sh myusername myemail@example.com mypassword
+# Pass the password via the environment so it isn't visible in `ps`:
+sudo CRYPTIRC_NEW_PASS=mypassword bash adduser.sh myusername myemail@example.com
 ```
 
 Make them admin:
@@ -304,6 +311,7 @@ sudo certbot --nginx -d yourdomain.com
 | `CRYPTIRC_FROM_EMAIL` | `noreply@cryptirc.local` | Sender address for verification emails |
 | `CRYPTIRC_REGISTRATION` | `open` | `open` = anyone can register, `closed` = admin creates accounts |
 | `CRYPTIRC_REG_CODE` | (none) | If set, users must enter this code to register |
+| `CRYPTIRC_HSTS` | `on` | Set to `off` for self-signed/IP installs. HSTS on a self-signed cert makes browsers refuse the cert-warning click-through and locks users out for ~2 years. The installer sets this automatically. |
 | `RUST_LOG` | `info` | Log level: `error`, `warn`, `info`, `debug`, `trace` |
 
 ---

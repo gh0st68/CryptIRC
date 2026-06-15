@@ -511,12 +511,19 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
     h.insert(HeaderName::from_static("x-content-type-options"),   HeaderValue::from_static("nosniff"));
     h.insert(HeaderName::from_static("referrer-policy"),          HeaderValue::from_static("no-referrer"));
     h.insert(HeaderName::from_static("permissions-policy"),       HeaderValue::from_static("camera=(), microphone=(), geolocation=()"));
-    // #54: HSTS. The app is served over HTTPS behind nginx (the :80 vhost 301s to
-    // https). Without HSTS the first request is sent in cleartext and is
-    // SSL-strippable — directly undermining the transit-confidentiality threat
-    // model that protects the bearer token and vault passphrase.
-    h.insert(HeaderName::from_static("strict-transport-security"),
-             HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"));
+    // #54: HSTS. The app is served over HTTPS behind a reverse proxy (the :80
+    // vhost 301s to https). Without HSTS the first request is sent in cleartext
+    // and is SSL-strippable — directly undermining the transit-confidentiality
+    // threat model that protects the bearer token and vault passphrase.
+    //
+    // Gated by CRYPTIRC_HSTS so a SELF-SIGNED / bare-IP deployment can turn it
+    // OFF: with a self-signed cert, HSTS makes the browser refuse the cert-warning
+    // click-through and would lock every visitor out for 2 years. Default = on.
+    static HSTS_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *HSTS_ON.get_or_init(|| std::env::var("CRYPTIRC_HSTS").map(|v| v != "off").unwrap_or(true)) {
+        h.insert(HeaderName::from_static("strict-transport-security"),
+                 HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"));
+    }
     // NOTE (#55): script-src still includes 'unsafe-inline' because the frontend
     // (static/app.js inline onclick handlers + static/index.html theme bootstrap
     // script) currently requires it. 'unsafe-inline' cannot be dropped here until
