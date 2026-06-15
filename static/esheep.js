@@ -1733,6 +1733,25 @@ ESheep.prototype._findAnimByName=function(name){
   return null;
 };
 
+// Cross-pet interaction hook: bolt the sheep into its own 'run' animation,
+// fleeing AWAY from screen-x `fromX` (e.g. an approaching crab). Reuses the
+// engine's normal stepper, so when the run finishes it resumes via the usual
+// _getNextRandomNode chain — no state corruption. No-op while dragging/dying.
+ESheep.prototype.startle=function(fromX){
+  if(this.prepareToDie || !this.DOMdiv || this.dragging) return false;
+  var anim=this._findAnimByName('run');
+  if(!anim) return false;
+  var center=this.imageX+this.imageW/2;
+  var fleeRight = fromX < center;           // crab on the left → bolt right
+  this.flipped=fleeRight;
+  this.DOMdiv.style.transform = fleeRight ? 'rotateY(180deg)' : 'rotateY(0deg)';
+  this.HTMLelement=null;                     // hop off any perch so it can run along the floor
+  this.animationId=anim.getAttribute('id'); this.animationNode=anim; this.animationStep=0;
+  if(this._timer){ clearTimeout(this._timer); this._timer=null; }
+  this._nextESheepStep();
+  return true;
+};
+
 // Decode the sprite, build the clipped tile <img>, wire interaction, then start.
 ESheep.prototype.start=function(){
   var self=this;
@@ -2147,7 +2166,14 @@ window.CryptIRCSheep={
     for(var i=0;i<all.length;i++){ try{ all[i].destroy(); }catch(_){ } }
     _instances.clear();
   },
-  isOn:function(){ return _enabled; }
+  isOn:function(){ return _enabled; },
+  // The root (non-child) sheep, for cross-pet interaction. Null if none alive.
+  _root:function(){ var r=null; _instances.forEach(function(s){ if(!s.isChild && s.DOMdiv && !s.prepareToDie) r=s; }); return r; },
+  // Live screen position of the root sheep ({cx,cy,x,y,w,h}) or null.
+  pos:function(){ var s=this._root(); if(!s) return null;
+    return {x:s.imageX,y:s.imageY,w:s.imageW,h:s.imageH,cx:s.imageX+s.imageW/2,cy:s.imageY+s.imageH/2}; },
+  // Make the root sheep bolt away from screen-x `fromX`. Returns true if it reacted.
+  startle:function(fromX){ var s=this._root(); return s ? s.startle(fromX) : false; }
 };
 
 })();

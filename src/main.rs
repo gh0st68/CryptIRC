@@ -645,6 +645,7 @@ async fn main() -> Result<()> {
         .route("/e2e.js",                get(serve_e2e_js))
         .route("/esheep.js",             get(serve_esheep_js))
         .route("/crab.js",               get(serve_crab_js))
+        .route("/ghost.js",              get(serve_ghost_js))
         .route("/app.js",                get(serve_app_js))
         .route("/manifest.json",         get(serve_manifest))
         .route("/sw.js",                 get(serve_sw))
@@ -746,6 +747,7 @@ async fn serve_sortable_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"app
 // rewrite needed: it has no /cryptirc refs and loads its pet inline (no network).
 async fn serve_esheep_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/esheep.js")) }
 async fn serve_crab_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/crab.js")) }
+async fn serve_ghost_js()  -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/ghost.js")) }
 
 // Bundled notification sounds — shipped in the binary so deploys don't need
 // external asset files. Served at /sounds/<name>.mp3.

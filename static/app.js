@@ -2164,8 +2164,25 @@ function _pruneChatDOM(area){
 // server numeric spacing (WHOIS) but well under conversational message spacing.
 const BURST_NO_ANIM_MS=120;
 let _lastAppendTs=0;
+// Stable per-message fingerprint for DOM idempotency. id-bearing messages key on
+// their unique server id (so genuinely-repeated text with distinct ids survives);
+// id-less ones key on ts|from|kind|text.
+function _msgFp(m){ return (m && m.id>0) ? 'id:'+m.id : 'k:'+((m&&m.ts)|0)+'|'+((m&&m.from)||'')+'|'+((m&&m.kind)||'')+'|'+((m&&m.text)||'').slice(0,80); }
 function appendMsgRow(msg){
   const area=document.getElementById('chat-area');if(area.style.display==='none')return;
+  // Idempotency guard against the transient duplicate-row bug: if an identical
+  // chat/notice row is already among the last few rendered, skip the append.
+  // renderChat() stays authoritative (this only touches the live append path), own
+  // messages are exempt (optimistic echo + intentional repeats are reconciled
+  // elsewhere), and id-bearing rows fingerprint by their unique id so legitimate
+  // repeats are never swallowed.
+  if((msg.kind==='privmsg'||msg.kind==='action'||msg.kind==='notice') && msg.from && msg.from!=='*' && !msg.self && msg.from!==getNick(active&&active.conn_id)){
+    const fp=_msgFp(msg);
+    for(let i=area.children.length-1, seen=0; i>=0 && seen<12; i--, seen++){
+      const c=area.children[i];
+      if(c.dataset && c.dataset.fp===fp){ scrollBottom(); return; }
+    }
+  }
   // Compute the burst window for EVERY append up front — including the condensed-
   // status early-returns below — so _lastAppendTs is always current and a chat
   // message right after a join/part still gets correct burst detection.
@@ -2327,12 +2344,15 @@ function buildCondensedRow(group){
   return row;
 }
 function buildRow(msg){
-  const row=document.createElement('div'); row.className=`msg-row row-${msg.kind}`; row.dataset.ts=msg.ts; row.dataset.from=msg.from||'';
+  const row=document.createElement('div'); row.className=`msg-row row-${msg.kind}`; row.dataset.ts=msg.ts; row.dataset.from=msg.from||''; row.dataset.fp=_msgFp(msg);
   if(msg.self) row.dataset.self='1';
   if(msg.mentioned) row.dataset.mentioned='1';
   const t=new Date(msg.ts*1000);
   const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';
-  const ts=`${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}`;
+  // mIRC theme: classic 24-hour bracketed [HH:MM] timestamp; every other theme keeps 12h.
+  const ts=(document.documentElement.dataset.theme==='mirc')
+    ?`[${h.toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}]`
+    :`${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}`;
   const isChat=msg.kind==='privmsg'||msg.kind==='action';
   const isSelf=isChat&&active&&msg.from===getNick(active.conn_id);
   const nc=isChat?(isSelf?'nc-self':`nc${nickHash(msg.from)}`):'';
@@ -5322,6 +5342,9 @@ const THEMES={
   scanlines: {label:'⎯ Scanlines',bg0:'#060a08',bg1:'#0a120e',bg2:'#101c16',bg3:'#16261e',bg4:'#1e3228',border:'#263c30',border2:'#3c5c48',text:'#d4e8dc',text2:'#94b49e',text3:'#5e7a68',animation:'scanlinesRoll'},
   falling_leaves: {label:'🍂 Autumn Leaves',bg0:'#120906',bg1:'#1c120a',bg2:'#281c10',bg3:'#342618',bg4:'#423222',border:'#4e3c2a',border2:'#785a40',text:'#f0e0cc',text2:'#c8a888',text3:'#8a7458',animation:'fallingLeaves'},
   firefly_meadow: {label:'✨ Firefly Meadow',bg0:'#050a06',bg1:'#0a120c',bg2:'#101a12',bg3:'#16241a',bg4:'#1e3022',border:'#263a2c',border2:'#3e5a44',text:'#e4efd8',text2:'#a4b898',text3:'#687c5c',animation:'fireflyMeadow'},
+  // ── mIRC: classic 1998 white-chrome look. Pairs with the html[data-theme='mirc']
+  //    CSS block in index.html (square corners, navy switchbar, Fixedsys font). ──
+  mirc:         {label:'mIRC',bg0:'#ffffff',bg1:'#ffffff',bg2:'#f0f0f0',bg3:'#e4e4e4',bg4:'#000080',border:'#c0c0c0',border2:'#808080',text:'#000000',text2:'#00007f',text3:'#555555',accent:'#000080',accent2:'#00007f',link:'#0000ff',warn:'#7f0000',error:'#ff0000',join:'#009300',part:'#7f0000',notice:'#7f0000',action:'#9c009c'},
   // ── ESHEEP: classic desktop pet, wanders the screen ────────────────────────
 };
 // Default semantic message colors (mirror :root in index.html). Used to RESET
@@ -5380,6 +5403,7 @@ const APPEAR_DEFAULTS={
   // Desktop pet (eSheep) — a little sheep wanders the client window. Off by default.
   esheep:'off',
   crab:'off',
+  ghost:'off',
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -5396,6 +5420,8 @@ function _esheepMode(v){ if(v===true) return 'both'; return (v==='desktop'||v===
 function _esheepOn(v){ var m=_esheepMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
 function _crabMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
 function _crabOn(v){ var m=_crabMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
+function _ghostMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
+function _ghostOn(v){ var m=_ghostMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
 let _appearCache=null,_appearCacheTs=0;
 function loadAppearance(){
   const now=Date.now();
@@ -5478,6 +5504,7 @@ function applyAppearance(){
     // Desktop pet toggle. Carry the previous value through if the row is absent.
     esheep:     el('a-esheep') ? el('a-esheep').value : _esheepMode(prev.esheep),
     crab:       el('a-crab') ? el('a-crab').value : _crabMode(prev.crab),
+    ghost:      el('a-ghost') ? el('a-ghost').value : _ghostMode(prev.ghost),
   };
   // Show/hide the custom radius slider based on shape
   const _radiusRow = el('a-media-radius-row');
@@ -5516,6 +5543,9 @@ function applyThemeCSS(cfg){
   const themeName=(mob&&cfg.mobileTheme)?cfg.mobileTheme:cfg.theme;
   const _rt=resolveThemeObj(themeName,cfg);
   const t=_rt.t, isCustom=_rt.custom;
+  // Expose the active theme name so theme-specific CSS (e.g. the mIRC look) can
+  // target html[data-theme='...']. Harmless for every other theme.
+  document.documentElement.setAttribute('data-theme', typeof themeName==='string'?themeName:'');
   // Keep the iOS PWA status-bar tint in sync with the active theme background,
   // otherwise a light theme shows a black status-bar seam above the app.
   const _tc=document.querySelector('meta[name="theme-color"]'); if(_tc&&t.bg0) _tc.setAttribute('content',t.bg0);
@@ -5523,13 +5553,14 @@ function applyThemeCSS(cfg){
   r.setProperty('--bg3',t.bg3); r.setProperty('--bg4',t.bg4);
   r.setProperty('--border',t.border); r.setProperty('--border2',t.border2);
   r.setProperty('--text',t.text); r.setProperty('--text2',t.text2); r.setProperty('--text3',t.text3);
-  // Pick accents: mobile override wins; otherwise a custom theme carries its own
-  // accents, while built-in themes use the global accent prefs.
-  const accent=(mob&&cfg.mobileAccent)?cfg.mobileAccent:(isCustom?(t.accent||cfg.accent):cfg.accent);
-  const accent2=(mob&&cfg.mobileAccent2)?cfg.mobileAccent2:(isCustom?(t.accent2||cfg.accent2):cfg.accent2);
+  // Pick accents: mobile override wins; otherwise a theme that carries its OWN
+  // accent (custom themes, plus the built-in mIRC) uses it, else the global pref.
+  // (Only the mIRC built-in defines accent keys, so this is a no-op for the rest.)
+  const accent=(mob&&cfg.mobileAccent)?cfg.mobileAccent:(t.accent||cfg.accent);
+  const accent2=(mob&&cfg.mobileAccent2)?cfg.mobileAccent2:(t.accent2||cfg.accent2);
   r.setProperty('--accent',accent); r.setProperty('--accent2',accent2);
-  // Hyperlink color: mobile override → custom-theme link → global linkColor → accent2.
-  const link=(mob&&cfg.mobileLink)?cfg.mobileLink:(isCustom?(t.link||t.accent2||accent2):(cfg.linkColor||accent2));
+  // Hyperlink color: mobile override → theme link → custom accent2 / global linkColor → accent2.
+  const link=(mob&&cfg.mobileLink)?cfg.mobileLink:(t.link||(isCustom?(t.accent2||accent2):(cfg.linkColor||accent2)));
   r.setProperty('--link',link||accent2);
   // Semantic message colors: custom themes may override them; built-ins keep the
   // :root defaults, so always reset to default first then apply any custom value.
@@ -5666,6 +5697,7 @@ function applyThemeCSS(cfg){
   // re-applies the saved state once it is.
   if(window.CryptIRCSheep){ _esheepOn(cfg.esheep) ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); }
   if(window.CryptIRCCrab){ _crabOn(cfg.crab) ? window.CryptIRCCrab.enable() : window.CryptIRCCrab.disable(); }
+  if(window.CryptIRCGhost){ _ghostOn(cfg.ghost) ? window.CryptIRCGhost.enable() : window.CryptIRCGhost.disable(); }
 }
 
 // Apply the saved eSheep state once everything (including the deferred
@@ -5674,6 +5706,7 @@ function applyThemeCSS(cfg){
 window.addEventListener('load', function(){
   try{ if(window.CryptIRCSheep){ var _c=loadAppearance(); _esheepOn(_c.esheep) ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); } }catch(_){}
   try{ if(window.CryptIRCCrab){ var _cc=loadAppearance(); _crabOn(_cc.crab) ? window.CryptIRCCrab.enable() : window.CryptIRCCrab.disable(); } }catch(_){}
+  try{ if(window.CryptIRCGhost){ var _cg=loadAppearance(); _ghostOn(_cg.ghost) ? window.CryptIRCGhost.enable() : window.CryptIRCGhost.disable(); } }catch(_){}
 });
 
 // ─── Animation System ─────────────────────────────────────────────────────────
@@ -6106,6 +6139,7 @@ function populateAppearanceModal(cfg){
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
   { const _es=el('a-esheep'); if(_es){ _es.value=_esheepMode(cfg.esheep); } }
   { const _cr=el('a-crab'); if(_cr){ _cr.value=_crabMode(cfg.crab); } }
+  { const _gh=el('a-ghost'); if(_gh){ _gh.value=_ghostMode(cfg.ghost); } }
   // spellcheck and linkPreviews toggles are now in the Security panel
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;
@@ -11717,8 +11751,28 @@ function renderText(s){
 // nick changes have already replaced old → new), so we explicitly wrap msg.subject
 // (and subject2 for nick changes) as clickable, then run highlightNicks for any
 // other names that happen to be present in the text.
+// mIRC-style event line text (only when theme='mirc'), rebuilt from the message's
+// structured fields so it re-renders correctly on a theme switch. Returns null for
+// kinds we don't reformat (those keep their normal text). No host/ident is available
+// in CryptIRC's join/part events, so those show just the nick (mIRC shows the host).
+function _mircEventText(msg){
+  const s=msg.subject||'', s2=msg.subject2||'', txt=msg.text||'';
+  const reason=()=>{ const m=txt.match(/\(([^)]*)\)\s*$/); return m?` (${m[1]})`:''; };
+  switch(msg.kind){
+    case 'join':  return `* Joins: ${s||msg.from||''}`;
+    case 'part':  return `* Parts: ${s||msg.from||''}${reason()}`;
+    case 'quit':  return `* Quits: ${s||msg.from||''}${reason()}`;
+    case 'nick':  return `* ${s2} is now known as ${s}`;
+    case 'kick':  return `* ${s} was kicked by ${s2}${reason()}`;
+    case 'mode': { const modes=(msg.rawModes||txt.replace(/^.*?sets mode\s*/i,'').replace(/^MODE\s*/i,'')); return s?`* ${s} sets mode: ${modes}`:`* sets mode: ${modes}`; }
+    case 'topic': { const t=txt.replace(/^Topic:\s*/i,'').replace(/\s*\([^)]*\)\s*$/,''); return `* Topic is '${t}'`; }
+    default: return null;
+  }
+}
 function renderStatusText(msg){
-  let html=parseMircColors(msg.text||'');
+  let raw=msg.text||'';
+  if(document.documentElement.dataset.theme==='mirc'){ const _m=_mircEventText(msg); if(_m!=null) raw=_m; }
+  let html=parseMircColors(raw);
   html=linkify(html);
   const explicit=[msg.subject,msg.subject2].filter(n=>typeof n==='string'&&n.length);
   for(const nick of explicit){

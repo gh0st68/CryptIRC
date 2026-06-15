@@ -19,6 +19,7 @@
 <script src="/cryptirc/e2e.js" defer></script>
 <script src="/cryptirc/esheep.js" defer></script>
 <script src="/cryptirc/crab.js" defer></script>
+<script src="/cryptirc/ghost.js" defer></script>
 <style>
 /* ── Locally-hosted display fonts (dafont) ─────────────────────────────────── */
 @font-face { font-family:'Spooky';           src:url('fonts/spooky.ttf') format('truetype'); font-display:swap; }
@@ -888,6 +889,70 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .nc0,.nick-entry.nc0{color:#e05a5a} .nc1,.nick-entry.nc1{color:#e0935a} .nc2,.nick-entry.nc2{color:#d4c850} .nc3,.nick-entry.nc3{color:#5adb7a}
 .nc4,.nick-entry.nc4{color:#5ab8e0} .nc5,.nick-entry.nc5{color:#8a70e0} .nc6,.nick-entry.nc6{color:#e05ab0} .nc7,.nick-entry.nc7{color:#5ae0d4}
 .nc8,.nick-entry.nc8{color:#a0c878} .nc9,.nick-entry.nc9{color:#d47890}
+/* ── mIRC classic (1998 Win95) look — active ONLY for html[data-theme='mirc'] ─────── */
+html[data-theme='mirc'] *{border-radius:0!important}                                   /* square, blocky chrome */
+/* Fixedsys bitmap-mono — the classic mIRC font, applied automatically (no font pick needed) */
+html[data-theme='mirc'] #chat-area,html[data-theme='mirc'] #chat-area *,
+html[data-theme='mirc'] #msg-input,
+html[data-theme='mirc'] #nick-panel,html[data-theme='mirc'] #nick-panel *,
+html[data-theme='mirc'] #network-list,html[data-theme='mirc'] #network-list *{font-family:'Fixedsys Excelsior','Fixedsys','Lucida Console','Consolas',monospace!important}
+/* grey Win95 window chrome (frames) with sunken white content boxes */
+html[data-theme='mirc'] #main,html[data-theme='mirc'] #sidebar,
+html[data-theme='mirc'] #input-wrap,html[data-theme='mirc'] #topbar{background:#c0c0c0!important;border-color:#808080}
+html[data-theme='mirc'] #topbar{color:#000000;border-bottom:1px solid #808080}
+html[data-theme='mirc'] #chat-area{background:#ffffff!important;border:2px solid;border-color:#808080 #ffffff #ffffff #808080;margin:2px}
+html[data-theme='mirc'] #network-list{background:#ffffff;border:2px solid;border-color:#808080 #ffffff #ffffff #808080;margin:3px}
+html[data-theme='mirc'] #nick-panel{background:#ffffff!important;border-left:2px solid;border-color:#808080}
+html[data-theme='mirc'] #msg-input{background:#ffffff!important;color:#000000!important;border:2px solid!important;border-color:#808080 #ffffff #ffffff #808080!important}
+/* raised Win95 buttons that press in on click */
+html[data-theme='mirc'] #input-wrap button,html[data-theme='mirc'] #topbar button{background:#c0c0c0;border:2px solid;border-color:#ffffff #808080 #808080 #ffffff;color:#000000}
+html[data-theme='mirc'] #input-wrap button:active,html[data-theme='mirc'] #topbar button:active{border-color:#808080 #ffffff #ffffff #808080}
+/* treebar/switchbar: classic navy selection, white text */
+html[data-theme='mirc'] .net-label{color:#000000}
+html[data-theme='mirc'] .chan-item{color:#000000}
+html[data-theme='mirc'] .chan-item:hover{background:#000080;color:#ffffff}
+html[data-theme='mirc'] .chan-item.active{background:#000080!important;color:#ffffff!important}
+html[data-theme='mirc'] .chan-item.active .chan-unread-badge{background:#ffffff;color:#000080}
+/* message line: black body, grey [HH:MM] ts, <nick> brackets, classic mIRC colors */
+html[data-theme='mirc'] .msg-body{color:#000000}
+html[data-theme='mirc'] .msg-ts,html[data-theme='mirc'] .sc-ts{color:#7f7f7f}
+html[data-theme='mirc'] .row-privmsg .msg-nick::before{content:'<'}
+html[data-theme='mirc'] .row-privmsg .msg-nick::after{content:'>'}
+html[data-theme='mirc'] .nc-self{color:#000000!important}
+html[data-theme='mirc'] .row-action .msg-body,html[data-theme='mirc'] .row-action .msg-nick{color:#9c009c;font-style:italic}
+html[data-theme='mirc'] .row-notice .msg-body{color:#7f0000}
+html[data-theme='mirc'] .row-join .msg-body{color:#007f00}
+html[data-theme='mirc'] .row-part .msg-body,html[data-theme='mirc'] .row-quit .msg-body,html[data-theme='mirc'] .row-kick .msg-body{color:#7f0000}
+html[data-theme='mirc'] .row-mode .msg-body,html[data-theme='mirc'] .row-nick .msg-body{color:#00007f}
+/* classic Windows navy text selection */
+html[data-theme='mirc'] ::selection{background:#000080;color:#ffffff}
+/* Win95 grey scrollbar with beveled arrow buttons */
+html[data-theme='mirc'] ::-webkit-scrollbar{width:16px;height:16px}
+html[data-theme='mirc'] ::-webkit-scrollbar-track{background:#dfdfdf}
+html[data-theme='mirc'] ::-webkit-scrollbar-thumb{background:#c0c0c0;border:1px solid;border-color:#ffffff #808080 #808080 #ffffff}
+html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;background:#c0c0c0;border:1px solid;border-color:#ffffff #808080 #808080 #ffffff}
+/* ── mIRC fake Win95 window chrome — title bar, menu bar, toolbar, status bar (desktop only) ── */
+.mirc-chrome{display:none}
+@media(min-width:769px){
+  html[data-theme='mirc'] #app{padding-top:70px;padding-bottom:22px}
+  html[data-theme='mirc'] .mirc-chrome{display:flex;align-items:center;position:fixed;left:0;right:0;z-index:95;box-sizing:border-box;font-family:'Pixelated MS Sans Serif','Tahoma','Segoe UI',sans-serif;font-size:11px;line-height:1;user-select:none}
+  html[data-theme='mirc'] #mirc-titlebar{top:0;height:22px;background:linear-gradient(90deg,#000080,#1084d0);color:#fff;font-weight:700;padding:0 4px;gap:6px}
+  html[data-theme='mirc'] #mirc-titlebar .mt-ico{font-size:13px}
+  html[data-theme='mirc'] #mirc-titlebar .mt-title{flex:1;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+  html[data-theme='mirc'] #mirc-titlebar .mt-btns{display:flex;gap:2px}
+  html[data-theme='mirc'] #mirc-titlebar .mt-btns b{display:flex;align-items:center;justify-content:center;width:18px;height:16px;background:#c0c0c0;color:#000;border:1px solid;border-color:#fff #808080 #808080 #fff;font-size:10px}
+  html[data-theme='mirc'] #mirc-titlebar .mt-x{font-weight:700}
+  html[data-theme='mirc'] #mirc-menubar{top:22px;height:20px;background:#c0c0c0;color:#000;padding:0 4px;border-bottom:1px solid #808080}
+  html[data-theme='mirc'] #mirc-menubar span{padding:2px 8px;cursor:default}
+  html[data-theme='mirc'] #mirc-menubar span:hover{background:#000080;color:#fff}
+  html[data-theme='mirc'] #mirc-menubar u{text-decoration:underline}
+  html[data-theme='mirc'] #mirc-toolbar{top:42px;height:28px;background:#c0c0c0;border-bottom:1px solid #808080;gap:3px;padding:0 4px}
+  html[data-theme='mirc'] #mirc-toolbar i{display:flex;align-items:center;justify-content:center;width:22px;height:22px;background:#c0c0c0;border:1px solid;border-color:#fff #808080 #808080 #fff;font-style:normal;font-size:13px;color:#000;cursor:default}
+  html[data-theme='mirc'] #mirc-toolbar .mt-tb-sep{width:0;height:18px;border-left:1px solid #808080;border-right:1px solid #fff;margin:0 3px}
+  html[data-theme='mirc'] #mirc-statusbar{bottom:0;height:22px;background:#c0c0c0;border-top:1px solid #fff;gap:3px;padding:2px}
+  html[data-theme='mirc'] #mirc-statusbar span{display:flex;align-items:center;padding:0 6px;height:100%;background:#c0c0c0;border:1px solid;border-color:#808080 #fff #fff #808080;color:#000;white-space:nowrap}
+  html[data-theme='mirc'] #mirc-statusbar .mt-grow{flex:1;border:none;background:none}
+}
 .load-more-btn {
   text-align:center; padding:10px; color:var(--accent2); font-size:12px;
   cursor:pointer; transition:background .15s; border-radius:6px; margin:4px 12px;
@@ -1565,6 +1630,12 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </head>
 <body>
 
+<!-- ── mIRC fake Win95 window chrome (decorative; shown only on the mIRC theme, desktop) ── -->
+<div id="mirc-titlebar" class="mirc-chrome"><span class="mt-ico">▦</span><span class="mt-title">mIRC - [CryptIRC @ frozen.gh0st.boo]</span><span class="mt-btns"><b>_</b><b>□</b><b class="mt-x">✕</b></span></div>
+<div id="mirc-menubar" class="mirc-chrome"><span><u>F</u>ile</span><span><u>V</u>iew</span><span><u>F</u>avorites</span><span><u>T</u>ools</span><span><u>C</u>ommands</span><span><u>W</u>indow</span><span><u>H</u>elp</span></div>
+<div id="mirc-toolbar" class="mirc-chrome"><i>⊞</i><i>⇄</i><i>⚙</i><i>✉</i><i>⌕</i><i>★</i><span class="mt-tb-sep"></span><i>◧</i><i>▦</i></div>
+<div id="mirc-statusbar" class="mirc-chrome"><span>Connected</span><span>TwistedNet</span><span>Lag: 42ms</span><span class="mt-grow"></span><span>[gh0st]</span></div>
+
 <!-- ── AUTH SCREEN ─────────────── -->
 <div id="auth-screen">
   <div class="auth-box">
@@ -1816,6 +1887,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
             <option value="'Monaspace Neon',monospace">Monaspace Neon</option>
             <option value="'Red Hat Mono',monospace">Red Hat Mono</option>
             <option value="monospace">System Monospace</option>
+            <option value="'Fixedsys Excelsior','Fixedsys','Lucida Console',monospace">Fixedsys (mIRC)</option>
             <option value="'Inter',sans-serif">Inter</option>
             <option value="'Outfit',sans-serif">Outfit</option>
             <option value="'Nunito',sans-serif">Nunito</option>
@@ -2088,6 +2160,15 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <span class="appear-label">🦀 Angry Crab<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A furious little crab scuttles sideways across your client — snaps its claws, rages, blows bubbles, charges, and mutters threats. Poke near it and it gets ANGRY. Silent.</div></span>
           <select id="a-crab" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+            <option value="off">Off</option>
+            <option value="desktop">Desktop only</option>
+            <option value="mobile">Mobile only</option>
+            <option value="both">Both</option>
+          </select>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">👻 Ghost<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A friendly little ghost floats gently around your client — drifting, fading through walls, the odd spin or surprise "BOO!". Low-key and never in the way (it phases through clicks). Silent.</div></span>
+          <select id="a-ghost" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>
