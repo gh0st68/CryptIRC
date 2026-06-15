@@ -89,8 +89,8 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 - **Multi-network** — connect to as many IRC networks as you want simultaneously
 - **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
 - **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
-- **171 themes** (32 animated — starfields, rain, aurora, Matrix code) + **139 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
-- **🐑 eSheep desktop pet** — the classic '95 pet wanders your client (desktop, mobile, or both); climbs walls, naps, gets abducted by a UFO
+- **172 themes** (32 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin: title/menu/tool/status bars, `<nick>` brackets, `[HH:MM]` timestamps) + **139 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
+- **🐑🦀👻 Desktop pets** — three to pick from (desktop, mobile, or both): the classic '95 **eSheep** (wanders, climbs walls, naps, UFO abduction), a furious **Angry Crab** (scuttles sideways, snaps its claws, eats shrimp, naps, digs — drag it around, and it pesters the sheep), and a friendly **Ghost** (floats freely, fades through walls, the odd spooky "BOO!"). The sheep and crab are draggable
 - **In-app News & changelog** with an auto-versioning build badge, so you always see exactly what changed
 - **Full IRCv3 support** — 17 capabilities including typing indicators, away-notify, SASL, MONITOR
 - **100+ slash commands** — everything from `/ascii` art to `/ud` Urban Dictionary lookups
@@ -124,7 +124,7 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 
 ### Themes & Personalization
 
-**171 built-in themes** — 139 static + 32 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more). Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
+**172 built-in themes** — 140 static + 32 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more), including a pixel-perfect **mIRC** skin with full Windows-95 window chrome. Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
 
 <p align="center">
   <a href="https://gh0st68.github.io/CryptIRC/">
