@@ -40,7 +40,7 @@ function injectStyle(){
   s.id = STYLE_ID;
   s.textContent = [
     '.cryptirc-crab{position:fixed;z-index:'+Z+';width:66px;height:50px;pointer-events:auto;cursor:move;touch-action:manipulation;',
-      'will-change:left,top,transform;user-select:none;-webkit-user-select:none;transition:transform .22s ease;filter:drop-shadow(0 3px 3px rgba(0,0,0,.45))}',
+      'will-change:left,top,transform;user-select:none;-webkit-user-select:none;transition:transform .22s ease,opacity .4s ease;filter:drop-shadow(0 3px 3px rgba(0,0,0,.45))}',
     '.cryptirc-crab svg{display:block;width:100%;height:100%;overflow:visible;pointer-events:none}',
     /* picked up & dragged: dangle, flail legs, snap claws, look mad */
     '.cryptirc-crab.drag{animation:ccDangle .5s ease-in-out infinite;cursor:grabbing}',
@@ -72,13 +72,6 @@ function injectStyle(){
     /* eyes look + angry brow twitch */
     '.cryptirc-crab .pupil{animation:ccLook 3.2s ease-in-out infinite}',
     '@keyframes ccLook{0%,40%{transform:translateX(0)}50%,70%{transform:translateX(1.6px)}80%,100%{transform:translateX(-1.6px)}}',
-    /* speech bubble */
-    '.cc-say{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-family:var(--mono,ui-monospace,monospace);',
-      'font-size:11px;font-weight:700;color:#3a0a06;background:#ffd9b0;border:2px solid #c0381f;',
-      'border-radius:9px;padding:3px 8px;white-space:nowrap;box-shadow:0 3px 8px rgba(0,0,0,.35);',
-      'opacity:0;transform:translateY(4px) scale(.9);transition:opacity .14s,transform .14s}',
-    '.cc-say.show{opacity:1;transform:none}',
-    '.cc-say::after{content:"";position:absolute;bottom:-7px;left:14px;border:6px solid transparent;border-top-color:#c0381f}',
     /* rising bubbles */
     '.cc-bub{position:fixed;z-index:'+Z+';pointer-events:none;border-radius:50%;',
       'background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.9),rgba(160,210,255,.35));',
@@ -108,6 +101,19 @@ function injectStyle(){
     '@keyframes ccFlip{0%,100%{transform:rotate(173deg)}50%{transform:rotate(187deg)}}',
     '.cryptirc-crab.flipped .ccleg{animation:ccLeg .13s ease-in-out infinite}',
     '.cryptirc-crab.flipped .ccleg.b{animation-delay:.06s}',
+    /* new random-event fx */
+    '.cc-castle,.cc-fish{position:fixed;z-index:'+(Z-1)+';pointer-events:none;font-size:16px;line-height:1;filter:drop-shadow(0 2px 2px rgba(0,0,0,.4));transition:transform .35s ease,opacity .35s ease}',
+    '.cc-treasure{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:15px;line-height:1;animation:ccTreasure 1.4s ease-out forwards}',
+    '@keyframes ccTreasure{0%{opacity:0;transform:translateY(6px) scale(.5)}25%{opacity:1;transform:translateY(-2px) scale(1.1)}100%{opacity:0;transform:translateY(-10px)}}',
+    '.cc-shell{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:15px;line-height:1;animation:ccShellBob 1.5s ease-in-out}',
+    '@keyframes ccShellBob{0%,100%{transform:translateY(0) rotate(-6deg)}50%{transform:translateY(-3px) rotate(6deg)}}',
+    '.cc-gull{position:fixed;z-index:'+(Z-1)+';pointer-events:none;width:54px;height:14px;background:radial-gradient(ellipse,rgba(0,0,0,.32),rgba(0,0,0,0) 70%)}',
+    '.cc-tide{position:fixed;z-index:'+(Z-1)+';pointer-events:none;width:72px;height:9px;border-radius:50%;background:radial-gradient(ellipse,rgba(120,190,230,.5),rgba(120,190,230,0) 70%)}',
+    '.cryptirc-crab.duck{animation:ccDuck .5s ease-in-out}',
+    '@keyframes ccDuck{0%,100%{transform:scaleY(1)}40%,70%{transform:scaleY(.7) translateY(8px)}}',
+    '.cryptirc-crab.hop{animation:ccHop .5s ease-out}',
+    '@keyframes ccHop{0%,100%{transform:translateY(0)}40%{transform:translateY(-14px)}}',
+    '.cryptirc-crab.burrow{opacity:0}',
     '@media(prefers-reduced-motion:reduce){.cryptirc-crab *,.cryptirc-crab{animation:none!important}}'
   ].join('');
   document.head.appendChild(s);
@@ -165,8 +171,6 @@ function Crab(){
   this.el.className = 'cryptirc-crab';
   this.el.setAttribute('aria-hidden','true');
   this.el.innerHTML = crabSVG();
-  this.say = document.createElement('div');
-  this.say.className = 'cc-say';
   this._timers = [];
   this._listeners = [];
   this._raf = 0;
@@ -226,7 +230,6 @@ Crab.prototype._applyTransform = function(){
 Crab.prototype.start = function(){
   injectStyle();
   document.body.appendChild(this.el);
-  document.body.appendChild(this.say);
   this.face(this.dir);
   this.setState('walk');
 
@@ -359,7 +362,7 @@ Crab.prototype.frame = function(ts){
       if(!tgt){ this.setState('walk'); break; }      // sheep vanished mid-chase
       var cc = this.x + this.W/2, d = tgt.cx - cc;
       this.face(d<0 ? -1 : 1);
-      this.vx = (Math.abs(d) < 6 ? 0 : (d<0 ? -1 : 1)) * 0.8;
+      this.vx = (Math.abs(d) < 6 ? 0 : (d<0 ? -1 : 1)) * 0.55;
       this.x += this.vx*k;
       this._seekT++;
       if(Math.abs(d) < this.W*0.7 || this._seekT > 1200){ this._encounter(tgt); }   // arrived (or gave up ~20s)
@@ -369,13 +372,13 @@ Crab.prototype.frame = function(ts){
       if(!this._shrimp){ this.setState('walk'); break; }              // shrimp gone — never mind
       var sc = this.x + this.W/2, sd = this._shrimpX - sc;
       this.face(sd<0 ? -1 : 1);
-      this.vx = (Math.abs(sd) < 8 ? 0 : (sd<0 ? -1 : 1)) * 0.45;      // a slow, deliberate approach
+      this.vx = (Math.abs(sd) < 8 ? 0 : (sd<0 ? -1 : 1)) * 0.32;      // a slow, deliberate approach
       this.x += this.vx*k;
       if(Math.abs(sd) < this.W*0.45){ this.setState('eat'); }         // reached it → chomp
       break;
     }
     // snap / rage / wave / idle / dance / eat / nap / dig / bonk / flipped: mostly stationary (dance shuffles)
-    case 'dance':   this.x += Math.sin(this.t*0.4)*1.1*this.dir; break;
+    case 'dance':   this.x += Math.sin(this.t*0.4)*0.8*this.dir; break;
   }
   // Floor states ride the LIVE input-bar floor (desktop) every frame, so the crab
   // tracks the bar even when it moves without a resize (reply bar / typing indicator).
@@ -420,22 +423,31 @@ Crab.prototype.bounceOrClimb = function(newDir){
 
 Crab.prototype.setState = function(st){
   this.state = st;
-  this.el.classList.remove('walk','snap','rage','charge','wave','dance','crawl','drag','nap','flipped','bonk');
+  this.el.classList.remove('walk','snap','rage','charge','wave','dance','crawl','drag','nap','flipped','bonk','duck','hop','burrow');
   this.t = 0;
   switch(st){
-    case 'walk':   this.el.classList.add('walk'); this.vx = 0.3*this.dir; this.next = 180 + (Math.random()*200|0); break;   // slower, ambles longer
+    case 'walk':   this.el.classList.add('walk'); this.vx = 0.22*this.dir; this.next = 240 + (Math.random()*260|0); break;  // slower, ambles longer
     case 'seek':   this.el.classList.add('walk'); this.vx = 0; this.next = 99999; break;   // ends via _encounter
     case 'toshrimp': this.el.classList.add('walk'); this.vx = 0; this.next = 99999; break; // ends on arrival → eat
-    case 'charge': this.el.classList.add('charge','rage'); this.vx = 1.5*this.dir; this.next = 65 + (Math.random()*50|0); if(Math.random()<0.3) this.speak(Math.random()<0.5?'CHARGE!':'WEEEE'); break;
-    case 'snap':   this.el.classList.add('snap'); this.vx = 0; this.next = 24 + (Math.random()*20|0); if(Math.random()<0.18) this.speak('SNIP SNIP'); break;
-    case 'rage':   this.el.classList.add('rage','snap'); this.vx = 0; this.next = 34 + (Math.random()*26|0); this.anger(); if(Math.random()<0.45) this.speak(pick()); break;
-    case 'wave':   this.el.classList.add('wave'); this.vx = 0; this.next = 55; if(Math.random()<0.4) this.speak(Math.random()<0.5?'oi':'come here'); break;
-    case 'dance':  this.el.classList.add('dance','walk'); this.vx = 0; this.next = 80; if(Math.random()<0.25) this.speak('sideways gang'); break;
+    case 'charge': this.el.classList.add('charge','rage'); this.vx = 1.1*this.dir; this.next = 80 + (Math.random()*60|0); break;
+    case 'snap':   this.el.classList.add('snap'); this.vx = 0; this.next = 24 + (Math.random()*20|0); break;
+    case 'rage':   this.el.classList.add('rage','snap'); this.vx = 0; this.next = 34 + (Math.random()*26|0); this.anger(); break;
+    case 'wave':   this.el.classList.add('wave'); this.vx = 0; this.next = 55; break;
+    case 'dance':  this.el.classList.add('dance','walk'); this.vx = 0; this.next = 80; break;
     case 'eat':    this.el.classList.add('snap'); this.vx = 0; this.next = 110; this.chompShrimp(); break;        // chomp the floor shrimp
-    case 'nap':    this.el.classList.add('nap');  this.vx = 0; this.next = 150 + (Math.random()*120|0); this.naptime(); if(Math.random()<0.4) this.speak('zzz'); break;
-    case 'dig':    this.el.classList.add('snap'); this.vx = 0; this.next = 70; this.digSand(); if(Math.random()<0.4) this.speak(Math.random()<0.5?'digging':'treasure?'); break;
-    case 'bonk':   this.el.classList.add('snap'); this.vx = 0; this.next = 18 + (Math.random()*12|0); this.dizzy(); if(Math.random()<0.55) this.speak(Math.random()<0.5?'oof':'ow'); break;
-    case 'flipped':this.el.classList.add('flipped'); this.vx = 0; this.next = 80 + (Math.random()*90|0); this.dizzy(); if(Math.random()<0.5) this.speak(Math.random()<0.5?'help, stuck':'legs! legs!'); break;
+    case 'nap':    this.el.classList.add('nap');  this.vx = 0; this.next = 150 + (Math.random()*120|0); this.naptime(); break;
+    case 'dig':    this.el.classList.add('snap'); this.vx = 0; this.next = 70; this.digSand(); break;
+    case 'bonk':   this.el.classList.add('snap'); this.vx = 0; this.next = 18 + (Math.random()*12|0); this.dizzy(); break;
+    case 'flipped':this.el.classList.add('flipped'); this.vx = 0; this.next = 80 + (Math.random()*90|0); this.dizzy(); break;
+    // ── new random events ──
+    case 'castle': this.el.classList.add('snap'); this.vx = 0; this.next = 130; this.sandcastle(); break;          // build then SMASH it
+    case 'treasure': this.el.classList.add('wave'); this.vx = 0; this.next = 90; this.treasure(); break;           // hold up a shiny
+    case 'fish':   this.el.classList.add('snap'); this.vx = 0; this.next = 90; this.fishBy(); break;               // snap at a passing fish
+    case 'gull':   this.el.classList.add('duck'); this.vx = 0; this.next = 70; this.gullShadow(); break;           // duck a gull shadow
+    case 'hermit': this.el.classList.add('wave'); this.vx = 0; this.next = 100; this.hermitShell(); break;         // try on a shell
+    case 'chase':  this.el.classList.add('dance','walk'); this.vx = 0; this.next = 80; this.chaseBubble(); break;  // chase a bubble
+    case 'tide':   this.el.classList.add('hop'); this.vx = 0; this.next = 60; this.tideWave(); break;              // hop a tide ripple
+    case 'burrow': this.el.classList.add('snap'); this.vx = 0; this.next = 90; this.burrow(); break;               // dig under, pop up elsewhere
     case 'idle':   this.vx = 0; this.next = 50 + (Math.random()*70|0); break;
     case 'bubble': this.el.classList.add('snap'); this.vx=0; this.next = 30; this.bubbles(); break;
     case 'climb':  this.el.classList.add('crawl'); break;
@@ -451,15 +463,23 @@ Crab.prototype.pickState = function(){
   if(this.state==='climb'||this.state==='ceil'||this.state==='fall'||this.state==='seek'||
      this.state==='toshrimp'||this.state==='bonk'||this.state==='flipped'||this.dragging) return;
   var r = Math.random();
-  if(r < 0.44)      this.setState('walk');
-  else if(r < 0.57) this.setState('snap');
-  else if(r < 0.65) this.setState('rage');
-  else if(r < 0.73) this.setState('charge');
-  else if(r < 0.81) this.setState('wave');
-  else if(r < 0.89) this.setState('dance');
-  else if(r < 0.95) this.setState('nap');     // catch some Zzz
-  else if(r < 0.99) this.setState('dig');     // dig in the sand
-  else              this.setState('bubble');
+  if(r < 0.34)       this.setState('walk');
+  else if(r < 0.44)  this.setState('snap');
+  else if(r < 0.50)  this.setState('rage');
+  else if(r < 0.56)  this.setState('charge');
+  else if(r < 0.62)  this.setState('wave');
+  else if(r < 0.68)  this.setState('dance');
+  else if(r < 0.73)  this.setState('nap');
+  else if(r < 0.77)  this.setState('dig');
+  else if(r < 0.81)  this.setState('castle');
+  else if(r < 0.85)  this.setState('treasure');
+  else if(r < 0.885) this.setState('fish');
+  else if(r < 0.915) this.setState('gull');
+  else if(r < 0.945) this.setState('hermit');
+  else if(r < 0.97)  this.setState('chase');
+  else if(r < 0.985) this.setState('tide');
+  else if(r < 0.995) this.setState('burrow');
+  else               this.setState('bubble');
 };
 
 Crab.prototype.poke = function(){
@@ -488,23 +508,9 @@ Crab.prototype._encounter = function(tgt){
 
 // ── silly fx ─────────────────────────────────────────────────────────────────
 function pick(){ return SAYINGS[Math.random()*SAYINGS.length|0]; }
-// Talks LESS: a global cooldown gates spontaneous chatter; `force` (pokes,
-// encounters, drag) bypasses the gate but still arms it so the crab then hushes.
-Crab.prototype.speak = function(txt, force){
-  if(this._dead) return;
-  if(!force && this._talkGate > 0) return;
-  this._talkGate = 420 + (Math.random()*480|0);      // ~7–15s of quiet after each line
-  this.say.textContent = txt;
-  var bx = this.x + this.W/2, by = this.y - 8;
-  this.say.style.left = Math.max(6, bx) + 'px';
-  this.say.style.top  = by + 'px';
-  this.say.style.transform = 'translate(-50%,-100%)';
-  this.say.classList.add('show');
-  var self=this;
-  clearTimeout(this._sayT);
-  this._sayT = setTimeout(function(){ if(!self._dead) self.say.classList.remove('show'); }, 1400);
-  this._timers.push(this._sayT);
-};
+// The crab is now SILENT — no text bubbles. speak() is a no-op kept so the many
+// call sites stay harmless; it expresses itself purely through visual fx instead.
+Crab.prototype.speak = function(){ /* no text */ };
 Crab.prototype.anger = function(){
   if(this._dead) return;
   var a = document.createElement('div');
@@ -595,6 +601,88 @@ Crab.prototype.digSand = function(){
     self._after(700,function(){ if(d.parentNode) d.parentNode.removeChild(d); });
   }); })(); }
 };
+// 🏰 builds a tiny sandcastle, admires it, then smashes it in a fit.
+Crab.prototype.sandcastle = function(){
+  if(this._dead) return;
+  var self=this;
+  var c=document.createElement('div'); c.className='cc-castle'; c.textContent='🏰';
+  c.style.left=(this.x + (this.dir>0?this.W-8:-14))+'px'; c.style.top=(this.y + this.H - 24)+'px';
+  c.style.transform='scale(0)'; document.body.appendChild(c);
+  this._after(40,  function(){ c.style.transform='scale(1)'; });
+  this._after(900, function(){ if(c.parentNode){ c.style.transform='scale(.2) rotate(40deg)'; c.style.opacity='0'; self.anger(); self.digSand(); } });
+  this._after(1300,function(){ if(c.parentNode) c.parentNode.removeChild(c); });
+};
+// 💎 proudly holds up a shiny it found.
+Crab.prototype.treasure = function(){
+  if(this._dead) return;
+  var t=document.createElement('div'); t.className='cc-treasure'; t.textContent=Math.random()<0.5?'💎':'🪙';
+  t.style.left=(this.x + this.W*0.5 - 8)+'px'; t.style.top=(this.y - 14)+'px';
+  document.body.appendChild(t);
+  this._after(1500, function(){ if(t.parentNode) t.parentNode.removeChild(t); });
+};
+// 🐟 a fish drifts past; the crab snaps at it.
+Crab.prototype.fishBy = function(){
+  if(this._dead) return;
+  var self=this, d=this.dir;
+  var f=document.createElement('div'); f.className='cc-fish'; f.textContent='🐟';
+  f.style.left=(this.x + (d>0 ? this.W+34 : -42))+'px'; f.style.top=(this.y + this.H*0.28)+'px';
+  if(d>0) f.style.transform='scaleX(-1)';
+  document.body.appendChild(f);
+  this._after(30,  function(){ f.style.transition='left 1.1s ease,opacity .3s'; f.style.left=(self.x + (d>0?-42:self.W+34))+'px'; });
+  this._after(1250,function(){ f.style.opacity='0'; });
+  this._after(1600,function(){ if(f.parentNode) f.parentNode.removeChild(f); });
+};
+// 🦅 a gull shadow sweeps over; the crab ducks (handled by the .duck class).
+Crab.prototype.gullShadow = function(){
+  if(this._dead) return;
+  var self=this, fromLeft=Math.random()<0.5;
+  var g=document.createElement('div'); g.className='cc-gull';
+  g.style.top=(this.y + this.H - 7)+'px'; g.style.left=(fromLeft ? this.x-50 : this.x+this.W+50)+'px';
+  document.body.appendChild(g);
+  this._after(30,  function(){ g.style.transition='left 1.2s linear,opacity .4s'; g.style.left=(fromLeft ? self.x+self.W+50 : self.x-50)+'px'; });
+  this._after(1300,function(){ if(g.parentNode) g.parentNode.removeChild(g); });
+};
+// 🐚 tries on a different shell for a moment.
+Crab.prototype.hermitShell = function(){
+  if(this._dead) return;
+  var s=document.createElement('div'); s.className='cc-shell'; s.textContent='🐚';
+  s.style.left=(this.x + this.W*0.5 - 9)+'px'; s.style.top=(this.y - 4)+'px';
+  document.body.appendChild(s);
+  this._after(1600, function(){ if(s.parentNode) s.parentNode.removeChild(s); });
+};
+// 🫧 chases a drifting bubble (excited shuffle via the .dance class).
+Crab.prototype.chaseBubble = function(){
+  if(this._dead) return;
+  var b=document.createElement('div'); b.className='cc-bub';
+  b.style.width='9px'; b.style.height='9px';
+  b.style.left=(this.x + this.W*0.55)+'px'; b.style.top=(this.y - 4)+'px';
+  b.style.animationDuration='1.4s';
+  document.body.appendChild(b);
+  this._after(1500, function(){ if(b.parentNode) b.parentNode.removeChild(b); });
+};
+// 🌊 a tide ripple sweeps the floor; the crab hops it (via the .hop class).
+Crab.prototype.tideWave = function(){
+  if(this._dead) return;
+  var self=this, fromLeft=Math.random()<0.5;
+  var w=document.createElement('div'); w.className='cc-tide';
+  w.style.top=(this._floorY() + this.H - 7)+'px'; w.style.left=(fromLeft ? -70 : this.screenW)+'px';
+  document.body.appendChild(w);
+  this._after(30,  function(){ w.style.transition='left 1.6s ease-in-out,opacity .5s'; w.style.left=(fromLeft ? self.screenW : -70)+'px'; });
+  this._after(1700,function(){ if(w.parentNode) w.parentNode.removeChild(w); });
+};
+// 🕳️ digs straight under, vanishes, and pops up somewhere else on the floor.
+Crab.prototype.burrow = function(){
+  if(this._dead) return;
+  var self=this;
+  this.digSand();
+  this.el.classList.add('burrow');                       // CSS fades it out
+  this._after(560, function(){
+    self.x = 24 + Math.random()*Math.max(40, self.screenW - self.W - 48);
+    self.el.style.left = self.x + 'px';
+    self.el.classList.remove('burrow');                  // fade back in
+    self.digSand();
+  });
+};
 
 Crab.prototype.destroy = function(){
   this._dead = true;
@@ -604,10 +692,9 @@ Crab.prototype.destroy = function(){
   for(var j=0;j<this._listeners.length;j++){ var L=this._listeners[j]; try{ L.t.removeEventListener(L.e,L.fn,L.opts); }catch(_){ } }
   this._listeners.length = 0;
   if(this.el && this.el.parentNode) this.el.parentNode.removeChild(this.el);
-  if(this.say && this.say.parentNode) this.say.parentNode.removeChild(this.say);
   this._shrimp = null;
   // sweep any stray fx
-  var stray = document.querySelectorAll('.cc-bub, .cc-anger, .cc-shrimp, .cc-zzz, .cc-sand, .cc-dizzy');
+  var stray = document.querySelectorAll('.cc-bub, .cc-anger, .cc-shrimp, .cc-zzz, .cc-sand, .cc-dizzy, .cc-castle, .cc-treasure, .cc-fish, .cc-gull, .cc-shell, .cc-tide');
   for(var k=0;k<stray.length;k++){ if(stray[k].parentNode) stray[k].parentNode.removeChild(stray[k]); }
 };
 
