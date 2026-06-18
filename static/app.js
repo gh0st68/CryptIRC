@@ -34,6 +34,10 @@
 let ws=null, sessionToken=null, currentUser=null;
 let networks=[], active=null;
 let buffers={}, unread=new Map(), mentionUnread=new Map(), queryBufs={};
+// PM/query windows the user explicitly CLOSED, keyed "conn_id|targetLower" → close
+// timestamp (unix seconds). Used so a closed query isn't re-opened by old/replayed
+// messages on reconnect — only a genuinely newer message reopens it. Synced + local.
+let closedQueries={};
 let _historyView=null; // history-view state: {bk,conn_id,target} when the active buffer is a past window (see jumpToMessage)
 // Restore unread counts
 try{const ur=JSON.parse(localStorage.getItem('cryptirc_unread')||'{}');for(const[k,v] of Object.entries(ur))unread.set(k,v);}catch(e){}
@@ -56,7 +60,18 @@ function loadQueryBufs(){
       queryBufs[connId]=new Map(entries);
     }
   }catch(e){}
+  try{ closedQueries=JSON.parse(localStorage.getItem('cryptirc_closed_queries')||'{}')||{}; }catch(e){ closedQueries={}; }
 }
+function saveClosedQueries(){
+  try{
+    localStorage.setItem('cryptirc_closed_queries',JSON.stringify(closedQueries));
+    localStorage.setItem('cryptirc_closed_queries_ts',String(Date.now()));
+  }catch(e){} savePrefsToServer();
+}
+// Mark a query closed (so replays can't reopen it); clears its open buffer entry.
+function markQueryClosed(conn_id,lc){ closedQueries[conn_id+'|'+lc]=Math.floor(Date.now()/1000); saveClosedQueries(); }
+// User explicitly (re)opened a query → forget any closed marker so it behaves normally.
+function clearQueryClosed(conn_id,lc){ if(closedQueries[conn_id+'|'+lc]!=null){ delete closedQueries[conn_id+'|'+lc]; saveClosedQueries(); } }
 function loadLastActive(){
   try{return JSON.parse(localStorage.getItem('cryptirc_active'));}catch{return null;}
 }
@@ -1594,10 +1609,20 @@ function addMessage(conn_id,target,msg){
   // Track channel stats and seen database
   if(msg.kind==='privmsg'||msg.kind==='action'){trackStat(conn_id,target,msg.from);trackSeen(msg.from,target,msg.ts);trackLastSpoke(conn_id,target,msg.from,msg.ts);}
   const isDM=target!=='status'&&!target.startsWith('#')&&!target.startsWith('&')&&!target.startsWith('+')&&!target.startsWith('!');
-  // Track query/PM buffers
+  // Track query/PM buffers — but don't auto-reopen a query the user explicitly
+  // closed unless this is a genuinely NEWER message (not a replay/old line
+  // re-delivered on reconnect / server restart).
   if(isDM){
+    const _lc=target.toLowerCase(), _ck=conn_id+'|'+_lc, _closedTs=closedQueries[_ck];
+    if(_closedTs && (msg.ts||0)<=_closedTs){
+      // Stale replay for an explicitly-closed query (reconnect/restart): the line is
+      // already kept in the buffer for history, but it must NOT re-open the sidebar
+      // row OR bump unread / fire a notice / play a sound. Bail out entirely.
+      return;
+    }
+    if(_closedTs) clearQueryClosed(conn_id,_lc);       // genuinely newer message → reopen
     if(!queryBufs[conn_id])queryBufs[conn_id]=new Map();
-    queryBufs[conn_id].set(target.toLowerCase(), target);
+    queryBufs[conn_id].set(_lc, target);
     saveQueryBufs();
   }
   if(isActive(conn_id,target)){appendMsgRow(msg);const isOwn=msg.from&&msg.from===getNick(conn_id);if(isOwn)scrollForce();else scrollBottom();}
@@ -2936,6 +2961,7 @@ async function handleInput(raw){
       case 'QUERY': {
         const qnick = args[0];
         if(!qnick){sysMsg(conn_id,target,'Usage: /query <nick>','error');break;}
+        clearQueryClosed(conn_id, qnick.toLowerCase());
         if(!queryBufs[conn_id])queryBufs[conn_id]=new Map();
         queryBufs[conn_id].set(qnick.toLowerCase(), qnick);
         saveQueryBufs(); renderSidebar();
@@ -3022,6 +3048,7 @@ async function handleInput(raw){
         if(!to||!t){sysMsg(conn_id,target,'Usage: /msg <target> <message>','error');break;}
         // Open query window for non-channel targets
         if(!to.startsWith('#')&&!to.startsWith('&')&&!to.startsWith('+')&&!to.startsWith('!')){
+          clearQueryClosed(conn_id, to.toLowerCase());
           if(!queryBufs[conn_id])queryBufs[conn_id]=new Map();
           queryBufs[conn_id].set(to.toLowerCase(), to);
           saveQueryBufs();
@@ -3320,11 +3347,8 @@ async function handleInput(raw){
         if(closeTarget.startsWith('#')||closeTarget.startsWith('&')||closeTarget.startsWith('+')||closeTarget.startsWith('!')){
           wsend({type:'part_channel',conn_id,channel:closeTarget});
         } else {
-          // Close PM but keep buffer for history
-          if(queryBufs[conn_id]) queryBufs[conn_id].delete(closeTarget.toLowerCase());
-          unread.delete(bk(conn_id,closeTarget));
-          if(isActive(conn_id,closeTarget)) setActive(conn_id,'status');
-          renderSidebar();
+          // Close PM but keep buffer for history (closeQuery records the closed marker + syncs)
+          closeQuery(conn_id, closeTarget.toLowerCase());
         }
         break;
       }
@@ -8344,9 +8368,12 @@ function gatherPreferences(){
     monitorPush: localStorage.getItem('cryptirc_monitor_push')||'on',
     unread: (()=>{const o={};for(const[k,v] of unread)o[k]=v;return o;})(),
     mentions: mentionsList.slice(0,100),
+    _mentionsTs: parseInt(localStorage.getItem('cryptirc_mentions_ts')||'0'),
     inputHistory: inputHistory.slice(-100),
     queries: (()=>{const o={};for(const[c,m] of Object.entries(queryBufs))o[c]=[...m.entries()];return o;})(),
     _queriesTs: parseInt(localStorage.getItem('cryptirc_queries_ts')||'0'),
+    closedQueries: {...closedQueries},
+    _closedQueriesTs: parseInt(localStorage.getItem('cryptirc_closed_queries_ts')||'0'),
     lastActive: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_active'));}catch{return null;}})(),
     stats: {tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount},
     ignoreList: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_ignore')||'[]');}catch{return[];}})(),
@@ -8430,12 +8457,41 @@ function restorePreferences(p){
         if(localLastRead===0&&+v>local) unread.set(k,+v);
       }
     }
-    if(p.mentions) mentionsList=p.mentions;
+    if(p.mentions){
+      // Timestamp-guard like queries/favs: a read/clear on another device (the most
+      // recent write) must win so it doesn't resurrect here as still-unread. Only
+      // accept the server's list when our local copy isn't newer.
+      const localTs=parseInt(localStorage.getItem('cryptirc_mentions_ts')||'0');
+      const serverTs=p._mentionsTs||0;
+      if(localTs<=serverTs){
+        mentionsList=p.mentions;
+        try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));localStorage.setItem('cryptirc_mentions_ts',String(serverTs));}catch(e){}
+        if(document.getElementById('mentions-panel')?.classList.contains('show')) renderMentionsList();
+      }
+    }
     if(p.inputHistory) inputHistory=p.inputHistory;
     if(p.queries){
       const localTs=parseInt(localStorage.getItem('cryptirc_queries_ts')||'0');
       const serverTs=p._queriesTs||0;
       if(localTs<=serverTs){for(const[c,entries] of Object.entries(p.queries))queryBufs[c]=new Map(entries);}
+    }
+    if(p.closedQueries){
+      const localTs=parseInt(localStorage.getItem('cryptirc_closed_queries_ts')||'0');
+      const serverTs=p._closedQueriesTs||0;
+      if(localTs<=serverTs){
+        closedQueries=p.closedQueries||{};
+        try{localStorage.setItem('cryptirc_closed_queries',JSON.stringify(closedQueries));localStorage.setItem('cryptirc_closed_queries_ts',String(serverTs));}catch(e){}
+        // a closed query must not also linger as open in the sidebar
+        let _deduped=false;
+        for(const k of Object.keys(closedQueries)){
+          const i=k.indexOf('|'); if(i<0) continue;
+          const c=k.slice(0,i), lc=k.slice(i+1);
+          if(queryBufs[c] && queryBufs[c].delete(lc)) _deduped=true;
+        }
+        // persist the deduped open-query list so a hard reload before the next WS sync
+        // doesn't resurrect the closed PM from stale localStorage
+        if(_deduped) saveQueryBufs();
+      }
     }
     if(p.lastActive) localStorage.setItem('cryptirc_active',JSON.stringify(p.lastActive));
     if(p.stats){_txBytes=p.stats.tx||0;_rxBytes=p.stats.rx||0;_txCount=p.stats.tc||0;_rxCount=p.stats.rc||0;}
@@ -8523,10 +8579,12 @@ function closeAllPMs(conn_id){
   renderSidebar();
 }
 function closeQuery(conn_id,lc){
+  lc=String(lc).toLowerCase();
   if(queryBufs[conn_id])queryBufs[conn_id].delete(lc);
   // Keep buffer so history reloads when reopened, just clear unread
   unread.delete(bk(conn_id,lc));
   mentionUnread.delete(bk(conn_id,lc));
+  markQueryClosed(conn_id,lc);          // remember it's closed so replays don't reopen it
   saveQueryBufs();
   if(active&&active.conn_id===conn_id&&active.target.toLowerCase()===lc)setActive(conn_id,'status');
   renderSidebar();
@@ -11518,7 +11576,7 @@ document.addEventListener('DOMContentLoaded',()=>{document.getElementById('chat-
 // ─── Mentions system ──────────────────────────────────────────────────────────
 let mentionsList=[];
 try{mentionsList=JSON.parse(localStorage.getItem('cryptirc_mentions')||'[]');}catch(e){}
-function saveMentions(){try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));}catch(e){} savePrefsToServer();}
+function saveMentions(){try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));localStorage.setItem('cryptirc_mentions_ts',String(Date.now()));}catch(e){} savePrefsToServer();}
 function getHighlightWords(){try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}}
 function checkMention(conn_id,target,from,text,ts){
   if(!currentUser)return false;
