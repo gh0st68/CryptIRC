@@ -5453,6 +5453,7 @@ const APPEAR_DEFAULTS={
   crab:'off',
   ghost:'off',
   fish:'off',
+  alien:'off',
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -5473,6 +5474,8 @@ function _ghostMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='
 function _ghostOn(v){ var m=_ghostMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
 function _fishMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
 function _fishOn(v){ var m=_fishMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
+function _alienMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
+function _alienOn(v){ var m=_alienMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
 let _appearCache=null,_appearCacheTs=0;
 function loadAppearance(){
   const now=Date.now();
@@ -5557,6 +5560,7 @@ function applyAppearance(){
     crab:       el('a-crab') ? el('a-crab').value : _crabMode(prev.crab),
     ghost:      el('a-ghost') ? el('a-ghost').value : _ghostMode(prev.ghost),
     fish:       el('a-fish') ? el('a-fish').value : _fishMode(prev.fish),
+    alien:      el('a-alien') ? el('a-alien').value : _alienMode(prev.alien),
   };
   // Show/hide the custom radius slider based on shape
   const _radiusRow = el('a-media-radius-row');
@@ -5751,6 +5755,7 @@ function applyThemeCSS(cfg){
   if(window.CryptIRCCrab){ _crabOn(cfg.crab) ? window.CryptIRCCrab.enable() : window.CryptIRCCrab.disable(); }
   if(window.CryptIRCGhost){ _ghostOn(cfg.ghost) ? window.CryptIRCGhost.enable() : window.CryptIRCGhost.disable(); }
   if(window.CryptIRCFish){ _fishOn(cfg.fish) ? window.CryptIRCFish.enable() : window.CryptIRCFish.disable(); }
+  if(window.CryptIRCAlien){ _alienOn(cfg.alien) ? window.CryptIRCAlien.enable() : window.CryptIRCAlien.disable(); }
 }
 
 // Apply the saved eSheep state once everything (including the deferred
@@ -5761,6 +5766,7 @@ window.addEventListener('load', function(){
   try{ if(window.CryptIRCCrab){ var _cc=loadAppearance(); _crabOn(_cc.crab) ? window.CryptIRCCrab.enable() : window.CryptIRCCrab.disable(); } }catch(_){}
   try{ if(window.CryptIRCGhost){ var _cg=loadAppearance(); _ghostOn(_cg.ghost) ? window.CryptIRCGhost.enable() : window.CryptIRCGhost.disable(); } }catch(_){}
   try{ if(window.CryptIRCFish){ var _cf=loadAppearance(); _fishOn(_cf.fish) ? window.CryptIRCFish.enable() : window.CryptIRCFish.disable(); } }catch(_){}
+  try{ if(window.CryptIRCAlien){ var _ca=loadAppearance(); _alienOn(_ca.alien) ? window.CryptIRCAlien.enable() : window.CryptIRCAlien.disable(); } }catch(_){}
 });
 
 // ─── Animation System ─────────────────────────────────────────────────────────
@@ -6195,6 +6201,7 @@ function populateAppearanceModal(cfg){
   { const _cr=el('a-crab'); if(_cr){ _cr.value=_crabMode(cfg.crab); } }
   { const _gh=el('a-ghost'); if(_gh){ _gh.value=_ghostMode(cfg.ghost); } }
   { const _fh=el('a-fish'); if(_fh){ _fh.value=_fishMode(cfg.fish); } }
+  { const _al=el('a-alien'); if(_al){ _al.value=_alienMode(cfg.alien); } }
   // spellcheck and linkPreviews toggles are now in the Security panel
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;

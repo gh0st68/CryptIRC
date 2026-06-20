@@ -65,7 +65,43 @@ function injectStyle(){
       'background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.85),rgba(170,215,235,.18));',
       'border:1px solid rgba(200,235,250,.5);animation:fishBub linear forwards}',
     '@keyframes fishBub{0%{opacity:.55;transform:translateY(0) scale(.55)}100%{opacity:0;transform:translateY(-30px) scale(1.15)}}',
-    '@media(prefers-reduced-motion:reduce){.cryptirc-fish *,.cryptirc-fish{animation:none!important}}'
+    // ── calm flourish effects (all pointer-events:none, all slow & gentle) ──
+    // slow expanding bubble-ring
+    '.fishring{position:fixed;z-index:'+Z+';border-radius:50%;pointer-events:none;',
+      'border:1.5px solid rgba(205,238,252,.6);box-shadow:0 0 5px rgba(200,235,250,.3);',
+      'animation:fishRing 3.4s ease-out forwards}',
+    '@keyframes fishRing{0%{opacity:.6;transform:scale(.25)}100%{opacity:0;transform:scale(1.7)}}',
+    // soft surface ripple ring
+    '.fishripple{position:fixed;z-index:'+Z+';border-radius:50%;pointer-events:none;',
+      'border:1.5px solid rgba(210,240,255,.55);animation:fishRipple 3.2s ease-out forwards}',
+    '@keyframes fishRipple{0%{opacity:.5;transform:scaleX(.4) scaleY(.18)}100%{opacity:0;transform:scaleX(2.2) scaleY(.9)}}',
+    // drifting sparkle (shimmer/trail)
+    '.fishspark{position:fixed;z-index:'+Z+';width:5px;height:5px;border-radius:50%;pointer-events:none;',
+      'background:radial-gradient(circle at 40% 35%,rgba(255,255,255,.95),rgba(255,240,200,.15));',
+      'box-shadow:0 0 5px rgba(255,245,210,.8);animation:fishSpark 2.6s ease-in-out forwards}',
+    '@keyframes fishSpark{0%{opacity:0;transform:scale(.3)}25%{opacity:.9;transform:scale(1)}100%{opacity:0;transform:scale(.4) translateY(-10px)}}',
+    // tiny silhouette friend drifting past
+    '.fishfriend{position:fixed;z-index:'+Z+';width:18px;height:11px;pointer-events:none;opacity:.22;',
+      'background:#5a7a8c;clip-path:polygon(0 50%,32% 0,100% 22%,100% 78%,32% 100%);',
+      'will-change:left,top;transition:opacity 1s ease}',
+    '.fishfriend.gone{opacity:0}',
+    // drifting plankton speck
+    '.fishplank{position:fixed;z-index:'+Z+';width:4px;height:4px;border-radius:50%;pointer-events:none;',
+      'background:radial-gradient(circle at 40% 35%,rgba(210,255,225,.95),rgba(120,200,150,.2));',
+      'box-shadow:0 0 4px rgba(180,255,200,.6);transition:opacity .5s ease}',
+    '.fishplank.gone{opacity:0}',
+    // soft scale-shimmer glow over the fish body
+    '.cryptirc-fish.shimmer{filter:drop-shadow(0 3px 5px rgba(0,40,70,.30)) drop-shadow(0 0 6px rgba(255,245,210,.7));',
+      'animation:fishShimmer 2.8s ease-in-out}',
+    '@keyframes fishShimmer{0%,100%{filter:drop-shadow(0 3px 5px rgba(0,40,70,.30))}',
+      '50%{filter:drop-shadow(0 3px 5px rgba(0,40,70,.30)) drop-shadow(0 0 8px rgba(255,248,215,.85))}}',
+    // slow gill-flare "yawn" — gentle, slow fin breathing (no transform; keeps facing)
+    '.cryptirc-fish.yawn .fishtail,.cryptirc-fish.yawn .fishdorsal,.cryptirc-fish.yawn .fishpec{animation-duration:3.6s}',
+    '.cryptirc-fish.yawn{filter:drop-shadow(0 3px 5px rgba(0,40,70,.30)) drop-shadow(0 0 4px rgba(255,235,190,.5))}',
+    // slow happy wiggle — just a livelier (but still gentle) tail sway
+    '.cryptirc-fish.wiggle .fishtail{animation-duration:1.1s}',
+    '@media(prefers-reduced-motion:reduce){.cryptirc-fish *,.cryptirc-fish{animation:none!important}',
+      '.fishring,.fishripple,.fishspark,.fishfriend,.fishplank{animation:none!important;opacity:0!important}}'
   ].join('');
   document.head.appendChild(s);
 }
@@ -129,6 +165,11 @@ function Fish(){
   this._food = [];                               // [{el,x,y,vy,sway,phase,life}]
   this._dir = 1;                                 // 1 = facing right, -1 = facing left
   this._floatY = 0;
+  this._roll = 0;                                // current barrel-roll angle (deg), eased
+  this._rollGoal = 0;                            // target roll angle
+  this._fancyBusy = false;                       // a multi-step flourish is mid-flight
+  this._fancyGate = 420 + (Math.random()*420|0); // frames until the next calm flourish chance
+  this._planktons = [];                          // [{el,x,y,phase,life}] calm specks to follow
   this._bobGate = 180 + (Math.random()*240|0);   // frames until next ambient bubble
   this._bounds();
   this.x = Math.random()*Math.max(1,(this.screenW-this.W));
@@ -171,7 +212,7 @@ Fish.prototype.start = function(){
   document.body.appendChild(this.el);
   this.el.style.left = this.x + 'px';
   this.el.style.top  = this.y + 'px';
-  this.el.style.transform = 'scaleX(1)';
+  this._applyTransform();
   var self=this;
   // Feed when a click lands on/near the fish. Passive observer — never blocks the UI.
   this._on(document, 'click', function(e){
@@ -256,6 +297,19 @@ Fish.prototype.frame = function(ts){
     if(fd.y > this.screenH + 8 || fd.life > 780){ this._removeFood(i, false); }
   }
 
+  // ── advance any drifting plankton specks (the fish calmly follows & eats) ──
+  for(var pi=this._planktons.length-1; pi>=0; pi--){
+    var pk = this._planktons[pi];
+    pk.life += k;
+    pk.phase += 0.02 * k;
+    pk.x += Math.cos(pk.phase) * 0.18 * k;                // slow lateral drift
+    pk.y += (Math.sin(pk.phase*0.7) * 0.12 + 0.02) * k;   // gentle rise/fall
+    pk.x = Math.max(6, Math.min(pk.x, this.screenW-6));
+    pk.y = Math.max(this._bandTop()+4, Math.min(pk.y, this._bandBot()+this.H/2));
+    if(pk.el){ pk.el.style.left = (pk.x-2)+'px'; pk.el.style.top = (pk.y-2)+'px'; }
+    if(pk.life > 900){ this._removePlankton(pi, false); }
+  }
+
   var cx = this.x + this.W/2, cy = this.y + this.H/2;     // logical centre (no bob) for steering
   var goalX, goalY, speed;
   var fi = this._food.length ? this._nearestFood(cx, cy) : -1;
@@ -271,6 +325,17 @@ Fish.prototype.frame = function(ts){
       this.bubble(this.x + (this._dir>0 ? this.W*0.78 : this.W*0.22), this.y + this.H*0.35);
       if(Math.random()<0.5) this.bubble(this.x + this.W*0.5, this.y + this.H*0.3);
       this._happy();
+    }
+  } else if(this._planktons.length){
+    // ── calmly follow & nibble the nearest drifting plankton speck ──────────
+    var pbest=-1, pbd=Infinity;
+    for(var q=0;q<this._planktons.length;q++){ var qx=this._planktons[q].x-cx, qy=this._planktons[q].y-cy, qd=qx*qx+qy*qy; if(qd<pbd){pbd=qd;pbest=q;} }
+    var pt = this._planktons[pbest];
+    goalX = pt.x - this.W/2; goalY = pt.y - this.H/2; speed = 0.016 * k;
+    var pdx = pt.x - cx, pdy = pt.y - cy;
+    if(pdx*pdx + pdy*pdy <= this.EAT*this.EAT){
+      this._removePlankton(pbest, true);
+      if(Math.random()<0.5) this.bubble(this.x + (this._dir>0 ? this.W*0.78 : this.W*0.22), this.y + this.H*0.32);
     }
   } else {
     // ── calm wander: ease to a target, then hover a beat, then pick another ──
@@ -288,8 +353,16 @@ Fish.prototype.frame = function(ts){
 
   // ── facing: turn smoothly toward travel direction (deadzone avoids flutter) ─
   var aimX = goalX + this.W/2;
-  if(aimX - cx > 10 && this._dir !== 1){ this._dir = 1; this.el.style.transform = 'scaleX(1)'; }
-  else if(aimX - cx < -10 && this._dir !== -1){ this._dir = -1; this.el.style.transform = 'scaleX(-1)'; }
+  if(aimX - cx > 10 && this._dir !== 1){ this._dir = 1; this._applyTransform(); }
+  else if(aimX - cx < -10 && this._dir !== -1){ this._dir = -1; this._applyTransform(); }
+
+  // ── ease the barrel-roll angle toward its goal, smoothly ─────────────────
+  if(Math.abs(this._rollGoal - this._roll) > 0.1){
+    this._roll += (this._rollGoal - this._roll) * 0.05 * k;
+    this._applyTransform();
+  } else if(this._roll !== this._rollGoal){
+    this._roll = this._rollGoal; this._applyTransform();
+  }
 
   // ── render (with a soft vertical bob) ────────────────────────────────────
   this._floatY = Math.sin(this.bob) * 2.6;
@@ -300,6 +373,13 @@ Fish.prototype.frame = function(ts){
   if(this._bobGate > 0){ this._bobGate -= k; }
   else { this._bobGate = 220 + (Math.random()*340|0); this.bubble(this.x + (this._dir>0 ? this.W*0.78 : this.W*0.22), this.y + this.H*0.32); }
 
+  // ── occasional calm flourish (only while plain swimming — not feeding) ────
+  if(this._fancyGate > 0){ this._fancyGate -= k; }
+  else {
+    this._fancyGate = 540 + (Math.random()*720|0);       // long, easy spacing between flourishes
+    if(fi < 0 && !this._fancyBusy && this._planktons.length === 0){ this._pickFancy(); }
+  }
+
   this.loop();
 };
 
@@ -308,6 +388,193 @@ Fish.prototype._happy = function(){
   this.el.classList.add('happy');
   var self=this;
   this._after(1100, function(){ if(self.el) self.el.classList.remove('happy'); });
+};
+
+// compose facing (scaleX by _dir) with the eased barrel-roll angle in one transform
+Fish.prototype._applyTransform = function(){
+  if(!this.el) return;
+  this.el.style.transform = 'scaleX('+this._dir+') rotate('+(this._roll*this._dir).toFixed(2)+'deg)';
+};
+
+// remove a plankton speck (eaten = quick fade)
+Fish.prototype._removePlankton = function(i, eaten){
+  var pk = this._planktons[i];
+  if(!pk) return;
+  this._planktons.splice(i, 1);
+  var el = pk.el;
+  if(el){ el.classList.add('gone'); this._after(eaten ? 140 : 520, function(){ if(el.parentNode) el.parentNode.removeChild(el); }); }
+};
+
+// ── tiny effect spawners (all pointer-events:none; tracked removal) ──────────
+Fish.prototype._spawnRing = function(cx, cy, sz){
+  if(this._dead) return;
+  var r = document.createElement('div'); r.className='fishring';
+  r.style.width=sz+'px'; r.style.height=sz+'px';
+  r.style.left=Math.max(0,Math.min(cx-sz/2,this.screenW-sz))+'px';
+  r.style.top =Math.max(0,Math.min(cy-sz/2,this.screenH-sz))+'px';
+  document.body.appendChild(r);
+  this._after(3500, function(){ if(r.parentNode) r.parentNode.removeChild(r); });
+};
+Fish.prototype._spawnSpark = function(cx, cy){
+  if(this._dead) return;
+  var s = document.createElement('div'); s.className='fishspark';
+  s.style.left=Math.max(0,Math.min(cx-2.5,this.screenW-5))+'px';
+  s.style.top =Math.max(0,Math.min(cy-2.5,this.screenH-5))+'px';
+  document.body.appendChild(s);
+  this._after(2700, function(){ if(s.parentNode) s.parentNode.removeChild(s); });
+};
+
+// ── the 10 calm flourishes ───────────────────────────────────────────────────
+// pick ONE calm flourish at random (kept rare via the long _fancyGate)
+Fish.prototype._pickFancy = function(){
+  if(this._dead || this._fancyBusy) return;
+  var fns = [
+    this._fancyBubbleRing, this._fancyBarrelRoll, this._fancySurfaceNibble,
+    this._fancySinkAndSway, this._fancyFriendsPass, this._fancyFigureEight,
+    this._fancyShimmer, this._fancyYawn, this._fancyPlankton, this._fancyHover
+  ];
+  fns[Math.random()*fns.length|0].call(this);
+};
+
+// 1) blow a slow, expanding bubble-ring out in front
+Fish.prototype._fancyBubbleRing = function(){
+  var self=this; this._fancyBusy=true;
+  var mx = this.x + (this._dir>0 ? this.W*0.82 : this.W*0.18), my = this.y + this._floatY + this.H*0.4;
+  this._spawnRing(mx, my, 14);
+  this._after(700,  function(){ if(!self._dead) self._spawnRing(mx, my, 22); });
+  this._after(1400, function(){ if(!self._dead) self._spawnRing(mx, my, 30); });
+  this._after(2200, function(){ self._fancyBusy=false; });
+};
+
+// 2) a graceful, slow barrel-roll (eased rotate via _rollGoal, then back)
+Fish.prototype._fancyBarrelRoll = function(){
+  var self=this; this._fancyBusy=true;
+  // Hold position during the roll so facing can't flip mid-spin (a flip would
+  // invert the rotate() and visibly snap the fish). It just rolls gently in place.
+  this.tx = this.x; this.ty = this.y; this.restT = 280;
+  this._rollGoal = 360;
+  this._after(4200, function(){ if(self._dead) return; self._roll = 0; self._rollGoal = 0; self._applyTransform(); self._fancyBusy=false; });
+};
+
+// 3) rise to nibble the surface, leaving a soft ripple ring at the top
+Fish.prototype._fancySurfaceNibble = function(){
+  var self=this; this._fancyBusy=true;
+  this.ty = this._bandTop(); this.tx = this.x; this.restT = 240;   // glide up & linger
+  this._after(2600, function(){
+    if(self._dead){ self._fancyBusy=false; return; }
+    var rp = document.createElement('div'); rp.className='fishripple';
+    var w=34;
+    rp.style.width=w+'px'; rp.style.height=(w*0.4)+'px';
+    rp.style.left=Math.max(0,Math.min(self.x+self.W/2-w/2,self.screenW-w))+'px';
+    rp.style.top =Math.max(0, self._bandTop()-2)+'px';
+    document.body.appendChild(rp);
+    self._after(3300, function(){ if(rp.parentNode) rp.parentNode.removeChild(rp); });
+    if(Math.random()<0.6) self.bubble(self.x+self.W*0.5, self.y+self.H*0.25);
+  });
+  this._after(3600, function(){ self._fancyBusy=false; });
+};
+
+// 4) sink to rest near the bottom and gently sway there a while
+Fish.prototype._fancySinkAndSway = function(){
+  var self=this; this._fancyBusy=true;
+  this.ty = this._bandBot(); this.tx = this.x; this.restT = 360;   // long, restful hover
+  this.el.classList.add('wiggle');
+  this._after(4800, function(){ if(self.el) self.el.classList.remove('wiggle'); self._fancyBusy=false; });
+};
+
+// 5) a few tiny silhouette fish friends drift slowly past in the background
+Fish.prototype._fancyFriendsPass = function(){
+  var self=this; this._fancyBusy=true;
+  var dir = Math.random()<0.5 ? 1 : -1;
+  var n = 2 + (Math.random()*2|0);
+  var baseY = this._bandTop() + Math.random()*Math.max(1,(this._bandBot()-this._bandTop()));
+  for(var i=0;i<n;i++){
+    (function(idx){
+      self._after(idx*600, function(){
+        if(self._dead) return;
+        var fr = document.createElement('div'); fr.className='fishfriend';
+        var startX = dir>0 ? -24 : self.screenW+24;
+        var fy = baseY + (idx*9) + (Math.random()*8-4);
+        fr.style.left=startX+'px'; fr.style.top=fy+'px';
+        fr.style.transform='scaleX('+dir+')';
+        document.body.appendChild(fr);
+        // ease it across over many seconds, then fade & remove
+        var endX = dir>0 ? self.screenW+24 : -24;
+        var px=startX;
+        var step=function(){
+          if(self._dead){ if(fr.parentNode) fr.parentNode.removeChild(fr); return; }
+          px += (endX - px) * 0.012;
+          fr.style.left = px + 'px';
+          fr.style.top  = (fy + Math.sin(px*0.02)*3) + 'px';
+          if(Math.abs(endX - px) > 30){ self._after(32, step); }
+          else { fr.classList.add('gone'); self._after(1100, function(){ if(fr.parentNode) fr.parentNode.removeChild(fr); }); }
+        };
+        step();
+      });
+    })(i);
+  }
+  this._after(n*600 + 14000, function(){ self._fancyBusy=false; });
+};
+
+// 6) drift in a slow figure-eight by chaining four eased waypoints
+Fish.prototype._fancyFigureEight = function(){
+  var self=this; this._fancyBusy=true;
+  var cx0 = Math.max(60, Math.min(this.x, this.screenW - this.W - 60));
+  var cy0 = Math.max(this._bandTop()+10, Math.min(this.y, this._bandBot()-10));
+  var rx = 46, ry = Math.min(26, (this._bandBot()-this._bandTop())/2);
+  // lobes of a figure-eight (relative offsets), traversed as gentle waypoints
+  var pts = [[rx,-ry],[0,0],[-rx,-ry],[0,0],[rx,ry],[0,0],[-rx,ry],[0,0]];
+  var idx=0;
+  var hop=function(){
+    if(self._dead){ self._fancyBusy=false; return; }
+    // yield immediately to feeding / plankton so the figure-eight never thrashes
+    // the swim target or holds _fancyBusy while the fish should be eating
+    if(self._food.length || (self._planktons && self._planktons.length)){ self._fancyBusy=false; return; }
+    if(idx>=pts.length){ self._fancyBusy=false; return; }
+    self.tx = Math.max(12, Math.min(cx0+pts[idx][0], self.screenW-self.W-12));
+    self.ty = Math.max(self._bandTop(), Math.min(cy0+pts[idx][1], self._bandBot()));
+    self.restT = 6;
+    idx++;
+    self._after(1300, hop);
+  };
+  hop();
+};
+
+// 7) scales shimmer/sparkle softly (a glow pass + a couple of sparkles)
+Fish.prototype._fancyShimmer = function(){
+  var self=this; this._fancyBusy=true;
+  this.el.classList.add('shimmer');
+  this._spawnSpark(this.x+this.W*0.55, this.y+this._floatY+this.H*0.4);
+  this._after(700, function(){ if(!self._dead) self._spawnSpark(self.x+self.W*0.4, self.y+self._floatY+self.H*0.5); });
+  this._after(2800, function(){ if(self.el) self.el.classList.remove('shimmer'); self._fancyBusy=false; });
+};
+
+// 8) a slow gill-flare "yawn" — gentle, slow breathing of the fins
+Fish.prototype._fancyYawn = function(){
+  var self=this; this._fancyBusy=true;
+  this.el.classList.add('yawn');
+  if(Math.random()<0.6) this.bubble(this.x + (this._dir>0 ? this.W*0.8 : this.W*0.2), this.y + this.H*0.4);
+  this._after(2700, function(){ if(self.el) self.el.classList.remove('yawn'); self._fancyBusy=false; });
+};
+
+// 9) release a tiny drifting plankton speck it then calmly follows & eats
+Fish.prototype._fancyPlankton = function(){
+  var self=this; this._fancyBusy=true;
+  var px = Math.max(20, Math.min(this.x + (this._dir>0 ? -40 : this.W+40), this.screenW-20));
+  var py = Math.max(this._bandTop()+8, Math.min(this.y + this.H*0.4 + (Math.random()*30-15), this._bandBot()+this.H/2));
+  var el = document.createElement('div'); el.className='fishplank';
+  el.style.left=(px-2)+'px'; el.style.top=(py-2)+'px';
+  document.body.appendChild(el);
+  this._planktons.push({ el:el, x:px, y:py, phase:Math.random()*Math.PI*2, life:0 });
+  // the frame loop handles the calm follow/eat; just release the busy flag
+  this._after(1400, function(){ self._fancyBusy=false; });
+};
+
+// 10) gentle pause-and-hover while the fins fan (a calm, still beat)
+Fish.prototype._fancyHover = function(){
+  var self=this; this._fancyBusy=true;
+  this.tx = this.x; this.ty = this.y; this.restT = 300;            // hold position & fan fins
+  this._after(3400, function(){ self._fancyBusy=false; });
 };
 
 Fish.prototype.bubble = function(bx, by){
@@ -332,9 +599,11 @@ Fish.prototype.destroy = function(){
   this._listeners.length = 0;
   for(var n=0;n<this._food.length;n++){ var fe=this._food[n].el; if(fe && fe.parentNode) fe.parentNode.removeChild(fe); }
   this._food.length = 0;
+  for(var p=0;p<this._planktons.length;p++){ var pe=this._planktons[p].el; if(pe && pe.parentNode) pe.parentNode.removeChild(pe); }
+  this._planktons.length = 0;
   if(this.el && this.el.parentNode) this.el.parentNode.removeChild(this.el);
   this.el = null;
-  var stray = document.querySelectorAll('.fishfood, .fishbub');
+  var stray = document.querySelectorAll('.fishfood, .fishbub, .fishring, .fishripple, .fishspark, .fishfriend, .fishplank');
   for(var m=0;m<stray.length;m++){ if(stray[m].parentNode) stray[m].parentNode.removeChild(stray[m]); }
 };
 

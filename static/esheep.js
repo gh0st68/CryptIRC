@@ -2177,3 +2177,101 @@ window.CryptIRCSheep={
 };
 
 })();
+
+/*!
+ * CryptIRC eSheep — random overlay flourishes (decoupled add-on)
+ * ------------------------------------------------------------------------
+ * 10 extra cute things the sheep randomly does — hearts, music notes, a
+ * fluttering butterfly, sparkles, a thought bubble, a sweat drop, a startled
+ * "!", a blooming flower at its feet, a rainbow, and a little bird that flies
+ * by. Purely cosmetic DOM overlays positioned via the sheep's public pos()
+ * API — the sprite engine above is NOT touched. CSP-safe (no eval/network),
+ * pointer-events:none (never blocks the UI), self-cleaning, and tied to the
+ * sheep's own enable()/disable() so it leaks nothing.
+ */
+(function(){
+'use strict';
+if(!window.CryptIRCSheep) return;          // core must be present (it is — defined above)
+var Z = 95;                                // above the sheep; below panels/menus/modals (>=100)
+var STYLE_ID = 'cryptirc-esheep-fx-style';
+var _on = false, _timer = 0, _fxTimers = [];
+
+function injectStyle(){
+  if(document.getElementById(STYLE_ID)) return;
+  var s = document.createElement('style'); s.id = STYLE_ID;
+  s.textContent = [
+    '.es-fx{position:fixed;z-index:'+Z+';pointer-events:none;font-size:16px;line-height:1;filter:drop-shadow(0 1px 2px rgba(0,0,0,.25))}',
+    '.es-float{animation:esFloat 1.8s ease-out forwards}',
+    '@keyframes esFloat{0%{opacity:0;transform:translateY(0) scale(.7)}20%{opacity:1}100%{opacity:0;transform:translateY(-30px) scale(1) rotate(8deg)}}',
+    '.es-pop{animation:esPop 1.1s ease-out forwards}',
+    '@keyframes esPop{0%{opacity:0;transform:scale(.3)}30%{opacity:1;transform:scale(1.25)}100%{opacity:0;transform:translateY(-14px) scale(1)}}',
+    '.es-twinkle{animation:esTwinkle 1.3s ease-in-out forwards}',
+    '@keyframes esTwinkle{0%{opacity:0;transform:scale(.2)}40%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(.3)}}',
+    '.es-thought{background:#fff;color:#333;border-radius:12px;padding:3px 8px;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,.25);animation:esPop 2s ease-out forwards}',
+    '.es-bloom{animation:esBloom 2.4s ease-out forwards;transform-origin:bottom center}',
+    '@keyframes esBloom{0%{opacity:0;transform:scale(.1) translateY(6px)}25%{opacity:1;transform:scale(1)}80%{opacity:1}100%{opacity:0}}',
+    '.es-rainbow{font-size:26px;animation:esRainbow 2.6s ease-out forwards}',
+    '@keyframes esRainbow{0%{opacity:0;transform:translateY(6px) scale(.8)}30%{opacity:.95;transform:translateY(0) scale(1)}80%{opacity:.95}100%{opacity:0}}',
+    '.es-bfly{animation:esBfly 3s ease-in-out forwards}',
+    '@keyframes esBfly{0%{opacity:0;transform:translate(0,0)}10%{opacity:1}50%{transform:translate(40px,-16px) rotate(10deg)}100%{opacity:0;transform:translate(80px,-6px)}}',
+    '.es-bird{animation:esBird 2.8s ease-in forwards}',
+    '@keyframes esBird{0%{opacity:0;transform:translate(-40px,10px)}20%{opacity:1;transform:translate(0,0)}70%{opacity:1}100%{opacity:0;transform:translate(60px,-30px)}}',
+    '@media(prefers-reduced-motion:reduce){.es-fx{animation:none!important;opacity:0!important}}'
+  ].join('');
+  document.head.appendChild(s);
+}
+
+// append a node, auto-remove after ttl (timer tracked so stop() can cancel it)
+function spawn(node, ttl){
+  document.body.appendChild(node);
+  var id = setTimeout(function(){
+    if(node.parentNode) node.parentNode.removeChild(node);
+    var i = _fxTimers.indexOf(id); if(i>=0) _fxTimers.splice(i,1);   // don't let the id list grow over a long session
+  }, ttl);
+  _fxTimers.push(id);
+}
+function mk(cls, ch){ var e=document.createElement('div'); e.className='es-fx '+cls; if(ch!=null) e.textContent=ch; return e; }
+
+// each fx receives the sheep's live position p = {x,y,w,h,cx,cy}
+var THOUGHTS = ['🌱','🍎','⭐','🐑','🌙','💤','🎵','🍀'];
+var FX = [
+  function(p){ var e=mk('es-float','💗'); e.style.left=(p.cx-8)+'px'; e.style.top=(p.y-6)+'px'; spawn(e,1800); },
+  function(p){ var notes=['♪','♫','♬']; for(var i=0;i<2;i++){ var e=mk('es-float',notes[(Math.random()*notes.length)|0]); e.style.left=(p.cx-8+(Math.random()*20-10))+'px'; e.style.top=(p.y-4)+'px'; spawn(e,1800); } },
+  function(p){ var e=mk('es-bfly','🦋'); e.style.left=(p.x-18)+'px'; e.style.top=(p.y-2)+'px'; spawn(e,3000); },
+  function(p){ for(var i=0;i<3;i++){ var e=mk('es-twinkle','✨'); e.style.left=(p.x+Math.random()*p.w-6)+'px'; e.style.top=(p.y+Math.random()*p.h-6)+'px'; spawn(e,1400); } },
+  function(p){ var e=mk('es-thought',THOUGHTS[(Math.random()*THOUGHTS.length)|0]); e.style.left=(p.cx+4)+'px'; e.style.top=(p.y-22)+'px'; spawn(e,2100); },
+  function(p){ var e=mk('es-float','💧'); e.style.fontSize='13px'; e.style.left=(p.x+p.w-6)+'px'; e.style.top=(p.y+4)+'px'; spawn(e,1500); },
+  function(p){ var e=mk('es-pop','❗'); e.style.left=(p.cx-6)+'px'; e.style.top=(p.y-12)+'px'; spawn(e,1100); },
+  function(p){ var e=mk('es-bloom',(Math.random()<0.5?'🌷':'🌼')); e.style.left=(p.cx-8+(Math.random()*20-10))+'px'; e.style.top=(p.y+p.h-14)+'px'; spawn(e,2400); },
+  function(p){ var e=mk('es-rainbow','🌈'); e.style.left=(p.cx-13)+'px'; e.style.top=(p.y-26)+'px'; spawn(e,2600); },
+  function(p){ var e=mk('es-bird','🐦'); e.style.left=(p.x-30)+'px'; e.style.top=(p.y-4)+'px'; spawn(e,2800); }
+];
+
+function tick(){
+  if(!_on || document.hidden) return;
+  var a = window.CryptIRCSheep;
+  var p = (a && a.isOn && a.isOn() && a.pos) ? a.pos() : null;
+  if(p){ FX[(Math.random()*FX.length)|0](p); }
+}
+function start(){
+  if(_on) return;
+  _on = true; injectStyle();
+  _timer = setInterval(tick, 2600);        // a flourish roughly every few seconds while the sheep is out
+}
+function stop(){
+  _on = false;
+  if(_timer){ clearInterval(_timer); _timer = 0; }
+  for(var i=0;i<_fxTimers.length;i++){ clearTimeout(_fxTimers[i]); }
+  _fxTimers.length = 0;
+  var stray = document.querySelectorAll('.es-fx');
+  for(var j=0;j<stray.length;j++){ if(stray[j].parentNode) stray[j].parentNode.removeChild(stray[j]); }
+}
+
+// tie the flourishes to the sheep's own lifecycle (idempotent wrappers)
+var _origEnable = window.CryptIRCSheep.enable, _origDisable = window.CryptIRCSheep.disable;
+window.CryptIRCSheep.enable  = function(){ _origEnable.apply(this, arguments);  start(); };
+window.CryptIRCSheep.disable = function(){ _origDisable.apply(this, arguments); stop();  };
+// already running (load-order: app.js may have enabled the sheep before this ran)
+try{ if(window.CryptIRCSheep.isOn && window.CryptIRCSheep.isOn()) start(); }catch(_){ }
+
+})();

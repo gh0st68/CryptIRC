@@ -101,6 +101,52 @@ function injectStyle(){
     '.gh-web{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:13px;animation:ghWeb 2.3s ease-in-out forwards}',
     '.gh-web::before{content:"";position:absolute;left:50%;top:-22px;width:1px;height:22px;background:rgba(205,222,216,.45)}',
     '@keyframes ghWeb{0%{opacity:0;transform:translateY(-22px)}22%{opacity:.95;transform:translateY(0)}80%{opacity:.95}100%{opacity:0;transform:translateY(-14px)}}',
+    /* ── NEW spooky fx ─────────────────────────────────────────────────── */
+    /* will-o'-wisp: tiny orbs that orbit then fade */
+    '.gh-wisp{position:fixed;z-index:'+(Z+1)+';pointer-events:none;width:9px;height:9px;border-radius:50%;',
+      'background:radial-gradient(circle at 40% 35%,rgba(190,255,235,.95),rgba(110,200,180,.15));',
+      'filter:blur(.4px) drop-shadow(0 0 6px #7fdcc8);opacity:0;animation:ghWisp ease-in-out forwards}',
+    '@keyframes ghWisp{0%{opacity:0}14%,80%{opacity:.9}100%{opacity:0}}',
+    /* bat that flutters off */
+    '.gh-bat{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:15px;animation:ghBat 2.4s ease-in forwards}',
+    '@keyframes ghBat{0%{opacity:0;transform:translate(0,0) rotate(0)}12%{opacity:.95}50%{transform:translate(-60px,-46px) rotate(-12deg)}100%{opacity:0;transform:translate(-150px,-130px) rotate(8deg)}}',
+    /* frost-breath fog puff */
+    '.gh-frost{position:fixed;z-index:'+Z+';pointer-events:none;border-radius:50%;',
+      'background:radial-gradient(circle at 50% 50%,rgba(225,245,255,.6),rgba(180,215,235,.05));',
+      'filter:blur(3px);animation:ghFrost 2.1s ease-out forwards}',
+    '@keyframes ghFrost{0%{opacity:0;transform:scale(.3)}25%{opacity:.55}100%{opacity:0;transform:scale(2.2) translateY(-8px)}}',
+    /* shadow-puddle it sinks into the floor */
+    '.cryptirc-ghost.puddle{animation:ghPuddle 2.4s ease-in-out}',
+    '@keyframes ghPuddle{0%{transform:scale(1,1)}40%{transform:scale(1.5,.18) translateY(26px);opacity:.5}70%{transform:scale(1.5,.18) translateY(26px);opacity:.5}100%{transform:scale(1,1);opacity:.86}}',
+    '.gh-puddle{position:fixed;z-index:'+(Z-1)+';pointer-events:none;border-radius:50%;',
+      'background:radial-gradient(ellipse at 50% 50%,rgba(10,16,14,.6),rgba(10,16,14,0));',
+      'filter:blur(2px);animation:ghPuddleFx 2.4s ease-in-out forwards}',
+    '@keyframes ghPuddleFx{0%{opacity:0;transform:scaleX(.2)}30%,70%{opacity:.65;transform:scaleX(1)}100%{opacity:0;transform:scaleX(.2)}}',
+    /* mirror doppelganger — a horizontally-flipped twin that mimics then fades */
+    '.gh-mirror{position:fixed;z-index:'+Z+';pointer-events:none;opacity:0;transform:scaleX(-1);',
+      'will-change:opacity;transition:opacity .5s ease;filter:drop-shadow(0 0 7px rgba(150,200,190,.4))}',
+    '.gh-mirror.in{opacity:.45}',
+    '.gh-mirror svg{display:block;width:100%;height:100%;overflow:visible}',
+    /* floating jack-o-lantern */
+    '.gh-pumpkin{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:18px;filter:drop-shadow(0 0 7px #ff8a1e);animation:ghPumpkin 3.2s ease-in-out forwards}',
+    '@keyframes ghPumpkin{0%{opacity:0;transform:translateY(8px) scale(.6)}18%{opacity:.95}50%{transform:translateY(-10px) scale(1)}82%{opacity:.95}100%{opacity:0;transform:translateY(-26px) scale(.7)}}',
+    /* flickering candle it lights */
+    '.gh-candle{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:15px;filter:drop-shadow(0 0 6px #ffcf6a);animation:ghCandle 2.8s ease-in-out forwards}',
+    '@keyframes ghCandle{0%{opacity:0;transform:scale(.7)}16%{opacity:1}24%{opacity:.55}30%{opacity:1}55%{opacity:.6}62%{opacity:1}85%{opacity:.9}100%{opacity:0;transform:scale(.6)}}',
+    /* spectral chains rattle — the ghost shudders */
+    '.cryptirc-ghost.chains{animation:ghChains .45s ease-in-out 4}',
+    '@keyframes ghChains{0%,100%{transform:translateX(0) rotate(0)}25%{transform:translateX(-2px) rotate(-2deg)}75%{transform:translateX(2px) rotate(2deg)}}',
+    '.gh-chain{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:14px;letter-spacing:-2px;animation:ghChain 1.9s ease-out forwards}',
+    '@keyframes ghChain{0%{opacity:0;transform:translateY(-10px) rotate(0)}20%{opacity:.9}40%{transform:translateY(0) rotate(-6deg)}60%{transform:rotate(6deg)}100%{opacity:0;transform:translateY(6px)}}',
+    /* gravestone rises from the floor then sinks */
+    '.gh-grave{position:fixed;z-index:'+(Z-1)+';pointer-events:none;font-size:22px;filter:drop-shadow(0 2px 3px rgba(0,0,0,.4));animation:ghGrave 3.6s ease-in-out forwards}',
+    '@keyframes ghGrave{0%{opacity:0;transform:translateY(26px)}18%{opacity:.95;transform:translateY(0)}78%{opacity:.95;transform:translateY(0)}100%{opacity:0;transform:translateY(26px)}}',
+    /* eerie rune that glows and fades */
+    '.gh-rune{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:18px;color:#a8ffe6;',
+      'filter:drop-shadow(0 0 9px #4fd9bd);animation:ghRune 2.6s ease-in-out forwards}',
+    '@keyframes ghRune{0%{opacity:0;transform:scale(.4) rotate(-30deg)}25%{opacity:.95;transform:scale(1) rotate(0)}55%{opacity:.55}70%{opacity:.95}100%{opacity:0;transform:scale(1.4) rotate(20deg)}}',
+    /* possess-the-cursor: the ghost shrinks & shadows the pointer (movement via JS) */
+    '.cryptirc-ghost.possess{transform:scale(.62);opacity:.7}',
     '@media(prefers-reduced-motion:reduce){.cryptirc-ghost *,.cryptirc-ghost,.gh-friend *,.gh-friend{animation:none!important;transition:opacity .6s ease!important}}'
   ].join('');
   document.head.appendChild(s);
@@ -158,6 +204,7 @@ function Ghost(){
   // a shadow companion that haunts alongside it now and then
   this._friend = null; this._friendT = 0; this._friendBob = 0; this._friendSide = 1;
   this._friendGate = 900 + (Math.random()*1800|0);
+  this._mirror = null;   // transient mirror-doppelganger node
 }
 Ghost.prototype._bounds = function(){
   this.screenW = window.innerWidth || document.documentElement.clientWidth || 800;
@@ -269,11 +316,12 @@ Ghost.prototype.frame = function(ts){
     this.t++;
     if(this.t >= this.next){ this.pickState(); }
 
-    if(this.state==='drift' || this.state==='peek' || this.state==='stare' || this.state==='wallcrawl'){
-      var sp = (this.state==='peek' ? 0.007 : this.state==='wallcrawl' ? 0.02 : this.state==='stare' ? 0.013 : 0.009) * k;
+    if(this.state==='drift' || this.state==='peek' || this.state==='stare' || this.state==='wallcrawl' || this.state==='possess'){
+      var sp = (this.state==='peek' ? 0.007 : this.state==='wallcrawl' ? 0.02 : this.state==='possess' ? 0.06 : this.state==='stare' ? 0.013 : 0.009) * k;
       this.x += (this.tx - this.x) * sp;
       this.y += (this.ty - this.y) * sp;
       if(this.state==='stare'){ this._stareTarget(); }   // keep tracking the cursor
+      if(this.state==='possess'){ this._possessTarget(); }   // shadow the pointer
       if(this.state==='drift'){
         var dx = this.tx - this.x, dy = this.ty - this.y;
         if(dx*dx + dy*dy < 25){ this._pickTarget(); }
@@ -321,6 +369,18 @@ Ghost.prototype.setState = function(st){
     case 'cobweb':   this.next = 150; this.cobweb(); break;
     case 'vanish':   this.el.classList.add('vanish');  this.next = 150 + (Math.random()*120|0); this._after(2200, this._vanishBack.bind(this)); break;
     case 'wallcrawl':this._wallTarget();               this.next = 200 + (Math.random()*160|0); break;
+    // ── new spooky events ──
+    case 'wisps':    this.next = 96;  this.wisps(); break;
+    case 'bat':      this.next = 90;  this.bat(); break;
+    case 'frost':    this.next = 110; this.frost(); break;
+    case 'puddle':   this.el.classList.add('puddle'); this.next = 150; this.puddle(); break;
+    case 'mirror':   this.next = 150; this.mirror(); break;
+    case 'pumpkin':  this.next = 130; this.pumpkin(); break;
+    case 'candle':   this.next = 130; this.candle(); break;
+    case 'chains':   this.el.classList.add('chains');  this.next = 120; this.chains(); break;
+    case 'grave':    this.next = 170; this.grave(); break;
+    case 'rune':     this.next = 120; this.rune(); break;
+    case 'possess':  this.el.classList.add('possess'); this._possessTarget(); this.next = 150 + (Math.random()*90|0); break;
   }
 };
 
@@ -392,6 +452,122 @@ Ghost.prototype.cobweb = function(){
   this._after(2400, function(){ if(w.parentNode) w.parentNode.removeChild(w); });
 };
 
+// ── NEW spooky behaviors ──────────────────────────────────────────────────────
+// a few will-o'-wisps orbit the ghost, then snuff out
+Ghost.prototype.wisps = function(){
+  if(this._dead) return;
+  var self=this, n=3+(Math.random()*2|0), cx=this.x+this.W/2, cy=this.y+this.H/2;
+  for(var i=0;i<n;i++){
+    var w=document.createElement('div'); w.className='gh-wisp';
+    var ang=Math.random()*Math.PI*2, rad=18+(Math.random()*22|0);
+    w.style.left=(cx + Math.cos(ang)*rad - 4.5)+'px';
+    w.style.top =(cy + Math.sin(ang)*rad - 4.5)+'px';
+    w.style.animationDuration=(1.6 + Math.random()*1.4)+'s';
+    document.body.appendChild(w);
+    (function(node){ self._after(3200, function(){ if(node.parentNode) node.parentNode.removeChild(node); }); })(w);
+  }
+};
+// a bat detaches and flutters away
+Ghost.prototype.bat = function(){
+  if(this._dead) return;
+  var b=document.createElement('div'); b.className='gh-bat'; b.textContent='🦇';
+  b.style.left=(this.x + this.W*0.3 + Math.random()*this.W*0.4)+'px';
+  b.style.top =(this.y + this.H*0.2)+'px';
+  document.body.appendChild(b);
+  this._after(2500, function(){ if(b.parentNode) b.parentNode.removeChild(b); });
+};
+// exhales a creeping cloud of frost-breath
+Ghost.prototype.frost = function(){
+  if(this._dead) return;
+  var f=document.createElement('div'); f.className='gh-frost';
+  var sz=34+(Math.random()*26|0);
+  f.style.width=sz+'px'; f.style.height=sz+'px';
+  f.style.left=(this.x + this.W*0.5 - sz/2)+'px';
+  f.style.top =(this.y + this.H*0.55 - sz/2)+'px';
+  document.body.appendChild(f);
+  this._after(2300, function(){ if(f.parentNode) f.parentNode.removeChild(f); });
+};
+// a dark shadow-puddle pools beneath as it oozes into the floor
+Ghost.prototype.puddle = function(){
+  if(this._dead) return;
+  var p=document.createElement('div'); p.className='gh-puddle';
+  var pw=this.W*1.6;
+  p.style.width=pw+'px'; p.style.height=(this.H*0.3)+'px';
+  p.style.left=(this.x + this.W/2 - pw/2)+'px';
+  p.style.top =(this.y + this.H - 8)+'px';
+  document.body.appendChild(p);
+  this._after(2600, function(){ if(p.parentNode) p.parentNode.removeChild(p); });
+};
+// a horizontally-flipped doppelganger fades in beside it, mimics, then fades
+Ghost.prototype.mirror = function(){
+  if(this._dead) return;
+  var self=this;
+  var m=document.createElement('div'); m.className='gh-mirror';
+  m.style.width=this.W+'px'; m.style.height=this.H+'px';
+  var side=(this.x < this.screenW/2) ? 1 : -1;
+  var mx=Math.max(0, Math.min(this.x + side*(this.W*1.1), this.screenW - this.W));
+  m.style.left=mx+'px'; m.style.top=this.y+'px';
+  m.innerHTML=this.el.innerHTML;
+  document.body.appendChild(m);
+  this._mirror=m;
+  this._after(30,   function(){ if(self._mirror===m) m.classList.add('in'); });
+  this._after(1600, function(){ if(self._mirror===m) m.classList.remove('in'); });
+  this._after(2300, function(){ if(self._mirror===m) self._mirror=null; if(m.parentNode) m.parentNode.removeChild(m); });
+};
+// a grinning jack-o'-lantern bobs up beside it
+Ghost.prototype.pumpkin = function(){
+  if(this._dead) return;
+  var p=document.createElement('div'); p.className='gh-pumpkin'; p.textContent='🎃';
+  p.style.left=(this.x + this.W + 2)+'px';
+  p.style.top =(this.y + this.H*0.4)+'px';
+  document.body.appendChild(p);
+  this._after(3300, function(){ if(p.parentNode) p.parentNode.removeChild(p); });
+};
+// it lights a guttering candle beside itself
+Ghost.prototype.candle = function(){
+  if(this._dead) return;
+  var c=document.createElement('div'); c.className='gh-candle'; c.textContent='🕯️';
+  c.style.left=(this.x - 14)+'px';
+  c.style.top =(this.y + this.H*0.5)+'px';
+  document.body.appendChild(c);
+  this._after(2900, function(){ if(c.parentNode) c.parentNode.removeChild(c); });
+};
+// spectral chains rattle around it
+Ghost.prototype.chains = function(){
+  if(this._dead) return;
+  var c=document.createElement('div'); c.className='gh-chain'; c.textContent='⛓️';
+  c.style.left=(this.x + this.W*0.3)+'px';
+  c.style.top =(this.y - 6)+'px';
+  document.body.appendChild(c);
+  this._after(2000, function(){ if(c.parentNode) c.parentNode.removeChild(c); });
+};
+// a gravestone heaves up out of the floor below it, then sinks back
+Ghost.prototype.grave = function(){
+  if(this._dead) return;
+  var g=document.createElement('div'); g.className='gh-grave'; g.textContent='🪦';
+  g.style.left=(this.x + this.W*0.3)+'px';
+  g.style.top =(this.y + this.H - 10)+'px';
+  document.body.appendChild(g);
+  this._after(3700, function(){ if(g.parentNode) g.parentNode.removeChild(g); });
+};
+// an eerie rune flares into being then fades
+Ghost.prototype.rune = function(){
+  if(this._dead) return;
+  var glyphs=['ᚦ','ᚱ','ᛟ','ᛉ','ᛏ','ᚷ','ᛞ','ᚹ'];
+  var u=document.createElement('div'); u.className='gh-rune';
+  u.textContent=glyphs[(Math.random()*glyphs.length)|0];
+  u.style.left=(this.x + this.W*0.5 - 9)+'px';
+  u.style.top =(this.y - 18)+'px';
+  document.body.appendChild(u);
+  this._after(2700, function(){ if(u.parentNode) u.parentNode.removeChild(u); });
+};
+// possess the cursor: shrink and shadow the pointer for a beat (movement in frame())
+Ghost.prototype._possessTarget = function(){
+  var mx=(this._mx!=null?this._mx:this.screenW/2), my=(this._my!=null?this._my:this.screenH/2);
+  this.tx=Math.max(0, Math.min(mx - this.W/2, this.screenW - this.W));
+  this.ty=Math.max(0, Math.min(my - this.H/2, this.screenH - this.H));
+};
+
 // blink out, reappear somewhere else with a flicker
 Ghost.prototype._doTeleport = function(){
   if(this._dead) return;
@@ -406,22 +582,34 @@ Ghost.prototype._doTeleport = function(){
 Ghost.prototype.pickState = function(){
   if(this.dragging) return;
   var r = Math.random();
-  if(r < 0.30)       this.setState('drift');
-  else if(r < 0.40)  this.setState('fade');
-  else if(r < 0.47)  this.setState('flicker');
-  else if(r < 0.53)  this.setState('peek');
-  else if(r < 0.59)  this.setState('teleport');
-  else if(r < 0.64)  this.setState('stretch');
-  else if(r < 0.69)  this.setState('sink');
-  else if(r < 0.75)  this.setState('stare');        // locks onto your cursor
-  else if(r < 0.80)  this.setState('eyes');         // eyes in the dark, then appears
-  else if(r < 0.84)  this.setState('split');        // after-image
-  else if(r < 0.88)  this.setState('melt');         // drips & re-forms
-  else if(r < 0.915) this.setState('drip');         // blood drip
-  else if(r < 0.945) this.setState('cobweb');       // spider on a thread
-  else if(r < 0.97)  this.setState('wallcrawl');    // slides along an edge
-  else if(r < 0.99)  this.setState('vanish');       // gone for a moment
-  else               this.setState('lunge');        // ~1% — rare jump-scare
+  if(r < 0.28)        this.setState('drift');        // calm drifting stays dominant
+  else if(r < 0.355)  this.setState('fade');
+  else if(r < 0.405)  this.setState('flicker');
+  else if(r < 0.450)  this.setState('peek');
+  else if(r < 0.495)  this.setState('teleport');
+  else if(r < 0.535)  this.setState('stretch');
+  else if(r < 0.575)  this.setState('sink');
+  else if(r < 0.620)  this.setState('stare');        // locks onto your cursor
+  else if(r < 0.655)  this.setState('eyes');         // eyes in the dark, then appears
+  else if(r < 0.685)  this.setState('split');        // after-image
+  else if(r < 0.715)  this.setState('melt');         // drips & re-forms
+  else if(r < 0.740)  this.setState('drip');         // blood drip
+  else if(r < 0.765)  this.setState('cobweb');       // spider on a thread
+  else if(r < 0.790)  this.setState('wallcrawl');    // slides along an edge
+  else if(r < 0.810)  this.setState('vanish');       // gone for a moment
+  // ── new spooky events (small probability each) ──
+  else if(r < 0.836)  this.setState('wisps');        // orbiting will-o'-wisps
+  else if(r < 0.860)  this.setState('frost');        // frost-breath fog
+  else if(r < 0.884)  this.setState('puddle');       // shadow-puddle in the floor
+  else if(r < 0.904)  this.setState('mirror');       // mimicking doppelganger
+  else if(r < 0.922)  this.setState('rune');         // glowing eerie rune
+  else if(r < 0.938)  this.setState('candle');       // flickering candle
+  else if(r < 0.954)  this.setState('chains');       // rattling spectral chains
+  else if(r < 0.966)  this.setState('bat');          // a bat flutters off
+  else if(r < 0.976)  this.setState('pumpkin');      // floating jack-o'-lantern
+  else if(r < 0.984)  this.setState('grave');        // gravestone rises & sinks
+  else if(r < 0.990)  this.setState('possess');      // shrinks & shadows the cursor
+  else                this.setState('lunge');        // ~1% — rare jump-scare
 };
 
 // ── the shadow companion ───────────────────────────────────────────────────────
@@ -494,8 +682,8 @@ Ghost.prototype.destroy = function(){
   for(var j=0;j<this._listeners.length;j++){ var L=this._listeners[j]; try{ L.t.removeEventListener(L.e,L.fn,L.opts); }catch(_){ } }
   this._listeners.length = 0;
   if(this.el && this.el.parentNode) this.el.parentNode.removeChild(this.el);
-  this._friend = null;
-  var stray = document.querySelectorAll('.gh-mist, .gh-ring, .gh-friend, .gh-clone, .gh-drip, .gh-eyes, .gh-web');
+  this._friend = null; this._mirror = null;
+  var stray = document.querySelectorAll('.gh-mist, .gh-ring, .gh-friend, .gh-clone, .gh-drip, .gh-eyes, .gh-web, .gh-wisp, .gh-bat, .gh-frost, .gh-puddle, .gh-mirror, .gh-pumpkin, .gh-candle, .gh-chain, .gh-grave, .gh-rune');
   for(var k=0;k<stray.length;k++){ if(stray[k].parentNode) stray[k].parentNode.removeChild(stray[k]); }
 };
 

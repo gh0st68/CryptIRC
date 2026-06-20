@@ -114,6 +114,62 @@ function injectStyle(){
     '.cryptirc-crab.hop{animation:ccHop .5s ease-out}',
     '@keyframes ccHop{0%,100%{transform:translateY(0)}40%{transform:translateY(-14px)}}',
     '.cryptirc-crab.burrow{opacity:0}',
+    /* ── 10 new grumpy-crab behaviors ── */
+    /* 1. shuffle: snappy sidestep shuffle-dance */
+    '.cryptirc-crab.shuffle .ccb{animation:ccBob .2s ease-in-out infinite}',
+    '.cryptirc-crab.shuffle .ccleg{animation:ccLeg .2s ease-in-out infinite}',
+    '.cryptirc-crab.shuffle .pinT{animation:ccSnapT .4s ease-in-out infinite}',
+    '.cryptirc-crab.shuffle .pinB{animation:ccSnapB .4s ease-in-out infinite}',
+    /* 2. peek: hunkered down in a hole, only top showing */
+    '.cryptirc-crab.peek{animation:ccPeek 1.6s ease-in-out}',
+    '@keyframes ccPeek{0%,100%{transform:translateY(0)}25%,75%{transform:translateY(16px)}}',
+    '.cc-hole{position:fixed;z-index:'+(Z-1)+';pointer-events:none;width:46px;height:14px;border-radius:50%;background:radial-gradient(ellipse,rgba(60,40,20,.65),rgba(90,66,36,.4) 70%);border:2px solid #caa46a;animation:ccHoleFade 1.7s ease-out forwards}',
+    '@keyframes ccHoleFade{0%{opacity:0}15%,80%{opacity:1}100%{opacity:0}}',
+    /* 3. angry sideways bubble stream */
+    '.cc-jet{position:fixed;z-index:'+Z+';pointer-events:none;border-radius:50%;background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.9),rgba(160,210,255,.35));border:1px solid rgba(255,255,255,.5);animation:ccJet linear forwards}',
+    '@keyframes ccJet{0%{opacity:.95;transform:translate(0,0) scale(.5)}100%{opacity:0;transform:translate(var(--jx,40px),-6px) scale(1.2)}}',
+    /* 4. sunbathe: lean back, claws up */
+    '.cryptirc-crab.sunbathe{animation:ccSunbathe 2.4s ease-in-out}',
+    '@keyframes ccSunbathe{0%,100%{transform:rotate(0)}20%,80%{transform:rotate(-12deg)}}',
+    '.cryptirc-crab.sunbathe .armL,.cryptirc-crab.sunbathe .armR{animation:ccArmsUp 2.4s ease-in-out;transform-origin:50px 40px}',
+    '@keyframes ccArmsUp{0%,100%{transform:rotate(0)}20%,80%{transform:rotate(-18deg)}}',
+    '.cc-sun{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:17px;line-height:1;animation:ccSun 2.4s ease-in-out forwards}',
+    '@keyframes ccSun{0%{opacity:0;transform:scale(.4)}20%,80%{opacity:1;transform:scale(1) rotate(20deg)}100%{opacity:0}}',
+    /* 5. claw-drum a rhythm */
+    '.cryptirc-crab.drum .pinT{animation:ccSnapT .12s ease-in-out infinite}',
+    '.cryptirc-crab.drum .pinB{animation:ccSnapB .12s ease-in-out infinite}',
+    '.cryptirc-crab.drum .armR{animation:ccDrum .24s ease-in-out infinite;transform-origin:62px 40px}',
+    '.cryptirc-crab.drum .armL{animation:ccDrum .24s ease-in-out infinite .12s;transform-origin:38px 40px}',
+    '@keyframes ccDrum{50%{transform:rotate(-10deg) translateY(2px)}}',
+    '.cc-note{position:fixed;z-index:'+(Z+1)+';pointer-events:none;color:#7a1c0e;font-weight:800;font-size:13px;animation:ccNote 1s ease-out forwards}',
+    '@keyframes ccNote{0%{opacity:0;transform:translate(0,0) rotate(-10deg)}25%{opacity:1}100%{opacity:0;transform:translate(9px,-22px) rotate(14deg)}}',
+    /* 6. snip at a drifting bubble */
+    '.cryptirc-crab.snipbub .pinT{animation:ccSnapT .15s ease-in-out infinite}',
+    '.cryptirc-crab.snipbub .pinB{animation:ccSnapB .15s ease-in-out infinite}',
+    '.cryptirc-crab.snipbub .armR{animation:ccReach .8s ease-in-out;transform-origin:62px 40px}',
+    '@keyframes ccReach{0%,100%{transform:rotate(0)}45%{transform:rotate(-40deg) translateY(-6px)}}',
+    /* 7. tiny defiant flag wave */
+    '.cc-flag{position:fixed;z-index:'+(Z+1)+';pointer-events:none;font-size:15px;line-height:1;transform-origin:bottom left;animation:ccFlag .5s ease-in-out infinite}',
+    '@keyframes ccFlag{0%,100%{transform:rotate(-8deg)}50%{transform:rotate(8deg)}}',
+    '.cryptirc-crab.flag .armR{animation:ccWave .5s ease-in-out infinite;transform-origin:62px 40px}',
+    /* 8. jolt-startle then scuttle */
+    '.cryptirc-crab.jolt{animation:ccJolt .45s ease-out}',
+    '@keyframes ccJolt{0%{transform:translateY(0)}20%{transform:translateY(-12px) scale(1.08)}45%{transform:translateY(0)}}',
+    '.cc-jolt{position:fixed;z-index:'+(Z+1)+';pointer-events:none;color:#ffce1f;font-weight:900;font-size:20px;-webkit-text-stroke:1px #7a1c0e;animation:ccJoltMark .6s ease-out forwards}',
+    '@keyframes ccJoltMark{0%{opacity:0;transform:scale(.2) translateY(4px)}30%{opacity:1;transform:scale(1.3)}100%{opacity:0;transform:scale(1) translateY(-14px)}}',
+    /* 9. pinch the air, both claws jabbing */
+    '.cryptirc-crab.pinchair .pinT{animation:ccSnapT .13s ease-in-out infinite}',
+    '.cryptirc-crab.pinchair .pinB{animation:ccSnapB .13s ease-in-out infinite}',
+    '.cryptirc-crab.pinchair .armL{animation:ccJab .26s ease-in-out infinite;transform-origin:38px 40px}',
+    '.cryptirc-crab.pinchair .armR{animation:ccJab .26s ease-in-out infinite .13s;transform-origin:62px 40px}',
+    '@keyframes ccJab{50%{transform:translateX(var(--jab,3px)) translateY(-2px)}}',
+    /* 10. defiant little victory dance */
+    '.cryptirc-crab.victory{animation:ccVictory .5s ease-in-out infinite}',
+    '@keyframes ccVictory{0%,100%{transform:translateY(0) rotate(-4deg)}50%{transform:translateY(-9px) rotate(4deg)}}',
+    '.cryptirc-crab.victory .armL,.cryptirc-crab.victory .armR{animation:ccCheer .5s ease-in-out infinite;transform-origin:50px 40px}',
+    '@keyframes ccCheer{0%,100%{transform:rotate(0)}50%{transform:rotate(-22deg)}}',
+    '.cc-confetti{position:fixed;z-index:'+(Z+1)+';pointer-events:none;width:5px;height:5px;border-radius:1px;animation:ccConfetti 1s ease-out forwards}',
+    '@keyframes ccConfetti{0%{opacity:1;transform:translate(0,0) rotate(0)}100%{opacity:0;transform:translate(var(--cx,0),var(--cy,-22px)) rotate(220deg)}}',
     '@media(prefers-reduced-motion:reduce){.cryptirc-crab *,.cryptirc-crab{animation:none!important}}'
   ].join('');
   document.head.appendChild(s);
@@ -348,6 +404,7 @@ Crab.prototype.frame = function(ts){
       if(Math.random()<0.6) this.setState('flipped');
       else { this.face(this._pendDir); this.setState('walk'); }
     } else if(this.state==='flipped'){ this.face(this._pendDir); this.setState('walk'); }   // right itself, amble away
+    else if(this.state==='jolt'){ this.face(Math.random()<0.5?-1:1); this.setState('charge'); }   // startled → bolt away
     else this.pickState();
   }
 
@@ -379,6 +436,7 @@ Crab.prototype.frame = function(ts){
     }
     // snap / rage / wave / idle / dance / eat / nap / dig / bonk / flipped: mostly stationary (dance shuffles)
     case 'dance':   this.x += Math.sin(this.t*0.4)*0.8*this.dir; break;
+    case 'shuffle': this.x += Math.sin(this.t*0.55)*1.3*this.dir; break;    // brisk side-to-side shuffle scoot
   }
   // Floor states ride the LIVE input-bar floor (desktop) every frame, so the crab
   // tracks the bar even when it moves without a resize (reply bar / typing indicator).
@@ -423,7 +481,8 @@ Crab.prototype.bounceOrClimb = function(newDir){
 
 Crab.prototype.setState = function(st){
   this.state = st;
-  this.el.classList.remove('walk','snap','rage','charge','wave','dance','crawl','drag','nap','flipped','bonk','duck','hop','burrow');
+  this.el.classList.remove('walk','snap','rage','charge','wave','dance','crawl','drag','nap','flipped','bonk','duck','hop','burrow',
+    'shuffle','peek','sunbathe','drum','snipbub','flag','jolt','pinchair','victory');
   this.t = 0;
   switch(st){
     case 'walk':   this.el.classList.add('walk'); this.vx = 0.22*this.dir; this.next = 240 + (Math.random()*260|0); break;  // slower, ambles longer
@@ -448,6 +507,17 @@ Crab.prototype.setState = function(st){
     case 'chase':  this.el.classList.add('dance','walk'); this.vx = 0; this.next = 80; this.chaseBubble(); break;  // chase a bubble
     case 'tide':   this.el.classList.add('hop'); this.vx = 0; this.next = 60; this.tideWave(); break;              // hop a tide ripple
     case 'burrow': this.el.classList.add('snap'); this.vx = 0; this.next = 90; this.burrow(); break;               // dig under, pop up elsewhere
+    // ── 10 more random behaviors ──
+    case 'shuffle':  this.el.classList.add('shuffle'); this.vx = 0; this.next = 96; break;                          // sidestep shuffle-dance (moved in frame())
+    case 'peek':     this.el.classList.add('peek');    this.vx = 0; this.next = 100; this.peekHole(); break;        // dig a hole, peek out
+    case 'jet':      this.el.classList.add('snap');    this.vx = 0; this.next = 56; this.bubbleJet(); break;        // angry sideways bubble stream
+    case 'sunbathe': this.el.classList.add('sunbathe');this.vx = 0; this.next = 150; this.sunbathe(); break;        // lean back, claws up, sun overhead
+    case 'drum':     this.el.classList.add('drum');    this.vx = 0; this.next = 90; this.clawDrum(); break;         // claw-drum a rhythm
+    case 'snipbub':  this.el.classList.add('snipbub'); this.vx = 0; this.next = 70; this.snipBubble(); break;       // snip at a drifting bubble
+    case 'flag':     this.el.classList.add('flag');    this.vx = 0; this.next = 110; this.tinyFlag(); break;        // wave a tiny defiant flag
+    case 'jolt':     this.el.classList.add('jolt');    this.vx = 0; this.next = 30; this.joltStartle(); break;      // startle, then scuttle off
+    case 'pinchair': this.el.classList.add('pinchair');this.vx = 0; this.next = 78; this.anger(); break;            // jab and pinch the air
+    case 'victory':  this.el.classList.add('victory'); this.vx = 0; this.next = 96; this.confetti(); break;         // defiant little victory dance
     case 'idle':   this.vx = 0; this.next = 50 + (Math.random()*70|0); break;
     case 'bubble': this.el.classList.add('snap'); this.vx=0; this.next = 30; this.bubbles(); break;
     case 'climb':  this.el.classList.add('crawl'); break;
@@ -463,23 +533,34 @@ Crab.prototype.pickState = function(){
   if(this.state==='climb'||this.state==='ceil'||this.state==='fall'||this.state==='seek'||
      this.state==='toshrimp'||this.state==='bonk'||this.state==='flipped'||this.dragging) return;
   var r = Math.random();
-  if(r < 0.34)       this.setState('walk');
-  else if(r < 0.44)  this.setState('snap');
-  else if(r < 0.50)  this.setState('rage');
-  else if(r < 0.56)  this.setState('charge');
-  else if(r < 0.62)  this.setState('wave');
-  else if(r < 0.68)  this.setState('dance');
-  else if(r < 0.73)  this.setState('nap');
-  else if(r < 0.77)  this.setState('dig');
-  else if(r < 0.81)  this.setState('castle');
-  else if(r < 0.85)  this.setState('treasure');
-  else if(r < 0.885) this.setState('fish');
-  else if(r < 0.915) this.setState('gull');
-  else if(r < 0.945) this.setState('hermit');
-  else if(r < 0.97)  this.setState('chase');
-  else if(r < 0.985) this.setState('tide');
-  else if(r < 0.995) this.setState('burrow');
-  else               this.setState('bubble');
+  if(r < 0.32)        this.setState('walk');    // calm ambling stays dominant
+  else if(r < 0.40)   this.setState('snap');
+  else if(r < 0.45)   this.setState('rage');
+  else if(r < 0.50)   this.setState('charge');
+  else if(r < 0.545)  this.setState('wave');
+  else if(r < 0.59)   this.setState('dance');
+  else if(r < 0.63)   this.setState('nap');
+  else if(r < 0.66)   this.setState('dig');
+  else if(r < 0.685)  this.setState('castle');
+  else if(r < 0.71)   this.setState('treasure');
+  else if(r < 0.732)  this.setState('fish');
+  else if(r < 0.754)  this.setState('gull');
+  else if(r < 0.776)  this.setState('hermit');
+  else if(r < 0.798)  this.setState('chase');
+  else if(r < 0.815)  this.setState('tide');
+  else if(r < 0.825)  this.setState('burrow');
+  else if(r < 0.84)   this.setState('bubble');
+  // ── 10 new behaviors, small probability each ──
+  else if(r < 0.858)  this.setState('shuffle');
+  else if(r < 0.876)  this.setState('peek');
+  else if(r < 0.894)  this.setState('jet');
+  else if(r < 0.910)  this.setState('sunbathe');
+  else if(r < 0.928)  this.setState('drum');
+  else if(r < 0.946)  this.setState('snipbub');
+  else if(r < 0.962)  this.setState('flag');
+  else if(r < 0.976)  this.setState('jolt');
+  else if(r < 0.990)  this.setState('pinchair');
+  else                this.setState('victory');
 };
 
 Crab.prototype.poke = function(){
@@ -684,6 +765,93 @@ Crab.prototype.burrow = function(){
   });
 };
 
+// 1. 🕳️ a little hole the crab is peeking out of (kicks sand up, then watches).
+Crab.prototype.peekHole = function(){
+  if(this._dead) return;
+  var self=this;
+  this.digSand();
+  var h=document.createElement('div'); h.className='cc-hole';
+  h.style.left=(this.x + this.W*0.5 - 23)+'px'; h.style.top=(this.y + this.H - 7)+'px';
+  document.body.appendChild(h);
+  this._after(900, function(){ self.anger(); });          // grumpy peek
+  this._after(1700, function(){ if(h.parentNode) h.parentNode.removeChild(h); });
+};
+// 2. 🫧 an angry sideways stream of bubbles jetting out the front.
+Crab.prototype.bubbleJet = function(){
+  if(this._dead) return;
+  var self=this, d=this.dir;
+  for(var i=0;i<7;i++){ (function(n){ self._after(n*70, function(){
+    var b=document.createElement('div'); b.className='cc-jet';
+    var sz=4+(Math.random()*6|0); b.style.width=sz+'px'; b.style.height=sz+'px';
+    b.style.left=(self.x + (d>0?self.W-10:6))+'px'; b.style.top=(self.y + self.H*0.4 + (Math.random()*8-4))+'px';
+    b.style.setProperty('--jx', (d * (32+Math.random()*28))+'px');
+    b.style.animationDuration=(0.7+Math.random()*0.5)+'s';
+    document.body.appendChild(b);
+    self._after(1400, function(){ if(b.parentNode) b.parentNode.removeChild(b); });
+  }); })(i); }
+};
+// 3. ☀️ sunbathes (leans back, claws behind head) while a sun beats down.
+Crab.prototype.sunbathe = function(){
+  if(this._dead) return;
+  var su=document.createElement('div'); su.className='cc-sun'; su.textContent='☀️';
+  su.style.left=(this.x + this.W*0.5 - 8)+'px'; su.style.top=(this.y - 22)+'px';
+  document.body.appendChild(su);
+  this._after(2400, function(){ if(su.parentNode) su.parentNode.removeChild(su); });
+};
+// 4. 🎵 drums a rhythm with its claws, musical notes popping off.
+Crab.prototype.clawDrum = function(){
+  if(this._dead) return;
+  var self=this;
+  for(var i=0;i<5;i++){ (function(n){ self._after(n*170, function(){
+    var m=document.createElement('div'); m.className='cc-note'; m.textContent=(n%2?'♪':'♫');
+    m.style.left=(self.x + self.W*0.5 + (Math.random()*24-12))+'px'; m.style.top=(self.y - 6)+'px';
+    document.body.appendChild(m);
+    self._after(1000, function(){ if(m.parentNode) m.parentNode.removeChild(m); });
+  }); })(i); }
+};
+// 5. 🫧 a single bubble drifts up past the crab, which snips at it.
+Crab.prototype.snipBubble = function(){
+  if(this._dead) return;
+  var self=this, d=this.dir;
+  var b=document.createElement('div'); b.className='cc-bub';
+  b.style.width='11px'; b.style.height='11px';
+  b.style.left=(this.x + (d>0?this.W-6:-4))+'px'; b.style.top=(this.y + 4)+'px';
+  b.style.animationDuration='1.1s';
+  document.body.appendChild(b);
+  this._after(620, function(){ self.anger(); });          // missed it — angy
+  this._after(1300, function(){ if(b.parentNode) b.parentNode.removeChild(b); });
+};
+// 6. 🚩 hoists a tiny defiant flag and waves it.
+Crab.prototype.tinyFlag = function(){
+  if(this._dead) return;
+  var f=document.createElement('div'); f.className='cc-flag'; f.textContent='🚩';
+  f.style.left=(this.x + (this.dir>0?this.W-10:0))+'px'; f.style.top=(this.y - 8)+'px';
+  document.body.appendChild(f);
+  this._after(1700, function(){ if(f.parentNode) f.parentNode.removeChild(f); });
+};
+// 7. ❗ jolts in alarm with an exclamation, then bolts (handled in frame()).
+Crab.prototype.joltStartle = function(){
+  if(this._dead) return;
+  var j=document.createElement('div'); j.className='cc-jolt'; j.textContent='!';
+  j.style.left=(this.x + this.W*0.5 - 4)+'px'; j.style.top=(this.y - 16)+'px';
+  document.body.appendChild(j);
+  this._after(600, function(){ if(j.parentNode) j.parentNode.removeChild(j); });
+};
+// 8. 🎉 flings a burst of confetti for a defiant little victory dance.
+Crab.prototype.confetti = function(){
+  if(this._dead) return;
+  var self=this, cols=['#ff2b1f','#ffce1f','#3fb0ff','#6bff8f','#ff6bd0'];
+  for(var i=0;i<10;i++){ (function(n){ self._after(20 + (n*30), function(){
+    var c=document.createElement('div'); c.className='cc-confetti';
+    c.style.background=cols[n%cols.length];
+    c.style.left=(self.x + self.W*0.5 - 2)+'px'; c.style.top=(self.y + 4)+'px';
+    c.style.setProperty('--cx', (Math.random()*44-22)+'px');
+    c.style.setProperty('--cy', (-18 - Math.random()*22)+'px');
+    document.body.appendChild(c);
+    self._after(1100, function(){ if(c.parentNode) c.parentNode.removeChild(c); });
+  }); })(i); }
+};
+
 Crab.prototype.destroy = function(){
   this._dead = true;
   if(this._raf) cancelAnimationFrame(this._raf);
@@ -694,7 +862,7 @@ Crab.prototype.destroy = function(){
   if(this.el && this.el.parentNode) this.el.parentNode.removeChild(this.el);
   this._shrimp = null;
   // sweep any stray fx
-  var stray = document.querySelectorAll('.cc-bub, .cc-anger, .cc-shrimp, .cc-zzz, .cc-sand, .cc-dizzy, .cc-castle, .cc-treasure, .cc-fish, .cc-gull, .cc-shell, .cc-tide');
+  var stray = document.querySelectorAll('.cc-bub, .cc-anger, .cc-shrimp, .cc-zzz, .cc-sand, .cc-dizzy, .cc-castle, .cc-treasure, .cc-fish, .cc-gull, .cc-shell, .cc-tide, .cc-hole, .cc-jet, .cc-sun, .cc-note, .cc-flag, .cc-jolt, .cc-confetti');
   for(var k=0;k<stray.length;k++){ if(stray[k].parentNode) stray[k].parentNode.removeChild(stray[k]); }
 };
 

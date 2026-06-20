@@ -21,6 +21,7 @@
 <script src="/cryptirc/crab.js" defer></script>
 <script src="/cryptirc/ghost.js" defer></script>
 <script src="/cryptirc/fish.js" defer></script>
+<script src="/cryptirc/alien.js" defer></script>
 <style>
 /* ── Locally-hosted display fonts (dafont) ─────────────────────────────────── */
 @font-face { font-family:'Spooky';           src:url('fonts/spooky.ttf') format('truetype'); font-display:swap; }
@@ -2179,6 +2180,15 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <span class="appear-label">🐟 Calm Fish<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A serene little fish glides slowly around your client, fins gently waving. Click on it to feed it — a flake drops in and it calmly swims over to nibble, blowing a few bubbles. Never in the way (clicks pass right through). Silent.</div></span>
           <select id="a-fish" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+            <option value="off">Off</option>
+            <option value="desktop">Desktop only</option>
+            <option value="mobile">Mobile only</option>
+            <option value="both">Both</option>
+          </select>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">👽 Little Alien<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A flying saucer with a tiny green alien drifts around your client doing sci-fi tricks — tractor-beam abductions, teleports, scans, laser zaps, wormhole jumps, hologram glitches, a split mini-saucer buddy and more. Click near it and it swoops over to beam something up. Never in the way (clicks pass right through). Silent.</div></span>
+          <select id="a-alien" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>
