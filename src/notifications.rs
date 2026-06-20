@@ -11,9 +11,12 @@
 ///   - The network/channel is not muted by the user
 
 use anyhow::{bail, Result};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 use web_push::*;
 
@@ -102,7 +105,11 @@ pub struct NotifPrefs {
 pub struct NotificationManager {
     data_dir:     String,
     vapid_keys:   VapidKeys,
-    push_client:  WebPushClient,
+    /// One async mutex per username, guarding the read-modify-write of that
+    /// user's push/{username}.json and notif_prefs/{username}.json. Mirrors
+    /// upload::user_record_lock so concurrent subscribe / dead-endpoint prune /
+    /// pref writes cannot lose each other's updates (#21-style RMW race).
+    user_locks:   DashMap<String, Arc<Mutex<()>>>,
 }
 
 impl NotificationManager {
@@ -112,8 +119,37 @@ impl NotificationManager {
         Self {
             data_dir: data_dir.to_string(),
             vapid_keys,
-            push_client: WebPushClient::new().expect("Failed to create WebPushClient"),
+            user_locks: DashMap::new(),
         }
+    }
+
+    /// Acquire (creating if needed) the per-user RMW lock.
+    fn user_lock(&self, username: &str) -> Arc<Mutex<()>> {
+        self.user_locks
+            .entry(username.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Persist a JSON value to `path` via temp-file + atomic rename so a crash
+    /// mid-write cannot truncate the file and a concurrent reader never observes
+    /// a partial file. Tightens perms after rename (push endpoints / muted lists
+    /// are privacy-sensitive, #7). Returns the write result.
+    async fn write_json_atomic<T: Serialize>(path: &std::path::Path, value: &T) -> Result<()> {
+        let json = serde_json::to_string_pretty(value)?;
+        let tmp = path.with_extension("json.tmp");
+        if tokio::fs::write(&tmp, &json).await.is_ok() {
+            if tokio::fs::rename(&tmp, path).await.is_err() {
+                // Rename can fail across some filesystems; fall back to direct write.
+                tokio::fs::write(path, &json).await?;
+                let _ = tokio::fs::remove_file(&tmp).await;
+            }
+        } else {
+            // Could not stage the temp file; write directly so we still persist.
+            tokio::fs::write(path, &json).await?;
+        }
+        set_secret_mode(path).await;
+        Ok(())
     }
 
     pub fn vapid_public_key(&self) -> &str {
@@ -127,7 +163,13 @@ impl NotificationManager {
         // POST to. Without validation an authenticated user could register an
         // internal target and turn the server into a blind-SSRF probe. Require
         // https and reject loopback/private/link-local/internal hosts.
-        validate_push_endpoint(&sub.endpoint)?;
+        validate_push_endpoint(&sub.endpoint).await?;
+
+        // Serialize the load→mutate→write window per user so a concurrent
+        // subscribe and a notify-time dead-endpoint prune cannot clobber each
+        // other (last-writer-wins data loss).
+        let lock = self.user_lock(username);
+        let _guard = lock.lock().await;
 
         let mut subs = self.load_subscriptions(username).await;
         // Replace existing subscription with same endpoint
@@ -140,18 +182,17 @@ impl NotificationManager {
         }
         subs.push(sub);
         let path = self.subs_path(username);
-        tokio::fs::write(&path, serde_json::to_string_pretty(&subs)?).await?;
-        set_secret_mode(&path).await; // push endpoints are privacy-sensitive (#7)
-        Ok(())
+        Self::write_json_atomic(&path, &subs).await // push endpoints are privacy-sensitive (#7)
     }
 
     pub async fn remove_subscription(&self, username: &str, endpoint: &str) -> Result<()> {
+        let lock = self.user_lock(username);
+        let _guard = lock.lock().await;
+
         let mut subs = self.load_subscriptions(username).await;
         subs.retain(|s| s.endpoint != endpoint);
         let path = self.subs_path(username);
-        tokio::fs::write(&path, serde_json::to_string_pretty(&subs)?).await?;
-        set_secret_mode(&path).await; // push endpoints are privacy-sensitive (#7)
-        Ok(())
+        Self::write_json_atomic(&path, &subs).await // push endpoints are privacy-sensitive (#7)
     }
 
     pub async fn load_subscriptions(&self, username: &str) -> Vec<PushSubscription> {
@@ -176,10 +217,11 @@ impl NotificationManager {
     }
 
     pub async fn save_prefs(&self, username: &str, prefs: &NotifPrefs) -> Result<()> {
+        let lock = self.user_lock(username);
+        let _guard = lock.lock().await;
+
         let path = self.prefs_path(username);
-        tokio::fs::write(&path, serde_json::to_string_pretty(prefs)?).await?;
-        set_secret_mode(&path).await; // muted-channel list leaks metadata (#7)
-        Ok(())
+        Self::write_json_atomic(&path, prefs).await // muted-channel list leaks metadata (#7)
     }
 
     // ── Send notification ─────────────────────────────────────────────────────
@@ -291,6 +333,18 @@ impl NotificationManager {
     }
 
     async fn send_push(&self, sub: &PushSubscription, payload: &str) -> Result<()> {
+        // #83: re-validate the endpoint at SEND time, not just at registration,
+        // AND pin the connection to the exact public IPs we validated. The
+        // registration-time check is a TOCTOU window: a DNS name validated as
+        // public can be re-pointed (DNS rebinding) at an internal address before
+        // this later POST. The previous hyper-based WebPushClient re-resolved the
+        // host at connect time with no pinning, so re-validating here was not
+        // enough — the connect could still land on 169.254.169.254 / RFC1918.
+        // We now resolve+validate once and pin reqwest to those addresses (same
+        // approach as preview::build_pinned_client). Legit public push services
+        // (FCM/Mozilla/Apple) resolve to public IPs, so this is transparent.
+        let pinned = resolve_and_validate_push_endpoint(&sub.endpoint).await?;
+
         let subscription_info = SubscriptionInfo::new(
             &sub.endpoint,
             &sub.keys.p256dh,
@@ -315,14 +369,60 @@ impl NotificationManager {
         builder.set_ttl(86400); // 24 hours — push service will retry delivery
         let message = builder.build()?;
 
-        match self.push_client.send(message).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
+        // Convert the fully-signed/encrypted WebPushMessage into an HTTP request
+        // (method=POST, endpoint URI, TTL/Urgency/Content-* + VAPID crypto
+        // headers, AES128GCM body) using the crate's own request builder, so the
+        // bytes on the wire are identical to what the hyper client would have
+        // sent — only the transport (a pinned reqwest client) changes.
+        let request = web_push::request_builder::build_request::<reqwest::Body>(message);
+        let (parts, body) = request.into_parts();
+
+        // Build a reqwest client pinned to the validated public IPs and with
+        // redirects disabled, so neither DNS re-resolution nor a 3xx Location can
+        // bounce the request to an internal target.
+        // Bound both the connect phase and the total request, mirroring the preview
+        // client (preview.rs). send_push is awaited INLINE inside the per-connection
+        // IRC read loop (a hung/black-holing endpoint with no deadline would otherwise
+        // park that loop indefinitely — server PINGs go unanswered until ping-timeout).
+        // Real push providers (FCM/Mozilla/Apple) respond in well under a second, so
+        // these deadlines never fire for legitimate endpoints; behavior is unchanged.
+        let mut client_builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            // Disable system-proxy auto-detection: an ambient HTTP(S)_PROXY/ALL_PROXY env
+            // var would tunnel the push through a proxy that re-resolves the host, bypassing
+            // the resolve_to_addrs pin + SSRF validation. A pinned client must go direct.
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5));
+        if !pinned.is_ip_literal {
+            client_builder = client_builder.resolve_to_addrs(&pinned.host, &pinned.addrs);
+        }
+        let client = client_builder
+            .build()
+            .map_err(|e| anyhow::anyhow!("Push client build failed: {}", e))?;
+
+        let resp = client
+            .post(sub.endpoint.as_str())
+            .headers(parts.headers)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| {
                 // char-safe truncation: byte-slicing a client-supplied endpoint at
                 // offset 60 would panic if a multibyte char straddles the boundary.
                 let endpoint: String = sub.endpoint.chars().take(60).collect();
-                anyhow::bail!("Push to {} failed: {:?}", endpoint, e)
-            }
+                anyhow::anyhow!("Push to {} failed: {:?}", endpoint, e)
+            })?;
+
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            // Surface the numeric status so the caller's dead-endpoint prune
+            // (checks for "410"/"404"/"Gone") still fires for 410 Gone / 404
+            // Not Found push subscriptions, matching the prior behavior.
+            let endpoint: String = sub.endpoint.chars().take(60).collect();
+            anyhow::bail!("Push to {} failed: {}", endpoint, status)
         }
     }
 
@@ -384,11 +484,34 @@ async fn set_secret_mode(path: &std::path::Path) {
     { let _ = path; }
 }
 
+/// A push endpoint that has passed SSRF validation, along with the exact set of
+/// public addresses to pin the outbound connection to (#83). `is_ip_literal` is
+/// true when the host was a bare IP (no DNS, so nothing to rebind / pin).
+struct PinnedEndpoint {
+    /// The host as it appears in the URL (DNS name, or IP literal incl. brackets
+    /// for IPv6). Used as the `resolve_to_addrs` key for DNS-name hosts.
+    host:          String,
+    /// Validated public addresses to pin the connection to (DNS-name hosts).
+    addrs:         Vec<std::net::SocketAddr>,
+    is_ip_literal: bool,
+}
+
 /// Validate a client-supplied web-push endpoint before storing it (#83).
 /// Require https and reject hosts that resolve to a private/internal address
 /// literal (loopback, RFC1918, link-local incl. cloud metadata, CGNAT, ...)
 /// or obvious internal names, so the endpoint cannot be used as an SSRF probe.
-fn validate_push_endpoint(endpoint: &str) -> Result<()> {
+async fn validate_push_endpoint(endpoint: &str) -> Result<()> {
+    resolve_and_validate_push_endpoint(endpoint).await.map(|_| ())
+}
+
+/// Resolve + validate a web-push endpoint and return the public addresses to pin
+/// the outbound connection to (#83). Same checks as the registration-time guard,
+/// but additionally hands back the validated `SocketAddr`s so the SEND path can
+/// pin reqwest's connection to exactly these IPs — closing the DNS-rebinding /
+/// TOCTOU window where a name validated as public is re-pointed at an internal
+/// address before the POST connects. Mirrors preview::resolve_and_validate_host
+/// and reuses preview::is_private_ip so both SSRF paths share audited logic.
+async fn resolve_and_validate_push_endpoint(endpoint: &str) -> Result<PinnedEndpoint> {
     let parsed = reqwest::Url::parse(endpoint)
         .map_err(|_| anyhow::anyhow!("Invalid push endpoint URL"))?;
     if parsed.scheme() != "https" {
@@ -402,42 +525,40 @@ fn validate_push_endpoint(endpoint: &str) -> Result<()> {
         bail!("Push endpoint host is not allowed");
     }
 
-    // If the host is an IP literal, reject private/internal ranges. (DNS-name
-    // hosts are not resolved here — the web-push client connects to the public
-    // push service; this guard blocks the direct-IP SSRF primitive.)
+    // If the host is an IP literal, reject private/internal ranges.
     // host_str() serializes IPv6 with surrounding brackets; strip them so the
     // literal parses (e.g. "[::1]" -> "::1").
     let host_ip = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
     if let Ok(ip) = host_ip.parse::<IpAddr>() {
-        if is_private_ip(&ip) {
+        if crate::preview::is_private_ip(ip) {
+            bail!("Push endpoint host is not allowed");
+        }
+        // Pure IP literal — no DNS to resolve, decision is final. reqwest connects
+        // straight to the literal (no resolver step to rebind), so no pinning set
+        // is needed.
+        return Ok(PinnedEndpoint { host: host.to_string(), addrs: vec![], is_ip_literal: true });
+    }
+
+    // DNS-name host: resolve it and reject if ANY resolved address is private
+    // /internal. Without this an authenticated user could register an internal
+    // name that the push client later connects to (blind SSRF to metadata/
+    // intranet). Legit push services (FCM/Mozilla/Apple) resolve to public IPs,
+    // so this is transparent for real endpoints. (#83, mirrors
+    // preview::resolve_and_validate_host.)
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
+        .await
+        .map_err(|_| anyhow::anyhow!("Push endpoint host resolution failed"))?
+        .collect();
+    if addrs.is_empty() {
+        bail!("Push endpoint host is not allowed");
+    }
+    for addr in &addrs {
+        if crate::preview::is_private_ip(addr.ip()) {
             bail!("Push endpoint host is not allowed");
         }
     }
-    Ok(())
-}
-
-/// Conservative private/internal IP check for #83 (kept local to this file to
-/// avoid cross-module coupling; mirrors the spirit of preview.rs::is_private_ip).
-fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()        // 169.254.0.0/16 (incl. 169.254.169.254 metadata)
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_unspecified()
-                || v4.octets()[0] == 0       // 0.0.0.0/8
-                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // 100.64.0.0/10 CGNAT
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 unique-local
-                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 link-local
-                || v6.to_ipv4_mapped().map(|m| is_private_ip(&IpAddr::V4(m))).unwrap_or(false)
-        }
-    }
+    Ok(PinnedEndpoint { host: host.to_string(), addrs, is_ip_literal: false })
 }
 
 /// Convert raw 32-byte P-256 private key to PEM format for web-push crate.

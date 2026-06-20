@@ -45,6 +45,11 @@ pub struct CryptoManager {
     data_dir: String,
     /// Per-user derived keys. Only populated while user's vault is unlocked.
     keys: DashMap<String, [u8; KEY_LEN]>,
+    /// Per-user lock serializing vault writers (unlock-legacy-migration and
+    /// change_passphrase both write vault.mkey). Without it, two concurrent sockets
+    /// for the same user could interleave their read-master → derive → write_master_bundle
+    /// → rename sequences and commit the wrong wrapped-master bundle.
+    vault_locks: DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
 }
 
 impl CryptoManager {
@@ -52,7 +57,14 @@ impl CryptoManager {
         Ok(Self {
             data_dir: data_dir.to_string(),
             keys: DashMap::new(),
+            vault_locks: DashMap::new(),
         })
+    }
+
+    fn vault_lock(&self, username: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.vault_locks.entry(username.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     // ─── Per-user vault paths ─────────────────────────────────────────────────
@@ -78,6 +90,12 @@ impl CryptoManager {
     // ─── Vault operations ─────────────────────────────────────────────────────
 
     pub async fn unlock(&self, username: &str, passphrase: &str) -> Result<()> {
+        // Serialize with change_passphrase (and concurrent unlocks) for this user, so the
+        // legacy-migration write_master_bundle below can't interleave with a concurrent
+        // passphrase change and commit a stale wrapped-master bundle. Bind the Arc to a
+        // local first so it outlives the guard (E0716).
+        let _vault_lock = self.vault_lock(username);
+        let _vault_guard = _vault_lock.lock().await;
         // ── Master-key vault (audit #8) ──────────────────────────────────────
         // Once vault.mkey exists it is the single authoritative, crash-atomic
         // record: it embeds the salt under which it was wrapped, so unlocking
@@ -140,9 +158,15 @@ impl CryptoManager {
             "wrapped": wrapped,
         });
         let mkey_path = self.mkey_path(username);
-        let tmp = mkey_path.with_extension("mkey.tmp");
+        // Unique temp (not a fixed vault.mkey.tmp) + cleanup on rename failure, mirroring
+        // auth.rs write_user_atomic: even under the per-user vault lock this avoids a
+        // shared-tmp clobber and leaves no stale temp behind if the rename fails.
+        let tmp = dir.join(format!("vault.mkey.tmp.{}", uuid::Uuid::new_v4()));
         write_secret(&tmp, serde_json::to_string(&bundle)?.as_bytes()).await?;
-        tokio::fs::rename(&tmp, &mkey_path).await?;
+        if let Err(e) = tokio::fs::rename(&tmp, &mkey_path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -153,11 +177,33 @@ impl CryptoManager {
         self.keys.remove(username);
     }
 
+    /// Atomically tear down a user's vault on account deletion: zeroize+drop the
+    /// in-memory master key AND remove the on-disk vault dir (salt/canary/mkey) while
+    /// holding the SAME per-user vault_lock that unlock()/change_passphrase() take.
+    /// Doing the two steps without the lock (as a bare lock()+remove_dir_all pair) lets a
+    /// concurrent unlock()/change_passphrase() interleave its keys.insert /
+    /// write_master_bundle AFTER the teardown, resurrecting the deleted account's master
+    /// key and vault — a cross-owner E2E key disclosure to a re-registered same-name user.
+    pub async fn purge_vault(&self, username: &str) {
+        let _vault_lock = self.vault_lock(username);
+        let _vault_guard = _vault_lock.lock().await;
+        if let Some(mut entry) = self.keys.get_mut(username) {
+            for b in entry.value_mut().iter_mut() { *b = 0; }
+        }
+        self.keys.remove(username);
+        let _ = tokio::fs::remove_dir_all(self.vault_dir(username)).await;
+    }
+
     pub async fn is_unlocked(&self, username: &str) -> bool {
         self.keys.contains_key(username)
     }
 
     pub async fn change_passphrase(&self, username: &str, old: &str, new: &str) -> Result<()> {
+        // Serialize with unlock (and concurrent passphrase changes) for this user — both
+        // write vault.mkey; interleaving could commit a bundle wrapped under the wrong KDF.
+        // Bind the Arc to a local first so it outlives the guard (E0716).
+        let _vault_lock = self.vault_lock(username);
+        let _vault_guard = _vault_lock.lock().await;
         // Authorization is the OLD-passphrase proof below (it must unwrap the
         // master bundle / verify the canary), so this works whether or not the
         // vault is already unlocked — preserving the existing UI flow while the
@@ -175,15 +221,22 @@ impl CryptoManager {
         } else {
             // Legacy vault with no bundle yet: verify the old passphrase against
             // the canary and adopt the old KDF key as the master.
+            //
+            // If there is NO canary (and no mkey above), the vault was never
+            // initialized — there is nothing to authenticate the old passphrase
+            // against, so accepting any value here would silently adopt it as the
+            // master and hand over an uninitialized vault. Refuse: vault setup
+            // must go through unlock/init, not change_passphrase.
+            let canary  = self.canary_path(username);
+            if tokio::fs::metadata(&canary).await.is_err() {
+                bail!("Vault not initialized");
+            }
             let salt    = self.get_or_create_salt(username).await?;
             let old_key = derive_key(old, &salt)?;
-            let canary  = self.canary_path(username);
-            if tokio::fs::metadata(&canary).await.is_ok() {
-                let enc = tokio::fs::read_to_string(&canary).await?;
-                let pt  = decrypt_with_key(&old_key, &enc)
-                    .map_err(|_| anyhow::anyhow!("Old passphrase incorrect"))?;
-                if pt != CANARY_PT { bail!("Old passphrase incorrect"); }
-            }
+            let enc = tokio::fs::read_to_string(&canary).await?;
+            let pt  = decrypt_with_key(&old_key, &enc)
+                .map_err(|_| anyhow::anyhow!("Old passphrase incorrect"))?;
+            if pt != CANARY_PT { bail!("Old passphrase incorrect"); }
             old_key
         };
 

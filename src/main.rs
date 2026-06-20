@@ -19,7 +19,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, sync::{Arc, atomic::{AtomicUsize, Ordering}}};
 use tokio::sync::{broadcast, Mutex, Semaphore};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod auth;
@@ -105,6 +105,19 @@ impl AppState {
             .or_insert_with(|| broadcast::channel(128).0)
             .clone()
     }
+    /// Subscribe to a user's broadcast WITHOUT a remove race. Subscribing while the
+    /// DashMap entry guard is still held means receiver_count() becomes 1 before the
+    /// shard lock is released, so a concurrent prune_user_events (which must take the
+    /// same shard lock for remove_if) can never observe count==0 and delete the sender
+    /// in the window between create and subscribe — which would have orphaned this
+    /// receiver (its sender dropped, future events routed to a freshly-created channel).
+    /// Behaviorally identical to `user_tx(u).subscribe()`, just race-free.
+    pub fn user_subscribe(&self, username: &str) -> broadcast::Receiver<ServerEvent> {
+        self.user_events
+            .entry(username.to_string())
+            .or_insert_with(|| broadcast::channel(128).0)
+            .subscribe()
+    }
     pub fn send_to_user(&self, username: &str, evt: ServerEvent) {
         let _ = self.user_tx(username).send(evt);
     }
@@ -114,7 +127,14 @@ impl AppState {
             .filter(|e| e.value().receiver_count() == 0)
             .map(|e| e.key().clone())
             .collect();
-        for k in stale { self.user_events.remove(&k); }
+        for k in stale {
+            // Re-check receiver_count under remove: a WS subscribe in the window between
+            // the snapshot and here may have created a receiver on this exact sender.
+            // An unconditional remove() would drop that live sender and orphan the
+            // subscriber (its events would silently vanish). remove_if only deletes if
+            // the channel still has no receivers at removal time.
+            self.user_events.remove_if(&k, |_, tx| tx.receiver_count() == 0);
+        }
     }
 
     /// #87: Drop finished/aborted connect-task JoinHandles so connect_tasks doesn't
@@ -139,8 +159,13 @@ impl AppState {
             .collect();
         for k in idle {
             // Re-check under remove to avoid racing a concurrent connect that just
-            // incremented the counter on this same Arc.
-            self.active_sessions.remove_if(&k, |_, c| c.load(Ordering::Acquire) == 0);
+            // incremented the counter on this same Arc. Also require the Arc to be
+            // uniquely owned (strong_count==1 => only the map holds it): a live socket
+            // may hold a clone of an idle (count==0) counter, and detaching it would
+            // orphan that socket's counter so user_is_idle() spuriously returns true.
+            self.active_sessions.remove_if(&k, |_, c| {
+                c.load(Ordering::Acquire) == 0 && Arc::strong_count(c) == 1
+            });
         }
     }
     /// #33: per-user sliding-window check for outbound link-preview fetches.
@@ -188,6 +213,67 @@ impl AppState {
         if let Some((_, handle)) = self.connect_tasks.remove(conn_id) {
             handle.abort();
         }
+    }
+
+    /// Fully tear down and erase an account: QUIT + drop its live IRC connections,
+    /// delete its auth/vault/network/e2e/log data, and remove all on-disk residue
+    /// (uploads, push subscriptions, notification prefs, abandoned chunked uploads).
+    /// Shared by the self-service WS DeleteAccount handler and the admin delete route
+    /// so the two paths can never drift — an admin delete must leave no more residue,
+    /// and no more auto-reconnecting ghost connection, than a self-service delete.
+    /// `username` is canonicalised (trim+lowercase) and rejected if not a legitimate
+    /// username, so an admin-supplied path component can't escape the data dir.
+    pub async fn purge_account(&self, username: &str) {
+        let uname = username.trim().to_lowercase();
+        if !crate::auth::is_safe_username(&uname) { return; }
+        // Disconnect every IRC connection owned by this user FIRST, so no auto-
+        // reconnecting task survives to keep a ghost session online as the deleted user.
+        let conns: Vec<String> = self.conn_owners.iter()
+            .filter(|e| e.value() == &uname)
+            .map(|e| e.key().clone())
+            .collect();
+        for cid in &conns {
+            // #20: clone the Arc out and drop the DashMap Ref before awaiting.
+            let conn = self.connections.get(cid).map(|c| c.clone());
+            if let Some(conn) = conn {
+                let mut c = conn.lock().await;
+                let _ = c.send_raw("QUIT :Account deleted\r\n").await;
+            }
+            self.abort_connect_task(cid);
+            self.connections.remove(cid);
+            self.conn_owners.remove(cid);
+            self.clear_disconnect_request(cid);
+        }
+        // Delete account data (auth/vault/networks/e2e/logs/sessions).
+        self.auth.delete_account(&uname).await;
+        // delete_account leaves uploaded files, push subscriptions, notif prefs and
+        // abandoned chunked uploads on disk. Clear them too so deletion leaves no
+        // residue — critical because a later re-registration of the SAME username
+        // would otherwise inherit them (e.g. push notifications routed to the prior
+        // owner's devices). Mirrors the path scheme notifications.rs uses
+        // ({data_dir}/push/{safe}.json, {data_dir}/notif_prefs/{safe}.json).
+        upload::clear_user_uploads(&self.data_dir, &self.upload_dir, &uname).await;
+        let safe_name: String = uname.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        let push_file = std::path::PathBuf::from(&self.data_dir)
+            .join("push").join(format!("{}.json", safe_name));
+        let prefs_file = std::path::PathBuf::from(&self.data_dir)
+            .join("notif_prefs").join(format!("{}.json", safe_name));
+        let _ = tokio::fs::remove_file(&push_file).await;
+        let _ = tokio::fs::remove_file(&prefs_file).await;
+        if let Some(inprog) = upload::user_inprogress_dir(&self.data_dir, &uname) {
+            let _ = tokio::fs::remove_dir_all(&inprog).await;
+        }
+        // Tear down the crypto vault (zeroize+drop the in-memory master key AND remove the
+        // on-disk vault salt/canary/mkey) so a re-registered same-name account can't inherit
+        // the prior owner's still-unlocked vault: the WS handshake calls is_unlocked(username)
+        // and, if true, hands the new session VaultUnlocked + derive_e2e_enc_key(username) —
+        // the PRIOR owner's E2E key — with no passphrase. (A stale on-disk vault.mkey would
+        // also permanently lock the re-registered user out of their own vault.) This MUST run
+        // under the vault_lock — hence purge_vault, not a bare lock()+remove_dir_all — so a
+        // concurrent unlock()/change_passphrase() can't re-insert the key after teardown.
+        self.crypto.purge_vault(&uname).await;
     }
 }
 
@@ -507,6 +593,18 @@ const MAX_NETWORKS_PER_USER: usize = 20;
 /// unthrottled flood degrades the shared runtime for all users.
 const WS_MAX_CMDS_PER_SEC: u32 = 40;
 
+/// Process-wide cap on concurrent 64-MiB Argon2id derivations (UnlockVault /
+/// ChangePassphrase). The per-user KDF rate limit bounds one account, but many
+/// accounts unlocking at once could still hold a large number of 64-MiB
+/// allocations live simultaneously and exhaust RAM. This global semaphore bounds
+/// the number of in-flight KDF derivations across ALL users; per-user behavior is
+/// unchanged (a permit is acquired only for the duration of the derive).
+const KDF_MAX_CONCURRENT: usize = 4;
+static KDF_SEM: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
+fn kdf_sem() -> &'static Semaphore {
+    KDF_SEM.get_or_init(|| Semaphore::new(KDF_MAX_CONCURRENT))
+}
+
 
 async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
     let mut response = next.run(req).await;
@@ -646,9 +744,27 @@ async fn main() -> Result<()> {
               // client never finalized/canceled (TTL 24h). Clears the dead_code
               // warning on sweep_stale_inprogress.
               let _ = upload::sweep_stale_inprogress(&s.data_dir, std::time::Duration::from_secs(86400)).await;
+              // Prune the per-network-config lock map: an AddNetwork→RemoveNetwork
+              // loop mints a fresh (username:conn_id) entry each cycle and never
+              // removed it, growing this static map without bound. Entries with
+              // strong_count==1 have no in-flight holder (a live op always holds a
+              // clone, so count>=2) and are safe to drop.
+              prune_network_config_locks();
           }
       });
     }
+
+    // Outer body cap for the legacy multipart /upload endpoint. handle_upload
+    // buffers the whole field in RAM before its own size check, so a fixed 500MB
+    // layer let any uploader force ~500MB allocations regardless of the admin's
+    // max_upload_mb. Track the configured size (+1MB multipart framing overhead)
+    // instead. The chunked path (/upload/init+chunk, what the frontend actually
+    // uses) is unaffected; the live per-request limit is still re-checked inside
+    // handle_upload against the runtime max_upload_mb.
+    let legacy_upload_limit = max_upload_mb
+        .clamp(1, 500)
+        .saturating_mul(1024 * 1024)
+        .saturating_add(1024 * 1024);
 
     let inner = Router::new()
         .route("/",                      get(serve_index))
@@ -683,7 +799,7 @@ async fn main() -> Result<()> {
         .route("/auth/reset",            post(route_reset_password).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/me",               get(route_me))
         .route("/auth/change-password",  post(route_change_password).layer(DefaultBodyLimit::max(8_192)))
-        .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(500 * 1024 * 1024)))
+        .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(legacy_upload_limit)))
         .route("/upload/init",           post(route_upload_init).layer(DefaultBodyLimit::max(4_096)))
         .route("/upload/chunk/:id",      post(route_upload_chunk).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
         .route("/upload/status/:id",     get(route_upload_status))
@@ -698,7 +814,7 @@ async fn main() -> Result<()> {
         .route("/files/:name",           get(serve_file))
         .route("/pub/:name",            get(serve_file_public))
         .route("/paste",                post(route_paste_create).layer(DefaultBodyLimit::max(524_288)))
-        .route("/paste/:id",            get(route_paste_view))
+        .route("/paste/:id",            get(route_paste_view).post(route_paste_view_post))
         .route("/paste/:id/raw",        get(route_paste_raw))
         .route("/s",                    post(route_short_create).layer(DefaultBodyLimit::max(4_096)))
         .route("/s/:id",                get(route_short_redirect))
@@ -916,7 +1032,11 @@ async fn route_admin_delete_user(State(state): State<AppState>, headers: HeaderM
     if target.to_lowercase() == user.to_lowercase() {
         return (StatusCode::BAD_REQUEST, Json(Msg { message: "Cannot delete yourself.".into() })).into_response();
     }
-    state.auth.delete_account(&target).await;
+    // Full teardown (disconnect live IRC connections + delete data + clear residue),
+    // identical to the self-service path — not just delete_account, which would leave an
+    // auto-reconnecting ghost connection online and orphaned push/prefs/upload files that
+    // a re-registered same-name account could inherit.
+    state.purge_account(&target).await;
     (StatusCode::OK, Json(Msg { message: format!("User '{}' deleted.", target) })).into_response()
 }
 
@@ -986,15 +1106,11 @@ async fn route_admin_add_user(State(state): State<AppState>, headers: HeaderMap,
     // Admin-created users: no client-IP rate dimension needed (admin-gated route).
     match state.auth.register(&body.username, &email, &body.password, None).await {
         Ok(_token) => {
-            // Auto-verify (admin-created users don't need email verification)
-            let path = std::path::PathBuf::from(&state.data_dir)
-                .join("users").join(format!("{}.json", body.username.to_lowercase()));
-            if let Ok(json) = tokio::fs::read_to_string(&path).await {
-                if let Ok(mut u) = serde_json::from_str::<auth::User>(&json) {
-                    u.verified = true;
-                    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&u).unwrap_or_default()).await;
-                }
-            }
+            // Auto-verify (admin-created users don't need email verification). Go through
+            // set_verified so the read-modify-write runs under the per-user lock + atomic
+            // write like every other mutator — the old raw unlocked write here could race a
+            // concurrent mutator and left a crash-truncation window. Best-effort as before.
+            let _ = state.auth.set_verified(&body.username.to_lowercase(), true).await;
             (StatusCode::OK, Json(Msg { message: format!("User '{}' created.", body.username) })).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(Msg { message: e.to_string() })).into_response(),
@@ -1040,6 +1156,12 @@ async fn route_register(State(state): State<AppState>, headers: HeaderMap, Json(
     }
     let req_code = state.registration_code.read().await.clone();
     if !req_code.is_empty() {
+        // Per-IP rate limit BEFORE the code compare so a closed-registration code
+        // can't be brute-forced online (the register() rate limits only run after the
+        // code passes). Generous bucket (10/60s) — unaffected for a real user typing it.
+        if state.auth.check_ip_rate_limit("reg_code", ip.as_deref()).is_err() {
+            return (StatusCode::TOO_MANY_REQUESTS, Json(Msg { message: "Too many attempts — try again later.".into() })).into_response();
+        }
         // Timing-safe comparison with no length oracle — always compare max(len) bytes
         let a = req_code.as_bytes();
         let b = body.code.as_bytes();
@@ -1468,6 +1590,11 @@ async fn route_paste_create(
     let user = match state.auth.validate_session(token) {
         Some(u) => u, None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response(),
     };
+    // Per-user rate limit: each paste writes a file, so cap creation to keep one
+    // account from filling the disk. The budget is generous for normal use.
+    if state.auth.check_user_create_rate_limit(&user, "paste").is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error":"Too many pastes — slow down"}))).into_response();
+    }
     match state.paste_store.create(&body, &user).await {
         Ok(paste) => {
             let url = format!("{}/paste/{}", state.base_url, paste.id);
@@ -1485,13 +1612,49 @@ async fn route_paste_create(
 async fn route_paste_view(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    match state.paste_store.get(&id).await {
+    // GET still reads ?password for an unprotected paste / direct link; the unlock FORM
+    // now POSTs (see route_paste_view_post) so a typed password never lands in the URL.
+    let pw = params.get("password").map(|s| s.as_str()).unwrap_or("");
+    render_paste(&state, &id, &headers, pw).await
+}
+
+// POST unlock: the password arrives in the form body, never the query string — so it
+// can't leak into the reverse-proxy access log, browser history, or the Referer header
+// the way a GET ?password= submission would. Same verify + rate-limit + render logic.
+async fn route_paste_view_post(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let pw = form.get("password").map(|s| s.as_str()).unwrap_or("");
+    render_paste(&state, &id, &headers, pw).await
+}
+
+async fn render_paste(state: &AppState, id: &str, headers: &HeaderMap, pw: &str) -> axum::response::Response {
+    match state.paste_store.get(id).await {
         Ok(Some(paste)) => {
             if paste.password_hash.is_some() {
-                let pw = params.get("password").map(|s| s.as_str()).unwrap_or("");
-                if !paste::PasteStore::verify_password(&paste, pw) {
+                // This endpoint is unauthenticated, and verify_password runs a
+                // 64-MiB Argon2id derive. Without a limit an attacker can spray
+                // guesses to exhaust CPU. Rate-limit per client IP BEFORE the
+                // derive, and run the derive off the async workers so it can't pin
+                // one. A legitimate single unlock stays well under the budget.
+                if state.auth.check_ip_rate_limit("paste_unlock", client_ip(headers).as_deref()).is_err() {
+                    return (StatusCode::TOO_MANY_REQUESTS,
+                        Html("Too many attempts — try again later.".to_string())).into_response();
+                }
+                let verify_ok = {
+                    let paste = paste.clone();
+                    let pw = pw.to_string();
+                    tokio::task::spawn_blocking(move || paste::PasteStore::verify_password(&paste, &pw))
+                        .await
+                        .unwrap_or(false)
+                };
+                if !verify_ok {
                     return (StatusCode::FORBIDDEN, Html(format!(
                         "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>CryptIRC Paste</title>\
                          <style>body{{background:#0b0d0f;color:#e0e0e0;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}\
@@ -1499,7 +1662,7 @@ async fn route_paste_view(
                          input{{width:100%;padding:8px;margin:8px 0;background:#1a1e2e;border:1px solid #2a2e3e;color:#e0e0e0;border-radius:6px;font-size:16px}}\
                          button{{width:100%;padding:8px;background:#00d4aa;color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700}}</style></head>\
                          <body><div class=\"box\"><h3>🔒 Password Required</h3>\
-                         <form method=\"get\"><input type=\"password\" name=\"password\" placeholder=\"Enter password\" autofocus>\
+                         <form method=\"post\"><input type=\"password\" name=\"password\" placeholder=\"Enter password\" autofocus>\
                          <button type=\"submit\">Unlock</button></form></div></body></html>"
                     ))).into_response();
                 }
@@ -1520,7 +1683,7 @@ async fn route_paste_view(
                  <body><div class=\"hdr\"><span><a href=\"/cryptirc/\">CryptIRC</a> Paste</span>\
                  <span class=\"meta\">{} · {} · by {} · {} · <a href=\"/cryptirc/paste/{}/raw\">raw</a></span></div>\
                  <pre>{}</pre></body></html>",
-                html_escape(&id), lang, created, html_escape(&paste.author), expires, html_escape(&id), escaped
+                html_escape(id), lang, created, html_escape(&paste.author), expires, html_escape(id), escaped
             )).into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, Html("Paste not found or expired.".to_string())).into_response(),
@@ -1531,13 +1694,26 @@ async fn route_paste_view(
 async fn route_paste_raw(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     match state.paste_store.get(&id).await {
         Ok(Some(paste)) => {
             if paste.password_hash.is_some() {
                 let pw = params.get("password").map(|s| s.as_str()).unwrap_or("");
-                if !paste::PasteStore::verify_password(&paste, pw) {
+                // Unauthenticated + 64-MiB Argon2id derive: rate-limit per client
+                // IP before the derive and run the derive off the async workers.
+                if state.auth.check_ip_rate_limit("paste_unlock", client_ip(&headers).as_deref()).is_err() {
+                    return (StatusCode::TOO_MANY_REQUESTS, "Too many attempts").into_response();
+                }
+                let verify_ok = {
+                    let paste = paste.clone();
+                    let pw = pw.to_string();
+                    tokio::task::spawn_blocking(move || paste::PasteStore::verify_password(&paste, &pw))
+                        .await
+                        .unwrap_or(false)
+                };
+                if !verify_ok {
                     return (StatusCode::FORBIDDEN, "Password required").into_response();
                 }
             }
@@ -1560,6 +1736,11 @@ async fn route_short_create(
     let user = match state.auth.validate_session(token) {
         Some(u) => u, None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response(),
     };
+    // Per-user rate limit: each short link writes a file, so cap creation to keep
+    // one account from filling the disk. The budget is generous for normal use.
+    if state.auth.check_user_create_rate_limit(&user, "short").is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error":"Too many short links — slow down"}))).into_response();
+    }
     let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
     if url.is_empty() || url.len() > 4096 || (!url.starts_with("http://") && !url.starts_with("https://")) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Invalid URL"}))).into_response();
@@ -1739,6 +1920,13 @@ async fn route_push_test(State(state): State<AppState>, headers: HeaderMap) -> i
     match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
         None => (StatusCode::UNAUTHORIZED, Json(Msg { message: "Not authenticated".into() })).into_response(),
         Some(user) => {
+            // Throttle: this HTTP route is NOT behind the WS per-socket limiter, and each
+            // call fans out a DNS+TLS+VAPID web-push to every stored subscription (up to
+            // MAX_SUBSCRIPTIONS_PER_USER). A dedicated per-user bucket caps abuse without
+            // affecting a human pressing "send test notification" (well under 10/60s).
+            if state.auth.check_user_create_rate_limit(&user, "push_test").is_err() {
+                return (StatusCode::TOO_MANY_REQUESTS, Json(Msg { message: "Too many requests — try again shortly".into() })).into_response();
+            }
             state.notifier.send_test_notification(&user).await;
             (StatusCode::OK, Json(Msg { message: "Test notification sent".into() })).into_response()
         }
@@ -1762,12 +1950,18 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         receiver.next()
     ).await;
 
-    let username = match auth_msg {
-        Ok(Some(Ok(Message::Text(txt)))) => {
+    // #5: retain the raw handshake token so each subsequent command can cheaply
+    // re-validate the session. Validating only once at handshake left a
+    // revoked/expired token with full access on an already-open socket.
+    let (username, session_token) = match auth_msg {
+        // S6: bound the UNAUTHENTICATED handshake frame by the same WS_MAX_MSG_BYTES cap the
+        // post-auth recv loop enforces — otherwise an anonymous client could send an up-to-
+        // 64-MiB Text frame and force the allocation + serde_json parse before any auth.
+        Ok(Some(Ok(Message::Text(txt)))) if txt.len() <= WS_MAX_MSG_BYTES => {
             match serde_json::from_str::<ClientMessage>(&txt) {
                 Ok(ClientMessage::Auth { token }) => {
                     match state.auth.validate_session(&token) {
-                        Some(u) => u,
+                        Some(u) => (u, token),
                         None => {
                             let _ = sender.send(Message::Text(serde_json::to_string(&ServerEvent::AuthFailed { message: "Invalid session".into() }).unwrap())).await;
                             return;
@@ -1810,7 +2004,7 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let active_counter = state.active_counter(&username);
     active_counter.fetch_add(1, Ordering::Release);
 
-    let mut event_rx = state.user_tx(&username).subscribe();
+    let mut event_rx = state.user_subscribe(&username);
     let session_is_active = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
     // #60: per-socket event channel for key material that must reach ONLY the
@@ -1818,7 +2012,22 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     // The send_task drains both the broadcast and this per-socket channel.
     let (socket_tx, mut socket_rx) = tokio::sync::mpsc::unbounded_channel::<ServerEvent>();
 
+    // #5b: handles for periodic re-validation of the OUTBOUND stream. The inbound path
+    // (recv_task) re-validates per command, but Idle/Active presence frames are exempt
+    // and an attacker can simply send NOTHING — leaving recv_task parked forever while
+    // send_task keeps streaming the victim's live messages. So the outbound task must
+    // independently re-check the session and close the socket when it is no longer valid
+    // (logout / password change / admin disable / age/idle expiry).
+    let state_sv = state.clone();
+    let user_sv  = username.clone();
+    let token_sv = session_token.clone();
+
     let mut send_task = tokio::spawn(async move {
+        // Re-validate roughly every 30s; this bounds post-revocation read exposure to
+        // the interval. A non-mutating check (session_valid_for) is used so this polling
+        // never itself refreshes the session's idle timer.
+        let mut revalidate = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        revalidate.tick().await; // consume the immediate first tick
         loop {
             tokio::select! {
                 evt = event_rx.recv() => {
@@ -1830,7 +2039,12 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                             Ok(s)  => { if sender.send(Message::Text(s)).await.is_err() { break; } }
                             Err(_) => continue,
                         },
-                        Err(_) => break, // channel closed/lagged-closed
+                        // A slow/backgrounded consumer that overflows the 128-event
+                        // buffer gets Lagged(n) — skip the dropped events and keep the
+                        // socket; the client's sync watchdog backfills what it missed.
+                        // Only a genuinely closed channel tears the socket down.
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(broadcast::error::RecvError::Closed)    => break,
                     }
                 }
                 Some(evt) = socket_rx.recv() => {
@@ -1838,6 +2052,9 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                         Ok(s)  => { if sender.send(Message::Text(s)).await.is_err() { break; } }
                         Err(_) => continue,
                     }
+                }
+                _ = revalidate.tick() => {
+                    if !state_sv.auth.session_valid_for(&token_sv, &user_sv) { break; }
                 }
             }
         }
@@ -1848,6 +2065,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     let counter2 = active_counter.clone();
     let active2 = session_is_active.clone();
     let socket_tx2 = socket_tx.clone();
+    // #5: token used to re-validate the session on each non-presence command.
+    let session_token2 = session_token.clone();
     let mut recv_task = tokio::spawn(async move {
         // #35: per-socket sliding-window command rate limiter. Commands above the
         // budget within a 1-second window are dropped, capping the disk-I/O /
@@ -1870,6 +2089,18 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
                         }
                     }
                     Ok(cmd) => {
+                        // #5: re-validate the session on every non-presence command.
+                        // The handshake validated once; a token revoked/expired
+                        // afterwards (logout, password change, admin disable, idle/age
+                        // timeout) must lose access on the already-open socket. Idle/
+                        // Active presence toggles are handled above and never reach
+                        // here, so they stay exempt to avoid churn. If the token no
+                        // longer validates — or now maps to a different username — stop
+                        // processing and let the socket close.
+                        match state2.auth.validate_session(&session_token2) {
+                            Some(u) if u == user2 => {}
+                            _ => break,
+                        }
                         // #35: throttle command dispatch (Idle/Active above are cheap
                         // presence toggles and are intentionally exempt).
                         let now = tokio::time::Instant::now();
@@ -1901,8 +2132,13 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
         _ = &mut recv_task => send_task.abort(),
     }
 
-    // Session disconnecting — decrement active count if this session was still active
-    if session_is_active.load(Ordering::Acquire) {
+    // Session disconnecting — decrement active count if this session was still active.
+    // Atomic check-and-act (swap, not load-then-sub): the recv_task's Idle/Active arms
+    // use the same swap-based pattern on the SAME atomics, and abort() can't interrupt a
+    // match arm already running on another worker thread. A non-atomic load+fetch_sub
+    // here would race a concurrent Idle decrement, double-subtract, and underflow the
+    // counter to usize::MAX (permanent push suppression + leaked map entry).
+    if session_is_active.swap(false, Ordering::AcqRel) {
         active_counter.fetch_sub(1, Ordering::Release);
     }
 }
@@ -1950,6 +2186,11 @@ async fn handle_command(
             // HTTP). Move it to the blocking pool via spawn_blocking + block_on so the
             // async workers stay free. Clone the Arc<CryptoManager> + inputs in.
             let unlock_res = {
+                // #4: bound the number of concurrent 64-MiB Argon2id derivations
+                // process-wide. Holding the permit only around the derive keeps
+                // per-user behavior unchanged while preventing many accounts from
+                // pinning that much RAM at once.
+                let _kdf_permit = kdf_sem().acquire().await;
                 let crypto = state.crypto.clone();
                 let uname  = username.to_string();
                 let pass   = passphrase.clone();
@@ -2006,6 +2247,10 @@ async fn handle_command(
             // (derive old + new) plus a log-tree re-encrypt — move it to the blocking
             // pool so it cannot stall the async runtime. Clone the Arc + inputs in.
             let chpass_res = {
+                // #4: bound concurrent 64-MiB Argon2id derivations process-wide.
+                // change_passphrase runs the KDF twice, so hold one permit around
+                // the whole derive; per-user behavior is unchanged.
+                let _kdf_permit = kdf_sem().acquire().await;
                 let crypto = state.crypto.clone();
                 let uname  = username.to_string();
                 let (oldp, newp) = (old.clone(), new.clone());
@@ -2085,6 +2330,11 @@ async fn handle_command(
         }
         ClientMessage::UpdateNetwork { mut network } => {
             if !state.owns_network(username, &network.id).await { return; }
+            // #4: serialize the read-existing → save → (cert-gen) → save sequence
+            // behind the per-config lock so a concurrent Join/Part/UpdateNetwork
+            // can't last-writer-wins clobber it.
+            let cfg_lock = network_config_lock(username, &network.id);
+            let _cfg_guard = cfg_lock.lock().await;
             // Preserve client_cert_id from existing config (UI doesn't send it)
             if let Some(existing) = state.get_network_config(&network.id, username).await {
                 if network.client_cert_id.is_none() {
@@ -2134,7 +2384,21 @@ async fn handle_command(
             state.connections.remove(&id);
             state.conn_owners.remove(&id);
             state.clear_disconnect_request(&id);
-            state.remove_network(&id, username).await;
+            // #4: serialize the config-file DELETE behind the SAME per-config lock
+            // every save_network writer takes. Without it, a concurrent
+            // JoinChannel/PartChannel/SaveChannelOrder/Send/GenerateCert/UpdateNetwork
+            // for this id (from another socket of the same user) can interleave
+            // get_network_config (read) → remove_network (this delete) → save_network
+            // (write), RESURRECTING the just-removed network's <id>.json on disk. The
+            // resurrected file reappears in user_network_states and is auto-reconnected
+            // by reconnect_for_user on the next vault unlock. Holding the lock across
+            // the delete makes delete and save mutually exclusive. The QUIT/abort/map
+            // removal above don't touch the config file, so they stay outside the lock.
+            {
+                let _cfg_lock = network_config_lock(username, &id);
+                let _cfg_guard = _cfg_lock.lock().await;
+                state.remove_network(&id, username).await;
+            }
             send(ServerEvent::State {
                 networks: state.user_network_states(username).await,
                 vault_unlocked: state.crypto.is_unlocked(username).await,
@@ -2171,7 +2435,14 @@ async fn handle_command(
                 let handle = tokio::spawn(async move {
                     if let Err(e) = irc::connect(id2, cfg, u2, s2).await { error!("IRC: {}", e); }
                 });
-                state.connect_tasks.insert(id, handle);
+                // Abort any predecessor handle this insert displaces. Normally
+                // abort_connect_task above already emptied the slot so this returns
+                // None, but if a concurrent Connect/reconnect_for_user for the SAME
+                // conn_id raced in between, the displaced task would otherwise be
+                // dropped-but-not-aborted, leaving an untracked ghost IRC socket that
+                // auto-reconnects forever and can never be killed. Aborting it here
+                // closes that hole; it is a no-op in the normal (uncontended) path.
+                if let Some(old) = state.connect_tasks.insert(id, handle) { old.abort(); }
             }
         }
         ClientMessage::Disconnect { id } => {
@@ -2273,6 +2544,14 @@ async fn handle_command(
                     if parts.len() >= 2 {
                         let ch = parts[1].split(',').next().unwrap_or("");
                         if !ch.is_empty() && is_valid_channel(ch) {
+                            // Serialize this auto_join/channel_keys RMW behind the same
+                            // per-config lock the JoinChannel/PartChannel handlers use — the
+                            // raw `/join`/`/part` SEND path does the identical mutation and
+                            // would otherwise race them (last-writer-wins + shared .tmp).
+                            // send_raw already happened above, so the lock isn't held across
+                            // the IRC round-trip.
+                            let _cfg_lock = network_config_lock(username, &conn_id);
+                            let _cfg_guard = _cfg_lock.lock().await;
                             if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
                                 let lc = ch.to_lowercase();
                                 if upper.starts_with("JOIN ") {
@@ -2312,11 +2591,15 @@ async fn handle_command(
                     _ => format!("JOIN {}\r\n", safe_ch),
                 };
                 let _ = conn.lock().await.send_raw(&cmd).await;
-                // Persist channel in auto_join (with key if provided)
+                // Persist channel in auto_join (with key if provided).
+                // #4: serialize the read-modify-write behind the per-config lock so a
+                // concurrent Join/Part/UpdateNetwork can't last-writer-wins clobber it.
+                let cfg_lock = network_config_lock(username, &conn_id);
+                let _cfg_guard = cfg_lock.lock().await;
                 if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
                     let lc = safe_ch.to_lowercase();
                     let mut changed = false;
-                    if !cfg.auto_join.iter().any(|c| c.to_lowercase() == lc) {
+                    if !cfg.auto_join.iter().any(|c| c.to_lowercase() == lc) && cfg.auto_join.len() < 100 {
                         cfg.auto_join.push(safe_ch.clone());
                         changed = true;
                     }
@@ -2343,12 +2626,17 @@ async fn handle_command(
             }
             // Always strip from auto_join so reconnect doesn't re-join it.
             let mut user_nick = String::new();
-            if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
-                user_nick = cfg.nick.clone();
-                let lc = safe.to_lowercase();
-                cfg.auto_join.retain(|c| c.to_lowercase() != lc);
-                cfg.channel_keys.remove(&lc);
-                let _ = state.save_network(&cfg, username).await;
+            {
+                // #4: serialize the read-modify-write behind the per-config lock.
+                let cfg_lock = network_config_lock(username, &conn_id);
+                let _cfg_guard = cfg_lock.lock().await;
+                if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
+                    user_nick = cfg.nick.clone();
+                    let lc = safe.to_lowercase();
+                    cfg.auto_join.retain(|c| c.to_lowercase() != lc);
+                    cfg.channel_keys.remove(&lc);
+                    let _ = state.save_network(&cfg, username).await;
+                }
             }
             // When offline, no server will echo the PART back — synthesize the
             // event so the frontend removes the channel from the sidebar and
@@ -2412,7 +2700,11 @@ async fn handle_command(
                 .unwrap_or_else(|| username.to_string());
             match state.certs.generate(username, &conn_id, &nick).await {
                 Ok(info) => {
-                    // Set client_cert_id on the network config so it's used on next connect
+                    // Set client_cert_id on the network config so it's used on next connect.
+                    // Guarded by the per-config lock (re-read inside the guard) so this RMW
+                    // can't race the JoinChannel/PartChannel/UpdateNetwork/SEND config writers.
+                    let _cfg_lock = network_config_lock(username, &conn_id);
+                    let _cfg_guard = _cfg_lock.lock().await;
                     if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
                         cfg.client_cert_id = Some(conn_id.clone());
                         let _ = state.save_network(&cfg, username).await;
@@ -2460,8 +2752,16 @@ async fn handle_command(
         }
 
         // ── E2E: public key bundle + one-time prekeys ─────────────────────────
-        ClientMessage::E2EPublishBundle { bundle } => {
+        ClientMessage::E2EPublishBundle { mut bundle } => {
             info!("[E2E] publish_bundle for {}", username);
+            // HIGH: cap OTPKs carried in a bundle so one publish can't exhaust
+            // inodes/disk (one file per key). Real clients publish a small bounded
+            // batch; 256 matches the client refill batch size.
+            if bundle.one_time_prekeys.len() > 256 {
+                warn!("[E2E] publish_bundle from {} carried {} OTPKs — truncating to 256",
+                    username, bundle.one_time_prekeys.len());
+                bundle.one_time_prekeys.truncate(256);
+            }
             match state.e2e_store.store_bundle(username, &bundle).await {
                 Ok(_) => { info!("[E2E] bundle published for {}", username);
                     // L5: use same threshold as client OTPK_REFILL_BELOW = 10
@@ -2473,7 +2773,14 @@ async fn handle_command(
                 Err(e) => send(ServerEvent::Error { message: format!("E2E publish bundle: {}", e) }),
             }
         }
-        ClientMessage::E2EAddOTPKs { keys } => {
+        ClientMessage::E2EAddOTPKs { mut keys } => {
+            // HIGH: cap per-call OTPK count so a single add can't exhaust
+            // inodes/disk (one file per key). 256 matches the client refill batch.
+            if keys.len() > 256 {
+                warn!("[E2E] add_otpks from {} carried {} keys — truncating to 256",
+                    username, keys.len());
+                keys.truncate(256);
+            }
             match state.e2e_store.add_one_time_prekeys(username, keys).await {
                 Ok(_)  => {}
                 Err(e) => send(ServerEvent::Error { message: format!("E2E add OTPKs: {}", e) }),
@@ -2610,6 +2917,16 @@ async fn handle_command(
             }
         }
         ClientMessage::E2ERelayX3DH { target_nick, header } => {
+            // Per-caller rate limit (mirrors E2EFetchBundle #27): this is the only
+            // unthrottled high-volume, large-payload (<=64KiB) cross-user WRITE primitive.
+            // Without a cap, an authenticated caller can flood a victim's 128-slot
+            // broadcast faster than send_task drains it; a broadcast Lagged is treated as
+            // fatal (Err(_) => break), force-closing the victim's WebSocket. 10/60s per
+            // caller is ample — a real X3DH relay fires once per newly-initiated conversation.
+            if state.auth.check_ws_kdf_rate_limit(username, "e2e_relay").is_err() {
+                send(ServerEvent::Error { message: "Too many relay requests — slow down".into() });
+                return;
+            }
             // Relay X3DH header to target user via server (too large for IRC)
             let safe: String = target_nick.chars()
                 .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '[' || *c == ']' || *c == '\\' || *c == '`' || *c == '^')
@@ -2652,7 +2969,17 @@ async fn handle_command(
                 let dir = std::path::PathBuf::from(&state.data_dir)
                     .join("users").join(&safe_username(username));
                 let _ = tokio::fs::create_dir_all(&dir).await;
-                let _ = tokio::fs::write(dir.join("appearance.json"), &settings).await;
+                // Atomic write (tmp + rename) so a crash mid-write can't leave a
+                // truncated appearance.json that fails to parse on next load —
+                // matches the rest of the persistence layer.
+                let dest = dir.join("appearance.json");
+                let tmp  = dir.join(format!("appearance.json.tmp.{}", Uuid::new_v4()));
+                if tokio::fs::write(&tmp, &settings).await.is_ok() {
+                    if tokio::fs::rename(&tmp, &dest).await.is_err() {
+                        let _ = tokio::fs::write(&dest, &settings).await;
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                    }
+                }
                 // Broadcast to all sessions so other devices update instantly
                 state.send_to_user(username, ServerEvent::Appearance { settings });
             }
@@ -2805,6 +3132,11 @@ async fn handle_command(
             } else { send(ServerEvent::Error { message: "Vault locked".into() }); }
         }
         ClientMessage::ClearAllData {} => {
+            // Rate-limit: this handler scans the GLOBAL pastes dir (work proportional to
+            // the server's total paste count, not the caller's data), so without a cap an
+            // authenticated user could spam it at the 40/s socket limit for a global-
+            // resource DoS. 10/60s is transparent for the rare, deliberate clear action.
+            if state.auth.check_user_create_rate_limit(username, "cleardata").is_err() { return; }
             info!("Clearing all data for user: {}", username);
             // Delete logs for all this user's connections
             for cfg in state.load_user_configs(username).await {
@@ -2862,6 +3194,12 @@ async fn handle_command(
         }
         ClientMessage::SaveChannelOrder { conn_id, order } => {
             if !state.owns_network(username, &conn_id).await { return; }
+            // Serialize this RMW behind the per-config lock like every other
+            // get_network_config->save_network writer, so a concurrent
+            // Join/Part/UpdateNetwork/Send/GenerateCert can't last-writer-wins clobber
+            // it (or race the shared .tmp). This was the only remaining unguarded site.
+            let _cfg_lock = network_config_lock(username, &conn_id);
+            let _cfg_guard = _cfg_lock.lock().await;
             if let Some(mut cfg) = state.get_network_config(&conn_id, username).await {
                 cfg.channel_order = order;
                 let _ = state.save_network(&cfg, username).await;
@@ -2874,28 +3212,18 @@ async fn handle_command(
         }
         ClientMessage::DeleteAccount { password } => {
             // Verify password before deleting (login creates a session, so logout it immediately)
-            match state.auth.login(username, &password, None).await {
+            // Pass the authenticated username as the IP-dimension key so this password
+            // verification uses an isolated ip:login:<username> bucket, not the single
+            // shared ip:login:noip bucket (ip=None collapses to "noip"). Otherwise one
+            // user's repeated DeleteAccount attempts fill the shared bucket and block
+            // every other user's self-service deletion for the rest of the window.
+            match state.auth.login(username, &password, Some(username)).await {
                 Ok(temp_token) => {
                     state.auth.logout(&temp_token); // L35: clean up orphaned session
-                    // Disconnect all IRC connections for this user
-                    let conns: Vec<String> = state.conn_owners.iter()
-                        .filter(|e| e.value() == username)
-                        .map(|e| e.key().clone())
-                        .collect();
-                    for cid in &conns {
-                        // #20: clone the Arc out and drop the DashMap Ref before awaiting.
-                        let conn = state.connections.get(cid).map(|c| c.clone());
-                        if let Some(conn) = conn {
-                            let mut c = conn.lock().await;
-                            let _ = c.send_raw("QUIT :Account deleted\r\n").await;
-                        }
-                        state.abort_connect_task(cid);
-                        state.connections.remove(cid);
-                        state.conn_owners.remove(cid);
-                        state.clear_disconnect_request(cid);
-                    }
-                    // Delete account data
-                    state.auth.delete_account(username).await;
+                    // Full teardown: disconnect IRC connections + delete account data +
+                    // clear all on-disk residue. Shared with the admin delete route so the
+                    // two paths can't drift (see AppState::purge_account).
+                    state.purge_account(username).await;
                     send(ServerEvent::AccountDeleted {});
                 }
                 Err(_) => {
@@ -2996,7 +3324,10 @@ impl AppState {
             let handle = tokio::spawn(async move {
                 if let Err(e) = irc::connect(id2, cfg, u, s).await { error!("{}", e); }
             });
-            self.connect_tasks.insert(id, handle);
+            // Abort any predecessor handle displaced by a concurrent Connect/reconnect
+            // for the same conn_id (see the Connect handler note). No-op in the normal
+            // path since abort_connect_task above just emptied the slot.
+            if let Some(old) = self.connect_tasks.insert(id, handle) { old.abort(); }
         }
     }
 
@@ -3054,10 +3385,16 @@ impl AppState {
             }
         }
 
-        tokio::fs::write(
-            format!("{}/{}.json", dir, safe_id),
-            serde_json::to_string_pretty(&persisted)?,
-        ).await?;
+        // Atomic write: serialize to a temp file then rename over the target so a
+        // crash mid-write can never leave a truncated/partial config on disk.
+        let final_path = format!("{}/{}.json", dir, safe_id);
+        let tmp_path   = format!("{}/{}.json.tmp", dir, safe_id);
+        let body = serde_json::to_string_pretty(&persisted)?;
+        tokio::fs::write(&tmp_path, body).await?;
+        if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -3178,6 +3515,34 @@ fn harden_dir_perms(path: &str) {
 ///   the verb + target are logged.
 /// - Everything else is char-truncated to 80 chars (char-safe: never byte-slices
 ///   across a multibyte boundary, which could panic).
+// ─── Per-network-config read-modify-write serialization (#4) ─────────────────
+// JoinChannel/PartChannel/UpdateNetwork all do get_network_config → mutate →
+// save_network. Without a lock, concurrent calls last-writer-wins and silently
+// drop auto_join/channel_key updates. One async mutex per (username, network id)
+// serializes that sequence. Mirrors upload.rs user_record_lock; file-local so it
+// does not touch AppState.
+fn network_config_locks() -> &'static DashMap<String, Arc<Mutex<()>>> {
+    static LOCKS: std::sync::OnceLock<DashMap<String, Arc<Mutex<()>>>> = std::sync::OnceLock::new();
+    LOCKS.get_or_init(DashMap::new)
+}
+
+/// Acquire (creating if needed) the per-config lock for one user's network.
+fn network_config_lock(username: &str, conn_id: &str) -> Arc<Mutex<()>> {
+    network_config_locks()
+        .entry(format!("{}:{}", username, conn_id))
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Drop idle per-network-config locks so the static map can't grow without bound
+/// across AddNetwork/RemoveNetwork churn. An entry whose Arc has strong_count==1
+/// is held only by the map (every caller of `network_config_lock` keeps a clone
+/// for the duration of its critical section → count>=2), so removing it cannot
+/// race a live read-modify-write. Called hourly from the background sweep.
+fn prune_network_config_locks() {
+    network_config_locks().retain(|_, v| Arc::strong_count(v) > 1);
+}
+
 pub fn redact_for_log(line: &str) -> String {
     let upper = line.to_uppercase();
     // OPER <login> <pass>  → redact everything after the verb
@@ -3200,24 +3565,64 @@ pub fn redact_for_log(line: &str) -> String {
         }
         return format!("{} {}", verb, chans);
     }
+    // AUTHENTICATE <base64 SASL payload> — manual SASL exchange carries credentials.
+    if upper.starts_with("AUTHENTICATE") {
+        return "AUTHENTICATE <redacted>".to_string();
+    }
+    // WEBIRC <pass> <gateway> <host> <ip> — first field is a shared password.
+    if upper.starts_with("WEBIRC ") {
+        return "WEBIRC <redacted>".to_string();
+    }
+    // SQUERY <service> :<text> — RFC-2812 "server query"; only ever addressed to a
+    // service (ratbox-services), so the tail may carry account credentials. Mirrors the
+    // client-side redactSensitive rule (E). Keep verb + service token, drop the rest.
+    if upper.starts_with("SQUERY ") {
+        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+        let verb = parts.first().copied().unwrap_or("SQUERY");
+        let svc  = parts.get(1).copied().unwrap_or("");
+        return format!("{} {} <redacted>", verb, svc);
+    }
     // PRIVMSG NICKSERV/CHANSERV :IDENTIFY/REGISTER/GHOST/REGAIN ...  (services auth)
     if upper.starts_with("PRIVMSG ") || upper.starts_with("NOTICE ") {
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
         let verb   = parts.first().copied().unwrap_or("");
         let target = parts.get(1).copied().unwrap_or("");
         let tgt_up = target.to_uppercase();
-        let is_services = tgt_up == "NICKSERV" || tgt_up == "CHANSERV"
-            || tgt_up == "NS" || tgt_up == "CS";
-        let body_up = parts.get(2).map(|s| s.to_uppercase()).unwrap_or_default();
-        let body_trim = body_up.trim_start_matches(':');
-        let cred_cmd = ["IDENTIFY", "REGISTER", "GHOST", "REGAIN", "RELEASE", "SET PASSWORD", "LOGIN", "AUTH"]
-            .iter().any(|c| body_trim.starts_with(c));
-        if is_services && cred_cmd {
+        // Strip an optional @server suffix (NickServ@services.net) before matching.
+        let tgt_base = tgt_up.split('@').next().unwrap_or(&tgt_up);
+        let is_services = matches!(tgt_base,
+            "NICKSERV" | "NS" | "USERSERV" | "US" | "CHANSERV" | "CS" | "MEMOSERV" | "MS"
+            | "OPERSERV" | "OS" | "HOSTSERV" | "HS" | "BOTSERV" | "BS");
+        if is_services {
+            // Convergent: any message to a service may carry a credential in some
+            // subcommand — do NOT enumerate cred verbs (that blocklist is never
+            // complete; mirrors client redactSensitive). Drop the whole body.
             return format!("{} {} :<redacted>", verb, target);
         }
         // Ordinary PRIVMSG/NOTICE: drop the body entirely (may be plaintext).
         return format!("{} {} :<{}B body redacted>", verb, target,
                        parts.get(2).map(|s| s.len()).unwrap_or(0));
+    }
+    // Bare service pseudo-command aliases: `NICKSERV IDENTIFY <pw>`, `NS IDENTIFY <pw>`,
+    // `USERSERV LOGIN <acct> <pw>`, `CS SET PASSWORD ...` etc. (ratbox-services and others
+    // accept the service name as a top-level command). These bypass the PRIVMSG/PASS/
+    // AUTHENTICATE forms above and would otherwise hit the default truncation branch,
+    // leaking the credential to logs.
+    {
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        let verb = parts.first().copied().unwrap_or("");
+        // Strip an optional @server suffix before matching the service name.
+        let verb_base = verb.split('@').next().unwrap_or(verb).to_uppercase();
+        let is_service = matches!(verb_base.as_str(),
+            "NICKSERV" | "NS" | "USERSERV" | "US" | "CHANSERV" | "CS" | "MEMOSERV" | "MS"
+            | "OPERSERV" | "OS" | "HOSTSERV" | "HS" | "BOTSERV" | "BS");
+        let has_args = parts.get(1).map(|s| !s.trim().is_empty()).unwrap_or(false);
+        if is_service && has_args {
+            // Convergent: mask ALL args of any bare service-directed line (do NOT
+            // enumerate credential subcommands — that blocklist is never complete and
+            // missed e.g. SETPASS/SIDENTIFY/CONFIRM; mirrors client redactSensitive).
+            return format!("{} <redacted>", verb);
+        }
     }
     // Default: char-safe truncation to 80 chars.
     let truncated: String = line.chars().take(80).collect();

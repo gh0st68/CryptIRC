@@ -99,6 +99,10 @@ pub struct AuthManager {
     /// mutators (admin toggles, password change, verify, reset, login) cannot
     /// clobber each other (lost update) or race past MAX_SESSIONS_PER_USER.
     user_locks:   Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-email async mutex serializing register()'s email-uniqueness check→create, so
+    /// concurrent same-email/different-username registrations can't all pass email_in_use()
+    /// before any writes its pending record (#14 one-account-per-email TOCTOU).
+    email_locks:  Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl AuthManager {
@@ -110,6 +114,7 @@ impl AuthManager {
             sessions:    Arc::new(DashMap::new()),
             rate_limits: Arc::new(DashMap::new()),
             user_locks:  Arc::new(DashMap::new()),
+            email_locks: Arc::new(DashMap::new()),
         })
     }
 
@@ -117,6 +122,14 @@ impl AuthManager {
     fn user_lock(&self, uname: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.user_locks
             .entry(uname.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Per-email serialization lock for register()'s check→create window.
+    fn email_lock(&self, email_lower: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.email_locks
+            .entry(email_lower.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
     }
@@ -173,7 +186,7 @@ impl AuthManager {
     /// `ip` is `None` when the caller could not determine a client IP (e.g. a
     /// direct-to-:9001 request that bypassed nginx); in that case we fall back to
     /// a single shared "noip" bucket so the limiter still applies globally.
-    fn check_ip_rate_limit(&self, action: &str, ip: Option<&str>) -> Result<()> {
+    pub fn check_ip_rate_limit(&self, action: &str, ip: Option<&str>) -> Result<()> {
         let ip = ip.unwrap_or("noip");
         // Bound the key length (char-safe — never byte-slices across a multibyte
         // boundary) to avoid an attacker stuffing the bucket table with huge header
@@ -189,6 +202,17 @@ impl AuthManager {
     pub fn check_ws_kdf_rate_limit(&self, username: &str, action: &str) -> Result<()> {
         let uname = username.trim().to_lowercase();
         self.check_rate_limit(&format!("ws_kdf:{}:{}", action, uname))
+    }
+
+    /// Per-user sliding-window limit for authenticated resource-creation routes
+    /// (paste / short-link). Each created object writes a file to disk, so an
+    /// unthrottled authenticated client can exhaust disk. Reuses the same bucket
+    /// machinery as the auth limiter, keyed on username + action. The shared
+    /// RATE_LIMIT_MAX_ATTEMPTS budget (10/60s) is generous for normal use while
+    /// stopping a creation flood. Public because it is called from main.rs.
+    pub fn check_user_create_rate_limit(&self, username: &str, action: &str) -> Result<()> {
+        let uname = username.trim().to_lowercase();
+        self.check_rate_limit(&format!("create:{}:{}", action, uname))
     }
 
     /// Remove rate-limit buckets whose window has fully expired.
@@ -226,14 +250,34 @@ impl AuthManager {
         }
 
         let email_lower = email.to_lowercase();
+        // #15: IP dimension FIRST (before the per-key inserts below) so an over-budget IP
+        // bails before minting a fresh reg:<rand>/regemail:<rand> bucket — otherwise one IP
+        // can fill the global bucket table and lock out all auth. See login() for detail.
+        self.check_ip_rate_limit("reg", ip)?;
         self.check_rate_limit(&format!("reg:{}", uname))?;
         // #14: rate-limit per email too, so varying the username with one victim
         // email cannot mint a fresh bucket on every request (mail-bomb defense).
         self.check_rate_limit(&format!("regemail:{}", email_lower))?;
-        // #15: add an IP dimension so distributed username-varying registration
-        // (which dodges the per-username bucket) is still throttled by source IP.
-        self.check_ip_rate_limit("reg", ip)?;
 
+        // Compute the Argon2 hash BEFORE the email-existence check so the dominant
+        // timing component (the ~tens-of-ms KDF) is paid on BOTH the email-in-use and
+        // the success branch. Otherwise the email_in_use bail returns measurably faster
+        // than a real registration, turning the deliberately-generic "Username already
+        // taken" message into an email-enumeration timing oracle. Mirrors the #56
+        // dummy-hash mitigation on the login path.
+        let salt = SaltString::generate(&mut OsRng);
+        let hash = Argon2::default()
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|_| anyhow::anyhow!("Password hashing failed"))?
+            .to_string();
+
+        // Serialize the email check→create window per email (held through the user
+        // create_new + pending write below). Without it, concurrent same-email/different-
+        // username registrations could all pass email_in_use() before any wrote its pending
+        // record, binding several accounts to one victim email (#14 TOCTOU). Acquired AFTER
+        // the KDF so hashing is never serialized; register holds no user_lock, so no deadlock.
+        let _elock = self.email_lock(&email_lower);
+        let _eguard = _elock.lock().await;
         // #14: reject registration when an account with this email already exists
         // (verified or pending). Prevents binding many usernames to a victim's
         // email to mail-bomb them and litter the data dir.
@@ -245,12 +289,6 @@ impl AuthManager {
         let user_path = PathBuf::from(&self.data_dir)
             .join("users")
             .join(format!("{}.json", uname));
-
-        let salt = SaltString::generate(&mut OsRng);
-        let hash = Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
-            .map_err(|_| anyhow::anyhow!("Password hashing failed"))?
-            .to_string();
 
         let user = User {
             username:      uname.clone(),
@@ -327,10 +365,11 @@ impl AuthManager {
 
     pub async fn request_password_reset(&self, email_addr: &str, ip: Option<&str>) -> Result<Option<(String, String)>> {
         let email_lower = email_addr.trim().to_lowercase();
-        self.check_rate_limit(&format!("reset:{}", email_lower))?;
-        // #15/#80: IP dimension so varying the email (which dodges the per-email
-        // bucket) cannot force an unbounded full users/ directory scan per request.
+        // #15/#80: IP dimension FIRST (before the per-email bucket insert) so varying the
+        // email cannot force an unbounded users/ scan AND cannot fill the global bucket
+        // table from one IP. See login() for the ordering rationale.
         self.check_ip_rate_limit("reset", ip)?;
+        self.check_rate_limit(&format!("reset:{}", email_lower))?;
 
         // Find user by email
         let users_dir = PathBuf::from(&self.data_dir).join("users");
@@ -466,10 +505,13 @@ impl AuthManager {
 
     pub async fn login(&self, username: &str, password: &str, ip: Option<&str>) -> Result<String> {
         let uname = username.trim().to_lowercase();
-        self.check_rate_limit(&format!("login:{}", uname))?;
-        // #15: IP dimension so credential-stuffing across many usernames from one
-        // IP (which gets a fresh per-username bucket each time) is still throttled.
+        // #15: IP dimension FIRST so credential-stuffing across many usernames from one
+        // IP is throttled. Order matters: check_rate_limit INSERTS a per-key bucket before
+        // it can reject, so the per-IP check must run BEFORE the per-username one —
+        // otherwise an over-budget IP still mints a fresh login:<rand> bucket per request
+        // and can fill the global RATE_LIMIT_MAX_BUCKETS table, locking out all auth.
         self.check_ip_rate_limit("login", ip)?;
+        self.check_rate_limit(&format!("login:{}", uname))?;
 
         let user_path = PathBuf::from(&self.data_dir)
             .join("users")
@@ -545,6 +587,27 @@ impl AuthManager {
         Some(entry.username.clone())
     }
 
+    /// Read-only liveness check for an already-validated session, used to re-validate
+    /// a long-lived open WebSocket's OUTBOUND stream without the side effects of
+    /// validate_session. Unlike validate_session it takes only a SHARED ref (get, not
+    /// get_mut), does NOT bump last_used, and does NOT evict on expiry (lazy eviction
+    /// stays with validate_session / the idle-prune sweep). This keeps it observably
+    /// side-effect-free for a valid session, so periodic polling from send_task cannot
+    /// itself extend a session's idle lifetime. Returns true only if the token still
+    /// maps to `expected_user` and is within both the age and idle limits.
+    pub fn session_valid_for(&self, raw_token: &str, expected_user: &str) -> bool {
+        let token = match validate_uuid(raw_token) { Some(t) => t, None => return false };
+        let now = Utc::now().timestamp();
+        match self.sessions.get(&token) {
+            Some(entry) => {
+                entry.username == expected_user
+                    && now - entry.created_at <= SESSION_MAX_AGE_SECS
+                    && now - entry.last_used  <= SESSION_IDLE_MAX_SECS
+            }
+            None => false,
+        }
+    }
+
     pub fn logout(&self, raw_token: &str) {
         if let Some(token) = validate_uuid(raw_token) {
             self.sessions.remove(&token);
@@ -589,6 +652,17 @@ impl AuthManager {
         if !is_safe_username(&uname) {
             return;
         }
+        // Hold the same per-user lock every other mutator takes (reset_password,
+        // verify_email, set_admin, set_can_upload, change_password, disable_user, login's
+        // session-cap section). delete_account was the lone mutator that skipped it, so a
+        // concurrent change_password (slow Argon2 verify+hash under the lock) could finish
+        // its write_user_atomic rename AFTER this remove_file, RESURRECTING users/<u>.json
+        // (verified=true + valid hash) atop the already-deleted vault/e2e/networks — an
+        // undead, loginable account that defeats deletion. Serializing here closes that
+        // race. Deadlock-free: no caller holds user_lock when invoking delete_account
+        // (purge_account does not; the WS path's preceding login() drops its guard first).
+        let lock = self.user_lock(&uname);
+        let _guard = lock.lock().await;
         // #6: enumerate the user's network config ids (filenames under
         // networks/<username>/) and delete the REAL per-conn_id logs dirs at
         // logs/<conn_id>/. The old code deleted logs/<username>, which never
@@ -603,6 +677,12 @@ impl AuthManager {
                         if let Some(safe_id) = validate_uuid(conn_id) {
                             let log_dir = PathBuf::from(&self.data_dir).join("logs").join(&safe_id);
                             let _ = tokio::fs::remove_dir_all(&log_dir).await;
+                            // Also drop the per-connection TLS client-cert dir
+                            // (certs/<conn_id>: cert.pem + key.enc). Nothing else in the
+                            // deletion path removed these, so a deleted account's client
+                            // certs lingered on disk. safe_id is already UUID-validated.
+                            let cert_dir = PathBuf::from(&self.data_dir).join("certs").join(&safe_id);
+                            let _ = tokio::fs::remove_dir_all(&cert_dir).await;
                         }
                     }
                 }
@@ -698,6 +778,9 @@ impl AuthManager {
 
     pub async fn set_admin(&self, username: &str, is_admin: bool) -> Result<()> {
         let uname = username.to_lowercase();
+        // Path-safety guard (mirrors disable_user/delete_account) so a crafted target
+        // username can't traverse out of users/. Behavior-preserving for valid names.
+        if !is_safe_username(&uname) { anyhow::bail!("Invalid username"); }
         // #22: serialize read→mutate→write under the per-user lock + atomic write.
         let lock = self.user_lock(&uname);
         let _guard = lock.lock().await;
@@ -709,8 +792,28 @@ impl AuthManager {
         Ok(())
     }
 
+    pub async fn set_verified(&self, username: &str, verified: bool) -> Result<()> {
+        let uname = username.to_lowercase();
+        if !is_safe_username(&uname) { anyhow::bail!("Invalid username"); }
+        // #22: serialize read→mutate→write under the per-user lock + atomic write, like
+        // every other mutator. The admin add-user route previously did a raw, unlocked,
+        // non-atomic read-modify-write to flip verified=true, which could race a concurrent
+        // mutator (resurrection / lost-update) and left a crash-truncation window.
+        let lock = self.user_lock(&uname);
+        let _guard = lock.lock().await;
+        let path = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", uname));
+        let json = tokio::fs::read_to_string(&path).await?;
+        let mut user: User = serde_json::from_str(&json)?;
+        user.verified = verified;
+        self.write_user_atomic(&uname, &user).await?;
+        Ok(())
+    }
+
     pub async fn set_can_upload(&self, username: &str, can_upload: bool) -> Result<()> {
         let uname = username.to_lowercase();
+        // Path-safety guard (mirrors disable_user/delete_account) so a crafted target
+        // username can't traverse out of users/. Behavior-preserving for valid names.
+        if !is_safe_username(&uname) { anyhow::bail!("Invalid username"); }
         // #22: serialize read→mutate→write under the per-user lock + atomic write.
         let lock = self.user_lock(&uname);
         let _guard = lock.lock().await;
@@ -724,9 +827,10 @@ impl AuthManager {
 
     pub async fn change_password(&self, username: &str, old_password: &str, new_password: &str, ip: Option<&str>) -> Result<()> {
         let uname = username.trim().to_lowercase();
-        self.check_rate_limit(&format!("chpass:{}", uname))?;
-        // #15: IP dimension.
+        // #15: IP dimension FIRST (before the per-user bucket insert) so one IP can't fill
+        // the global bucket table via varying usernames. See login() for the rationale.
         self.check_ip_rate_limit("chpass", ip)?;
+        self.check_rate_limit(&format!("chpass:{}", uname))?;
 
         // #22: serialize the entire verify→mutate→write under the per-user lock.
         let lock = self.user_lock(&uname);
@@ -801,13 +905,17 @@ impl AuthManager {
     }
 }
 
-/// #58: Validate a username for safe filesystem-path use. Matches the same charset
-/// and length registration enforces ([A-Za-z0-9_-], 3–32) and explicitly rejects
-/// '.', '..', and empty. Used before any path join in delete_account / disable_user.
+/// #58: Validate a username for safe filesystem-path use. MUST match the exact charset
+/// and length registration enforces — register() allows `c.is_alphanumeric()` (Unicode)
+/// plus '_'/'-', 3–32 bytes — otherwise a legitimately-registered (Unicode) username
+/// would be rejected here and become unmanageable/undeletable. This charset is still
+/// path-safe: Unicode alphanumerics contain no path separators ('/','\\') or '.', and
+/// '.'/'..'/empty are rejected explicitly. Used before any path join in
+/// delete_account / disable_user / set_admin / set_can_upload.
 pub fn is_safe_username(s: &str) -> bool {
     if s.len() < 3 || s.len() > 32 { return false; }
     if s == "." || s == ".." { return false; }
-    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Validate that a string is a canonical UUID.

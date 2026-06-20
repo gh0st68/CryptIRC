@@ -54,7 +54,7 @@ window.E2E = {
   channelKeys:  Object.create(null),  // channel → CryptoKey (AES-256-GCM)
   trustStore:   Object.create(null),  // nick → { fingerprint, verified, keyChanged }
   _spkBlob:     null,       // raw encrypted SPK blob (set when server sends it)
-  _encryptLock: Object.create(null),  // nick → Promise chain (S3: serialise per-session sends)
+  _encryptLock: Object.create(null),  // nick → Promise chain (S3: serialise ALL per-session ratchet ops — encrypt AND decrypt — via _withRatchetLock)
 };
 
 // ─── Initialise on vault unlock ───────────────────────────────────────────────
@@ -324,10 +324,54 @@ async function x3dhRespond(x3dhHeader) {
 //   * runs x3dhRespond + ratchetInitRecv, pinning theirIdentityPub (#2) and the
 //     identity-binding AD (#12) on the session.
 // Returns true on success, false if establishment was refused/failed.
+// True if `name` SANITIZES (the server's exact filter: keep [A-Za-z0-9_-]) to a key
+// in the reserved internal namespace ('__spk__' / '__otpk__<id>'). Used to refuse a
+// peer nick that would collide with the user's own private-key blob filenames. The
+// ASCII keep-set is a subset of the server's (Unicode-alnum + _ -), so this can never
+// UNDER-reject a real collision; a legit peer nick never sanitizes to a '__' prefix.
+function _e2eReservedNamespace(name){
+  return String(name).replace(/[^A-Za-z0-9_-]/g, '').startsWith('__');
+}
 async function e2eEstablishResponderSession(from, header) {
+  // SECURITY: peer ratchet sessions share the server-side e2e/sessions namespace with
+  // the user's OWN internal key blobs ('__spk__', '__otpk__<id>'). A peer whose nick
+  // SANITIZES to a reserved name could otherwise overwrite the victim's own private-key
+  // blob → permanent inbound-E2E self-DoS. Test the SERVER-SANITIZED form (the server
+  // strips every char except [A-Za-z0-9_-] before using it as the filename), NOT the
+  // raw nick — e.g. '[__spk__' passes a raw startsWith but the server stores it as
+  // '__spk__'. (saveSession enforces the same below.)
+  if (_e2eReservedNamespace(from)) {
+    console.warn('[E2E] refusing reserved-namespace peer:', from);
+    return false;
+  }
   if (!header || !header.sender_ik) {
     console.warn('[E2E] responder establish: missing sender_ik');
     return false;
+  }
+  // REPLAY GUARD: every responder path (relayed e2e_x3dh_header, inline
+  // [e2ex3dh], and the [e2edm1]-with-x3dh path) calls this and then runs
+  // ratchetInitRecv, which OVERWRITES E2E.dmSessions[from] with a blank
+  // receiving session (CKr fresh, CKs/DHr/Nr/skipped reset). The server relays
+  // X3DH headers verbatim with no dedup, so any authenticated user — or the
+  // peer itself replaying its own captured header — can resend the SAME header
+  // that already established the live session and silently reset/corrupt an
+  // ESTABLISHED session's receive chain (paths 1 & 2 have no restore at all;
+  // the [e2edm1] path's restore only re-applies CKs/DHs/Ns, leaving CKr/Nr/DHr/
+  // skipped destroyed). A genuine re-handshake (peer lost ratchet state, re-ran
+  // /encrypt on) ALWAYS carries a fresh ephemeral_pub (x3dhInitiate generates a
+  // new ephemeral every time), whereas a replay reuses the captured one. So if a
+  // session already exists AND it was established from this exact ephemeral, this
+  // header is a replay/duplicate of the one that built it — the session is
+  // already that session; skip re-establishment (return success, idempotent).
+  // Behaviour-preserving: first contact and genuine re-handshake (new ephemeral)
+  // are unaffected; only a byte-replayed header stops resetting the live session.
+  const _existing = E2E.dmSessions[from];
+  if (_existing && header.ephemeral_pub
+      && (_existing.establishEph === header.ephemeral_pub
+          || (Array.isArray(_existing.priorEstablishEphs)
+              && _existing.priorEstablishEphs.includes(header.ephemeral_pub)))) {
+    console.warn('[E2E] ignoring replayed X3DH header (known ephemeral) for established session:', from);
+    return true;
   }
   // #11: pin BOTH identity keys. sender_sign_ik may be absent from an old
   // initiator; computeIdentityFingerprint tolerates an empty sign key (the
@@ -346,7 +390,9 @@ async function e2eEstablishResponderSession(from, header) {
 
   const { sharedSecret, identityAD } = await x3dhRespond(header);
   // #2: pin the initiator's long-term identity DH pub (header.sender_ik).
-  await ratchetInitRecv(from, sharedSecret, header.sender_ik, identityAD);
+  // Pin the establishing ephemeral so the replay guard above can recognise a
+  // resend of this exact header on the next call.
+  await ratchetInitRecv(from, sharedSecret, header.sender_ik, identityAD, header.ephemeral_pub);
   return true;
 }
 
@@ -400,9 +446,23 @@ async function ratchetInitSend(nick, sharedSecret, theirSPKPub, theirIdentityPub
   return session;
 }
 
-async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD) {
+async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD, establishEph) {
   const RK  = sharedSecret.slice(0, 32);
   const CKr = sharedSecret.slice(32, 64);
+
+  // Carry forward EVERY ephemeral that has previously established this session — not just
+  // the most recent — so the replay guard in e2eEstablishResponderSession recognises a
+  // re-delivered OLDER genuine header (whose ephemeral differs from the current one, e.g.
+  // a header from before a legitimate re-handshake) and treats it as an idempotent no-op
+  // instead of letting it overwrite/desync the live ratchet. Bounded to 32 + deduped; the
+  // current establishEph is tracked in its own field so it's excluded from this list.
+  const _old = E2E.dmSessions[nick];
+  const _prior = [];
+  if (_old) {
+    if (_old.establishEph) _prior.push(_old.establishEph);
+    if (Array.isArray(_old.priorEstablishEphs)) for (const e of _old.priorEstablishEphs) _prior.push(e);
+  }
+  const _priorDedup = [...new Set(_prior.filter(e => e && e !== establishEph))].slice(-32);
 
   // Use SPK keypair as initial DHs so initiator can match the first ratchet step
   const spkObj = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(E2E._spkBlob)));
@@ -424,6 +484,13 @@ async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD)
     theirIdentityPub: theirIdentityPub || null,
     // #12: pin the canonical identity-binding AD for the per-message AEAD.
     identityAD:  identityAD || null,
+    // Replay guard: record the X3DH ephemeral this session was established from,
+    // so a verbatim resend of the same header (relayed by the untrusted server
+    // or replayed by the peer) is recognised and does NOT reset the live session.
+    establishEph: establishEph || null,
+    // ...and every ephemeral that established a PRIOR generation of this session, so a
+    // stale-but-genuine header replayed after a re-handshake is also caught (see above).
+    priorEstablishEphs: _priorDedup,
     skipped:     {},
     isInitiator: false,
   };
@@ -433,18 +500,33 @@ async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD)
   return session;
 }
 
-// S3: serialise outgoing encryptions per session to prevent key reuse
-async function ratchetEncrypt(nick, plaintext) {
-  // Chain each call behind the previous one for the same nick
+// S3: serialise ALL ratchet operations (encrypt AND decrypt) per session. Both paths
+// mutate the same session object, so they must never interleave at an await boundary:
+// an encrypt advancing the send chain (CKs/Ns) while a decrypt is mid-flight would be
+// silently lost when the decrypt commits — ratchetDecrypt clones the session and swaps
+// the whole object back on a successful decrypt, reverting any send-chain progress made
+// in the meantime (→ message-key reuse / send-chain desync / a dropped outbound msg).
+// Two concurrent decrypts would clobber each other the same way. One shared per-nick
+// promise chain guarantees strict FIFO serialisation across both directions. Sequential
+// (non-overlapping) calls are completely unaffected — behavior is identical.
+function _withRatchetLock(nick, fn) {
+  // Chain each call behind the previous one for the same nick. The stored promise only
+  // ever resolves (resolve() in finally, never rejected), so `await prev` never throws.
   const prev = E2E._encryptLock[nick] || Promise.resolve();
   let resolve;
   E2E._encryptLock[nick] = new Promise(r => resolve = r);
-  try {
-    await prev;
-    return await _ratchetEncryptInner(nick, plaintext);
-  } finally {
-    resolve();
-  }
+  return (async () => {
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      resolve();
+    }
+  })();
+}
+
+async function ratchetEncrypt(nick, plaintext) {
+  return _withRatchetLock(nick, () => _ratchetEncryptInner(nick, plaintext));
 }
 
 async function _ratchetEncryptInner(nick, plaintext) {
@@ -486,9 +568,27 @@ async function _ratchetEncryptInner(nick, plaintext) {
 }
 
 async function ratchetDecrypt(nick, envelope) {
+  // Serialise with the send path (and other decrypts) per nick — see _withRatchetLock.
+  return _withRatchetLock(nick, () => _ratchetDecryptInner(nick, envelope));
+}
+
+async function _ratchetDecryptInner(nick, envelope) {
   // L2: null-check session BEFORE any property access
-  const session = E2E.dmSessions[nick];
-  if (!session) throw new Error(`No ratchet session with ${nick} — key exchange needed`);
+  const live = E2E.dmSessions[nick];
+  if (!live) throw new Error(`No ratchet session with ${nick} — key exchange needed`);
+  // ATOMICITY (Signal spec §decrypt): operate on a deep CLONE and commit only after the
+  // ciphertext is authenticated. The sole authentication is messageDecrypt (AES-GCM tag)
+  // below, which throws on any forged/tampered [e2edm1] envelope — and the server relays
+  // every PRIVMSG, so any peer who can DM the victim can inject one. Every mutation in
+  // this function (skipped-key delete, skipMessageKeys, CKr/Nr advance, dhRatchetStep)
+  // therefore runs on `session` (the clone); the live ratchet in E2E.dmSessions[nick] is
+  // untouched until saveSession() reassigns it AFTER a successful decrypt. A forgery now
+  // leaves Nr/CKr/CKs/RK/DHs/DHr and the buffered skipped keys fully intact (the next
+  // genuine message still decrypts) instead of desyncing the session until reload, and it
+  // can no longer destroy a buffered out-of-order key. The session is pure-JSON
+  // (saveSession does JSON.stringify), so structuredClone is a faithful deep copy; for
+  // honest peers the committed state, plaintext and wire output are byte-identical to before.
+  const session = structuredClone(live);
 
   // Support both compact (h/c) and legacy (header/ciphertext) formats
   const header = envelope.h ? { dh: envelope.h.d, pn: envelope.h.p, n: envelope.h.n } : envelope.header;
@@ -711,6 +811,15 @@ async function aesDecryptBlob(b64) {
 // ─── Session persistence ──────────────────────────────────────────────────────
 
 async function saveSession(nick, session) {
+  // SECURITY chokepoint: never persist a PEER session under the reserved internal
+  // namespace ('__spk__' / '__otpk__<id>' — the user's own private-key blobs, which
+  // are written directly elsewhere, NOT via saveSession). Test the SERVER-SANITIZED
+  // form so a nick like '[__spk__' (server stores it as '__spk__') can't slip past.
+  // Legit peer nicks never sanitize to a '__' prefix, so real sessions are unaffected.
+  if (_e2eReservedNamespace(nick)) {
+    console.warn('[E2E] refusing to store peer session under reserved name:', nick);
+    return;
+  }
   E2E.dmSessions[nick] = session;
   const blob = await aesEncryptBlob(new TextEncoder().encode(JSON.stringify(session)));
   wsend({ type:'e2e_store_session', partner:nick, blob });
@@ -859,50 +968,54 @@ async function e2eHandleEvent(ev) {
     case 'e2e_bundle': {
       const nick   = ev.username;
       const bundle = ev.bundle;
+      try {
+        // Guard: if session already exists (e.g. both users initiated simultaneously), skip
+        if (E2E.dmSessions[nick]) {
+          e2eSysMsg(nick, `🔐 Session with ${nick} already active — skipping duplicate initiation`);
+          break;
+        }
 
-      // Guard: if session already exists (e.g. both users initiated simultaneously), skip
-      if (E2E.dmSessions[nick]) {
-        e2eSysMsg(nick, `🔐 Session with ${nick} already active — skipping duplicate initiation`);
-        break;
-      }
+        // #11: TOFU now pins BOTH identity keys (dh + sign) so swapping either
+        // trips the key-change warning. Must match the compare path used here.
+        const fp    = await computeIdentityFingerprint(bundle.identity_dh_key, bundle.identity_sign_key);
+        const trust = await e2eCheckTrust(nick, fp);
 
-      // #11: TOFU now pins BOTH identity keys (dh + sign) so swapping either
-      // trips the key-change warning. Must match the compare path used here.
-      const fp    = await computeIdentityFingerprint(bundle.identity_dh_key, bundle.identity_sign_key);
-      const trust = await e2eCheckTrust(nick, fp);
+        if (trust.keyChanged) {
+          e2eShowKeyChangeWarning(nick, fp);
+          return;
+        }
 
-      if (trust.keyChanged) {
-        e2eShowKeyChangeWarning(nick, fp);
-        return;
-      }
+        const { sharedSecret, ephemeralPub, usedOTPKId, identityAD } = await x3dhInitiate(bundle);
+        const myIKPub     = await exportPub(E2E.identityKeys.dhKeyPair.publicKey,   'ECDH');
+        const mySignIKPub = await exportPub(E2E.identityKeys.signKeyPair.publicKey, 'ECDSA');
 
-      const { sharedSecret, ephemeralPub, usedOTPKId, identityAD } = await x3dhInitiate(bundle);
-      const myIKPub     = await exportPub(E2E.identityKeys.dhKeyPair.publicKey,   'ECDH');
-      const mySignIKPub = await exportPub(E2E.identityKeys.signKeyPair.publicKey, 'ECDSA');
+        // L1: pass SPK pub (not identity key) as DHr seed.
+        // #2: pin the partner's long-term identity DH pub (bundle.identity_dh_key).
+        // #12: pin the identity-binding AD.
+        await ratchetInitSend(nick, sharedSecret, bundle.signed_prekey.public_key, bundle.identity_dh_key, identityAD);
 
-      // L1: pass SPK pub (not identity key) as DHr seed.
-      // #2: pin the partner's long-term identity DH pub (bundle.identity_dh_key).
-      // #12: pin the identity-binding AD.
-      await ratchetInitSend(nick, sharedSecret, bundle.signed_prekey.public_key, bundle.identity_dh_key, identityAD);
+        // L3: store x3dh_header OUTSIDE the session object, in a separate map
+        E2E._pendingX3DH = E2E._pendingX3DH || {};
+        E2E._pendingX3DH[nick] = {
+          sender_ik:      myIKPub,
+          // #12: include our SIGN identity so the responder can reconstruct the
+          // identical identity AD and pin BOTH our keys via TOFU (#11).
+          sender_sign_ik: mySignIKPub,
+          ephemeral_pub:  ephemeralPub,
+          used_otpk_id:   usedOTPKId,
+          spk_id:         bundle.signed_prekey.key_id,
+        };
 
-      // L3: store x3dh_header OUTSIDE the session object, in a separate map
-      E2E._pendingX3DH = E2E._pendingX3DH || {};
-      E2E._pendingX3DH[nick] = {
-        sender_ik:      myIKPub,
-        // #12: include our SIGN identity so the responder can reconstruct the
-        // identical identity AD and pin BOTH our keys via TOFU (#11).
-        sender_sign_ik: mySignIKPub,
-        ephemeral_pub:  ephemeralPub,
-        used_otpk_id:   usedOTPKId,
-        spk_id:         bundle.signed_prekey.key_id,
-      };
-
-      updateE2EIndicator(nick);
-      e2eSysMsg(nick, '🔐 E2E session established with ' + nick);
-      // Refresh encryption panel if it's open for this nick
-      if (typeof showEncryptPanel === 'function' && active && active.target === nick) {
-        const overlay = document.getElementById('encrypt-overlay');
-        if (overlay && overlay.classList.contains('show')) showEncryptPanel();
+        updateE2EIndicator(nick);
+        e2eSysMsg(nick, '🔐 E2E session established with ' + nick);
+        // Refresh encryption panel if it's open for this nick
+        if (typeof showEncryptPanel === 'function' && active && active.target === nick) {
+          const overlay = document.getElementById('encrypt-overlay');
+          if (overlay && overlay.classList.contains('show')) showEncryptPanel();
+        }
+      } catch(e) {
+        console.warn('[E2E] Failed to process bundle:', nick, e);
+        e2eSysMsg(nick, '🔐 Failed to establish E2E session with ' + nick + ' (invalid key bundle)');
       }
       break;
     }

@@ -14,12 +14,73 @@
 set -euo pipefail
 
 # ── Colors / output helpers ───────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
-BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+# Full styling + animation on a real terminal; auto-disabled when output is piped
+# to a file/tee or when NO_COLOR is set, so logs stay clean and nothing breaks.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
+    GREY='\033[0;90m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'; FANCY=true
+else
+    RED=''; GREEN=''; YELLOW=''; CYAN=''; GREY=''
+    BOLD=''; DIM=''; NC=''; FANCY=false
+fi
+# The spinner hides the cursor — guarantee it comes back on any exit.
+[[ "$FANCY" == true ]] && trap 'printf "\033[?25h" 2>/dev/null || true' EXIT
+
 ok()   { echo -e "  ${GREEN}✓${NC} $*"; }
 warn() { echo -e "  ${YELLOW}⚠${NC} $*"; }
-die()  { echo -e "\n${RED}Error:${NC} $*\n" >&2; exit 1; }
-step() { echo -e "\n${BOLD}$*${NC}\n"; }
+die()  { echo -e "\n  ${RED}✗ Error:${NC} $*\n" >&2; exit 1; }
+
+# A thin horizontal rule, clamped to a sane width.
+hr() {
+    local w="${COLUMNS:-0}"; [[ "$w" -lt 10 ]] && w=$(tput cols 2>/dev/null || echo 60)
+    [[ "$w" -gt 60 ]] && w=60
+    printf "${GREY}"; printf '─%.0s' $(seq 1 "$w"); printf "${NC}\n"
+}
+
+# A unicode progress bar: progressbar CURRENT TOTAL  (green=done, grey=remaining)
+progressbar() {
+    local cur="$1" tot="$2" width=22 i filled out=""
+    filled=$(( cur * width / tot )); (( filled > width )) && filled=width
+    out="${GREEN}"
+    for ((i=0; i<width; i++)); do
+        (( i == filled )) && out+="${GREY}"
+        if (( i < filled )); then out+="█"; else out+="░"; fi
+    done
+    out+="${NC}"; printf "%b" "$out"
+}
+
+# Section header. If the title starts with [N/T] it draws an inline progress bar.
+step() {
+    local title="$*" n t rest bar
+    echo ""
+    if [[ "$title" =~ ^\[([0-9]+)/([0-9]+)\]\ (.*)$ ]]; then
+        n="${BASH_REMATCH[1]}"; t="${BASH_REMATCH[2]}"; rest="${BASH_REMATCH[3]}"
+        bar="$(progressbar "$n" "$t")"
+        echo -e "${CYAN}${BOLD}▸ ${rest}${NC}  ${bar} ${DIM}${n}/${t}${NC}"
+    else
+        echo -e "${CYAN}${BOLD}▸ ${title}${NC}"
+    fi
+    hr
+}
+
+# Big ASCII wordmark shown once at the top.
+logo() {
+    echo ""
+    printf "%b" "${CYAN}${BOLD}"
+    cat <<'ART'
+   ____                  _   ___ ____   ____
+  / ___|_ __ _   _ _ __ | |_|_ _|  _ \ / ___|
+ | |   | '__| | | | '_ \| __|| || |_) | |
+ | |___| |  | |_| | |_) | |_ | ||  _ <| |___
+  \____|_|   \__, | .__/ \__|___|_| \_\____|
+             |___/|_|
+ART
+    printf "%b" "${NC}"
+    echo -e "       ${DIM}🔒 End-to-end encrypted IRC client${NC}   ${GREY}v0.6 · Arch${NC}"
+}
+
+# Animated spinner frames for run() (array → locale-safe with multibyte glyphs).
+SPIN_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 
 INSTALL_DIR="/opt/cryptirc"
 DATA_DIR="/var/lib/cryptirc"
@@ -30,9 +91,27 @@ RUN_LOG="/tmp/cryptirc-install.log"
 
 run() {
   local desc="$1"; shift
-  echo -e "  ${DIM}${desc}...${NC}"
-  if ! "$@" >"$RUN_LOG" 2>&1; then
-    echo -e "  ${RED}✗ ${desc} failed.${NC} Last lines:" >&2
+  if [[ "$FANCY" != true ]]; then
+    echo "  ${desc}..."
+    if ! "$@" >"$RUN_LOG" 2>&1; then
+      echo "  x ${desc} failed. Last lines:" >&2
+      tail -n 15 "$RUN_LOG" >&2
+      die "Step failed. Full output: $RUN_LOG"
+    fi
+    return
+  fi
+  "$@" >"$RUN_LOG" 2>&1 &
+  local pid=$! i=0 n=${#SPIN_FRAMES[@]}
+  printf '\033[?25l'
+  while kill -0 "$pid" 2>/dev/null; do
+    printf "\r  ${CYAN}%s${NC} ${DIM}%s…${NC}\033[K" "${SPIN_FRAMES[i % n]}" "$desc"
+    i=$((i+1)); sleep 0.08 || true
+  done
+  printf '\033[?25h'
+  if wait "$pid"; then
+    printf "\r  ${GREEN}✓${NC} %s\033[K\n" "$desc"
+  else
+    printf "\r  ${RED}✗${NC} %s\033[K\n" "$desc" >&2
     tail -n 15 "$RUN_LOG" >&2
     die "Step failed. Full output: $RUN_LOG"
   fi
@@ -45,11 +124,7 @@ url_host() { if is_ipv6 "$1"; then echo "[$1]"; else echo "$1"; fi; }
 
 [[ $EUID -eq 0 ]] || die "This script must be run as root:  sudo bash deploy/deploy-arch.sh"
 
-echo ""
-echo -e "${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║${NC}${BOLD}          CryptIRC Installer v0.6 (Arch)              ${NC}${CYAN}║${NC}"
-echo -e "${CYAN}║${NC}${DIM}          End-to-end encrypted IRC client              ${NC}${CYAN}║${NC}"
-echo -e "${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
+logo
 
 # ── Step 1: where will this run? (domain vs bare IP / self-signed) ─────────────
 DOMAIN="${1:-}"
@@ -219,6 +294,8 @@ id "$SERVICE_USER" &>/dev/null || useradd --system --no-create-home --shell /usr
 mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$LOG_DIR" /var/log/caddy
 chown "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR" "$LOG_DIR"
 chmod 750 "$DATA_DIR" "$LOG_DIR"
+# Caddy runs as the 'caddy' user and writes its access log here; make sure it can.
+chown caddy:caddy /var/log/caddy 2>/dev/null || true
 
 # ── Step 5: build ─────────────────────────────────────────────────────────────
 step "[5/6] Building CryptIRC"
@@ -264,7 +341,7 @@ http://$URL_HOST {
 
 https://$URL_HOST {
     tls $SS_DIR/cert.pem $SS_DIR/key.pem
-    reverse_proxy localhost:9001 {
+    reverse_proxy 127.0.0.1:9001 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
@@ -291,7 +368,7 @@ else
 }
 
 $URL_HOST {
-    reverse_proxy localhost:9001 {
+    reverse_proxy 127.0.0.1:9001 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         header_up X-Forwarded-For {remote_host}
@@ -328,6 +405,10 @@ cat > /etc/systemd/system/cryptirc.service <<UNIT
 Description=CryptIRC — Encrypted IRC Client
 After=network-online.target caddy.service
 Wants=network-online.target
+# Crash-loop guard. The correct location in modern systemd is [Unit]; the
+# legacy [Service] StartLimitInterval=/StartLimitBurst= spelling is deprecated.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -340,8 +421,9 @@ TimeoutStopSec=30
 KillMode=mixed
 Restart=on-failure
 RestartSec=5
-StartLimitInterval=60
-StartLimitBurst=5
+# Files/dirs the service creates default to 0600/0700 (matches the at-rest
+# secrets hardening), even if a code path forgets to chmod.
+UMask=0077
 
 Environment=CRYPTIRC_DATA=$DATA_DIR
 Environment="CRYPTIRC_BASE_URL=https://$URL_HOST"
@@ -381,7 +463,14 @@ UNIT
 chmod 640 /etc/systemd/system/cryptirc.service
 
 systemctl daemon-reload
-systemctl enable --now cryptirc >/dev/null 2>&1 || true
+systemctl enable cryptirc >/dev/null 2>&1 || true           # start on boot
+# Use `restart`, NOT `enable --now`: `--now` only does a `start`, which is a no-op
+# if the unit is already active. Re-running this installer on a live system installs
+# the new binary on disk but the old process keeps running the old (now-unlinked)
+# inode — so without an explicit restart the update silently never takes effect.
+# `restart` starts it on a fresh install and swaps in the new binary on a re-run.
+systemctl restart cryptirc >/dev/null 2>&1 || true          # don't abort — the check below reports real status
+systemctl enable caddy >/dev/null 2>&1 || true              # persist across reboot (pacman doesn't auto-enable services)
 systemctl reload-or-restart caddy  >/dev/null 2>&1 || true
 ok "Services started"
 

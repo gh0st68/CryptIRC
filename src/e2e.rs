@@ -44,6 +44,25 @@ use tracing::warn;
 const OTPK_CONSUME_WINDOW: Duration = Duration::from_secs(60);
 const OTPK_CONSUME_MAX_PER_WINDOW: u32 = 5;
 
+// HIGH: cap the number of one-time-prekey files written per call. A single
+// publish/add carrying an unbounded `Vec<OneTimePrekey>` would create one inode
+// per key, letting any authenticated user exhaust disk/inodes. Real clients
+// publish at most a small bounded refill batch (256), so any input above this is
+// abusive. This is the belt-and-suspenders write-loop bound; the command
+// handlers also truncate the incoming vector before reaching the store.
+const MAX_OTPK_WRITES_PER_CALL: usize = 256;
+
+// MEDIUM/HIGH: per-user on-disk caps to bound disk/inode growth. Each of these
+// bounds the number of records/files a single user can accumulate. Real clients
+// never approach these limits (a few trusted nicks, a handful of active sessions
+// and channels), so a generous reject/evict-when-exceeded policy is
+// behaviour-preserving for legitimate use while denying a disk/inode-exhaustion
+// DoS primitive.
+const MAX_TRUST_RECORDS: usize = 4096;
+const MAX_SESSION_FILES: usize = 4096;
+const MAX_OTPK_TOTAL: usize = 1024;
+const MAX_CHANNEL_KEY_FILES: usize = 4096;
+
 // ─── Public key bundle types ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +111,11 @@ pub struct E2EStore {
     /// S2: per-user mutex prevents TOCTOU races on OTPK consumption.
     /// DashMap<username, Mutex<()>>
     otpk_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// MEDIUM: per-user mutex serializing the load->mutate->save window in
+    /// `update_trust`. Without it, concurrent same-user E2EUpdateTrust calls form
+    /// an unserialized read-modify-write on trust.json and can silently drop a
+    /// pin (undetected key-change). Mirrors the otpk_locks pattern.
+    trust_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     /// #27: per-target sliding-window counter of OTPK consumptions. Keyed by the
     /// target username (the pool being drained). Value is (window_start, count).
     otpk_consume_rate: Arc<DashMap<String, (Instant, u32)>>,
@@ -103,6 +127,7 @@ impl E2EStore {
         Self {
             data_dir:          data_dir.to_string(),
             otpk_locks:        Arc::new(DashMap::new()),
+            trust_locks:       Arc::new(DashMap::new()),
             otpk_consume_rate: Arc::new(DashMap::new()),
         }
     }
@@ -117,6 +142,15 @@ impl E2EStore {
     /// S2: acquire the per-user OTPK lock.
     fn otpk_lock(&self, username: &str) -> Arc<Mutex<()>> {
         self.otpk_locks
+            .entry(username.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// MEDIUM: acquire the per-user trust lock, serializing the
+    /// load->mutate->save window in `update_trust`.
+    fn trust_lock(&self, username: &str) -> Arc<Mutex<()>> {
+        self.trust_locks
             .entry(username.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
@@ -180,7 +214,21 @@ impl E2EStore {
         // Store one-time prekeys individually
         let otpk_dir = dir.join("otpk");
         tokio::fs::create_dir_all(&otpk_dir).await?;
-        for opk in &bundle.one_time_prekeys {
+        // HIGH: bound the OTPK writes by BOTH the per-call cap AND the per-user TOTAL cap
+        // (MAX_OTPK_TOTAL). Like add_one_time_prekeys, the per-call cap alone is bypassable
+        // by repeated E2EPublishBundle calls (each carrying fresh, non-colliding key_ids),
+        // which would accumulate ~256 files per call and exhaust inodes/disk on the shared
+        // data volume. Serialize the count→headroom→write block under the same per-user
+        // OTPK lock that consume/add take, so the total cap is correct under multi-device
+        // concurrency. The main bundle.json (identity + signed prekey) is always written
+        // above regardless, so republishing still refreshes the public keys — only OTPKs
+        // beyond the total cap are dropped.
+        let lock = self.otpk_lock(username);
+        let _guard = lock.lock().await;
+        let existing = self.otpk_count(username).await;
+        let headroom = MAX_OTPK_TOTAL.saturating_sub(existing);
+        let limit = headroom.min(MAX_OTPK_WRITES_PER_CALL);
+        for opk in bundle.one_time_prekeys.iter().take(limit) {
             tokio::fs::write(
                 otpk_dir.join(format!("{}.json", opk.key_id)),
                 serde_json::to_string(opk)?,
@@ -249,7 +297,35 @@ impl E2EStore {
     pub async fn add_one_time_prekeys(&self, username: &str, keys: Vec<OneTimePrekey>) -> Result<()> {
         let otpk_dir = self.user_dir(username).join("otpk");
         tokio::fs::create_dir_all(&otpk_dir).await?;
-        for opk in keys {
+        // MEDIUM: the per-call cap (MAX_OTPK_WRITES_PER_CALL) is bypassable by
+        // repeated E2EAddOTPKs calls, so cap the TOTAL OTPK files held per user.
+        // Count what already exists and only write up to the remaining headroom.
+        // Consumption (fetch_bundle) removes files and frees slots, so legitimate
+        // refill is unaffected; a flood is simply truncated at the total cap.
+        //
+        // The count→headroom→write block must hold the per-user OTPK lock (the same one
+        // consume and store_bundle take): a single WS recv_task is sequential, but a user
+        // can open multiple sockets (multi-device), and two concurrent E2EAddOTPKs would
+        // otherwise both read the same `existing`, both compute the same headroom, and each
+        // write up to MAX_OTPK_WRITES_PER_CALL distinct-key_id files — overshooting
+        // MAX_OTPK_TOTAL by up to (N-1)*256 and defeating the inode/disk bound. No deadlock:
+        // this path never recurses into consume/store_bundle and vice versa.
+        let lock = self.otpk_lock(username);
+        let _guard = lock.lock().await;
+        let existing = self.otpk_count(username).await;
+        let headroom = MAX_OTPK_TOTAL.saturating_sub(existing);
+        if headroom == 0 {
+            warn!(
+                "[E2E] OTPK total cap ({}) reached for '{}' — dropping refill batch",
+                MAX_OTPK_TOTAL, username
+            );
+            return Ok(());
+        }
+        // HIGH: bound the write loop so an oversized batch can't exhaust
+        // inodes/disk. Caps at MAX_OTPK_WRITES_PER_CALL files per call and at the
+        // remaining total headroom, whichever is smaller.
+        let limit = headroom.min(MAX_OTPK_WRITES_PER_CALL);
+        for opk in keys.into_iter().take(limit) {
             tokio::fs::write(
                 otpk_dir.join(format!("{}.json", opk.key_id)),
                 serde_json::to_string(&opk)?,
@@ -276,7 +352,23 @@ impl E2EStore {
         let safe: String = partner.chars()
             .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
             .take(128).collect();
-        tokio::fs::write(dir.join(format!("{}.enc", safe)), blob).await?;
+        let path = dir.join(format!("{}.enc", safe));
+        // MEDIUM: one session file per partner with no cap lets a user create an
+        // unbounded number of session files (one inode each). Only a NEW partner
+        // file grows the set — overwriting an existing partner is always allowed —
+        // so we count existing files only when the target file doesn't yet exist,
+        // and reject once the per-user cap is reached. Legitimate users have a
+        // bounded set of active conversations and never hit this.
+        if tokio::fs::metadata(&path).await.is_err()
+            && count_dir_entries(&dir).await >= MAX_SESSION_FILES
+        {
+            warn!(
+                "[E2E] session file cap ({}) reached for '{}' — rejecting new partner '{}'",
+                MAX_SESSION_FILES, username, safe
+            );
+            anyhow::bail!("session storage limit reached");
+        }
+        tokio::fs::write(path, blob).await?;
         Ok(())
     }
 
@@ -305,7 +397,23 @@ impl E2EStore {
         let dir = self.user_dir(username).join("channels");
         tokio::fs::create_dir_all(&dir).await?;
         let safe = safe_channel(channel);
-        tokio::fs::write(dir.join(format!("{}.enc", safe)), blob).await?;
+        let path = dir.join(format!("{}.enc", safe));
+        // MEDIUM: one channel-key file per channel with no cap lets a user create
+        // an unbounded number of files (one inode each). Only a NEW channel grows
+        // the set — overwriting an existing channel is always allowed — so count
+        // existing files only when the target file doesn't yet exist, and reject
+        // once the per-user cap is reached. Legitimate users join a bounded number
+        // of channels and never hit this.
+        if tokio::fs::metadata(&path).await.is_err()
+            && count_dir_entries(&dir).await >= MAX_CHANNEL_KEY_FILES
+        {
+            warn!(
+                "[E2E] channel-key file cap ({}) reached for '{}' — rejecting new channel '{}'",
+                MAX_CHANNEL_KEY_FILES, username, safe
+            );
+            anyhow::bail!("channel key storage limit reached");
+        }
+        tokio::fs::write(path, blob).await?;
         Ok(())
     }
 
@@ -355,6 +463,12 @@ impl E2EStore {
     pub async fn update_trust(
         &self, username: &str, nick: &str, fingerprint: &str, verified: bool
     ) -> Result<(TrustRecord, bool)> {
+        // MEDIUM: serialize the entire load->mutate->save window per user so
+        // concurrent same-user E2EUpdateTrust calls can't form an unserialized
+        // read-modify-write that silently drops a pin (undetected key-change).
+        let lock = self.trust_lock(username);
+        let _g = lock.lock().await;
+
         let mut records = self.load_trust(username).await;
         let now = chrono::Utc::now().timestamp();
 
@@ -371,6 +485,18 @@ impl E2EStore {
             return Ok((rec, fp_changed));
         }
 
+        // HIGH: bound per-user trust.json growth (and its O(n^2) rewrite cost) so a
+        // flood of distinct nicks can't exhaust disk/inodes. REJECT at the cap rather
+        // than evicting: silently dropping a pinned fingerprint would erase TOFU
+        // history and let a later key-change for the evicted peer go undetected.
+        // Overwriting an existing nick (handled above) is unaffected, and legitimate
+        // users with a handful of trusted nicks never reach this limit. Consistent
+        // with the session/channel-key file caps.
+        if records.len() >= MAX_TRUST_RECORDS {
+            warn!("[E2E] trust record cap ({}) reached for '{}' — rejecting new pin", MAX_TRUST_RECORDS, username);
+            anyhow::bail!("Trust record limit reached");
+        }
+
         let rec = TrustRecord {
             nick:       nick.to_string(),
             fingerprint: fingerprint.to_string(),
@@ -384,6 +510,18 @@ impl E2EStore {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Cheaply count the number of entries in a directory. Used to enforce per-user
+/// on-disk file caps. A missing/unreadable directory counts as 0 (nothing stored
+/// yet), so a first write is always allowed.
+async fn count_dir_entries(dir: &std::path::Path) -> usize {
+    let Ok(mut rd) = tokio::fs::read_dir(dir).await else { return 0; };
+    let mut n = 0;
+    while let Ok(Some(_)) = rd.next_entry().await {
+        n += 1;
+    }
+    n
+}
 
 fn safe_channel(channel: &str) -> String {
     channel.chars()

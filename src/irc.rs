@@ -10,7 +10,7 @@
 use anyhow::Result;
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
     sync::Mutex,
     time::{sleep, timeout, Duration, Instant},
@@ -64,6 +64,116 @@ fn params_from(params: &[String], n: usize) -> String {
     params.get(n..).map(|s| s.join(" ")).unwrap_or_default()
 }
 
+/// #S7: outcome of a single capped line read. See `read_capped_line`.
+enum CappedLine {
+    /// A complete (or final unterminated) line whose content fit within the cap.
+    /// The terminating `\n` is removed; a trailing `\r`, if any, is left for the
+    /// caller's existing `trim_end_matches` to strip (identical to the old path).
+    Line(String),
+    /// The line exceeded `MAX_IRC_LINE_LEN` and was drained to the next newline
+    /// without ever buffering past the cap. Caller skips it (warn + continue),
+    /// matching the previous post-buffer length check.
+    Oversized,
+    /// Clean end of stream with no pending bytes (server closed the connection).
+    Eof,
+}
+
+/// #S7: read one IRC line with a hard memory bound.
+///
+/// The previous implementation used `BufReader::lines()` / `next_line()`, which
+/// allocate the ENTIRE line before any size check runs. A hostile server that
+/// streams bytes with no `\n` would grow that buffer without limit and OOM the
+/// shared process; the `MAX_IRC_LINE_LEN` guard only fired *after* the unbounded
+/// allocation had already happened.
+///
+/// This helper instead pulls from the `BufReader`'s internal buffer via
+/// `fill_buf()`/`consume()` and copies at most `MAX_IRC_LINE_LEN + 2` content
+/// bytes into an owned buffer. Once that ceiling is hit it keeps consuming (so the
+/// connection stays in sync) but stops growing the buffer, then reports
+/// `Oversized`. The `+2` headroom reproduces the old "trim `\r\n`, then compare
+/// length" semantics exactly, so a maximal legitimate line is still accepted.
+///
+/// Behaviour parity with the old `next_line()` path:
+///   (a) EOF with no pending bytes → `Eof` (caller returns `Ok(())`).
+///   (e) strict UTF-8: invalid bytes yield an `InvalidData` error, exactly like
+///       `read_line`'s validation, so the caller drops the connection (`Err`).
+async fn read_capped_line<R>(reader: &mut R) -> std::io::Result<CappedLine>
+where
+    R: AsyncBufRead + Unpin,
+{
+    // Ceiling on buffered content bytes (everything before the terminating `\n`).
+    // `+2` so a line of exactly MAX_IRC_LINE_LEN content followed by `\r\n` — or a
+    // trailing `\r` that trimming would remove — is still accepted, matching the
+    // old trim-then-compare check.
+    const CONTENT_CEIL: usize = MAX_IRC_LINE_LEN + 2;
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut oversized = false;
+
+    loop {
+        // How many bytes to consume from the BufReader after inspecting them, and
+        // whether this chunk contained the line-terminating newline. Computed inside
+        // a scope so the `&[u8]` borrow from `fill_buf()` ends before `consume()`.
+        let (consume_amt, found_nl) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                // EOF. If we have pending content it's a final unterminated line
+                // (parity with `Lines`, which yields a last line without `\n`);
+                // otherwise it's a clean close.
+                if buf.is_empty() && !oversized {
+                    return Ok(CappedLine::Eof);
+                }
+                break;
+            }
+            match available.iter().position(|&b| b == b'\n') {
+                Some(idx) => {
+                    // `idx` bytes are line content; +1 to also consume the `\n`.
+                    if !oversized {
+                        let take = idx.min(CONTENT_CEIL - buf.len());
+                        buf.extend_from_slice(&available[..take]);
+                        if take < idx {
+                            // The newline is within reach but content already exceeds
+                            // the cap — discard this line.
+                            oversized = true;
+                        }
+                    }
+                    (idx + 1, true)
+                }
+                None => {
+                    // No newline yet: copy what fits, then keep draining without
+                    // growing the buffer once the ceiling is reached.
+                    if !oversized {
+                        let room = CONTENT_CEIL - buf.len();
+                        let take = available.len().min(room);
+                        buf.extend_from_slice(&available[..take]);
+                        if take < available.len() {
+                            oversized = true;
+                        }
+                    }
+                    (available.len(), false)
+                }
+            }
+        };
+        reader.consume(consume_amt);
+        if found_nl {
+            break;
+        }
+    }
+
+    if oversized {
+        return Ok(CappedLine::Oversized);
+    }
+
+    // `buf` holds the line content only — the terminating `\n` is consumed but
+    // never copied in, so there is nothing more to strip here. Any trailing `\r`
+    // is left for the caller's existing `trim_end_matches` (parity with the old
+    // path, which re-trimmed too). Validate UTF-8 strictly: an error maps to the
+    // same read-error path the old `next_line()` took on invalid UTF-8.
+    let line = String::from_utf8(buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(CappedLine::Line(line))
+}
+
 /// #46: RAII guard that removes a connection's shared-state entries on ANY exit
 /// from `run_loop`, including a panic unwind. Previously the only cleanup lived in
 /// `connect()` *after* the `do_connect(...).await`, so a panic in the parse/dispatch
@@ -79,14 +189,27 @@ fn params_from(params: &[String], n: usize) -> String {
 /// reconnect backoff. `connect_tasks` is reclaimed on `connect()`'s terminal returns.
 struct ConnCleanup {
     conn_id:     String,
+    conn:        Arc<Mutex<IrcConnection>>,
     connections: Arc<dashmap::DashMap<String, Arc<Mutex<IrcConnection>>>>,
     conn_owners: Arc<dashmap::DashMap<String, String>>,
 }
 
 impl Drop for ConnCleanup {
     fn drop(&mut self) {
-        self.connections.remove(&self.conn_id);
-        self.conn_owners.remove(&self.conn_id);
+        // Identity-checked removal: only reclaim the map entries if they still
+        // point at THIS connection. A fast Disconnect/RemoveNetwork+Connect (or a
+        // reconnect) can replace the entry with a brand-new task's connection before
+        // this old task's Drop runs; an unconditional rem() would then delete the
+        // live successor's freshly-inserted entry. `conn_owners` is keyed by the same
+        // conn_id and inserted/removed in lockstep with `connections`, so gate it on
+        // the identical Arc-identity test to avoid orphaning the successor's owner.
+        let removed = self
+            .connections
+            .remove_if(&self.conn_id, |_, v| Arc::ptr_eq(v, &self.conn))
+            .is_some();
+        if removed {
+            self.conn_owners.remove(&self.conn_id);
+        }
     }
 }
 
@@ -159,9 +282,13 @@ pub async fn connect(
 
         let result = do_connect(&conn_id, &cfg, &username, &state).await;
 
-        // Always remove dead connection from map immediately (L3)
-        state.connections.remove(&conn_id);
-        state.conn_owners.remove(&conn_id);
+        // Map cleanup is owned by ConnCleanup::drop, which runs on EVERY run_loop exit
+        // (return/error/cancel) and removes the entry with an identity check
+        // (remove_if Arc::ptr_eq). Do NOT remove by conn_id here: this block is
+        // synchronous and a fast Disconnect/Connect can reinsert a SUCCESSOR task's
+        // entry before it runs, so an unconditional remove would delete the successor —
+        // orphaning a live, uncontrollable "ghost" connection. (Supersedes the old L3
+        // immediate-remove, which is redundant for this task's own entry and unsafe.)
 
         // User-requested disconnect → stop regardless of result
         if state.disconnect_requested(&conn_id) {
@@ -376,6 +503,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
     // clean `Err`/`Ok` returns handled by connect().
     let _cleanup = ConnCleanup {
         conn_id:     conn_id.to_string(),
+        conn:        conn.clone(),
         connections: state.connections.clone(),
         conn_owners: state.conn_owners.clone(),
     };
@@ -428,7 +556,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
         c.send_raw(&format!("USER {} 0 * :{}\r\n", strip_crlf(&cfg.username), strip_crlf(&cfg.realname))).await?;
     }
 
-    let mut reader     = BufReader::new(read_half).lines();
+    let mut reader     = BufReader::new(read_half);
     let mut registered = false;
     // S3: bounded names accumulation buffer
     let mut names_buf: HashMap<String, Vec<String>> = HashMap::with_capacity(32);
@@ -468,22 +596,34 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         who_pending.insert(ch.clone());
                         // A send failure here just means the connection is going down;
                         // the read side will surface the real error and reconnect.
-                        if conn.lock().await.send_raw(&format!("WHO {}\r\n", ch)).await.is_err() { break; }
+                        // strip_crlf: channel keys originate from server-supplied JOIN names;
+                        // a stored interior \r would otherwise be reflected into the WHO.
+                        if conn.lock().await.send_raw(&format!("WHO {}\r\n", strip_crlf(&ch))).await.is_err() { break; }
                     }
                 }
             }
 
             // ── Incoming line ──────────────────────────────────────────────
-            res = timeout(READ_TIMEOUT, reader.next_line()) => {
+            res = timeout(READ_TIMEOUT, read_capped_line(&mut reader)) => {
                 let line = match res {
-                    Err(_)          => return Err(anyhow::anyhow!("Read timeout")),
-                    Ok(Ok(Some(l))) => l,
-                    Ok(Ok(None))    => return Ok(()), // clean server close
-                    Ok(Err(e))      => return Err(e.into()),
+                    Err(_)                       => return Err(anyhow::anyhow!("Read timeout")),
+                    Ok(Ok(CappedLine::Line(l)))  => l,
+                    Ok(Ok(CappedLine::Eof))      => return Ok(()), // clean server close
+                    // S7: an oversized line is drained to the next newline without
+                    // growing the buffer past the cap, then skipped — identical
+                    // observable result to the previous post-buffer length check.
+                    Ok(Ok(CappedLine::Oversized)) => {
+                        warn!("[{}] Dropping oversized IRC line (> {} bytes)", conn_id, MAX_IRC_LINE_LEN);
+                        continue;
+                    }
+                    Ok(Err(e))                   => return Err(e.into()),
                 };
                 let line = line.trim_end_matches(['\r', '\n']).to_string();
                 if line.is_empty() { continue; }
-                // S7: reject extremely long lines to prevent memory exhaustion
+                // S7: enforce the exact post-trim length cutoff. `read_capped_line`
+                // already bounds the allocation (it never buffers far past the cap),
+                // but a line whose trimmed content lands just over MAX_IRC_LINE_LEN
+                // must still be dropped here to match the original boundary exactly.
                 if line.len() > MAX_IRC_LINE_LEN {
                     warn!("[{}] Dropping oversized IRC line ({} bytes)", conn_id, line.len());
                     continue;
@@ -507,7 +647,9 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
 
                     "PING" => {
                         let tok = p.params.last().cloned().unwrap_or_default();
-                        conn.lock().await.send_raw(&format!("PONG :{}\r\n", tok)).await?;
+                        // strip_crlf: `tok` is a server-supplied PING param echoed verbatim into
+                        // the outbound PONG; an interior \r would inject a second command.
+                        conn.lock().await.send_raw(&format!("PONG :{}\r\n", strip_crlf(&tok))).await?;
                     }
                     "PONG" => {
                         let tok = p.params.last().cloned().unwrap_or_default();
@@ -914,7 +1056,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             let mut c = conn.lock().await;
                             if nick == c.nick {
                                 if c.channels.contains_key(&channel) {
-                                    (true, true)
+                                    // #43: a server can repeat ":<ournick> JOIN #chan" to force
+                                    // unbounded outbound NAMES/WHO. Only issue NAMES/WHO when the
+                                    // channel is newly inserted; a re-JOIN of an already-tracked
+                                    // channel is still echoed/logged but skips the amplification.
+                                    (true, false)
                                 } else if c.channels.len() < MAX_CHANNELS_PER_CONN {
                                     c.channels.insert(channel.clone(), ChannelState { topic: String::new(), names: vec![] });
                                     (true, true)
@@ -931,12 +1077,22 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         };
                         // Only issue the outbound NAMES amplification for an accepted self-JOIN.
                         if is_self_join {
-                            conn.lock().await.send_raw(&format!("NAMES {}\r\n", channel)).await?;
+                            // strip_crlf: `channel` is a server-supplied JOIN param; an interior
+                            // \r would otherwise be reflected into the outbound NAMES/WHO (CRLF
+                            // injection). The reader splits on \n, so a bare \r survives parsing.
+                            conn.lock().await.send_raw(&format!("NAMES {}\r\n", strip_crlf(&channel))).await?;
                             // Seed the nick panel's away state immediately (don't wait for the
                             // periodic WHO_INTERVAL tick). Marked pending so the reply is consumed
                             // silently rather than dumped to the status buffer.
-                            who_pending.insert(channel.clone());
-                            conn.lock().await.send_raw(&format!("WHO {}\r\n", channel)).await?;
+                            // Cap who_pending independently of the c.channels 256-cap: a self-PART
+                            // removes the channel from c.channels (freeing the #43 slot) but NOT from
+                            // who_pending, and the removing 315 reply is server-controlled. Without
+                            // this guard a malicious peer's JOIN/PART churn (never sending 315) grows
+                            // who_pending without bound → heap exhaustion. Mirrors the who_away guard.
+                            if who_pending.len() < NAMES_BUF_MAX_CHANNELS || who_pending.contains(&channel) {
+                                who_pending.insert(channel.clone());
+                            }
+                            conn.lock().await.send_raw(&format!("WHO {}\r\n", strip_crlf(&channel))).await?;
                         }
                         // Persist for log replay (Lounge-style condense after refresh) —
                         // skipped for channels rejected by the cap to bound disk/inode growth.
@@ -1608,6 +1764,14 @@ fn parse_irc(line: &str) -> IrcLine {
 /// literal backslash. This avoids the ordering bugs and extra allocations of the
 /// old chained `.replace()` approach.
 fn unescape_tag_value(v: &str) -> String {
+    // Defense-in-depth: CR, LF and NUL are illegal inside IRC tag values (they are
+    // line/field delimiters), so DROP any decoded-or-literal CR/LF/NUL rather than
+    // materializing them. This stops a malicious server from smuggling a newline
+    // into a parsed tag value (e.g. the `account` / `time` tags) that some future
+    // code path might concatenate into an outbound raw line — a latent CRLF
+    // injection vector. No legitimate tag value contains these bytes, so honest
+    // traffic is unaffected.
+    fn forbidden(c: char) -> bool { c == '\r' || c == '\n' || c == '\0' }
     let mut out = String::with_capacity(v.len());
     let mut chars = v.chars();
     while let Some(c) = chars.next() {
@@ -1615,13 +1779,14 @@ fn unescape_tag_value(v: &str) -> String {
             match chars.next() {
                 Some(':')  => out.push(';'),
                 Some('s')  => out.push(' '),
-                Some('r')  => out.push('\r'),
-                Some('n')  => out.push('\n'),
+                Some('r')  => {}            // \r → CR: dropped (delimiter)
+                Some('n')  => {}            // \n → LF: dropped (delimiter)
                 Some('\\') => out.push('\\'),
-                Some(other) => out.push(other),
+                Some(other) if !forbidden(other) => out.push(other),
+                Some(_)    => {}            // literal CR/LF/NUL after a backslash: dropped
                 None       => out.push('\\'), // trailing lone backslash → literal
             }
-        } else {
+        } else if !forbidden(c) {
             out.push(c);
         }
     }

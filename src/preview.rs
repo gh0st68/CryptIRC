@@ -225,6 +225,12 @@ fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Clie
         .timeout(TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("CryptIRC/1.0 (Link Preview)")
+        // #17b: disable reqwest's default system-proxy auto-detection. If an ambient
+        // HTTP(S)_PROXY/ALL_PROXY env var were set, the request would tunnel through the
+        // proxy — which re-resolves the hostname itself — completely bypassing the
+        // resolve_to_addrs IP pin and is_private_ip validation (SSRF). A pinned anti-SSRF
+        // client must always connect directly to the validated addresses.
+        .no_proxy()
         .resolve_to_addrs(host, addrs)
         .build()
         .map_err(|e| anyhow::anyhow!("client build failed: {}", e))
@@ -332,12 +338,14 @@ fn html_decode(s: &str) -> String {
 }
 
 /// Reject any address that is not a globally-routable public IP. This is the single
-/// source of truth used by resolve_and_validate_host (#17) for every hop (#18).
+/// source of truth used by resolve_and_validate_host (#17) for every hop (#18) and
+/// reused by notifications.rs's push-endpoint SSRF guard (#83) so both paths share
+/// the same audited logic.
 /// #82: in addition to loopback/RFC1918/link-local/CGNAT, this also rejects
 /// 192.0.0.0/24, 198.18.0.0/15 (benchmarking), multicast (224.0.0.0/4 / ff00::/8),
 /// documentation ranges, and decodes 6to4 (2002::/16) / Teredo (2001::/32) wrappers
 /// so a private IPv4 cannot hide inside an IPv6 tunnel address.
-fn is_private_ip(ip: IpAddr) -> bool {
+pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
@@ -351,6 +359,7 @@ fn is_private_ip(ip: IpAddr) -> bool {
                 || (o[0] == 198 && o[1] == 51 && o[2] == 100) // 198.51.100.0/24 (TEST-NET-2)
                 || (o[0] == 203 && o[1] == 0 && o[2] == 113) // 203.0.113.0/24 (TEST-NET-3)
                 || (o[0] == 198 && (o[1] == 18 || o[1] == 19)) // 198.18.0.0/15 (benchmarking)
+                || o[0] >= 240 // 240.0.0.0/4 (Class E, reserved-future-use; also covers 255.255.255.255)
         }
         IpAddr::V6(v6) => {
             let seg = v6.segments();
@@ -385,6 +394,25 @@ fn is_private_ip(ip: IpAddr) -> bool {
                         (c7 >> 8) as u8, c7 as u8,
                     );
                     is_private_ip(IpAddr::V4(server)) || is_private_ip(IpAddr::V4(client))
+                })
+                // NAT64 (64:ff9b::/96, RFC 6052): the target IPv4 is embedded in seg[6..8].
+                // On a NAT64-enabled host the kernel forwards to that IPv4, so an AAAA of
+                // 64:ff9b::169.254.169.254 would otherwise reach the metadata service.
+                || (seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2..6] == [0,0,0,0] && {
+                    let v4 = std::net::Ipv4Addr::new(
+                        (seg[6] >> 8) as u8, seg[6] as u8,
+                        (seg[7] >> 8) as u8, seg[7] as u8,
+                    );
+                    is_private_ip(IpAddr::V4(v4))
+                })
+                // Deprecated IPv4-compatible IPv6 (::a.b.c.d): seg[0..6]==0, embedded v4 in
+                // seg[6..8]. Decode & check (loopback ::1 is already handled above).
+                || (seg[0..6] == [0,0,0,0,0,0] && (seg[6] != 0 || seg[7] != 0) && {
+                    let v4 = std::net::Ipv4Addr::new(
+                        (seg[6] >> 8) as u8, seg[6] as u8,
+                        (seg[7] >> 8) as u8, seg[7] as u8,
+                    );
+                    is_private_ip(IpAddr::V4(v4))
                 })
                 // Link-local (fe80::/10)
                 || (seg[0] & 0xffc0) == 0xfe80

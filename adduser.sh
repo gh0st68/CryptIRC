@@ -48,7 +48,12 @@ python3 -c "
 import json, os
 from argon2 import PasswordHasher
 import argon2
-ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, type=argon2.Type.ID)
+# Params MUST match the app's Argon2::default() (m=19456 KiB, t=2, p=1, Argon2id).
+# The login handler equalizes timing against a dummy hash computed with those same
+# default params; heavier params here make these accounts verify measurably slower
+# than the dummy, re-opening a username-enumeration timing oracle. Keep in lock-step
+# with src/auth.rs and resetpass.sh.
+ph = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1, hash_len=32, type=argon2.Type.ID)
 pw_hash = ph.hash(os.environ['_CRYPTIRC_PW'])
 data = {
     'username': os.environ['_U'],

@@ -52,7 +52,7 @@ impl EncryptedLogger {
     fn seq_path(&self, username: &str) -> PathBuf {
         PathBuf::from(&self.data_dir)
             .join("logs")
-            .join(format!(".seq_{}", sanitize_lossy(username)))
+            .join(format!(".seq_{}", sanitize_username(username)))
     }
 
     /// Append a message to the log; returns the assigned msg_id.
@@ -61,6 +61,20 @@ impl EncryptedLogger {
         ts: i64, from: &str, text: &str, kind: &str,
     ) -> u64 {
         if !self.crypto.is_unlocked(username).await { return 0; }
+        // Only log to a path the read/delete side can actually reach. log_path()
+        // uses sanitize_lossy, which can map a target like "#.." / "#--" to an
+        // EMPTY component; PathBuf::join("") then drops the level, mis-locating
+        // the file at logs/{conn}/{date}.log. But read_all_lines()/delete_target()
+        // run sanitize_path_component(), which REJECTS the empty case — so those
+        // records would be permanently unreadable AND undeletable (ClearTargetLogs
+        // surfaces "Empty path component"), an un-reclaimable on-disk leak. Mirror
+        // the reader's validation here and skip the write (returning the same 0
+        // sentinel the locked-vault path already returns) for any target/conn the
+        // reader can't address. For every NON-empty sanitize result the two
+        // sanitizers are identical, so this changes nothing for valid targets.
+        if sanitize_path_component(conn_id).is_err() || sanitize_path_component(target).is_err() {
+            return 0;
+        }
         let id = self.next_id(username).await;
         let record    = serde_json::json!({ "id": id, "ts": ts, "from": from, "text": text, "kind": kind });
         let plaintext = record.to_string();
@@ -219,6 +233,19 @@ fn sanitize_path_component(s: &str) -> Result<String> {
         anyhow::bail!("Invalid path component");
     }
     Ok(out)
+}
+
+/// Per-user path key for the .seq counter. Uses the SAME non-trimming,
+/// collision-preserving sanitizer as the per-user vault/e2e dirs
+/// (crypto::sanitize_username / e2e::user_dir): filter to the registered
+/// username charset ([alphanumeric] | '_' | '-') and DROP everything else,
+/// without trimming. Unlike sanitize_lossy (which trim_matches('_')), this
+/// keeps distinct registered usernames distinct (e.g. "_alice" vs "alice"),
+/// preventing two users from sharing one .seq file and corrupting msg_ids.
+/// Identity for all valid usernames (auth::is_safe_username enforces the
+/// same charset), so behavior is unchanged for normal inputs.
+fn sanitize_username(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect()
 }
 
 fn sanitize_lossy(s: &str) -> String {

@@ -168,11 +168,47 @@ function _sidebarActivate(conn_id,target){
 function _canPopOut(){return !_detMode && !!_detachedChannel && !window.matchMedia('(max-width: 768px)').matches;}
 
 let inputHistory=[], historyIdx=-1;
-try{inputHistory=JSON.parse(localStorage.getItem('cryptirc_input_history')||'[]');}catch(e){}
+try{inputHistory=(JSON.parse(localStorage.getItem('cryptirc_input_history')||'[]')||[]).map(redactSensitive);}catch(e){}
+// Strip credentials from any command line that may carry a password/secret
+// before it is stored in history, persisted to localStorage, or uploaded to
+// the server. The visible/sent command is unaffected — only the stored copy
+// has its secret replaced with a placeholder.
+function redactSensitive(line){
+  if(typeof line!=='string')return line;
+  // Mask credentials before a line is stored in input history / uploaded to the server.
+  // We do NOT enumerate per-service auth subcommands (identify/setpass/sidentify/confirm/
+  // set/login/...): that blocklist can never be complete — every services package adds its
+  // own credential-bearing verbs — and trying to track them caused repeated leaks. Instead
+  // mask the ENTIRE argument tail of any line that is (a) an always-credential verb or
+  // (b) directed at a services pseudo-client (directly or tunnelled through a message verb).
+  // This is convergent and safe: benign recall (e.g. `/ns info`) shows '•••', which is an
+  // acceptable cost. The dispatched command is NEVER altered — only the persisted/uploaded copy.
+  let r=line;
+  // (A) Always-credential direct verbs → mask all args (incl. direct SASL/WEBIRC secrets).
+  r=r.replace(/^(\/(?:identify|id|register|ghost|regain|recover|release|oper|pass|authenticate|webirc)\b)\s+\S[\s\S]*$/i,'$1 •••');
+  // (B) ANY command sent directly to a services pseudo-client → mask ALL args.
+  //     Includes userserv/us — on ratbox-services (this deployment) UserServ, NOT NickServ,
+  //     is the primary account-auth service (LOGIN/REGISTER/SET PASSWORD all carry secrets).
+  //     The nick may be server-qualified (NickServ@services.<net>) — the form security-
+  //     conscious users prefer to avoid sending creds to a nick-spoofer — so allow @server.
+  r=r.replace(/^(\/(?:nickserv|ns|userserv|us|chanserv|cs|memoserv|ms|operserv|os|hostserv|hs|botserv|bs)(?:@\S+)?)\s+\S[\s\S]*$/i,'$1 •••');
+  // (C) Services command tunnelled through a message verb — including a PRIVMSG/NOTICE in
+  //     between (/quote PRIVMSG NickServ ...) and colon-prefixed args (/msg NickServ :IDENTIFY pw).
+  //     The service nick may likewise be server-qualified (/msg NickServ@services. IDENTIFY pw).
+  r=r.replace(/^(\/(?:msg|privmsg|notice|quote|raw|query|q)\s+(?:(?:privmsg|notice)\s+)?(?:nickserv|ns|userserv|us|chanserv|cs|memoserv|ms|operserv|os|hostserv|hs|botserv|bs)(?:@\S+)?)\s+\S[\s\S]*$/i,'$1 •••');
+  // (D) /raw|/quote of a raw credential IRC command.
+  r=r.replace(/^(\/(?:raw|quote)\s+(?:pass|oper|authenticate|webirc)\b)\s+\S[\s\S]*$/i,'$1 •••');
+  // (E) SQUERY <service> ... — RFC-2812 "server query", the standard way to message a
+  //     service; it has no slash-handler so it falls through to raw passthrough and reaches
+  //     ratbox-services. SQUERY is only ever addressed to a service, so mask the whole
+  //     argument tail (keeping the verb + service-name token visible, matching A-D). Covers
+  //     the direct form and the tunnelled /quote|/raw SQUERY forms.
+  r=r.replace(/^(\/(?:squery|(?:quote|raw)\s+squery)\s+\S+)\s+\S[\s\S]*$/i,'$1 •••');
+  return r;
+}
 function saveInputHistory(){
-  // Filter out commands that may contain passwords before persisting
-  const SENSITIVE=/^\/(identify|nickserv|ns|oper|msg\s+nickserv|msg\s+chanserv|pass)/i;
-  const safe=inputHistory.filter(l=>!SENSITIVE.test(l)).slice(-100);
+  // Redact credentials, then keep the most recent 100 lines.
+  const safe=inputHistory.map(redactSensitive).slice(-100);
   try{localStorage.setItem('cryptirc_input_history',JSON.stringify(safe));}catch(e){}
   savePrefsToServer();
 }
@@ -424,7 +460,9 @@ function showApp() {
   const params=new URLSearchParams(location.search);
   const openTarget=params.get('open');
   if(openTarget) {
-    const [cid,tgt]=decodeURIComponent(openTarget).split('/');
+    let decodedTarget;
+    try{decodedTarget=decodeURIComponent(openTarget);}catch(e){decodedTarget=openTarget;}
+    const [cid,tgt]=decodedTarget.split('/');
     const ts=params.get('ts');
     const from=params.get('from');
     // Stash as pending nav — will execute once networks load via the state handler.
@@ -2721,9 +2759,19 @@ function updateTopbar(){
 // ─── Media ────────────────────────────────────────────────────────────────────
 function extractMediaUrls(text){const urls=[];const re=/(https?:\/\/[^\s<>"]+)/g;let m;while((m=re.exec(text))!==null)urls.push(m[1]);return urls;}
 function appendFileToken(url){
-  if(sessionToken&&url.includes('/files/')){
-    const sep=url.includes('?')?'&':'?';
-    return url+sep+'token='+encodeURIComponent(sessionToken);
+  // SECURITY: only ever attach the session token to SAME-ORIGIN /files/ URLs.
+  // Message bodies are attacker-controlled, and media (img/audio/video) auto-loads,
+  // so without this gate a message like `https://evil/files/x.png` would make the
+  // victim's client GET it with ?token=<session token> — a zero-click token leak /
+  // account takeover. Foreign-origin URLs are returned untouched.
+  if(sessionToken && url.includes('/files/')){
+    try{
+      const u=new URL(url, location.href);
+      if(u.origin===location.origin && u.pathname.includes('/files/')){
+        const sep=url.includes('?')?'&':'?';
+        return url+sep+'token='+encodeURIComponent(sessionToken);
+      }
+    }catch(_){ /* unparseable URL → no token */ }
   }
   return url;
 }
@@ -2775,7 +2823,7 @@ function buildMediaEl(url){
       thumb.innerHTML=`<iframe src="https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0&modestbranding=1" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="no-referrer-when-downgrade"></iframe>`;
       if(!_userScrolledAway)scrollBottom();
     });
-    wrap.querySelector('.msg-yt-info').addEventListener('click',()=>window.open(url,'_blank'));
+    wrap.querySelector('.msg-yt-info').addEventListener('click',()=>window.open(url,'_blank','noopener,noreferrer'));
     // Fetch video info via noembed (no API key needed, privacy-friendly)
     const _ac=new AbortController();const _to=setTimeout(()=>_ac.abort(),10000);
     fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${ytId}`,{signal:_ac.signal}).then(r=>{clearTimeout(_to);return r.json();}).then(d=>{
@@ -2805,8 +2853,8 @@ function buildMediaEl(url){
           const author=metaEl.querySelector('span')?.textContent;
           if(author&&author!=='YouTube') parts.push(esc(author));
           parts.push('YouTube');
-          if(d.viewCount) parts.push(d.viewCount.toLocaleString()+' views');
-          if(d.likes) parts.push(d.likes.toLocaleString()+' likes');
+          if(d.viewCount) parts.push(esc(d.viewCount.toLocaleString())+' views');
+          if(d.likes) parts.push(esc(d.likes.toLocaleString())+' likes');
           metaEl.innerHTML=parts.map(p=>`<span>${p}</span>`).join('');
           if(!_userScrolledAway)scrollBottom();
         }
@@ -2844,6 +2892,15 @@ function buildMediaEl(url){
   return null;
 }
 function extractYouTubeId(url){
+  // Only treat genuine YouTube hosts as YouTube. The path regex below matches
+  // anywhere in the string, so without a host check an attacker URL such as
+  // https://evil.example/x#youtube.com/watch?v=XXXXXXXXXXX would render a spoofed
+  // "YouTube" card whose info-click opens the attacker URL. Anchor to the real
+  // hostname (callers always pass a scheme-qualified https?:// URL from
+  // extractMediaUrls, so new URL() never throws here).
+  let host;
+  try{ host=new URL(url).hostname.toLowerCase(); }catch(_){ return null; }
+  if(host!=='youtu.be'&&host!=='youtube.com'&&!host.endsWith('.youtube.com')) return null;
   const m=url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/);
   return m?m[1]:null;
 }
@@ -3015,7 +3072,21 @@ async function doSend(){
 }
 async function handleInput(raw){
   raw=raw.trim(); if(!raw||!active)return;
-  inputHistory.push(raw); if(inputHistory.length>500)inputHistory.splice(0,inputHistory.length-500); saveInputHistory();
+  // Mask credentials in the STORED history copy. redactSensitive handles slash-prefixed
+  // forms; additionally, a BARE line typed directly into a services query window (e.g.
+  // open a query with NickServ/UserServ and type `IDENTIFY pw` / `LOGIN acct pw` with no
+  // slash) is sent as a PRIVMSG to that service and would otherwise be stored verbatim.
+  // When the active target is a services pseudo-client and the line is bare with args,
+  // mask all args (convergent — no per-verb blocklist), keeping only the first token.
+  // Only the stored/uploaded copy is masked; the dispatched command uses the raw line.
+  let _hist=redactSensitive(raw);
+  if(_hist===raw && !raw.startsWith('/') && active.target){
+    const _svc=stripPfx(active.target).toLowerCase().split('@')[0];
+    if(['nickserv','ns','userserv','us','chanserv','cs','memoserv','ms','operserv','os','hostserv','hs','botserv','bs'].includes(_svc)){
+      _hist=raw.replace(/^(\S+)\s+\S[\s\S]*$/,'$1 •••');
+    }
+  }
+  inputHistory.push(_hist); if(inputHistory.length>500)inputHistory.splice(0,inputHistory.length-500); saveInputHistory();
   const{conn_id,target}=active;
   if(raw.startsWith('/')){
     const parts=raw.slice(1).split(' ');const cmd=parts[0].toUpperCase();const args=parts.slice(1);
@@ -4765,7 +4836,7 @@ async function clearAllLogs(){
   showToast('All data cleared');
 }
 async function showDeleteAccount(){
-  const pw=await customPrompt('To delete your account permanently, enter your password:');
+  const pw=await customPrompt('To delete your account permanently, enter your password:','',true);
   if(!pw)return;
   if(!(await customConfirm('This will permanently delete your account, all connections, logs, and settings. This cannot be undone. Are you sure?','Delete')))return;
   wsend({type:'delete_account',password:pw});
@@ -8601,7 +8672,7 @@ function restorePreferences(p){
     }
     if(p.lastActive) localStorage.setItem('cryptirc_active',JSON.stringify(p.lastActive));
     if(p.stats){_txBytes=p.stats.tx||0;_rxBytes=p.stats.rx||0;_txCount=p.stats.tc||0;_rxCount=p.stats.rc||0;}
-    if(p.ignoreList) localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));
+    if(Array.isArray(p.ignoreList)) localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));
     if(Array.isArray(p.pmAllow)){
       const localTs=parseInt(localStorage.getItem('cryptirc_pm_allow_ts')||'0');
       const serverTs=p._pmAllowTs||0;
@@ -9610,7 +9681,7 @@ function viewFullTopic(){
   box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Topic — ${esc(active.target)}</div>${parseMircColors(topic)}`;
   ov.innerHTML='';ov.appendChild(box);
 }
-function customPrompt(message,defaultValue){
+function customPrompt(message,defaultValue,isPassword){
   return new Promise(resolve=>{
     const ov=document.getElementById('custom-prompt-overlay');
     const msg=document.getElementById('custom-prompt-msg');
@@ -9618,11 +9689,17 @@ function customPrompt(message,defaultValue){
     const ok=document.getElementById('custom-prompt-ok');
     const cancel=document.getElementById('custom-prompt-cancel');
     msg.textContent=message||'';
+    // Honor the (previously ignored) isPassword flag so credentials — vault passphrase,
+    // login password, password-safe entries — are MASKED, not shown in cleartext. Reset
+    // the type each call since the input element is a shared singleton.
+    inp.type=isPassword?'password':'text';
     inp.value=defaultValue||'';
     ov.classList.add('open');
     inp.focus();
     inp.select();
-    function finish(val){ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;inp.onkeydown=null;resolve(val);}
+    // For password prompts, clear the shared input's value on close so the secret
+    // doesn't linger in the live DOM for later scripts/inspection to read.
+    function finish(val){ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;inp.onkeydown=null;if(isPassword)inp.value='';resolve(val);}
     ok.onclick=()=>finish(inp.value);
     cancel.onclick=()=>finish(null);
     inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();finish(inp.value);}else if(e.key==='Escape'){e.preventDefault();finish(null);}};
@@ -10500,7 +10577,7 @@ function isPmAllowed(nick){return pmAllowList.has(String(nick).toLowerCase());}
 
 // ── Client-side ignore list ───────────────────────────────────────────────────
 
-let ignoreList = new Set(JSON.parse(localStorage.getItem('cryptirc_ignore') || '[]'));
+let ignoreList = new Set((()=>{try{const a=JSON.parse(localStorage.getItem('cryptirc_ignore')||'[]');return Array.isArray(a)?a:[];}catch{return[];}})());
 
 // Tracks in-progress /unbanall requests: "conn_id/channel" → [mask, mask, ...]
 const pendingUnbanAll = {};
@@ -11901,7 +11978,13 @@ function parseMircColors(s){
     if(bold)styles.push('font-weight:bold');
     if(underline)styles.push('text-decoration:underline');
     if(italic)styles.push('font-style:italic');
-    const ch=g==='&'?'&amp;':g==='<'?'&lt;':g==='>'?'&gt;':g==='"'?'&quot;':g==="'"?'&#39;':g;
+    // Escape HTML specials PER-CHARACTER, not by whole-grapheme equality: Intl.Segmenter
+    // yields one grapheme cluster at a time, so a special fused with a following combining
+    // codepoint (e.g. '"' + U+0301) is a length>1 grapheme that whole-grapheme equality
+    // would miss — letting a raw quote reach the data-nick="..." attribute sink downstream
+    // (renderStatusText/highlightNicks) and break out (attribute-context XSS). Per-char
+    // escaping is byte-identical for all legitimate text and closes the breakout.
+    const ch=g.replace(/[&<>"']/g,c=>c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='"'?'&quot;':'&#39;');
     if(styles.length)out+=`<span style="${styles.join(';')}">${ch}</span>`;
     else out+=ch;
   }

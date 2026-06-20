@@ -321,6 +321,16 @@ fn inprogress_dir(data_dir: &str, username: &str, id: &str) -> Option<PathBuf> {
     Some(PathBuf::from(data_dir).join("uploads").join("_inprogress").join(u).join(i))
 }
 
+/// Per-user root of the in-progress chunked-upload tree
+/// ({data_dir}/uploads/_inprogress/{username}), holding every in-flight upload's
+/// dir for this user. Used by account deletion to reclaim abandoned chunk data.
+/// Returns None if the username sanitizes to empty.
+pub fn user_inprogress_dir(data_dir: &str, username: &str) -> Option<PathBuf> {
+    let u = safe_user(username);
+    if u.is_empty() { return None; }
+    Some(PathBuf::from(data_dir).join("uploads").join("_inprogress").join(u))
+}
+
 /// #31: Sweep abandoned in-progress chunked uploads. Walks
 /// `{data_dir}/uploads/_inprogress/<user>/<id>` and deletes any upload dir
 /// whose `data` file has not been modified within `ttl`. Intended to be called
@@ -521,8 +531,9 @@ pub async fn init_chunked_upload(
     if id.is_empty() { anyhow::bail!("Invalid upload id"); }
     let dir = inprogress_dir(data_dir, username, &id)
         .ok_or_else(|| anyhow::anyhow!("Invalid upload path"))?;
-    tokio::fs::create_dir_all(&dir).await?;
-    // Resume case: if data file already has bytes, keep them.
+    // Resume case: if data file already has bytes, keep them. (metadata() on a
+    // not-yet-created dir returns Err → 0, correct for a fresh upload; the dir is
+    // created only AFTER validation below.)
     let existing_bytes = match tokio::fs::metadata(dir.join("data")).await {
         Ok(m) => m.len() as usize,
         Err(_) => 0,
@@ -583,6 +594,10 @@ pub async fn init_chunked_upload(
             if !source_conn_id.is_empty() { r.source_conn_id = source_conn_id.to_string(); }
             if !source_target.is_empty() { r.source_target = source_target.to_string(); }
         }).await?;
+    // Create the per-id dir only AFTER validation passes, so a rejected init (cap or
+    // quota) cannot leak an empty directory/inode and bypass PER_USER_MAX_INPROGRESS.
+    // For a genuine resume the dir already exists (create_dir_all is idempotent).
+    tokio::fs::create_dir_all(&dir).await?;
     Ok(rec)
 }
 
@@ -599,6 +614,17 @@ pub async fn append_chunk(
     let dir = inprogress_dir(data_dir, username, &id)
         .ok_or_else(|| anyhow::anyhow!("Invalid upload path"))?;
     let data_path = dir.join("data");
+    // #16/#21/#38: hold the per-user records lock across the offset/size
+    // validation, the quota check, the file append, AND the record update so
+    // read→validate→write→record is atomic per user. The metadata size read and
+    // the offset==current comparison MUST happen under the lock: otherwise two
+    // concurrent chunks for the same id both read the same `current`, both pass
+    // validation, and both append (file corruption / quota bypass). Without the
+    // lock the window also let concurrent chunks across different ids overrun
+    // the quota, and a client could create records + write bytes without ever
+    // calling init.
+    let lock = user_record_lock(username);
+    let _guard = lock.lock().await;
     let current = match tokio::fs::metadata(&data_path).await {
         Ok(m) => m.len() as usize,
         Err(_) => 0,
@@ -607,30 +633,50 @@ pub async fn append_chunk(
         anyhow::bail!("Offset mismatch (have {}, got {})", current, offset);
     }
     let new_total = current + chunk.len();
+    let mut records = load_records(data_dir, username).await;
+
+    // #38: require that init already created an Uploading record for this id and
+    // re-enforce the in-progress cap (mirrors the init validator). A client must
+    // not be able to materialize new upload records / write bytes by chunking an
+    // id that was never initialized.
+    let already_uploading = records.iter()
+        .any(|r| r.id == id && r.status == UploadStatus::Uploading);
+    if !already_uploading {
+        let inprogress = compute_usage(&records, None).inprogress;
+        if inprogress >= PER_USER_MAX_INPROGRESS {
+            anyhow::bail!(
+                "Too many uploads in progress (max {})",
+                PER_USER_MAX_INPROGRESS
+            );
+        }
+        anyhow::bail!("Upload not initialized");
+    }
+
     // #16: reject the chunk BEFORE writing it to disk if the resulting on-disk
     // size for this upload would push the user over quota. We exclude this id's
     // current row (its already-counted progress) and re-add new_total.
-    {
-        let lock = user_record_lock(username);
-        let _guard = lock.lock().await;
-        let records = load_records(data_dir, username).await;
-        check_quota(&records, Some(&id), new_total)?;
-    }
+    check_quota(&records, Some(&id), new_total)?;
+
     let mut file = tokio::fs::OpenOptions::new()
         .create(true).append(true).open(&data_path).await?;
     file.write_all(chunk).await?;
     file.flush().await?;
-    let rec = upsert_record(data_dir, username, &id,
-        UploadRecord {
-            id: id.clone(), filename: String::new(), original_name: String::new(),
-            size: 0, content_type: String::new(), url: String::new(),
-            uploaded_at: 0, status: UploadStatus::Uploading,
-            progress_bytes: new_total, started_at: chrono::Utc::now().timestamp(),
-            completed_at: 0, error: String::new(),
-            source_conn_id: String::new(), source_target: String::new(),
-        },
-        |r| { r.progress_bytes = new_total; r.status = UploadStatus::Uploading; },
-    ).await;
+
+    // Update the existing record under the same lock. The Uploading record is
+    // guaranteed to exist (checked above), so this always hits the find branch.
+    let rec = match records.iter().position(|r| r.id == id) {
+        Some(p) => {
+            records[p].progress_bytes = new_total;
+            records[p].status = UploadStatus::Uploading;
+            records[p].clone()
+        }
+        None => {
+            // Unreachable given the already_uploading check, but keep the data
+            // consistent rather than panicking if records changed under us.
+            anyhow::bail!("Upload not initialized");
+        }
+    };
+    save_records(data_dir, username, &records).await;
     Ok(rec)
 }
 
@@ -732,7 +778,8 @@ pub async fn cancel_chunked_upload(
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
     let now = chrono::Utc::now().timestamp();
-    let rec = upsert_record(data_dir, username, &id,
+    let id_for_check = id.clone();
+    let rec = upsert_record_validated(data_dir, username, &id,
         UploadRecord {
             id: id.clone(), filename: String::new(), original_name: String::new(),
             size: 0, content_type: String::new(), url: String::new(),
@@ -740,6 +787,14 @@ pub async fn cancel_chunked_upload(
             progress_bytes: 0, started_at: now, completed_at: now,
             error: String::new(),
             source_conn_id: String::new(), source_target: String::new(),
+        },
+        |records| {
+            // No-op for an existing id (every legitimate cancel acts on an init'd id);
+            // for a crafted brand-new id, apply the same file-count cap init uses so a
+            // flood of /upload/cancel/<random-id> can't push phantom Canceled records
+            // past PER_USER_MAX_FILES (the cap lived only in the init/append validators).
+            if records.iter().any(|r| r.id == id_for_check) { Ok(()) }
+            else { check_quota(records, Some(&id_for_check), 0) }
         },
         |r| {
             // Only transition from Uploading → Canceled. If already Done
@@ -749,7 +804,7 @@ pub async fn cancel_chunked_upload(
                 r.completed_at = now;
             }
         },
-    ).await;
+    ).await?;
     Ok(rec)
 }
 
@@ -763,7 +818,8 @@ pub async fn error_chunked_upload(
     }
     let now = chrono::Utc::now().timestamp();
     let msg: String = message.chars().take(300).collect();
-    let rec = upsert_record(data_dir, username, &id,
+    let id_for_check = id.clone();
+    let rec = upsert_record_validated(data_dir, username, &id,
         UploadRecord {
             id: id.clone(), filename: String::new(), original_name: String::new(),
             size: 0, content_type: String::new(), url: String::new(),
@@ -772,6 +828,13 @@ pub async fn error_chunked_upload(
             error: msg.clone(),
             source_conn_id: String::new(), source_target: String::new(),
         },
+        |records| {
+            // Same cap as cancel: no-op for an existing id, file-count guard for a
+            // crafted brand-new id so /upload/error/<random-id> can't grow the records
+            // JSON without bound.
+            if records.iter().any(|r| r.id == id_for_check) { Ok(()) }
+            else { check_quota(records, Some(&id_for_check), 0) }
+        },
         |r| {
             if r.status == UploadStatus::Uploading {
                 r.status = UploadStatus::Error;
@@ -779,7 +842,7 @@ pub async fn error_chunked_upload(
                 r.error = msg.clone();
             }
         },
-    ).await;
+    ).await?;
     Ok(rec)
 }
 
@@ -1009,11 +1072,35 @@ fn strip_jpeg_metadata(data: &[u8]) -> Result<Vec<u8>> {
 
         let marker = data[i + 1];
 
-        // SOS (Start of Scan) — everything after this is image data, copy the rest
+        // SOS (Start of Scan) — entropy-coded image data follows. Copy the scan up
+        // to and including the terminating EOI (FF D9) and discard anything after it,
+        // so trailing EXIF/GPS/XMP appended past the scan cannot survive (mirror the
+        // PNG path that stops at IEND). The SOS header itself has a 2-byte length, but
+        // we don't need to parse it: we just search forward for the EOI marker.
         if marker == 0xDA {
-            out.extend_from_slice(&data[i..]);
-            saw_sos = true;
-            break;
+            // Find FF D9 (EOI) somewhere after the SOS marker. Within entropy-coded
+            // data a literal 0xFF is followed by 0x00 (byte stuffing) or an RSTn
+            // marker (D0-D7), so a genuine FF D9 reliably marks the end of the image.
+            let mut j = i + 2;
+            let mut eoi = None;
+            while j + 1 < data.len() {
+                if data[j] == 0xFF && data[j + 1] == 0xD9 {
+                    eoi = Some(j + 2);
+                    break;
+                }
+                j += 1;
+            }
+            match eoi {
+                Some(end) => {
+                    out.extend_from_slice(&data[i..end]);
+                    saw_sos = true;
+                    break;
+                }
+                None => {
+                    // No EOI: malformed/truncated image (consistent with #88 reject behavior).
+                    anyhow::bail!("Corrupt image (missing JPEG end marker)");
+                }
+            }
         }
 
         // EOI
