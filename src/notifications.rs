@@ -318,8 +318,10 @@ impl NotificationManager {
         match self.push_client.send(message).await {
             Ok(_) => Ok(()),
             Err(e) => {
-                let endpoint = &sub.endpoint;
-                anyhow::bail!("Push to {} failed: {:?}", &endpoint[..endpoint.len().min(60)], e)
+                // char-safe truncation: byte-slicing a client-supplied endpoint at
+                // offset 60 would panic if a multibyte char straddles the boundary.
+                let endpoint: String = sub.endpoint.chars().take(60).collect();
+                anyhow::bail!("Push to {} failed: {:?}", endpoint, e)
             }
         }
     }

@@ -679,6 +679,9 @@ function wsend(obj){
           if(txt.startsWith('\x01ACTION ')&&txt.endsWith('\x01')) txt=txt.slice(8,-1);
           if(!window._sentMsgs) window._sentMsgs=[];
           window._sentMsgs.push({t:Date.now(),conn:obj.conn_id,target:parts[1],text:txt});
+          // Bound the list: the TTL filter only runs when an echo arrives, so cap
+          // here in case echoes stop coming (offline/zombie WS) — keep the newest 100.
+          if(window._sentMsgs.length>100) window._sentMsgs.splice(0,window._sentMsgs.length-100);
         }
       }
     }
@@ -818,8 +821,12 @@ function handleEvent(ev) {
       // Skip if this device already displayed it (tracked by _sentMsgs)
       if(!window._sentMsgs) window._sentMsgs=[];
       const now=Date.now();
-      // Clean old entries (>5s)
-      window._sentMsgs=window._sentMsgs.filter(s=>now-s.t<5000);
+      // Clean old entries. 60s (was 5s): on mobile/PWA the server echo of our own
+      // message routinely lags well past 5s (slow RTT, iOS throttling), which used
+      // to push reconciliation into the weak fuzzy-only branch and duplicate the
+      // message. Keeping the sent-record for 60s lets the robust id-stamping path
+      // (the idx>=0 branch below) win instead. Bounded by the length cap in wsend().
+      window._sentMsgs=window._sentMsgs.filter(s=>now-s.t<60000);
       // Check if this device sent this exact message
       const idx=window._sentMsgs.findIndex(s=>s.conn===ev.conn_id&&s.target===ev.target&&s.text===ev.text);
       if(idx>=0){
@@ -864,7 +871,10 @@ function handleEvent(ev) {
         const _eConn=ev.conn_id, _eTarget=ev.target, _eText=ev.text;
         const _eFrom=ev.from, _eTs=ev.ts, _eId=ev.msg_id||0, _eKind=ev.kind;
         if(!window._e2eQueue) window._e2eQueue=Promise.resolve();
-        window._e2eQueue=window._e2eQueue.then(async()=>{
+        // .catch(()=>{}) BEFORE .then heals a previously-rejected queue: if any
+        // iteration's body throws (e.g. a malformed event), the chain would stay
+        // permanently rejected and silently drop ALL later messages. This resets it.
+        window._e2eQueue=window._e2eQueue.catch(()=>{}).then(async()=>{
           let dtext=_eText, enc=false;
           if(typeof _eText==='string'&&_eText.startsWith('sd8~')&&typeof channelDecrypt==='function'){
             try{
@@ -875,6 +885,10 @@ function handleEvent(ev) {
           const echoBuf=getBuf(_eConn,_eTarget);
           const echoKey=_eTs+'|'+_eFrom+'|'+(dtext||'').slice(0,50);
           if(echoBuf.some(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)===echoKey)) return;
+          // A self-sent optimistic row (id 0, client-clock ts) that missed the
+          // _sentMsgs window lands here; reconcile by stamping it rather than adding
+          // a 2nd copy (the exact-ts key above can't catch the client/server skew).
+          if(_reconcileSelfRow(echoBuf,_eFrom,dtext,_eId,_eTs)) return;
           addMessage(_eConn,_eTarget,{
             id:_eId, ts:_eTs, from:_eFrom, text:dtext, encrypted:enc,
             kind:_eKind==='Action'?'action':_eKind==='Notice'?'notice':'privmsg',
@@ -888,7 +902,7 @@ function handleEvent(ev) {
       // Route incoming user notices to the active channel instead of opening a PM
       // (e.g. NickServ, ChanServ replies) — but let our OWN outgoing notices
       // go to the target's PM window (e.g. PM protection responses)
-      if(ev.kind==='Notice'&&ev.target&&ev.target!=='status'&&!ev.target.startsWith('#')&&!ev.target.startsWith('&')&&ev.from!=='*'&&!ev.from.includes('.')){
+      if(ev.kind==='Notice'&&ev.target&&ev.target!=='status'&&!ev.target.startsWith('#')&&!ev.target.startsWith('&')&&ev.from&&ev.from!=='*'&&!ev.from.includes('.')){
         if(ev.from!==getNick(ev.conn_id)){
           ev.target=active&&active.conn_id===ev.conn_id?active.target:'status';
         }
@@ -925,7 +939,10 @@ function handleEvent(ev) {
       }
       // Serialize E2E decrypt to prevent race between x3dh header and encrypted message
       if(!window._e2eQueue) window._e2eQueue=Promise.resolve();
-      window._e2eQueue=window._e2eQueue.then(async()=>{
+      // .catch(()=>{}) BEFORE .then heals a rejected queue so one throwing event
+      // (e.g. a null/non-string ev.text) can't permanently poison the chain and
+      // silently drop every subsequent incoming message.
+      window._e2eQueue=window._e2eQueue.catch(()=>{}).then(async()=>{
         const { plaintext, encrypted } = await e2eDecryptIncoming(ev.from, ev.target, ev.text);
         // Suppress x3dh header messages (handled internally, not displayed)
         if (plaintext === null && !encrypted && ev.text.startsWith('[e2ex3dh]')) return;
@@ -1031,7 +1048,9 @@ function handleEvent(ev) {
     case 'e2e_trust':
     case 'e2e_otpk_low':
     case 'e2e_x3dh_header':
-      if (window.E2E) e2eHandleEvent(ev);
+      // .catch: e2eHandleEvent is async + fire-and-forget; a malformed server-supplied
+      // bundle/header parsing throw would otherwise be an unhandled promise rejection.
+      if (window.E2E) e2eHandleEvent(ev).catch(e=>{try{console.error('e2e event error:',e);}catch(_){}});
       break;
     case 'irc_join': // fallthrough to irc_join_ex
     case 'irc_join_ex': {
@@ -1042,7 +1061,7 @@ function handleEvent(ev) {
       if(ev.realname) joinMsg += ` — ${ev.realname}`;
       sysMsg(ev.conn_id,ev.channel,joinMsg,'join',{ts:ev.ts,from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
       const jNet=networks.find(n=>n.config.id===ev.conn_id);
-      const jCh=jNet?.channels.find(c=>c.name===ev.channel);
+      const jCh=jNet?.channels?.find(c=>c.name===ev.channel);
       if(jCh&&!jCh.names.some(n=>stripPfx(n)===ev.nick)) jCh.names.push(ev.nick);
       renderSidebar(); refreshUserCount(ev.conn_id,ev.channel); blinkUserCount('join');
       if(ev.nick===getNick(ev.conn_id)) setActive(ev.conn_id,ev.channel);
@@ -1051,7 +1070,7 @@ function handleEvent(ev) {
     case 'irc_part': {
       sysMsg(ev.conn_id,ev.channel,`← ${ev.nick} left${ev.reason?' ('+ev.reason+')':''}`,'part',{ts:ev.ts,from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
       const pNet=networks.find(n=>n.config.id===ev.conn_id);
-      const pCh=pNet?.channels.find(c=>c.name===ev.channel);
+      const pCh=pNet?.channels?.find(c=>c.name===ev.channel);
       if(pCh) pCh.names=pCh.names.filter(n=>stripPfx(n)!==ev.nick);
       // If WE parted, remove channel and switch away
       if(ev.nick===getNick(ev.conn_id)){
@@ -1064,7 +1083,7 @@ function handleEvent(ev) {
         const newFavs=favs.filter(f=>!(f.conn_id===ev.conn_id&&f.target===ev.channel));
         if(newFavs.length!==favs.length) saveFavorites(newFavs);
         if(isActive(ev.conn_id,ev.channel)){
-          const altCh=pNet?.channels.find(c=>c.name!==ev.channel);
+          const altCh=pNet?.channels?.find(c=>c.name!==ev.channel);
           setActive(ev.conn_id,altCh?altCh.name:'status');
         }
       }
@@ -1141,7 +1160,7 @@ function handleEvent(ev) {
       sysMsg(ev.conn_id,ev.target,modeDisplay,'mode',{ts:ev.ts,from:modeSetter||'*',self:modeSetter===getNick(ev.conn_id),rawModes:rawModes,subject:modeSetter||''});
       // Update nick prefixes in names list when channel modes change
       const mNet=networks.find(n=>n.config.id===ev.conn_id);
-      const mCh=mNet?.channels.find(c=>c.name===ev.target);
+      const mCh=mNet?.channels?.find(c=>c.name===ev.target);
       if(mCh){
         const modeMap={o:'@',v:'+',h:'%',a:'&',q:'~'};
         const parts=rawModes.split(' ');
@@ -1232,7 +1251,7 @@ function handleEvent(ev) {
     case 'irc_account': {
       const acNet=networks.find(n=>n.config.id===ev.conn_id);
       if(acNet){
-        for(const ch of acNet.channels){
+        for(const ch of (acNet.channels||[])){
           if(ch.names.some(n=>stripPfx(n)===ev.nick)){
             if(ev.account){
               sysMsg(ev.conn_id,ch.name,`★ ${ev.nick} logged in as ${ev.account}`,'system');
@@ -1250,7 +1269,7 @@ function handleEvent(ev) {
       if(ev.target===myNick){
         sysMsg(ev.conn_id,'status',`📩 ${ev.from} has invited you to ${ev.channel}`,'system');
         // Show desktop notification for invites
-        if(Notification.permission==='granted'){
+        if(typeof Notification!=='undefined'&&Notification.permission==='granted'){
           new Notification('CryptIRC — Invite',{body:`${ev.from} invited you to ${ev.channel}`,icon:'/cryptirc/icon.svg'});
         }
       } else {
@@ -1460,6 +1479,33 @@ function getBuf(c,t){const k=bk(c,t);if(!buffers[k])buffers[k]=[];return buffers
 // Per-channel last known msg_id for ID-based sync
 const _lastMsgId={};
 function trackMsgId(conn_id,target,id){if(id>0){const k=bk(conn_id,target);if(!_lastMsgId[k]||id>_lastMsgId[k])_lastMsgId[k]=id;}}
+// Reconcile a self-sent OPTIMISTIC row (added locally with id 0 and a CLIENT-clock
+// ts) against the server's id'd copy of the SAME message arriving via a different
+// path (irc_echo "other device" branch, sync, or get_logs). The optimistic ts can
+// differ from the server ts by a second or more (clock skew, floor-rounding, send
+// latency), so an exact ts|from|text key misses it and the row duplicates — the
+// duplicate-message bug, worst on mobile where the echo lags past the _sentMsgs
+// window. Walk the recent tail for an UNSTAMPED row from the same author with
+// matching text within a clock-skew window; if found, stamp it with the real id
+// (so addMessage's id-dedup then guards any later copy) and return true so the
+// caller drops the incoming duplicate. Shared by every reconciliation site so they
+// can't diverge again (the original root cause was inconsistent per-site dedup).
+const _SELF_RECONCILE_TAIL=50, _SELF_RECONCILE_SKEW=30;
+function _reconcileSelfRow(buf,from,text,id,ts){
+  if(!buf||!buf.length) return false;
+  const slice=(text||'').slice(0,50);
+  const start=Math.max(0,buf.length-_SELF_RECONCILE_TAIL);
+  for(let i=buf.length-1;i>=start;i--){
+    const m=buf[i];
+    if(m.id) continue;                                   // only optimistic (unstamped) rows
+    if(m.from!==from) continue;
+    if(Math.abs((m.ts||0)-(ts||0))>_SELF_RECONCILE_SKEW) continue;
+    if((m.text||'').slice(0,50)!==slice) continue;
+    if(id) m.id=id;                                      // stamp → later copies hit id-dedup
+    return true;
+  }
+  return false;
+}
 // ─── Notification sounds ──────────────────────────────────────────────────────
 let _audioCtx=null,_lastSoundAt=0;
 // Chromium (including Electron) starts AudioContexts in "suspended" state until
@@ -1797,6 +1843,7 @@ async function prependLogs(conn_id,target,lines){
   lines=await _decryptLogLines(target,lines);
   const buf=getBuf(conn_id,target);
   const wasEmpty=buf.length===0;
+  const _selfNick=getNick(conn_id);
   const newMsgs=lines.map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted},conn_id));
   // Track highest msg_id from log lines
   for(const m of newMsgs) trackMsgId(conn_id,target,m.id);
@@ -1805,6 +1852,13 @@ async function prependLogs(conn_id,target,lines){
   const existingKeys=new Set(buf.map(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)));
   const unique=newMsgs.filter(m=>{
     if(m.id>0&&existingIds.has(m.id)) return false;
+    // Clock-skew reconcile: stamp a self-sent optimistic row (id 0, client ts)
+    // with this id'd server copy instead of duplicating it (mobile dropped-echo
+    // recovered via get_logs — get_logs lacked any skew fallback before this).
+    // Self-only: a received message can also be id-0 when the vault was locked at
+    // receive time (logger.append returns 0), so gate on our own nick to never
+    // collapse a genuinely-distinct same-text message from another user.
+    if(m.id>0&&m.from===_selfNick&&_reconcileSelfRow(buf,m.from,m.text,m.id,m.ts)) return false;
     if(m.id>0) return true;
     return !existingKeys.has(m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50));
   });
@@ -1843,6 +1897,7 @@ async function prependLogs(conn_id,target,lines){
 async function appendSyncLines(conn_id,target,lines){
   lines=await _decryptLogLines(target,lines);
   const buf=getBuf(conn_id,target);
+  const _selfNick=getNick(conn_id);
   const existingIds=new Set(buf.filter(m=>m.id>0).map(m=>m.id));
   const existingKeys=new Set(buf.map(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)));
   let added=0;
@@ -1860,11 +1915,14 @@ async function appendSyncLines(conn_id,target,lines){
     // entry from the same `from` with matching text within ±30s of l.ts.
     // If found, stamp it with l.id and skip the dup.
     let _matched=false;
-    const _tailStart=Math.max(0,buf.length-30);
+    // Self-only (see prependLogs): other users' messages can also be id-0 when the
+    // vault was locked at receive time, so only skew-reconcile our OWN optimistic rows.
+    const _selfLine=(l.from===_selfNick);
+    const _tailStart=Math.max(0,buf.length-_SELF_RECONCILE_TAIL);
     const _slice=(l.text||'').slice(0,50);
-    for(let i=buf.length-1;i>=_tailStart;i--){
+    for(let i=buf.length-1;_selfLine&&i>=_tailStart;i--){
       const m=buf[i];
-      if(Math.abs((m.ts||0)-l.ts)>30) continue;
+      if(Math.abs((m.ts||0)-l.ts)>_SELF_RECONCILE_SKEW) continue;
       if(m.id) continue;
       if(m.from!==l.from) continue;
       if((m.text||'').slice(0,50)!==_slice) continue;
@@ -1876,6 +1934,11 @@ async function appendSyncLines(conn_id,target,lines){
       break;
     }
     if(_matched) continue;
+    // Seed the dedup sets so a second identical line later in THIS same batch
+    // (e.g. two id-0 lines with matching ts|from|text) can't slip past the checks
+    // above, which were computed once before the loop.
+    if(id>0) existingIds.add(id);
+    existingKeys.add(fk);
     buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted},conn_id));
     added++;
   }
@@ -3755,7 +3818,7 @@ let _tabCycleState=null; // {partial, matches, index, stamp}
 function tabComplete(inp){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
-  const ch=net?.channels.find(c=>c.name===active.target);
+  const ch=net?.channels?.find(c=>c.name===active.target);
   if(!ch)return;
   const val=inp.value,words=val.split(' ');
   const partial=words[words.length-1].toLowerCase();
@@ -4472,7 +4535,7 @@ function _renderUploadsSidebarEntry(){
 function refreshUserCount(connId,channel){
   if(!active||active.conn_id!==connId||typeof channel!=='string'||active.target.toLowerCase()!==channel.toLowerCase())return;
   const net=networks.find(n=>n.config.id===connId);
-  const ch=net?.channels.find(c=>c.name===channel);
+  const ch=net?.channels?.find(c=>c.name===channel);
   document.getElementById('usercount').textContent=ch?`${ch.names.length} users`:'';
   renderNickPanel(ch?.names||[]);
 }
@@ -5576,7 +5639,7 @@ function applyAppearance(){
   el('a-sidebar-w-val').textContent=cfg.sidebarW+'px';
   el('a-nick-w-val').textContent=cfg.nickW+'px';
   el('a-nickpanel-w-val').textContent=cfg.nickPanelW+'px';
-  el('a-line-height-val').textContent=cfg.lineHeight.toFixed(1);
+  el('a-line-height-val').textContent=((+cfg.lineHeight)||1.55).toFixed(1);
   el('a-brightness-val').textContent=(cfg.brightness||100)+'%';
   el('a-msg-gap-val').textContent=(cfg.msgGap!=null?cfg.msgGap:4)+'px';
   if(el('a-input-h-val')) el('a-input-h-val').textContent=(cfg.inputH!=null?cfg.inputH:36)+'px';
@@ -5704,19 +5767,24 @@ function applyThemeCSS(cfg){
   // Dynamic styles via a stylesheet
   let ss=document.getElementById('appear-styles');
   if(!ss){ss=document.createElement('style');ss.id='appear-styles';document.head.appendChild(ss);}
-  const fontSize=mob&&cfg.mobileChatSize?cfg.mobileChatSize:cfg.chatSize;
-  const nickW=mob&&cfg.mobileNickW?cfg.mobileNickW:cfg.nickW;
+  // Coerce numeric appearance values (the cross-device sync path delivers cfg
+  // unsanitized; a crafted string here would otherwise inject CSS into the <style>
+  // text below — data-exfil via url()/defacement). Legit numbers pass through.
+  const fontSize=(+(mob&&cfg.mobileChatSize?cfg.mobileChatSize:cfg.chatSize))||14;
+  const nickW=(+(mob&&cfg.mobileNickW?cfg.mobileNickW:cfg.nickW))||100;
+  const _lineH=(+cfg.lineHeight)||1.55, _msgGap=(+cfg.msgGap)||4, _sideF=(+cfg.sidebarFont)||12, _nickF=(+cfg.nickFont)||13;
+  const _fontFam=(cfg.font||"'Spooky Magic',cursive").replace(/[;{}()<>\\]/g,'');
   const showTs=mob?(cfg.mobileTimestamps!==undefined?cfg.mobileTimestamps:false):cfg.timestamps;
   ss.textContent=`
     body { font-size:${fontSize}px; ${cfg.brightness&&cfg.brightness!==100?`filter:brightness(${cfg.brightness/100});`:''} }
-    :root { --mono:${cfg.font||"'Spooky Magic',cursive"}; }
-    .msg-row { line-height:${cfg.lineHeight}; ${cfg.compact?'padding:1px 12px;':''} gap:${cfg.msgGap||4}px; }
+    :root { --mono:${_fontFam}; }
+    .msg-row { line-height:${_lineH}; ${cfg.compact?'padding:1px 12px;':''} gap:${_msgGap}px; }
     .msg-ts, .sc-ts { ${showTs?'':'display:none;'} font-size:${Math.max(fontSize-3,8)}px; }
     .msg-nick { width:${nickW}px; font-size:${fontSize}px; }
     .msg-body { font-size:${fontSize}px; }
-    .chan-item { font-size:${cfg.sidebarFont}px; }
-    .net-label { font-size:${Math.max(cfg.sidebarFont-1,9)}px; }
-    .nick-entry { font-size:${cfg.nickFont}px; }
+    .chan-item { font-size:${_sideF}px; }
+    .net-label { font-size:${Math.max(_sideF-1,9)}px; }
+    .nick-entry { font-size:${_nickF}px; }
     ${cfg.statusMsg==='hide'?'.row-join,.row-part,.row-quit,.row-nick,.row-mode,.row-kick,.row-away,.row-back,.status-condensed{display:none!important;}':''}
     ${cfg.compact?'.msg-row:hover{background:none;}':''}
     ${cfg.coloredNicks===false?'.nc0,.nc1,.nc2,.nc3,.nc4,.nc5,.nc6,.nc7,.nc8,.nc9{color:var(--text2)!important;}.nc-self{color:var(--accent)!important;}':''}
@@ -6218,7 +6286,7 @@ function populateAppearanceModal(cfg){
   el('a-sidebar-w-val').textContent=cfg.sidebarW+'px';
   el('a-nick-w-val').textContent=cfg.nickW+'px';
   el('a-nickpanel-w-val').textContent=cfg.nickPanelW+'px';
-  el('a-line-height-val').textContent=cfg.lineHeight.toFixed(1);
+  el('a-line-height-val').textContent=((+cfg.lineHeight)||1.55).toFixed(1);
   el('a-brightness').value=cfg.brightness||100;
   el('a-brightness-val').textContent=(cfg.brightness||100)+'%';
   // Mobile settings
@@ -9527,7 +9595,7 @@ async function leaveCurrentChannel(){
 function viewFullTopic(){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
-  const ch=net?.channels.find(c=>c.name===active.target);
+  const ch=net?.channels?.find(c=>c.name===active.target);
   const topic=ch?.topic;
   if(!topic){showToast('No topic set');return;}
   let ov=document.getElementById('topic-overlay');
@@ -9626,7 +9694,7 @@ function customAlert(message){
 async function editTopic(){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
-  const ch=net?.channels.find(c=>c.name===active.target);
+  const ch=net?.channels?.find(c=>c.name===active.target);
   const current=ch?.topic||'';
   const newTopic=await customPrompt('Edit topic for '+active.target+':',current);
   if(newTopic===null)return;
@@ -9639,7 +9707,7 @@ async function promptJoinChannel(conn_id){
 function copyTopic(){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
-  const ch=net?.channels.find(c=>c.name===active.target);
+  const ch=net?.channels?.find(c=>c.name===active.target);
   const topic=ch?.topic||'';
   if(!topic){showToast('No topic set');return;}
   navigator.clipboard?.writeText(topic).then(()=>showToast('Topic copied'));
@@ -9820,6 +9888,10 @@ async function loadNotifPrefs() {
     if (r.ok) _notifPrefs = await r.json();
   } catch(e) {}
   if (!_notifPrefs) _notifPrefs = { enabled: false, trigger: 'mentions_and_dms', muted_networks: [], muted_channels: [] };
+  // Normalize: a valid-but-partial server prefs object (missing these arrays) would
+  // otherwise crash the mute toggles on .includes/.push/.filter.
+  if (!Array.isArray(_notifPrefs.muted_networks)) _notifPrefs.muted_networks = [];
+  if (!Array.isArray(_notifPrefs.muted_channels)) _notifPrefs.muted_channels = [];
 }
 
 async function saveNotifPrefs() {
@@ -10122,7 +10194,7 @@ function batchMode(conn_id, channel, modeChar, nicks) {
 
 function getChannelNicksByTarget(conn_id, channel) {
   const net = networks.find(n => n.config.id === conn_id);
-  const ch  = net?.channels.find(c => c.name === channel);
+  const ch  = net?.channels?.find(c => c.name === channel);
   if (!ch) return [];
   // Return bare nicks (strip prefix)
   return ch.names.map(n => stripPfx(n));
@@ -10130,7 +10202,7 @@ function getChannelNicksByTarget(conn_id, channel) {
 
 function getChannelOps(conn_id, channel) {
   const net = networks.find(n => n.config.id === conn_id);
-  const ch  = net?.channels.find(c => c.name === channel);
+  const ch  = net?.channels?.find(c => c.name === channel);
   if (!ch) return [];
   return ch.names.filter(n => n.startsWith('@')).map(n => stripPfx(n));
 }
@@ -10138,7 +10210,7 @@ function getChannelOps(conn_id, channel) {
 function getChannelNonOps(conn_id, channel) {
   const self = getNick(conn_id);
   const net  = networks.find(n => n.config.id === conn_id);
-  const ch   = net?.channels.find(c => c.name === channel);
+  const ch   = net?.channels?.find(c => c.name === channel);
   if (!ch) return [];
   return ch.names
     .filter(n => !n.startsWith('@') && !n.startsWith('~') && !n.startsWith('&'))
@@ -10148,7 +10220,7 @@ function getChannelNonOps(conn_id, channel) {
 
 function getChannelVoiced(conn_id, channel) {
   const net = networks.find(n => n.config.id === conn_id);
-  const ch  = net?.channels.find(c => c.name === channel);
+  const ch  = net?.channels?.find(c => c.name === channel);
   if (!ch) return [];
   return ch.names.filter(n => n.startsWith('+')).map(n => stripPfx(n));
 }
@@ -10156,7 +10228,7 @@ function getChannelVoiced(conn_id, channel) {
 function getChannelNonVoiced(conn_id, channel) {
   const self = getNick(conn_id);
   const net  = networks.find(n => n.config.id === conn_id);
-  const ch   = net?.channels.find(c => c.name === channel);
+  const ch   = net?.channels?.find(c => c.name === channel);
   if (!ch) return [];
   // Non-voiced = no + prefix AND no op/owner prefix (they already have >= voice)
   return ch.names
@@ -11372,7 +11444,7 @@ async function showAdminPanel(){
         <span style="font-size:11px;color:var(--text2);font-weight:600">Whitelist</span>
         <span style="font-size:10px;color:var(--text3);margin-left:4px">(one domain per line)</span>
       </div>
-      <textarea id="admin-lp-whitelist" style="width:100%;min-height:120px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:12px;padding:8px;outline:none;resize:vertical;box-sizing:border-box" onchange="adminSaveLinkPreview()">${lpSettings.whitelist.join('\n')}</textarea>
+      <textarea id="admin-lp-whitelist" style="width:100%;min-height:120px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:12px;padding:8px;outline:none;resize:vertical;box-sizing:border-box" onchange="adminSaveLinkPreview()">${lpSettings.whitelist.map(esc).join('\n')}</textarea>
     `;
     body.appendChild(lpSection);
 
@@ -11702,6 +11774,9 @@ async function renderSearchResults(conn_id,target,query,results){
   if(!el)return;
   if(!results||!results.length){el.innerHTML='<div class="search-empty">No results found</div>';return;}
   results=await _decryptLogLines(target,results); // sd8~ search hits are ciphertext on disk — decrypt before display
+  // Drop stale results: if the user switched channel/query during the async decrypt,
+  // a slower older response must not overwrite the current view.
+  { const sr=window._searchReq; if(!sr||sr.conn_id!==conn_id||sr.target!==target||sr.query!==query) return; }
   el.innerHTML='';
   // Count header so it's clear the full history was searched.
   const hdr=document.createElement('div');

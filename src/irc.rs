@@ -540,6 +540,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                     let cap_name = cap.split('=').next().unwrap_or(cap);
                                     available_caps.push(cap_name.to_string());
                                 }
+                                // Bound the accumulator: a malicious server can stream
+                                // unbounded `CAP * LS *` lines and never send the terminal
+                                // line, growing this without limit. Real servers advertise
+                                // well under 100 caps, so a 256 cap changes nothing for them.
+                                if available_caps.len() > 256 { available_caps.truncate(256); }
                                 // If multiline (*), wait for more LS lines
                                 if is_multiline { continue; }
 
@@ -705,7 +710,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             // the real nick.
                             if let Some(real) = p.params.get(0) {
                                 if !real.is_empty() && real.as_str() != "*" {
-                                    c.nick = real.clone();
+                                    // strip_crlf: a server-supplied nick with an interior \r
+                                    // (next_line only trims trailing CRLF) would otherwise be
+                                    // smuggled into a later raw `NICK <nick>` send (CRLF injection).
+                                    c.nick = strip_crlf(real);
                                 }
                             }
                             c.nick.clone()
@@ -981,7 +989,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let affected: Vec<String> = {
                             let mut c = conn.lock().await;
                             let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == old)).map(|(n, _)| n.clone()).collect();
-                            if old == c.nick { c.nick = new.clone(); }
+                            if old == c.nick { c.nick = strip_crlf(&new); }
                             for ch in c.channels.values_mut() {
                                 for n in ch.names.iter_mut() {
                                     if strip_pfx(n) == old {

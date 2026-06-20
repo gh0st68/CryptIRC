@@ -129,6 +129,13 @@ impl E2EStore {
     /// an OTPK (it falls back to a 3-DH bundle instead).
     fn otpk_consume_allowed(&self, username: &str) -> bool {
         let now = Instant::now();
+        // Bound the map: an attacker querying many distinct target usernames would
+        // otherwise grow it without limit. Drop fully-expired windows (which would be
+        // reset to a fresh window on next access anyway, so no rate decision changes).
+        // Done BEFORE taking the entry guard to avoid a same-map deadlock.
+        if self.otpk_consume_rate.len() > 4096 {
+            self.otpk_consume_rate.retain(|_, (ws, _)| now.duration_since(*ws) < OTPK_CONSUME_WINDOW);
+        }
         let mut entry = self
             .otpk_consume_rate
             .entry(username.to_string())

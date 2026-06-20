@@ -33,13 +33,19 @@ impl EncryptedLogger {
         }
         *entry += 1;
         let id = *entry;
-        drop(map);
-        // Persist counter (best-effort)
+        // Persist the counter while STILL holding the lock. If the write happened
+        // after releasing it, two concurrent callers (e.g. the same user logging on
+        // two networks at once) could persist out of order — writing N then N-1 —
+        // leaving the on-disk value below the max id actually issued. After a restart
+        // next_id would reload the stale value and re-issue already-used ids, breaking
+        // the monotonic-msg_id invariant the sync/dedup logic relies on. The write is a
+        // few bytes; serializing it under the (already-held) seq lock is negligible here.
         let path = self.seq_path(username);
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
         let _ = tokio::fs::write(&path, id.to_string()).await;
+        drop(map);
         id
     }
 

@@ -1520,7 +1520,7 @@ async fn route_paste_view(
                  <body><div class=\"hdr\"><span><a href=\"/cryptirc/\">CryptIRC</a> Paste</span>\
                  <span class=\"meta\">{} · {} · by {} · {} · <a href=\"/cryptirc/paste/{}/raw\">raw</a></span></div>\
                  <pre>{}</pre></body></html>",
-                id, lang, created, html_escape(&paste.author), expires, id, escaped
+                html_escape(&id), lang, created, html_escape(&paste.author), expires, html_escape(&id), escaped
             )).into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, Html("Paste not found or expired.".to_string())).into_response(),
@@ -2922,7 +2922,11 @@ impl AppState {
             .map(|e| e.key().clone())
             .collect();
         for conn_id in conn_ids {
-            if let Some(conn) = self.connections.get(&conn_id) {
+            // Clone the Arc out and DROP the DashMap Ref before awaiting the Mutex —
+            // holding a shard read-guard across .await blocks same-shard insert/remove
+            // (connect/disconnect) and risks deadlock. Matches every other call site.
+            let conn = self.connections.get(&conn_id).map(|c| c.clone());
+            if let Some(conn) = conn {
                 let conn_nick = {
                     let c = conn.lock().await;
                     c.nick.clone()
@@ -3183,6 +3187,18 @@ pub fn redact_for_log(line: &str) -> String {
     // PASS <pass>
     if upper.starts_with("PASS ") {
         return "PASS <redacted>".to_string();
+    }
+    // JOIN #chan <key> — the channel key is a shared secret; drop it (other redacted
+    // commands cover PASS/OPER/services, but JOIN fell through to the default branch
+    // which logged the key verbatim).
+    if upper.starts_with("JOIN ") {
+        let parts: Vec<&str> = line.splitn(3, ' ').collect();
+        let verb  = parts.first().copied().unwrap_or("JOIN");
+        let chans = parts.get(1).copied().unwrap_or("");
+        if parts.len() >= 3 && !parts[2].is_empty() {
+            return format!("{} {} <key redacted>", verb, chans);
+        }
+        return format!("{} {}", verb, chans);
     }
     // PRIVMSG NICKSERV/CHANSERV :IDENTIFY/REGISTER/GHOST/REGAIN ...  (services auth)
     if upper.starts_with("PRIVMSG ") || upper.starts_with("NOTICE ") {

@@ -856,7 +856,10 @@ pub async fn clear_user_uploads(data_dir: &str, upload_dir: &str, username: &str
     let path = user_uploads_path(data_dir, username);
     let records = load_user_records(&path).await;
     for r in &records {
-        let _ = tokio::fs::remove_file(PathBuf::from(upload_dir).join(&r.filename)).await;
+        // Sanitize before joining, consistent with delete_user_upload (filenames are
+        // server-generated UUIDs today, so this is defense-in-depth, not a behavior change).
+        let safe: String = r.filename.chars().filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-').take(128).collect();
+        let _ = tokio::fs::remove_file(PathBuf::from(upload_dir).join(&safe)).await;
     }
     let tmp = path.with_extension("json.tmp");
     if tokio::fs::write(&tmp, "[]").await.is_ok() && tokio::fs::rename(&tmp, &path).await.is_err() {
