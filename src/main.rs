@@ -300,6 +300,10 @@ pub enum ServerEvent {
     IrcJoinEx        { conn_id: String, nick: String,  channel: String, account: String, realname: String, ts: i64 },
     /// IRCv3 away-notify
     IrcAway          { conn_id: String, nick: String,  away: bool, message: String, ts: i64 },
+    /// Away snapshot from a WHO poll — for servers without away-notify (e.g. ircd-ratbox).
+    /// `away_nicks` are the members of `channel` currently flagged away (G in the WHO reply);
+    /// every other current member of `channel` is implicitly back/here.
+    IrcAwaySnapshot  { conn_id: String, channel: String, away_nicks: Vec<String> },
     /// IRCv3 account-notify
     IrcAccount       { conn_id: String, nick: String,  account: String, ts: i64 },
     /// IRCv3 invite-notify
@@ -653,6 +657,7 @@ async fn main() -> Result<()> {
         .route("/esheep.js",             get(serve_esheep_js))
         .route("/crab.js",               get(serve_crab_js))
         .route("/ghost.js",              get(serve_ghost_js))
+        .route("/fish.js",               get(serve_fish_js))
         .route("/app.js",                get(serve_app_js))
         .route("/manifest.json",         get(serve_manifest))
         .route("/sw.js",                 get(serve_sw))
@@ -755,6 +760,7 @@ async fn serve_sortable_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"app
 async fn serve_esheep_js() -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/esheep.js")) }
 async fn serve_crab_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/crab.js")) }
 async fn serve_ghost_js()  -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/ghost.js")) }
+async fn serve_fish_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/fish.js")) }
 
 // Bundled notification sounds — shipped in the binary so deploys don't need
 // external asset files. Served at /sounds/<name>.mp3.

@@ -20,6 +20,7 @@
 <script src="/cryptirc/esheep.js" defer></script>
 <script src="/cryptirc/crab.js" defer></script>
 <script src="/cryptirc/ghost.js" defer></script>
+<script src="/cryptirc/fish.js" defer></script>
 <style>
 /* ── Locally-hosted display fonts (dafont) ─────────────────────────────────── */
 @font-face { font-family:'Spooky';           src:url('fonts/spooky.ttf') format('truetype'); font-display:swap; }
@@ -2169,6 +2170,15 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <span class="appear-label">👻 Ghost<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A friendly little ghost floats gently around your client — drifting, fading through walls, the odd spin or surprise "BOO!". Low-key and never in the way (it phases through clicks). Silent.</div></span>
           <select id="a-ghost" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+            <option value="off">Off</option>
+            <option value="desktop">Desktop only</option>
+            <option value="mobile">Mobile only</option>
+            <option value="both">Both</option>
+          </select>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">🐟 Calm Fish<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A serene little fish glides slowly around your client, fins gently waving. Click on it to feed it — a flake drops in and it calmly swims over to nibble, blowing a few bubbles. Never in the way (clicks pass right through). Silent.</div></span>
+          <select id="a-fish" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>

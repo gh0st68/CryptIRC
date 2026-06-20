@@ -1204,6 +1204,30 @@ function handleEvent(ev) {
       }
       break;
     }
+    // ── Away snapshot from a WHO poll (servers without away-notify) ──
+    // Reconciles the away (grayed-out) state for a whole channel at once:
+    // members listed in away_nicks are away, all other current members are back.
+    case 'irc_away_snapshot': {
+      if(!window._awayNicks) window._awayNicks={};
+      const snNet=networks.find(n=>n.config.id===ev.conn_id);
+      if(!snNet) break;
+      const snCh=snNet.channels.find(c=>c.name===ev.channel);
+      if(!snCh) break;
+      const awaySet=new Set((ev.away_nicks||[]).map(x=>x.toLowerCase()));
+      let changed=false;
+      for(const member of snCh.names){
+        const bare=stripPfx(member);
+        const key=ev.conn_id+'/'+bare;
+        const nowAway=awaySet.has(bare.toLowerCase());
+        const wasAway=!!window._awayNicks[key];
+        if(nowAway&&!wasAway){ window._awayNicks[key]=true; changed=true; }
+        else if(!nowAway&&wasAway){ delete window._awayNicks[key]; changed=true; }
+      }
+      if(changed&&active&&active.conn_id===ev.conn_id&&active.target===ev.channel){
+        renderNickPanel(snCh.names);
+      }
+      break;
+    }
     // ── IRCv3: account-notify ─────────────────────────
     case 'irc_account': {
       const acNet=networks.find(n=>n.config.id===ev.conn_id);
@@ -5428,6 +5452,7 @@ const APPEAR_DEFAULTS={
   esheep:'off',
   crab:'off',
   ghost:'off',
+  fish:'off',
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -5446,6 +5471,8 @@ function _crabMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='m
 function _crabOn(v){ var m=_crabMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
 function _ghostMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
 function _ghostOn(v){ var m=_ghostMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
+function _fishMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
+function _fishOn(v){ var m=_fishMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
 let _appearCache=null,_appearCacheTs=0;
 function loadAppearance(){
   const now=Date.now();
@@ -5529,6 +5556,7 @@ function applyAppearance(){
     esheep:     el('a-esheep') ? el('a-esheep').value : _esheepMode(prev.esheep),
     crab:       el('a-crab') ? el('a-crab').value : _crabMode(prev.crab),
     ghost:      el('a-ghost') ? el('a-ghost').value : _ghostMode(prev.ghost),
+    fish:       el('a-fish') ? el('a-fish').value : _fishMode(prev.fish),
   };
   // Show/hide the custom radius slider based on shape
   const _radiusRow = el('a-media-radius-row');
@@ -5722,6 +5750,7 @@ function applyThemeCSS(cfg){
   if(window.CryptIRCSheep){ _esheepOn(cfg.esheep) ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); }
   if(window.CryptIRCCrab){ _crabOn(cfg.crab) ? window.CryptIRCCrab.enable() : window.CryptIRCCrab.disable(); }
   if(window.CryptIRCGhost){ _ghostOn(cfg.ghost) ? window.CryptIRCGhost.enable() : window.CryptIRCGhost.disable(); }
+  if(window.CryptIRCFish){ _fishOn(cfg.fish) ? window.CryptIRCFish.enable() : window.CryptIRCFish.disable(); }
 }
 
 // Apply the saved eSheep state once everything (including the deferred
@@ -5731,6 +5760,7 @@ window.addEventListener('load', function(){
   try{ if(window.CryptIRCSheep){ var _c=loadAppearance(); _esheepOn(_c.esheep) ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); } }catch(_){}
   try{ if(window.CryptIRCCrab){ var _cc=loadAppearance(); _crabOn(_cc.crab) ? window.CryptIRCCrab.enable() : window.CryptIRCCrab.disable(); } }catch(_){}
   try{ if(window.CryptIRCGhost){ var _cg=loadAppearance(); _ghostOn(_cg.ghost) ? window.CryptIRCGhost.enable() : window.CryptIRCGhost.disable(); } }catch(_){}
+  try{ if(window.CryptIRCFish){ var _cf=loadAppearance(); _fishOn(_cf.fish) ? window.CryptIRCFish.enable() : window.CryptIRCFish.disable(); } }catch(_){}
 });
 
 // ─── Animation System ─────────────────────────────────────────────────────────
@@ -6164,6 +6194,7 @@ function populateAppearanceModal(cfg){
   { const _es=el('a-esheep'); if(_es){ _es.value=_esheepMode(cfg.esheep); } }
   { const _cr=el('a-crab'); if(_cr){ _cr.value=_crabMode(cfg.crab); } }
   { const _gh=el('a-ghost'); if(_gh){ _gh.value=_ghostMode(cfg.ghost); } }
+  { const _fh=el('a-fish'); if(_fh){ _fh.value=_fishMode(cfg.fish); } }
   // spellcheck and linkPreviews toggles are now in the Security panel
   el('a-accent-color').value=cfg.accent;
   el('a-accent2-color').value=cfg.accent2;

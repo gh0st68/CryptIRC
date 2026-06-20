@@ -8,7 +8,7 @@
 //!   L3    — stale IrcConnection removed from map on run_loop exit
 
 use anyhow::Result;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -26,6 +26,10 @@ const PONG_TIMEOUT:      Duration = Duration::from_secs(90);
 const RECONNECT_BASE:    Duration = Duration::from_secs(5);
 const RECONNECT_MAX:     Duration = Duration::from_secs(300);
 const READ_TIMEOUT:      Duration = Duration::from_secs(120);
+// How often to poll WHO per joined channel to refresh away (G/H) state. ircd-ratbox
+// 3.0.10 (and other old IRCds) don't advertise the IRCv3 `away-notify` cap, so the
+// only server-independent way to gray out away nicks is to poll WHO and read the G flag.
+const WHO_INTERVAL:      Duration = Duration::from_secs(45);
 /// S4: maximum number of times we'll retry a nick before aborting registration
 const MAX_NICK_RETRIES:  u32 = 5;
 /// S3: maximum total channels in names_buf
@@ -429,6 +433,14 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
     // S3: bounded names accumulation buffer
     let mut names_buf: HashMap<String, Vec<String>> = HashMap::with_capacity(32);
     let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
+    // Away-state polling (see WHO_INTERVAL). `who_pending` holds channels for which WE
+    // issued an automatic WHO — their 352/315 replies are consumed silently for away
+    // tracking instead of being dumped to the status buffer (a user-typed /who is not in
+    // the set, so its output is still forwarded). `who_away` accumulates the away nicks
+    // of the in-flight WHO, keyed by channel, flushed into a snapshot on 315 (end of WHO).
+    let mut who_ticker = tokio::time::interval(WHO_INTERVAL);
+    let mut who_pending: HashSet<String> = HashSet::new();
+    let mut who_away: HashMap<String, Vec<String>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -443,6 +455,21 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     let ts = chrono::Utc::now().timestamp_millis() as u64;
                     conn.lock().await.send_raw(&format!("PING :hb-{}\r\n", ts)).await?;
                     ping_out = true;
+                }
+            }
+
+            // ── Away-state poll ───────────────────────────────────────────
+            // Periodically WHO every joined channel to refresh the nick panel's
+            // away (grayed-out) state on servers without away-notify.
+            _ = who_ticker.tick() => {
+                if registered {
+                    let chans: Vec<String> = { conn.lock().await.channels.keys().cloned().collect() };
+                    for ch in chans {
+                        who_pending.insert(ch.clone());
+                        // A send failure here just means the connection is going down;
+                        // the read side will surface the real error and reconnect.
+                        if conn.lock().await.send_raw(&format!("WHO {}\r\n", ch)).await.is_err() { break; }
+                    }
                 }
             }
 
@@ -897,6 +924,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         // Only issue the outbound NAMES amplification for an accepted self-JOIN.
                         if is_self_join {
                             conn.lock().await.send_raw(&format!("NAMES {}\r\n", channel)).await?;
+                            // Seed the nick panel's away state immediately (don't wait for the
+                            // periodic WHO_INTERVAL tick). Marked pending so the reply is consumed
+                            // silently rather than dumped to the status buffer.
+                            who_pending.insert(channel.clone());
+                            conn.lock().await.send_raw(&format!("WHO {}\r\n", channel)).await?;
                         }
                         // Persist for log replay (Lounge-style condense after refresh) —
                         // skipped for channels rejected by the cap to bound disk/inode growth.
@@ -1416,6 +1448,57 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             target: display_target, text: reason, ts,
                             kind: MessageKind::Notice, msg_id: 0, prefix: None,
                         });
+                    }
+                    // ── WHO away-state polling (no away-notify on ratbox) ─────
+                    "352" => { // RPL_WHOREPLY: <me> <chan> <user> <host> <server> <nick> <H|G..> :<hops> <real>
+                        let channel  = p.params.get(1).cloned().unwrap_or_default();
+                        let who_nick = p.params.get(5).cloned().unwrap_or_default();
+                        let status   = p.params.get(6).cloned().unwrap_or_default();
+                        // 'G' = gone/away, 'H' = here. Accumulate away nicks for the snapshot;
+                        // here-nicks are implied by absence (the frontend has the member list).
+                        if status.starts_with('G') && !who_nick.is_empty()
+                            && (who_away.len() < NAMES_BUF_MAX_CHANNELS || who_away.contains_key(&channel)) {
+                            let v = who_away.entry(channel.clone()).or_default();
+                            if v.len() < NAMES_BUF_MAX_PER_CHAN { v.push(who_nick); }
+                        }
+                        // A user-typed /who isn't in who_pending — keep forwarding its raw
+                        // reply to status so manual WHO still works as before.
+                        if !who_pending.contains(&channel) {
+                            let text = if p.params.len() > 1 { p.params[1..].join(" ") } else { String::new() };
+                            if !text.is_empty() {
+                                let msg_id = state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await;
+                                send(ServerEvent::IrcMessage {
+                                    conn_id: conn_id.to_string(), from: "*".into(),
+                                    target: "status".into(), text, ts,
+                                    kind: MessageKind::Notice, msg_id, prefix: None,
+                                });
+                            }
+                        }
+                    }
+                    "315" => { // RPL_ENDOFWHO: <me> <chan/mask> :End of /WHO list.
+                        let channel  = p.params.get(1).cloned().unwrap_or_default();
+                        let was_auto = who_pending.remove(&channel);
+                        // Emit a snapshot only for real channels (skip `WHO nick`-style masks).
+                        if channel.starts_with(['#','&','+','!']) {
+                            let away_nicks = who_away.remove(&channel).unwrap_or_default();
+                            send(ServerEvent::IrcAwaySnapshot {
+                                conn_id: conn_id.to_string(), channel, away_nicks,
+                            });
+                        } else {
+                            who_away.remove(&channel);
+                        }
+                        // Preserve the status line for a user-initiated /who.
+                        if !was_auto {
+                            let text = if p.params.len() > 1 { p.params[1..].join(" ") } else { String::new() };
+                            if !text.is_empty() {
+                                let msg_id = state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await;
+                                send(ServerEvent::IrcMessage {
+                                    conn_id: conn_id.to_string(), from: "*".into(),
+                                    target: "status".into(), text, ts,
+                                    kind: MessageKind::Notice, msg_id, prefix: None,
+                                });
+                            }
+                        }
                     }
                     // Forward unhandled numerics (whois, lusers, motd, etc.) as status messages
                     cmd if cmd.chars().all(|c| c.is_ascii_digit()) => {
