@@ -3972,7 +3972,7 @@ function _styleOutgoing(text){
 }
 function _mcCfg(){ const c=loadAppearance(); return {mode:c.msgColorMode||'off', fg:(c.msgColorFg==null?4:c.msgColorFg), bg:(c.msgColorBg==null?null:c.msgColorBg)}; }
 function _mcSave(mode,fg,bg){ const cfg=loadAppearance(); cfg.msgColorMode=mode; if(fg!=null)cfg.msgColorFg=fg; if(bg!==undefined)cfg.msgColorBg=bg; saveAppearance(cfg); }
-function setMsgColorMode(mode){ _mcSave(mode); if(document.getElementById('msgcolor-pop'))_renderMsgColorPop(); }
+function setMsgColorMode(mode){ _mcSave(mode); _refreshMsgColor(); }
 function _mcOutside(e){ if(!e.target.closest('#msgcolor-pop')&&!e.target.closest('#msgcolor-btn')) closeMsgColorPop(); }
 function closeMsgColorPop(){ const p=document.getElementById('msgcolor-pop'); if(p)p.remove(); document.removeEventListener('click',_mcOutside); }
 function toggleMsgColorPop(ev){ if(ev){ev.stopPropagation();ev.preventDefault&&ev.preventDefault();} if(document.getElementById('msgcolor-pop')){closeMsgColorPop();return;} openMsgColorPop(); }
@@ -3986,18 +3986,14 @@ function openMsgColorPop(){
   _renderMsgColorPop();
   setTimeout(()=>document.addEventListener('click',_mcOutside),60);   // guard the opening click
 }
-function _renderMsgColorPop(){
-  const pop=document.getElementById('msgcolor-pop'); if(!pop) return;
-  const st=_mcCfg();
+// Shared message-color controls — rendered into BOTH the 🎨 popover and the
+// Appearance ▸ My Message Color section, kept in sync via _refreshMsgColor().
+function _msgColorControlsHTML(st){
   const sw=(type,sel)=>MIRC_COLORS.map((c,i)=>`<div class="mc-sw" data-mc="${type}" data-i="${i}" title="${i}" style="width:20px;height:20px;border-radius:4px;cursor:pointer;background:${c};border:2px solid ${sel===i?'var(--accent)':'var(--border)'};touch-action:manipulation"></div>`).join('');
   const solidSample='\x03'+String(st.fg).padStart(2,'0')+(st.bg!=null?','+String(st.bg).padStart(2,'0'):'')+'gh0st: hey everyone!\x0F';
   let prismSample='';{const rc=[4,7,8,3,11,12,6];let ci=0;for(const ch of 'gh0st: hey everyone!'){if(ch===' ')prismSample+=ch;else{prismSample+='\x03'+String(rc[ci%rc.length]).padStart(2,'0')+ch;ci++;}}prismSample+='\x0F';}
   const previewSrc=st.mode==='prism'?prismSample:(st.mode==='solid'?solidSample:'gh0st: hey everyone!');
-  pop.innerHTML=`
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">
-      <span style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text2)">My Message Color</span>
-      <span id="mc-x" style="cursor:pointer;color:var(--text3);padding:2px 8px;font-size:15px">&times;</span>
-    </div>
+  return `
     <div style="display:flex;gap:6px;margin-bottom:9px">
       ${['off','solid','prism'].map(m=>`<button class="mc-mode" data-m="${m}" style="flex:1;padding:7px 0;border-radius:7px;font-size:12px;cursor:pointer;text-transform:capitalize;touch-action:manipulation;border:1px solid ${st.mode===m?'var(--accent)':'var(--border)'};background:${st.mode===m?'var(--accent)':'var(--bg3)'};color:${st.mode===m?'#001b16':'var(--text2)'};font-weight:${st.mode===m?'700':'500'}">${m}</button>`).join('')}
     </div>
@@ -4010,10 +4006,27 @@ function _renderMsgColorPop(){
         ${sw('bg',st.bg)}
       </div>`:''}
     <div style="margin-top:11px;padding:9px 10px;background:var(--bg0);border:1px solid var(--border);border-radius:6px;font-family:var(--mono);font-size:13px;min-height:18px">${parseMircColors(previewSrc)}</div>
-    <div style="font-size:10px;color:var(--text3);margin-top:7px;line-height:1.35">Applied to every message you send. Some channels block colors (+c).</div>`;
+    <div style="font-size:10px;color:var(--text3);margin-top:7px;line-height:1.35">Sent to everyone in the channel — others see this. Some channels block colors (+c).</div>`;
+}
+function _wireMsgColor(root){
+  root.querySelectorAll('.mc-mode').forEach(b=>{b.onclick=()=>setMsgColorMode(b.dataset.m);});
+  root.querySelectorAll('.mc-sw').forEach(s=>{s.onclick=()=>{const i=s.dataset.i;const v=(i==='none')?null:+i;if(s.dataset.mc==='fg')_mcSave('solid',v);else _mcSave('solid',null,v);_refreshMsgColor();};});
+}
+function _refreshMsgColor(){ if(document.getElementById('msgcolor-pop'))_renderMsgColorPop(); _renderMsgColorSection(); }
+function _renderMsgColorPop(){
+  const pop=document.getElementById('msgcolor-pop'); if(!pop) return;
+  pop.innerHTML=`
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">
+      <span style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text2)">My Message Color</span>
+      <span id="mc-x" style="cursor:pointer;color:var(--text3);padding:2px 8px;font-size:15px">&times;</span>
+    </div>`+_msgColorControlsHTML(_mcCfg());
   pop.querySelector('#mc-x').onclick=closeMsgColorPop;
-  pop.querySelectorAll('.mc-mode').forEach(b=>{b.onclick=()=>setMsgColorMode(b.dataset.m);});
-  pop.querySelectorAll('.mc-sw').forEach(s=>{s.onclick=()=>{const i=s.dataset.i;const v=(i==='none')?null:+i;if(s.dataset.mc==='fg')_mcSave('solid',v);else _mcSave('solid',null,v);_renderMsgColorPop();};});
+  _wireMsgColor(pop);
+}
+function _renderMsgColorSection(){
+  const box=document.getElementById('a-msgcolor-box'); if(!box) return;
+  box.innerHTML=_msgColorControlsHTML(_mcCfg());
+  _wireMsgColor(box);
 }
 function showMircColorPicker(inp){
   // Remove existing picker
@@ -5774,7 +5787,7 @@ const APPEAR_DEFAULTS={
   // Persistent outgoing text color ("My Messages"). mode: off|solid|prism; fg/bg = mIRC 0-15 (bg null = none).
   msgColorMode:'off', msgColorFg:4, msgColorBg:null,
   // Chat-bar button visibility, per platform (desktop/mobile). Shown by default.
-  barUploadD:true, barUploadM:true, barPasteD:true, barPasteM:true, barColorD:true, barColorM:true,
+  barUploadD:true, barUploadM:true, barPasteD:true, barPasteM:true, barColorD:false, barColorM:false,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
   // Hyperlink color. '' = follow Accent 2 (default). mobileLink '' = inherit desktop link.
@@ -6565,6 +6578,7 @@ function populateAppearanceModal(cfg){
     _bt('a-bar-upload-d',cfg.barUploadD); _bt('a-bar-upload-m',cfg.barUploadM);
     _bt('a-bar-paste-d',cfg.barPasteD);   _bt('a-bar-paste-m',cfg.barPasteM);
     _bt('a-bar-color-d',cfg.barColorD);   _bt('a-bar-color-m',cfg.barColorM); }
+  _renderMsgColorSection();
   { const _es=el('a-esheep'); if(_es){ _es.value=_esheepMode(cfg.esheep); } }
   { const _cr=el('a-crab'); if(_cr){ _cr.value=_crabMode(cfg.crab); } }
   { const _gh=el('a-ghost'); if(_gh){ _gh.value=_ghostMode(cfg.ghost); } }
