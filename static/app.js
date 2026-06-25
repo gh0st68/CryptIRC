@@ -3674,7 +3674,7 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.0 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 121 themes • 135 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.1 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 121 themes • 135 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'GIPHY': case 'GIF': {
         const sub=(args[0]||'').toLowerCase();
         // ── Key management: /giphy key [value|clear] ────────────────────
@@ -11646,7 +11646,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.0';
+const CRYPTIRC_VERSION='0.3.1';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
