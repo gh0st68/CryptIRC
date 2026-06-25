@@ -1107,7 +1107,7 @@ function handleEvent(ev) {
         const _msgKind = _isHostChange ? 'chghost' : (ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg');
         // Server/system notices (from '*') are never real mentions — skip detection so
         // they don't turn channels red or spam the Mentions panel.
-        const mentioned=(ev.from==='*')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts);
+        const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts);
         // ZNC playback detection — batch old messages silently
         const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null};
         if(zncDetectBatch(ev.conn_id,ev.target,zncMsg)){
@@ -1847,14 +1847,18 @@ function addMessage(conn_id,target,msg){
   if(isActive(conn_id,target)){appendMsgRow(msg);const isOwn=msg.from&&msg.from===getNick(conn_id);if(isOwn)scrollForce();else scrollBottom();}
   else{
     const _ownMsg=msg.from&&msg.from===getNick(conn_id);
+    // Status (server) buffer is kept "fully quiet": it may still show a plain
+    // unread count, but never a mention-red badge, sound, or desktop popup —
+    // even if a server line happens to contain your nick / a highlight word.
+    const _isStatusBuf=(target==='status');
     // Status events (join/part/quit/nick/mode/kick/away/back) never bump unread
     // or trigger notifications — matches The Lounge's behavior where only real
     // chat (privmsg/action/notice) counts as unread.
     const _isStatus=['join','part','quit','nick','mode','kick','away','back','chghost'].includes(msg.kind);
-    if(!msg.noUnread && !_ownMsg && !_isStatus){
+    if(!msg.noUnread && !_ownMsg && !_isStatus && !_isStatusBuf){
       const uk=bk(conn_id,target);
       unread.set(uk,(unread.get(uk)||0)+1);
-      if(msg.mentioned||isDM) mentionUnread.set(uk,(mentionUnread.get(uk)||0)+1);
+      if((msg.mentioned||isDM) && !_isStatusBuf) mentionUnread.set(uk,(mentionUnread.get(uk)||0)+1);
       saveUnread();renderSidebar();
     }
     // Notices inbox: one row per PM sender, first message only; only if that
@@ -1864,7 +1868,7 @@ function addMessage(conn_id,target,msg){
     }
     // Play sound for unread DMs and mentions — never for own or status messages.
     const isMutedChan=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
-    if(!isMutedChan && !_ownMsg && !_isStatus){
+    if(!isMutedChan && !_ownMsg && !_isStatus && !_isStatusBuf){
       const soundCfg=loadAppearance();
       if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
       else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
@@ -2115,7 +2119,7 @@ function _renderSidebarNow(){
     const id=net.config.id;
     const g=document.createElement('div'); g.className='net-group'; g.dataset.netId=id;
     // draggable handled by SortableJS
-    const sk=bk(id,'status'),sa=isActive(id,'status'),sc=unread.get(sk)||0;
+    const sk=bk(id,'status'),sa=isActive(id,'status'),sc=0; // status buffer kept fully quiet — never render an unread badge
     const netMuted=isMuted('net:'+id)||isMuted(id+'/status');
     g.innerHTML=`<div class="net-label${sa?' active':''}" onclick="setActive('${id}','status');closeSidebar();" style="${sa?'background:var(--bg4);':''}">
       <span class="net-dot ${net.connected?'online':''}" id="dot-${id}"></span>
@@ -3733,9 +3737,24 @@ async function handleInput(raw){
       case 'DANCE': { const t='♪┏(・o・)┛♪┗(・o・)┓♪'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'RIP': { const t='⚰️ R.I.P. '+(args.length?args.join(' '):'')+'⚰️';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'HUG': { const n=args[0]||'everyone';const t=`(づ｡◕‿‿◕｡)づ ${n}`;wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'COLOR': {
+        const a=(args[0]||'').toLowerCase().trim();
+        if(!a||a==='off'){ setMsgColorMode('off'); sysMsg(conn_id,target,'Message color turned off.','system'); break; }
+        if(a==='prism'||a==='rainbow'){ setMsgColorMode('prism'); sysMsg(conn_id,target,'Prism enabled for all your messages.','system'); break; }
+        const NAMES={white:0,black:1,blue:2,navy:2,green:3,red:4,brown:5,maroon:5,purple:6,orange:7,yellow:8,lime:9,green2:9,teal:10,cyan:11,aqua:11,royal:12,royalblue:12,pink:13,magenta:13,fuchsia:13,grey:14,gray:14,silver:15};
+        const toCode=s=>{ if(s==null||s==='')return null; if(/^\d{1,2}$/.test(s)){const n=+s;return (n>=0&&n<=15)?n:'bad';} return (s in NAMES)?NAMES[s]:'bad'; };
+        const parts=a.split(',');
+        const fg=toCode(parts[0]); const bg=parts.length>1?toCode(parts[1]):null;
+        if(fg==null||fg==='bad'||bg==='bad'){ sysMsg(conn_id,target,'Usage: /color <fg>[,<bg>]  (0-15 or names like red, blue)  ·  /color off  ·  /color prism','error'); break; }
+        const cfg=loadAppearance(); cfg.msgColorMode='solid'; cfg.msgColorFg=fg; cfg.msgColorBg=(bg==null?null:bg); saveAppearance(cfg);
+        if(document.getElementById('msgcolor-pop'))_renderMsgColorPop();
+        sysMsg(conn_id,target,'Message color set for all your messages.','system'); break;
+      }
       case 'PRISM': case 'RAINBOW': {
+        const _pa=(args[0]||'').toLowerCase();
+        if(_pa==='on'||_pa==='off'){ setMsgColorMode(_pa==='on'?'prism':'off'); sysMsg(conn_id,target,_pa==='on'?'Prism enabled for all your messages.':'Message color turned off.','system'); break; }
         const text=args.join(' ');
-        if(!text){sysMsg(conn_id,target,'Usage: /prism <message>','error');break;}
+        if(!text){sysMsg(conn_id,target,'Usage: /prism <message>  ·  /prism on|off (apply to all messages)','error');break;}
         const rainbowColors=[4,7,8,3,12,2,6]; // red,orange,yellow,green,cyan,blue,purple
         let colored='';
         let ci=0;
@@ -3902,8 +3921,9 @@ async function handleInput(raw){
         wsend({type:'send',conn_id,raw:raw.slice(1)});
     }
   } else {
-    // Translate visible caret-notation formatting tokens (^B/^I/^U/^O/^R/^Cnn[,nn]) to real mIRC control chars
-    const raw2=toMircChars(raw);
+    // Translate visible caret-notation formatting tokens (^B/^I/^U/^O/^R/^Cnn[,nn]) to real mIRC control chars,
+    // then apply the persistent "My Messages" color (no-op when off / when the user already added codes).
+    const raw2=_styleOutgoing(toMircChars(raw));
     // Attempt E2E encryption for outgoing plaintext
     // Handle reply — send quote line first, then the actual message
     const replyPrefix=getReplyPrefix();
@@ -3930,6 +3950,70 @@ function insertAtCursor(inp,text){
   inp.value=inp.value.slice(0,pos)+text+inp.value.slice(inp.selectionEnd);
   inp.selectionStart=inp.selectionEnd=pos+text.length;
   inp.focus();
+}
+// ── Persistent outgoing text color ("My Messages") ──────────────────────────
+// Applies the user's chosen color/prism to every plain message sent (wire-level
+// mIRC codes, so others see it). Off by default. Set via the 🎨 input button,
+// the Settings menu, or /color · /prism on|off. Stored in synced appearance prefs.
+function _styleOutgoing(text){
+  if(!text||typeof text!=='string') return text;
+  const cfg=loadAppearance();
+  const mode=cfg.msgColorMode||'off';
+  if(mode==='off') return text;
+  if(text.indexOf('\x03')>=0) return text; // user already inserted color codes — leave it alone
+  if(mode==='prism'){
+    const rc=[4,7,8,3,11,12,6]; let out='',ci=0;
+    for(const ch of text){ if(ch===' '||ch==='\t'){out+=ch;} else {out+='\x03'+String(rc[ci%rc.length]).padStart(2,'0')+ch;ci++;} }
+    return out+'\x0F';
+  }
+  const fg=String(cfg.msgColorFg==null?4:cfg.msgColorFg).padStart(2,'0');
+  const bg=(cfg.msgColorBg==null)?'':(','+String(cfg.msgColorBg).padStart(2,'0'));
+  return '\x03'+fg+bg+text+'\x0F';
+}
+function _mcCfg(){ const c=loadAppearance(); return {mode:c.msgColorMode||'off', fg:(c.msgColorFg==null?4:c.msgColorFg), bg:(c.msgColorBg==null?null:c.msgColorBg)}; }
+function _mcSave(mode,fg,bg){ const cfg=loadAppearance(); cfg.msgColorMode=mode; if(fg!=null)cfg.msgColorFg=fg; if(bg!==undefined)cfg.msgColorBg=bg; saveAppearance(cfg); }
+function setMsgColorMode(mode){ _mcSave(mode); if(document.getElementById('msgcolor-pop'))_renderMsgColorPop(); }
+function _mcOutside(e){ if(!e.target.closest('#msgcolor-pop')&&!e.target.closest('#msgcolor-btn')) closeMsgColorPop(); }
+function closeMsgColorPop(){ const p=document.getElementById('msgcolor-pop'); if(p)p.remove(); document.removeEventListener('click',_mcOutside); }
+function toggleMsgColorPop(ev){ if(ev){ev.stopPropagation();ev.preventDefault&&ev.preventDefault();} if(document.getElementById('msgcolor-pop')){closeMsgColorPop();return;} openMsgColorPop(); }
+function openMsgColorPop(){
+  closeMsgColorPop();
+  const inp=document.getElementById('msg-input'); if(!inp) return;
+  try{inp.blur();}catch(_){}                       // dodge the iOS overlay-tap blur cascade
+  const pop=document.createElement('div'); pop.id='msgcolor-pop';
+  pop.style.cssText='position:absolute;bottom:100%;left:0;right:0;margin-bottom:6px;background:var(--bg1);border:1px solid var(--border2);border-radius:8px;padding:10px;z-index:140;box-shadow:0 10px 30px rgba(0,0,0,.55)';
+  inp.parentNode.appendChild(pop);
+  _renderMsgColorPop();
+  setTimeout(()=>document.addEventListener('click',_mcOutside),60);   // guard the opening click
+}
+function _renderMsgColorPop(){
+  const pop=document.getElementById('msgcolor-pop'); if(!pop) return;
+  const st=_mcCfg();
+  const sw=(type,sel)=>MIRC_COLORS.map((c,i)=>`<div class="mc-sw" data-mc="${type}" data-i="${i}" title="${i}" style="width:20px;height:20px;border-radius:4px;cursor:pointer;background:${c};border:2px solid ${sel===i?'var(--accent)':'var(--border)'};touch-action:manipulation"></div>`).join('');
+  const solidSample='\x03'+String(st.fg).padStart(2,'0')+(st.bg!=null?','+String(st.bg).padStart(2,'0'):'')+'gh0st: hey everyone!\x0F';
+  let prismSample='';{const rc=[4,7,8,3,11,12,6];let ci=0;for(const ch of 'gh0st: hey everyone!'){if(ch===' ')prismSample+=ch;else{prismSample+='\x03'+String(rc[ci%rc.length]).padStart(2,'0')+ch;ci++;}}prismSample+='\x0F';}
+  const previewSrc=st.mode==='prism'?prismSample:(st.mode==='solid'?solidSample:'gh0st: hey everyone!');
+  pop.innerHTML=`
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">
+      <span style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text2)">My Message Color</span>
+      <span id="mc-x" style="cursor:pointer;color:var(--text3);padding:2px 8px;font-size:15px">&times;</span>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:9px">
+      ${['off','solid','prism'].map(m=>`<button class="mc-mode" data-m="${m}" style="flex:1;padding:7px 0;border-radius:7px;font-size:12px;cursor:pointer;text-transform:capitalize;touch-action:manipulation;border:1px solid ${st.mode===m?'var(--accent)':'var(--border)'};background:${st.mode===m?'var(--accent)':'var(--bg3)'};color:${st.mode===m?'#001b16':'var(--text2)'};font-weight:${st.mode===m?'700':'500'}">${m}</button>`).join('')}
+    </div>
+    ${st.mode==='solid'?`
+      <div style="font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);margin:6px 0 4px">Text</div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap">${sw('fg',st.fg)}</div>
+      <div style="font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:var(--text3);margin:9px 0 4px">Background</div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+        <div class="mc-sw" data-mc="bg" data-i="none" title="none" style="width:20px;height:20px;border-radius:4px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text3);background:var(--bg2);border:2px solid ${st.bg==null?'var(--accent)':'var(--border)'};touch-action:manipulation">&empty;</div>
+        ${sw('bg',st.bg)}
+      </div>`:''}
+    <div style="margin-top:11px;padding:9px 10px;background:var(--bg0);border:1px solid var(--border);border-radius:6px;font-family:var(--mono);font-size:13px;min-height:18px">${parseMircColors(previewSrc)}</div>
+    <div style="font-size:10px;color:var(--text3);margin-top:7px;line-height:1.35">Applied to every message you send. Some channels block colors (+c).</div>`;
+  pop.querySelector('#mc-x').onclick=closeMsgColorPop;
+  pop.querySelectorAll('.mc-mode').forEach(b=>{b.onclick=()=>setMsgColorMode(b.dataset.m);});
+  pop.querySelectorAll('.mc-sw').forEach(s=>{s.onclick=()=>{const i=s.dataset.i;const v=(i==='none')?null:+i;if(s.dataset.mc==='fg')_mcSave('solid',v);else _mcSave('solid',null,v);_renderMsgColorPop();};});
 }
 function showMircColorPicker(inp){
   // Remove existing picker
@@ -5687,6 +5771,10 @@ const APPEAR_DEFAULTS={
   timestamps:true, joinpart:true, statusMsg:'condense', compact:false, coloredNicks:true,
   accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'water-drop', msgGap:4, inputH:36,
   font:"'DM Sans',sans-serif", linkPreviews:true,
+  // Persistent outgoing text color ("My Messages"). mode: off|solid|prism; fg/bg = mIRC 0-15 (bg null = none).
+  msgColorMode:'off', msgColorFg:4, msgColorBg:null,
+  // Chat-bar button visibility, per platform (desktop/mobile). Shown by default.
+  barUploadD:true, barUploadM:true, barPasteD:true, barPasteM:true, barColorD:true, barColorM:true,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
   // Hyperlink color. '' = follow Accent 2 (default). mobileLink '' = inherit desktop link.
@@ -5791,6 +5879,17 @@ function applyAppearance(){
     // '' means "inherit the desktop link color" (the Inherit toggle is on).
     mobileLink:     el('a-mobile-link-inherit')?.classList.contains('on') ? '' : (el('a-mobile-link-color')?.value||''),
     font:           el('a-font').value||prev.font||"'DM Sans',sans-serif",
+    // "My Messages" color isn't a modal control — carry it through untouched so a
+    // slider/theme tweak never wipes it.
+    msgColorMode: prev.msgColorMode||'off',
+    msgColorFg:   (prev.msgColorFg==null?4:prev.msgColorFg),
+    msgColorBg:   (prev.msgColorBg==null?null:prev.msgColorBg),
+    barUploadD: !el('a-bar-upload-d')||el('a-bar-upload-d').classList.contains('on'),
+    barUploadM: !el('a-bar-upload-m')||el('a-bar-upload-m').classList.contains('on'),
+    barPasteD:  !el('a-bar-paste-d') ||el('a-bar-paste-d').classList.contains('on'),
+    barPasteM:  !el('a-bar-paste-m') ||el('a-bar-paste-m').classList.contains('on'),
+    barColorD:  !el('a-bar-color-d') ||el('a-bar-color-d').classList.contains('on'),
+    barColorM:  !el('a-bar-color-m') ||el('a-bar-color-m').classList.contains('on'),
     mediaShape:     el('a-media-shape')?.value || prev.mediaShape || 'rounded',
     mediaSize:      el('a-media-size')?.value || prev.mediaSize || 'medium',
     mediaBorder:    el('a-media-border')?.value || prev.mediaBorder || 'none',
@@ -6006,6 +6105,21 @@ function applyThemeCSS(cfg){
   if(window.CryptIRCGhost){ _ghostOn(cfg.ghost) ? window.CryptIRCGhost.enable() : window.CryptIRCGhost.disable(); }
   if(window.CryptIRCFish){ _fishOn(cfg.fish) ? window.CryptIRCFish.enable() : window.CryptIRCFish.disable(); }
   if(window.CryptIRCAlien){ _alienOn(cfg.alien) ? window.CryptIRCAlien.enable() : window.CryptIRCAlien.disable(); }
+  _applyBarButtons(cfg);
+}
+// Show/hide chat-bar buttons per platform via generated media-query CSS (no JS
+// resize handling needed; updates live on rotate/resize). Defaults = all shown.
+function _applyBarButtons(cfg){
+  cfg=cfg||loadAppearance();
+  const map=[['btn-upload',cfg.barUploadD,cfg.barUploadM],['btn-paste',cfg.barPasteD,cfg.barPasteM],['msgcolor-btn',cfg.barColorD,cfg.barColorM]];
+  let css='';
+  for(const [id,d,m] of map){
+    if(d===false) css+=`@media(min-width:769px){#${id}{display:none!important}}`;
+    if(m===false) css+=`@media(max-width:768px){#${id}{display:none!important}}`;
+  }
+  let st=document.getElementById('barbtn-css');
+  if(!st){ st=document.createElement('style'); st.id='barbtn-css'; document.head.appendChild(st); }
+  st.textContent=css;
 }
 
 // Apply the saved eSheep state once everything (including the deferred
@@ -6447,6 +6561,10 @@ function populateAppearanceModal(cfg){
   cfg.compact ? el('a-compact').classList.add('on') : el('a-compact').classList.remove('on');
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
   cfg.nickList!==false ? el('a-nicklist').classList.add('on') : el('a-nicklist').classList.remove('on');
+  { const _bt=(id,v)=>{const e=el(id);if(e)(v!==false?e.classList.add('on'):e.classList.remove('on'));};
+    _bt('a-bar-upload-d',cfg.barUploadD); _bt('a-bar-upload-m',cfg.barUploadM);
+    _bt('a-bar-paste-d',cfg.barPasteD);   _bt('a-bar-paste-m',cfg.barPasteM);
+    _bt('a-bar-color-d',cfg.barColorD);   _bt('a-bar-color-m',cfg.barColorM); }
   { const _es=el('a-esheep'); if(_es){ _es.value=_esheepMode(cfg.esheep); } }
   { const _cr=el('a-crab'); if(_cr){ _cr.value=_crabMode(cfg.crab); } }
   { const _gh=el('a-ghost'); if(_gh){ _gh.value=_ghostMode(cfg.ghost); } }
@@ -9350,7 +9468,7 @@ const _CM_FLAGS=[
   ['R','Registered only','Only registered (Services-identified) users may join'],
   ['z','TLS only','Only users connected over SSL/TLS may join'],
   ['s','Secret','Hide the channel from /LIST and /WHOIS, as if it does not exist'],
-  ['p','Private','Partially conceal that the channel exists'],
+  ['p','Private','Hidden from /LIST (still visible in members /WHOIS)'],
   ['c','Block colors','Reject messages containing mIRC/ANSI color codes'],
   ['S','Strip colors','Strip color codes from messages instead of blocking them'],
   ['C','Block CTCPs','Reject CTCPs sent to the channel'],
@@ -9432,6 +9550,9 @@ function cmRenderList(){
 function cmRender(){
   if(!_cm)return;
   const ov=document.getElementById('chanmodes-overlay'); if(!ov.classList.contains('show'))return;
+  // Preserve scroll across full re-render (e.g. removing a ban triggers a MODE
+  // re-query → cmRender → innerHTML rebuild, which otherwise jumps to the top).
+  const _cmScroll=ov.querySelector('.cm-body')?ov.querySelector('.cm-body').scrollTop:0;
   const ro=!_cm.isOp;
   const prevAdd=(document.getElementById('cm-add-input')||{}).value||'';
   const known=new Set(_CM_FLAGS.map(f=>f[0]));
@@ -9462,6 +9583,7 @@ function cmRender(){
     ov.querySelectorAll('.cm-del').forEach(b=>b.addEventListener('click',()=>cmRemoveEntry(b.dataset.mask)));
   }
   ov.querySelectorAll('.cm-tab').forEach(t=>t.addEventListener('click',()=>cmSwitchTab(t.dataset.tab)));
+  const _nb=ov.querySelector('.cm-body'); if(_nb)_nb.scrollTop=_cmScroll;
 }
 // Close when tapping the dark backdrop (not the box)
 document.getElementById('chanmodes-overlay')?.addEventListener('click',e=>{ if(e.target.id==='chanmodes-overlay')closeChanModes(); });
@@ -11518,6 +11640,12 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.1', date:'June 2026', items:[
+    {tag:'new', text:'Colour your own messages: pick a text & background colour, or flip on rainbow Prism mode for everything you send. Use the 🎨 button by the message box, or /color and /prism on|off.'},
+    {tag:'new', text:'Refreshed Settings: the Settings menu, panels, and Channel Modes dialog got a cleaner, more consistent control-panel look.'},
+    {tag:'new', text:'Fresh default look: new accounts start on the Arctic theme with the DM Sans font (change any time in Appearance).'},
+    {tag:'new', text:'Tidy your message bar: hide buttons you don’t use (Upload, Paste, Text colour) — separately for desktop and mobile — in Appearance ▸ Chat Bar Buttons.'},
+  ]},
   {version:'0.3.0', date:'June 2026', items:[
     {tag:'new', text:'eSheep desktop pet — a little sheep wanders your client window: climbs the edges, naps, gets abducted by a UFO, and is draggable. Enable it for desktop, mobile, or both in Appearance ▸ Desktop Pet (off by default).'},
     {tag:'new', text:'Custom theme editor with 50+ built-in themes, animated scene backgrounds, your own background image, and a customizable chat link colour.'},

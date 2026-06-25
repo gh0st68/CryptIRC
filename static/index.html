@@ -271,6 +271,16 @@ body > style, body > script { visibility:hidden; }
 }
 .net-btn:hover, .net-btn:active { color:var(--text); background:var(--bg4); }
 .net-kebab { font-size:16px; font-weight:700; letter-spacing:-1px; }
+/* Desktop only: show the server-tab ⋮ constantly at a compact size so it never
+   appears/resizes the row on hover. The kebab's 44px touch min-height was taller
+   than the row's 32px content area, popping the tab 44px→~56px on hover/click.
+   Touch/mobile keep the existing reveal-on-tap + 44px hit target, untouched. */
+@media (hover:hover) and (pointer:fine) {
+  .net-actions { display:flex; }
+  .net-btn { min-height:0; min-width:0; padding:2px 4px; }
+  .net-kebab { font-size:15px; opacity:.45; transition:opacity .12s; }
+  .net-label:hover .net-kebab, .net-label.active .net-kebab { opacity:1; }
+}
 .net-dropdown {
   position:absolute; right:4px; top:100%; z-index:200;
   background:var(--bg1); border:1px solid var(--border); border-radius:6px;
@@ -1635,6 +1645,76 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
   .cm-list { max-height:min(40vh,300px); }
   .cm-toggle-sub { display:none; }
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   SETTINGS REDESIGN — cohesive "control panel" system. VISUAL ONLY: no markup,
+   wording, or JS changes. Theme-driven (existing --bg*/--border*/--text*/--accent
+   vars). Placed after the base settings rules so it wins the cascade; lifts the
+   whole Settings surface (the gear menu + every panel it opens) via shared
+   primitives.
+   ════════════════════════════════════════════════════════════════════════════ */
+/* Settings menu — accent rail on hover, crisper surface */
+.settings-menu{border-radius:14px;padding:7px;box-shadow:0 14px 44px rgba(0,0,0,.55),0 2px 8px rgba(0,0,0,.3)}
+.settings-menu-item{position:relative;border-radius:9px}
+.settings-menu-item svg{color:var(--text3);transition:color .14s ease}
+.settings-menu-item:hover svg{color:var(--accent)}
+.settings-menu-item::before{content:'';position:absolute;left:5px;top:50%;width:3px;height:0;border-radius:2px;background:var(--accent);transform:translateY(-50%);transition:height .15s ease}
+.settings-menu-item:hover::before{height:18px}
+/* Modal / panel surfaces */
+.appear-box{border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6),0 2px 10px rgba(0,0,0,.35)}
+.stats-box{box-shadow:0 24px 70px rgba(0,0,0,.6),0 2px 10px rgba(0,0,0,.35)}
+/* Section titles → accent tick (signature) */
+.appear-section-title,.notif-section-title{position:relative;padding-left:11px;font-weight:700;letter-spacing:.1em;color:var(--text2)}
+.appear-section-title::before,.notif-section-title::before{content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:11px;border-radius:2px;background:var(--accent)}
+/* Sections → grouped inset cards with hairline-divided rows */
+.appear-section,.notif-section{background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:13px 15px;margin-bottom:14px}
+.appear-section .appear-section-title{margin-bottom:9px}
+.appear-section .appear-row{margin-bottom:0;padding:10px 0;border-bottom:1px solid var(--border)}
+.appear-section .appear-section-title + .appear-row{padding-top:2px}
+.appear-section .appear-row:last-child{border-bottom:none;padding-bottom:2px}
+/* Slider value → inset readout pill */
+.appear-value{background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:2px 7px;min-width:44px;text-align:center;font-variant-numeric:tabular-nums}
+/* Toggle switch — tactile (geometry unchanged) */
+.appear-toggle{box-shadow:inset 0 0 0 1px var(--border);transition:background .22s cubic-bezier(.4,0,.2,1)}
+.appear-toggle.on{box-shadow:inset 0 0 0 1px var(--accent)}
+.appear-toggle::after{box-shadow:0 1px 3px rgba(0,0,0,.45);transition:transform .22s cubic-bezier(.4,0,.2,1)}
+/* Range sliders — crafted thumb + inset track */
+.appear-slider{box-shadow:inset 0 1px 2px rgba(0,0,0,.35)}
+.appear-slider::-webkit-slider-thumb{border:3px solid var(--bg2);box-shadow:0 1px 4px rgba(0,0,0,.5);transition:transform .12s ease}
+.appear-slider:hover::-webkit-slider-thumb,.appear-slider:active::-webkit-slider-thumb{transform:scale(1.14)}
+.appear-slider::-moz-range-thumb{border:3px solid var(--bg2);box-shadow:0 1px 4px rgba(0,0,0,.5)}
+/* Selects across settings (unify; override the per-element inline styles) */
+#appearance-overlay select,#notif-modal select,#theme-editor-overlay select{
+  background:var(--bg2)!important;color:var(--text)!important;border:1px solid var(--border)!important;
+  border-radius:8px!important;padding:7px 30px 7px 11px!important;font-size:13px!important;min-height:38px;
+  -webkit-appearance:none;appearance:none;cursor:pointer;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23889'/%3E%3C/svg%3E")!important;
+  background-repeat:no-repeat!important;background-position:right 11px center!important;transition:border-color .15s}
+#appearance-overlay select:hover,#notif-modal select:hover,#theme-editor-overlay select:hover{border-color:var(--border2)!important}
+#appearance-overlay select:focus,#notif-modal select:focus,#theme-editor-overlay select:focus{border-color:var(--accent)!important}
+/* Theme cards + colour swatches */
+.theme-card{border-radius:10px;transition:transform .12s ease,border-color .15s ease,box-shadow .15s ease}
+.theme-card:hover{transform:translateY(-2px);box-shadow:0 6px 16px rgba(0,0,0,.35)}
+.theme-card.active{box-shadow:inset 0 0 0 1px var(--accent)}
+.color-swatch{border-radius:7px;transition:transform .12s ease,box-shadow .15s ease}
+.color-swatch:hover{transform:scale(1.08);box-shadow:0 2px 8px rgba(0,0,0,.45)}
+/* Buttons — depth + press feedback */
+.btn-save{box-shadow:0 2px 10px rgba(0,0,0,.3)}
+.btn-save:active,.te-save:active,.btn-cancel:active,.te-btn:active,.appear-reset:active{transform:translateY(1px)}
+/* Unified focus ring (accessibility) */
+.settings-menu-item:focus-visible,
+#appearance-overlay :focus-visible,#notif-modal :focus-visible,#theme-editor-overlay :focus-visible,
+.modal-box :focus-visible,.stats-box :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){
+  .settings-menu-item::before,.appear-toggle,.appear-toggle::after,.appear-slider::-webkit-slider-thumb,.theme-card,.color-swatch{transition:none!important}
+}
+/* Channel-modes menu — same control-panel language (accent-tick titles, grouped cards) */
+.cm-box{border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.6),0 2px 10px rgba(0,0,0,.35)}
+.cm-section-title{position:relative;padding-left:11px;font-weight:700;letter-spacing:.1em;color:var(--text2)}
+.cm-section-title::before{content:'';position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:11px;border-radius:2px;background:var(--accent)}
+.cm-section{background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:13px 15px;margin-bottom:14px}
+@media (hover:hover){ .cm-section .cm-toggle:hover{background:var(--bg4)} }
+.cm-btn.primary{color:#001b16}
 </style>
 <script>
 // Apply theme colors immediately — :root no longer sets theme defaults,
@@ -2208,6 +2288,26 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       </div>
 
       <div class="appear-section">
+        <div class="appear-section-title">Chat Bar Buttons</div>
+        <div class="appear-row" style="margin-bottom:6px">
+          <span class="appear-label" style="color:var(--text3);font-size:10px;letter-spacing:.06em;text-transform:uppercase">Show on</span>
+          <span style="display:flex;gap:14px;color:var(--text3);font-size:10px;letter-spacing:.06em;text-transform:uppercase"><span style="width:44px;text-align:center">Desktop</span><span style="width:44px;text-align:center">Mobile</span></span>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Upload</span>
+          <span style="display:flex;gap:14px"><button class="appear-toggle" id="a-bar-upload-d" onclick="this.classList.toggle('on');applyAppearance()"></button><button class="appear-toggle" id="a-bar-upload-m" onclick="this.classList.toggle('on');applyAppearance()"></button></span>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Paste snippet</span>
+          <span style="display:flex;gap:14px"><button class="appear-toggle" id="a-bar-paste-d" onclick="this.classList.toggle('on');applyAppearance()"></button><button class="appear-toggle" id="a-bar-paste-m" onclick="this.classList.toggle('on');applyAppearance()"></button></span>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Text color (🎨)</span>
+          <span style="display:flex;gap:14px"><button class="appear-toggle" id="a-bar-color-d" onclick="this.classList.toggle('on');applyAppearance()"></button><button class="appear-toggle" id="a-bar-color-m" onclick="this.classList.toggle('on');applyAppearance()"></button></span>
+        </div>
+      </div>
+
+      <div class="appear-section">
         <div class="appear-section-title">🐑 Desktop Pet</div>
         <div class="appear-row">
           <span class="appear-label">🐑 eSheep<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A little sheep wanders your client — climbs the edges, naps, gets abducted by a UFO, and more. The classic '95 desktop pet. Silent. Choose where it runs.</div></span>
@@ -2658,6 +2758,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div id="settings-menu" class="settings-menu">
           <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Notifications</button>
           <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="19" cy="13.5" r="2.5"/><circle cx="6.5" cy="10" r="2.5"/><circle cx="10.5" cy="17.5" r="2.5"/></svg>Theme</button>
+          <button class="settings-menu-item" onclick="closeSettingsMenu();openMsgColorPop()"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="13.5" cy="6.5" r="1.1"/><circle cx="17.3" cy="10.3" r="1.1"/><circle cx="6.7" cy="12.3" r="1.1"/><circle cx="8.7" cy="7.7" r="1.1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3C7 3 3 7 3 12s4 9 9 9c1.1 0 2-.9 2-2 0-.5-.2-.95-.5-1.3-.32-.36-.5-.82-.5-1.2 0-1.1.9-2 2-2H17c2.2 0 4-1.8 4-4 0-4.4-4-7.5-9-7.5z"/></svg>Text Color</button>
           <button class="settings-menu-item" onclick="showSecurityPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Security</button>
           <button class="settings-menu-item" onclick="showStatsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>Channel Stats</button>
           <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>Monitor</button>
@@ -2738,11 +2839,14 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <button id="send-btn" onclick="doSend()" title="Send" aria-label="Send message">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="pointer-events:none" aria-hidden="true" focusable="false"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
-        <button class="upload-btn" title="Upload file" onclick="triggerUpload()" aria-label="Upload file">
+        <button class="upload-btn" id="btn-upload" title="Upload file" onclick="triggerUpload()" aria-label="Upload file">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
         </button>
-        <button class="upload-btn" title="Paste snippet" onclick="showPasteModal()" aria-label="Paste snippet">
+        <button class="upload-btn" id="btn-paste" title="Paste snippet" onclick="showPasteModal()" aria-label="Paste snippet">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+        </button>
+        <button class="upload-btn" id="msgcolor-btn" title="My text color (all messages)" onclick="toggleMsgColorPop(event)" aria-label="My text color">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="13.5" cy="6.5" r="1.2"/><circle cx="17.3" cy="10.3" r="1.2"/><circle cx="6.7" cy="12.3" r="1.2"/><circle cx="8.7" cy="7.7" r="1.2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3C7 3 3 7 3 12s4 9 9 9c1.1 0 2-.9 2-2 0-.5-.2-.95-.5-1.3-.32-.36-.5-.82-.5-1.2 0-1.1.9-2 2-2H17c2.2 0 4-1.8 4-4 0-4.4-4-7.5-9-7.5z"/></svg>
         </button>
       </div>
       <input type="file" id="file-input" multiple accept="*/*" onchange="handleFileSelect(this.files)">

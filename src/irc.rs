@@ -542,15 +542,23 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
     // kill). Per-connection token gate; first reply allowed immediately.
     let mut last_ctcp_reply: Option<Instant> = None;
 
-    // Registration — always request CAP LS 302 to negotiate IRCv3 caps
+    // Registration. EFnet (hybrid/ratbox lineage) doesn't speak modern IRCv3/SASL the
+    // way newer networks do — when connecting there, skip CAP negotiation entirely so
+    // NO capabilities (and no SASL) are requested. Detected by network label or server host.
+    let efnet = cfg.label.to_lowercase().contains("efnet") || cfg.server.to_lowercase().contains("efnet");
+    if efnet {
+        info!("[{}] EFnet detected (label='{}' server='{}') — IRCv3 caps disabled, skipping CAP negotiation", conn_id, cfg.label, cfg.server);
+    }
     {
         let mut c = conn.lock().await;
         if let Some(ref pass) = cfg.password {
             c.send_raw(&format!("PASS {}\r\n", strip_crlf(pass))).await?;
         }
-        c.send_raw("CAP LS 302\r\n").await?;
-        if use_sasl {
-            sasl_state = SaslState::CapLsSent;
+        if !efnet {
+            c.send_raw("CAP LS 302\r\n").await?;
+            if use_sasl {
+                sasl_state = SaslState::CapLsSent;
+            }
         }
         c.send_raw(&format!("NICK {}\r\n", strip_crlf(&cfg.nick))).await?;
         c.send_raw(&format!("USER {} 0 * :{}\r\n", strip_crlf(&cfg.username), strip_crlf(&cfg.realname))).await?;

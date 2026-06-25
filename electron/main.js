@@ -5,6 +5,10 @@ const { autoUpdater } = require('electron-updater');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const CONFIG_FILE = path.join(app.getPath('userData'), 'config.json');
+// Default server for fresh installs — TwistedNet's hosted CryptIRC. Only a user-chosen
+// custom server is persisted (so the default can move with app updates); pointing at
+// your own server is done via File ▸ Change Server URL… and is remembered after that.
+const DEFAULT_URL = 'https://client.twistednet.org/cryptirc/';
 
 function loadConfig() {
   try {
@@ -301,7 +305,7 @@ function setBadge(n) {
 // ─── Change-server flow (shared by tray, menu, error page) ───────────────────
 async function changeServerFlow() {
   const cfg = loadConfig();
-  const url = await showSetupPrompt(cfg.url);
+  const url = await showSetupPrompt(cfg.url || DEFAULT_URL);
   if (!url) return;
   cfg.url = url;
   saveConfig(cfg);
@@ -364,7 +368,7 @@ ipcMain.on('show-notification', (e, title, body, meta) => {
 
 // ─── IPC: unread badge / retry / change server ───────────────────────────────
 ipcMain.on('set-unread', (e, n) => setBadge(parseInt(n, 10) || 0));
-ipcMain.on('retry-load', () => { const cfg = loadConfig(); if (cfg.url && mainWindow) mainWindow.loadURL(cfg.url); });
+ipcMain.on('retry-load', () => { const cfg = loadConfig(); if (mainWindow) mainWindow.loadURL(cfg.url || DEFAULT_URL); });
 ipcMain.on('change-server', () => { changeServerFlow(); });
 
 // ─── System tray ─────────────────────────────────────────────────────────────
@@ -431,19 +435,16 @@ if (!gotLock) {
 
   app.on('ready', async () => {
     const cfg = loadConfig();
-    if (!cfg.url) {
-      const url = await showSetupPrompt();
-      if (!url) { app.quit(); return; }
-      cfg.url = url;
-      saveConfig(cfg);
-    }
+    // Default to the TwistedNet-hosted client on a fresh install — no prompt. A custom
+    // server (File ▸ Change Server URL…) is saved to config and used instead thereafter.
+    const url = cfg.url || DEFAULT_URL;
     buildMenu();
-    createWindow(cfg.url);
+    createWindow(url);
     createTray();
     setupAutoUpdate();
   });
 
   app.on('before-quit', () => { isQuitting = true; });
-  app.on('activate', () => { if (!mainWindow) { const cfg = loadConfig(); if (cfg.url) createWindow(cfg.url); } });
+  app.on('activate', () => { if (!mainWindow) { const cfg = loadConfig(); createWindow(cfg.url || DEFAULT_URL); } });
   app.on('window-all-closed', () => { /* tray keeps the app alive; quit only via menu/tray */ });
 }
