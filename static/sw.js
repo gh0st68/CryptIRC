@@ -1,7 +1,7 @@
 // CryptIRC Service Worker v10
 // Handles: offline caching, push notifications, notification click actions
 
-const CACHE = 'cryptirc-v207';
+const CACHE = 'cryptirc-v208';
 const STATIC = ['/cryptirc/manifest.json', '/cryptirc/icon.svg', '/cryptirc/icon-192.png', '/cryptirc/icon-512.png'];
 // App scripts: needed for an offline launch to actually boot (audit #95). Served
 // network-first with a cache fallback so online deploys always take effect immediately

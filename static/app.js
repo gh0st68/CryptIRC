@@ -424,6 +424,78 @@ async function doLogout() {
   document.getElementById('vault-overlay').classList.remove('show');
 }
 function setErr(id,msg){document.getElementById(id).textContent=msg;}
+
+// ── Boot splash (Starfield Warp) ─────────────────────────────────────────────
+// Masks the brief login-screen flash on PWA resume while the saved session token
+// is verified over the network. Shown by default for logged-in users (decided by
+// the early inline script in index.html); dismissed with a warp-out from showApp()
+// on success, or instantly from every auth-failure path. Self-contained + fully
+// guarded so it can never block boot.
+let _bootSplashDone=false, _bootRAF=null, _bootResizeFn=null;
+// Single teardown: stop the rAF AND drop the resize listener so the closure
+// (canvas/ctx/stars) can be GC'd. Called from hideBootSplash() and self-invoked
+// by frame() if the splash is hidden by anything else (e.g. the index.html 12s
+// safety timeout on a hung /auth/me) so the loop can never outlive the overlay.
+function _bootCleanup(){
+  if(_bootRAF){cancelAnimationFrame(_bootRAF);_bootRAF=null;}
+  if(_bootResizeFn){window.removeEventListener('resize',_bootResizeFn);_bootResizeFn=null;}
+}
+function hideBootSplash(){
+  if(_bootSplashDone) return; _bootSplashDone=true;
+  const s=document.getElementById('boot-splash'); if(!s){_bootCleanup();return;}
+  s.classList.add('warp-out');                 // CSS fades opacity; canvas boosts star speed
+  setTimeout(()=>{ try{s.style.display='none';}catch(_){} _bootCleanup(); }, 650);
+}
+(function bootSplashWarp(){
+  function init(){
+    try{
+      const s=document.getElementById('boot-splash'); if(!s) return;
+      if(getComputedStyle(s).display==='none') return;          // no-token: splash already dropped
+      let reduce=false; try{reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;}catch(_){}
+      if(reduce) return;                                         // static splash; still fades on hide
+      const cv=document.getElementById('boot-stars'); if(!cv) return;
+      const ctx=cv.getContext('2d'); if(!ctx) return;
+      const dpr=Math.min(window.devicePixelRatio||1,2);
+      let W=0,H=0,cx=0,cy=0;
+      function resize(){ W=cv.clientWidth||window.innerWidth; H=cv.clientHeight||window.innerHeight;
+        cx=W/2; cy=H/2; cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); }
+      resize(); _bootResizeFn=resize; window.addEventListener('resize',_bootResizeFn,{passive:true});
+      let accent='#00d4aa';
+      try{ const a=getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(); if(a)accent=a; }catch(_){}
+      const N=Math.max(120, Math.min(260, Math.round((W*H)/4200)));
+      const stars=[];
+      const mk=()=>({ x:(Math.random()*2-1)*W, y:(Math.random()*2-1)*H, z:Math.random()*W+1, pz:0 });
+      for(let i=0;i<N;i++) stars.push(mk());
+      let speed=0.9;
+      function frame(){
+        _bootRAF=requestAnimationFrame(frame);
+        // Self-terminate if the overlay was hidden by anything other than hideBootSplash()
+        // (warp-out keeps display!=='none' for its 650ms, so the warp-out animation still plays).
+        if(s.style.display==='none'){ _bootCleanup(); return; }
+        if(document.hidden) return;
+        const warp=s.classList.contains('warp-out');
+        speed+=((warp?26:0.9)-speed)*0.08;
+        ctx.clearRect(0,0,W,H);
+        ctx.strokeStyle=accent;
+        for(let i=0;i<stars.length;i++){
+          const st=stars[i]; st.pz=st.z; st.z-=speed*6;
+          if(st.z<1){ stars[i]=mk(); stars[i].z=W; stars[i].pz=W; continue; }
+          const k=128/st.z, px=cx+st.x*k, py=cy+st.y*k;
+          const pk=128/st.pz, ox=cx+st.x*pk, oy=cy+st.y*pk;
+          if(px<-4||px>W+4||py<-4||py>H+4){ stars[i]=mk(); continue; }
+          ctx.lineWidth=Math.max(0.5,(1-st.z/W)*2.4);
+          ctx.globalAlpha=Math.min(1,(1-st.z/W)+0.25);
+          ctx.beginPath(); ctx.moveTo(ox,oy); ctx.lineTo(px,py); ctx.stroke();
+        }
+        ctx.globalAlpha=1;
+      }
+      frame();
+    }catch(_){ /* never let the splash block boot */ }
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',init);
+  else init();
+})();
+
 async function checkAuth() {
   // Check if registration is open
   try{
@@ -441,17 +513,22 @@ async function checkAuth() {
     }
   }catch(e){}
   const token=localStorage.getItem('cryptirc_token');
-  if(!token){document.getElementById('auth-screen').style.display='flex';return;}
+  if(!token){hideBootSplash();document.getElementById('auth-screen').style.display='flex';return;}
   try {
-    const r=await fetch('/cryptirc/auth/me',{headers:{'Authorization':'Bearer '+token}});
-    if(!r.ok){localStorage.removeItem('cryptirc_token');document.getElementById('auth-screen').style.display='flex';return;}
+    // Bound the verify so a stalled-but-open connection (captive portal, dead TCP) can't
+    // leave the boot splash up indefinitely — on timeout the abort throws into the catch,
+    // which dismisses the splash and shows the login screen.
+    const _ac=new AbortController(); const _act=setTimeout(()=>_ac.abort(),10000);
+    let r; try{ r=await fetch('/cryptirc/auth/me',{headers:{'Authorization':'Bearer '+token},signal:_ac.signal}); } finally { clearTimeout(_act); }
+    if(!r.ok){hideBootSplash();localStorage.removeItem('cryptirc_token');document.getElementById('auth-screen').style.display='flex';return;}
     const d=await r.json();
     sessionToken=token; currentUser=d.username;
     document.cookie=`cryptirc_token=${sessionToken};path=/cryptirc;max-age=31536000;SameSite=Strict${location.protocol==='https:'?';Secure':''}`;
     showApp();
-  } catch(e){document.getElementById('auth-screen').style.display='flex';}
+  } catch(e){hideBootSplash();document.getElementById('auth-screen').style.display='flex';}
 }
 function showApp() {
+  hideBootSplash();
   document.getElementById('auth-screen').style.display='none';
   document.getElementById('app').style.display='flex';
   connectWs();
@@ -767,7 +844,7 @@ function handleEvent(ev) {
         }
       },2000);
       break;
-    case 'auth_failed': sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; break;
+    case 'auth_failed': hideBootSplash(); sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; break;
     case 'vault_unlocked':
       document.getElementById('vault-overlay').classList.remove('show'); renderSidebar();
       {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
@@ -1022,9 +1099,17 @@ function handleEvent(ev) {
             }
           }
         }
-        const mentioned=checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts);
+        // Host-change announcements ("*** X has changed hostname to Y", sent by the
+        // server as from '*') are status noise, not chat. Classify them as 'chghost'
+        // so they get the same silent treatment as join/part (no unread/red/sound)
+        // and condense, instead of landing as a chat notice.
+        const _isHostChange = ev.from==='*' && /^\*\*\* \S+ has changed hostname to /.test(displayText);
+        const _msgKind = _isHostChange ? 'chghost' : (ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg');
+        // Server/system notices (from '*') are never real mentions — skip detection so
+        // they don't turn channels red or spam the Mentions panel.
+        const mentioned=(ev.from==='*')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts);
         // ZNC playback detection — batch old messages silently
-        const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg',encrypted,mentioned,prefix:ev.prefix||null};
+        const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null};
         if(zncDetectBatch(ev.conn_id,ev.target,zncMsg)){
           // Filter ignored users in ZNC batch path too
           if(isIgnored(ev.from, ev.prefix)) return;
@@ -1062,7 +1147,7 @@ function handleEvent(ev) {
           ts:        ev.ts,
           from:      ev.from,
           text:      displayText,
-          kind:      ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg',
+          kind:      _msgKind,
           encrypted: encrypted,
           mentioned: mentioned,
           prefix: ev.prefix||null,
@@ -1102,7 +1187,13 @@ function handleEvent(ev) {
       const jCh=jNet?.channels?.find(c=>c.name===ev.channel);
       if(jCh&&!jCh.names.some(n=>stripPfx(n)===ev.nick)) jCh.names.push(ev.nick);
       renderSidebar(); refreshUserCount(ev.conn_id,ev.channel); blinkUserCount('join');
-      if(ev.nick===getNick(ev.conn_id)) setActive(ev.conn_id,ev.channel);
+      if(ev.nick===getNick(ev.conn_id)){
+        if(consumeUserJoin(ev.conn_id,ev.channel)) setActive(ev.conn_id,ev.channel);
+        // Brand-new session with no saved view restored: land in the first channel we
+        // join, ONCE, so we don't sit on the welcome screen. Guarded by !active (reconnect
+        // auto-rejoins already have a view) + a one-shot flag, so it never re-yanks.
+        else if(!active && !_detMode && !_didInitialAutoSelect){ _didInitialAutoSelect=true; setActive(ev.conn_id,ev.channel); }
+      }
       break;
     }
     case 'irc_part': {
@@ -1183,7 +1274,7 @@ function handleEvent(ev) {
       if(ev.kicked===getNick(ev.conn_id) && localStorage.getItem('cryptirc_autorejoin')!=='false'){
         const _rjKey=bk(ev.conn_id,ev.channel),_rjSavedKey=localStorage.getItem('cryptirc_chankeys');
         let _rjKeyVal=null;try{const ks=JSON.parse(_rjSavedKey||'{}');_rjKeyVal=ks[_rjKey]||null;}catch(e){}
-        setTimeout(()=>{wsend({type:'join_channel',conn_id:ev.conn_id,channel:ev.channel,key:_rjKeyVal||''});sysMsg(ev.conn_id,ev.channel,'Auto-rejoining after kick...','system');},3000);
+        setTimeout(()=>{markUserJoin(ev.conn_id,ev.channel);wsend({type:'join_channel',conn_id:ev.conn_id,channel:ev.channel,key:_rjKeyVal||''});sysMsg(ev.conn_id,ev.channel,'Auto-rejoining after kick...','system');},3000);
       }
       break;
     case 'irc_mode': {
@@ -1513,6 +1604,26 @@ function handleEvent(ev) {
 
 // ─── Buffer helpers ────────────────────────────────────────────────────────────
 function bk(c,t){return `${c}/${t.toLowerCase()}`;}
+// User-intent join tracking: only auto-switch the active view to channels the
+// user explicitly joined (/join, /cycle, channel list, join button, kick-rejoin).
+// The server's reconnect auto-rejoin emits irc_join with NO preceding
+// join_channel message, so it carries no flag and won't yank the active view.
+const _pendingUserJoins=new Map(); // bk() -> expiry ms
+let _didInitialAutoSelect=false;   // one-shot: land in the first channel of a brand-new session
+function markUserJoin(conn_id,channel){
+  if(!channel) return;
+  const now=Date.now();
+  // Lazy-sweep: a marked join that never produces an irc_join (banned/+i/+k/nonexistent)
+  // would otherwise linger; drop expired keys so the Map stays bounded.
+  for(const [k,exp] of _pendingUserJoins){ if(exp<now) _pendingUserJoins.delete(k); }
+  _pendingUserJoins.set(bk(conn_id,channel), now+15000);
+}
+function consumeUserJoin(conn_id,channel){
+  const k=bk(conn_id,channel), exp=_pendingUserJoins.get(k);
+  if(exp==null) return false;
+  _pendingUserJoins.delete(k);
+  return exp>=Date.now();
+}
 function getBuf(c,t){const k=bk(c,t);if(!buffers[k])buffers[k]=[];return buffers[k];}
 // Per-channel last known msg_id for ID-based sync
 const _lastMsgId={};
@@ -1739,7 +1850,7 @@ function addMessage(conn_id,target,msg){
     // Status events (join/part/quit/nick/mode/kick/away/back) never bump unread
     // or trigger notifications — matches The Lounge's behavior where only real
     // chat (privmsg/action/notice) counts as unread.
-    const _isStatus=['join','part','quit','nick','mode','kick','away','back'].includes(msg.kind);
+    const _isStatus=['join','part','quit','nick','mode','kick','away','back','chghost'].includes(msg.kind);
     if(!msg.noUnread && !_ownMsg && !_isStatus){
       const uk=bk(conn_id,target);
       unread.set(uk,(unread.get(uk)||0)+1);
@@ -2219,9 +2330,9 @@ function renderChat(){
   const lastReadTs=parseFloat(localStorage.getItem('cryptirc_lastread_'+rmKey)||'0');
   let markerInserted=false;
   const statusMsgMode=(loadAppearance().statusMsg)||'condense';
-  // Match The Lounge's `condensedTypes` set — `chghost` excluded since CryptIRC
-  // doesn't surface it as its own event yet.
-  const isStatusKind=k=>['away','back','join','kick','mode','nick','part','quit'].includes(k);
+  // Match The Lounge's `condensedTypes` set. `chghost` is now surfaced as a silent
+  // status event (no unread/red/sound), so it condenses like join/part.
+  const isStatusKind=k=>['away','back','join','kick','mode','nick','part','quit','chghost'].includes(k);
   // The Lounge break rule: `self`, `highlight`, or unread-marker crossing breaks
   // a condense run so the user never misses personally-relevant context.
   const isCondensable=m=>isStatusKind(m.kind)&&!m.self&&!m.mentioned;
@@ -2340,7 +2451,7 @@ function appendMsgRow(msg){
   const _burst=(_ts-_lastAppendTs)<BURST_NO_ANIM_MS;
   _lastAppendTs=_ts;
   const statusMsgMode=(loadAppearance().statusMsg)||'condense';
-  const isStatus=['away','back','join','kick','mode','nick','part','quit'].includes(msg.kind);
+  const isStatus=['away','back','join','kick','mode','nick','part','quit','chghost'].includes(msg.kind);
   const isCondensable=isStatus&&!msg.self&&!msg.mentioned;
   if(statusMsgMode==='condense'&&isCondensable){
     // Try to merge with an existing condensed row at the bottom
@@ -2356,7 +2467,7 @@ function appendMsgRow(msg){
     }
     // Previous element is a single status row — convert it + new one into condensed
     // (skip if the previous was self/highlighted — Lounge keeps those standalone).
-    if(lastChild&&lastChild.classList.contains('msg-row')&&!lastChild.dataset.self&&!lastChild.dataset.mentioned&&['row-away','row-back','row-join','row-part','row-quit','row-nick','row-mode','row-kick'].some(c=>lastChild.classList.contains(c))){
+    if(lastChild&&lastChild.classList.contains('msg-row')&&!lastChild.dataset.self&&!lastChild.dataset.mentioned&&['row-away','row-back','row-join','row-part','row-quit','row-nick','row-mode','row-kick','row-chghost'].some(c=>lastChild.classList.contains(c))){
       const prevKind=(lastChild.className.match(/row-(\w+)/)||[])[1]||'system';
       const prevTs=parseFloat(lastChild.dataset.ts||'0')||msg.ts;
       const prevMsg={kind:prevKind,ts:prevTs,from:lastChild.dataset.from||'*',text:lastChild.querySelector('.msg-body')?.textContent||''};
@@ -3102,7 +3213,7 @@ async function handleInput(raw){
           let jKey=keys[i]||null;
           if(!jKey){jKey=ks[bk(conn_id,ch)]||null;}
           if(keys[i]){ks[bk(conn_id,ch)]=keys[i];}
-          wsend({type:'join_channel',conn_id,channel:ch,key:jKey});
+          markUserJoin(conn_id,ch); wsend({type:'join_channel',conn_id,channel:ch,key:jKey});
         }
         if(keys.some(Boolean)) saveChanKeys(ks);
         break;
@@ -3113,7 +3224,7 @@ async function handleInput(raw){
         // Part and immediately rejoin the current channel
         const cycleKey = args[0]||target;
         wsend({type:'part_channel',conn_id,channel:cycleKey});
-        setTimeout(()=>wsend({type:'join_channel',conn_id,channel:cycleKey,key:null}),500);
+        setTimeout(()=>{markUserJoin(conn_id,cycleKey); wsend({type:'join_channel',conn_id,channel:cycleKey,key:null});},500);
         break;
       }
       case 'QUERY': {
@@ -5571,11 +5682,11 @@ function _safeBgCss(v){
   return 'url("'+s.replace(/["\\\n\r]/g,'')+'")';
 }
 const APPEAR_DEFAULTS={
-  theme:'starwarp', chatSize:13, sidebarFont:12, nickFont:12,
+  theme:'arctic', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
   timestamps:true, joinpart:true, statusMsg:'condense', compact:false, coloredNicks:true,
   accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'water-drop', msgGap:4, inputH:36,
-  font:"'Spooky Magic',cursive", linkPreviews:true,
+  font:"'DM Sans',sans-serif", linkPreviews:true,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
   // Hyperlink color. '' = follow Accent 2 (default). mobileLink '' = inherit desktop link.
@@ -5645,7 +5756,7 @@ function applyAppearance(){
   if(!el('a-chat-size')||!el('a-chat-size').value||+el('a-chat-size').value<8){return;}
   const prev=loadAppearance();
   const cfg={
-    theme:      document.querySelector('.theme-card.active')?.dataset?.theme||prev.theme||'midnight',
+    theme:      document.querySelector('.theme-card.active')?.dataset?.theme||prev.theme||'arctic',
     chatSize:   +el('a-chat-size').value||prev.chatSize||13,
     sidebarFont:+el('a-sidebar-font').value||prev.sidebarFont||12,
     nickFont:   +el('a-nick-font').value||prev.nickFont||12,
@@ -5679,7 +5790,7 @@ function applyAppearance(){
     mobileAccent2:  el('a-mobile-accent2-color').value||'',
     // '' means "inherit the desktop link color" (the Inherit toggle is on).
     mobileLink:     el('a-mobile-link-inherit')?.classList.contains('on') ? '' : (el('a-mobile-link-color')?.value||''),
-    font:           el('a-font').value||prev.font||"'Spooky Magic',cursive",
+    font:           el('a-font').value||prev.font||"'DM Sans',sans-serif",
     mediaShape:     el('a-media-shape')?.value || prev.mediaShape || 'rounded',
     mediaSize:      el('a-media-size')?.value || prev.mediaSize || 'medium',
     mediaBorder:    el('a-media-border')?.value || prev.mediaBorder || 'none',
@@ -5844,7 +5955,7 @@ function applyThemeCSS(cfg){
   const fontSize=(+(mob&&cfg.mobileChatSize?cfg.mobileChatSize:cfg.chatSize))||14;
   const nickW=(+(mob&&cfg.mobileNickW?cfg.mobileNickW:cfg.nickW))||100;
   const _lineH=(+cfg.lineHeight)||1.55, _msgGap=(+cfg.msgGap)||4, _sideF=(+cfg.sidebarFont)||12, _nickF=(+cfg.nickFont)||13;
-  const _fontFam=(cfg.font||"'Spooky Magic',cursive").replace(/[;{}()<>\\]/g,'');
+  const _fontFam=(cfg.font||"'DM Sans',sans-serif").replace(/[;{}()<>\\]/g,'');
   const showTs=mob?(cfg.mobileTimestamps!==undefined?cfg.mobileTimestamps:false):cfg.timestamps;
   ss.textContent=`
     body { font-size:${fontSize}px; ${cfg.brightness&&cfg.brightness!==100?`filter:brightness(${cfg.brightness/100});`:''} }
@@ -5856,7 +5967,7 @@ function applyThemeCSS(cfg){
     .chan-item { font-size:${_sideF}px; }
     .net-label { font-size:${Math.max(_sideF-1,9)}px; }
     .nick-entry { font-size:${_nickF}px; }
-    ${cfg.statusMsg==='hide'?'.row-join,.row-part,.row-quit,.row-nick,.row-mode,.row-kick,.row-away,.row-back,.status-condensed{display:none!important;}':''}
+    ${cfg.statusMsg==='hide'?'.row-join,.row-part,.row-quit,.row-nick,.row-mode,.row-kick,.row-away,.row-back,.row-chghost,.status-condensed{display:none!important;}':''}
     ${cfg.compact?'.msg-row:hover{background:none;}':''}
     ${cfg.coloredNicks===false?'.nc0,.nc1,.nc2,.nc3,.nc4,.nc5,.nc6,.nc7,.nc8,.nc9{color:var(--text2)!important;}.nc-self{color:var(--accent)!important;}':''}
     ${cfg.nickList===false?'#nick-panel{display:none!important;}':''}
@@ -6320,7 +6431,7 @@ fireflyMeadow(cv,ctx){
 
 function populateAppearanceModal(cfg){
   const el=id=>document.getElementById(id);
-  el('a-font').value=cfg.font||"'Spooky Magic',cursive";
+  el('a-font').value=cfg.font||"'DM Sans',sans-serif";
   el('a-chat-size').value=cfg.chatSize;
   el('a-sidebar-font').value=cfg.sidebarFont;
   el('a-nick-font').value=cfg.nickFont;
@@ -6738,7 +6849,7 @@ function deleteCustomTheme(){
     delete customThemes[id];
     const next={...cfg, customThemes};
     // If the deleted theme was active (desktop or mobile), fall back to a built-in.
-    if(next.theme==='custom:'+id) next.theme='starwarp';
+    if(next.theme==='custom:'+id) next.theme='arctic';
     if(next.mobileTheme==='custom:'+id) next.mobileTheme='';
     try{ localStorage.removeItem('cryptirc_cbg_'+id); }catch(e){}
     saveAppearance(next);
@@ -7514,7 +7625,7 @@ const OPER_IRCDS={
       {label:'CHGNAME',icon:'🏷',action:()=>operPrompt('Change Realname',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'name',label:'Realname',placeholder:'New Name'}],v=>operSend(`CHGNAME ${v.nick} :${v.name}`))},
     ],
     channels:[
-      {label:'SAJOIN Self',icon:'➡️',action:()=>operPrompt('Join as Oper',[{id:'chan',label:'Channel',placeholder:'#secret'}],v=>{const net=networks.find(n=>n.config.id===_operConnId);operSend(`SAJOIN ${net?.nick||'me'} ${v.chan}`);})},
+      {label:'SAJOIN Self',icon:'➡️',action:()=>operPrompt('Join as Oper',[{id:'chan',label:'Channel',placeholder:'#secret'}],v=>{const net=networks.find(n=>n.config.id===_operConnId);markUserJoin(_operConnId,v.chan);operSend(`SAJOIN ${net?.nick||'me'} ${v.chan}`);})},
       {label:'Force Topic',icon:'📝',action:()=>operPrompt('Set Topic',[{id:'chan',label:'Channel',placeholder:'#channel'},{id:'topic',label:'Topic',type:'textarea',placeholder:'New topic'}],v=>{operSend(`SAMODE ${v.chan} +t`);setTimeout(()=>operSend(`TOPIC ${v.chan} :${v.topic}`),500);})
 },
       {label:'Clear All Bans',icon:'🧹',action:()=>operPrompt('Clear Bans',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAMODE ${v.chan} -b *!*@*`))},
@@ -7569,7 +7680,7 @@ const OPER_IRCDS={
       {label:'Wallops',icon:'📢',action:()=>operPrompt('Wallops',[{id:'msg',label:'Message',type:'textarea',placeholder:'Message...'}],v=>operSend(`WALLOPS :${v.msg}`))},
     ],
     channels:[
-      {label:'SAJOIN Self',icon:'➡️',action:()=>operPrompt('Join as Oper',[{id:'chan',label:'Channel',placeholder:'#secret'}],v=>{const net=networks.find(n=>n.config.id===_operConnId);operSend(`SAJOIN ${net?.nick||'me'} ${v.chan}`);})},
+      {label:'SAJOIN Self',icon:'➡️',action:()=>operPrompt('Join as Oper',[{id:'chan',label:'Channel',placeholder:'#secret'}],v=>{const net=networks.find(n=>n.config.id===_operConnId);markUserJoin(_operConnId,v.chan);operSend(`SAJOIN ${net?.nick||'me'} ${v.chan}`);})},
       {label:'Force Topic',icon:'📝',action:()=>operPrompt('Set Topic',[{id:'chan',label:'Channel',placeholder:'#channel'},{id:'topic',label:'Topic',type:'textarea',placeholder:'New topic'}],v=>{operSend(`SAMODE ${v.chan} +t`);setTimeout(()=>operSend(`TOPIC ${v.chan} :${v.topic}`),500);})
 },
       {label:'Clear All Bans',icon:'🧹',action:()=>operPrompt('Clear Bans',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAMODE ${v.chan} -b *!*@*`))},
@@ -7607,7 +7718,7 @@ const OPER_IRCDS={
       {label:'Force Nick',icon:'✏️',action:()=>operPrompt('Force Nick',[{id:'nick',label:'Current nick',placeholder:'oldnick'},{id:'newnick',label:'New nick',placeholder:'newnick'}],v=>operSend(`FNICK ${v.nick} ${v.newnick}`))},
     ],
     channels:[
-      {label:'Join (override)',icon:'➡️',action:()=>operPrompt('Join (override +p/+i/+k)',[{id:'chan',label:'Channel',placeholder:'#secret'}],v=>operSend(`JOIN ${v.chan} override`))},
+      {label:'Join (override)',icon:'➡️',action:()=>operPrompt('Join (override +p/+i/+k)',[{id:'chan',label:'Channel',placeholder:'#secret'}],v=>{markUserJoin(_operConnId,v.chan);operSend(`JOIN ${v.chan} override`);})},
       {label:'Clear Bans',icon:'🧹',action:()=>operPrompt('Clear Bans',[{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`MODE ${v.chan} -b *!*@*`))},
     ],
     server:[
@@ -9088,9 +9199,11 @@ function renderChanList(data){
     row.innerHTML=`<span class="chanlist-chan">${esc(ch.channel)}</span><span class="chanlist-users">${ch.users}</span><span class="chanlist-topic">${parseMircColors(ch.topic)}</span>`;
     row.onclick=()=>{
       if(chanListConnId){
-        wsend({type:'join_channel',conn_id:chanListConnId,channel:ch.channel,key:null});
+        markUserJoin(chanListConnId,ch.channel); wsend({type:'join_channel',conn_id:chanListConnId,channel:ch.channel,key:null});
         closeChanList();
-        setTimeout(()=>{setActive(chanListConnId,ch.channel);},500);
+        // View switch happens via consumeUserJoin() in the irc_join handler — only on a
+        // REAL join. (Removed the old unconditional setTimeout(setActive,500) which also
+        // switched into channels the server refused: +i/+k/+b/nonexistent.)
       }
     };
     frag.appendChild(row);
@@ -9779,7 +9892,7 @@ async function editTopic(){
 }
 async function promptJoinChannel(conn_id){
   const ch=await customPrompt('Channel name:');
-  if(ch){let c=ch.trim();if(c&&!c.startsWith('#')&&!c.startsWith('&'))c='#'+c;if(c)wsend({type:'join_channel',conn_id,channel:c,key:null});}
+  if(ch){let c=ch.trim();if(c&&!c.startsWith('#')&&!c.startsWith('&'))c='#'+c;if(c){markUserJoin(conn_id,c); wsend({type:'join_channel',conn_id,channel:c,key:null});}}
 }
 function copyTopic(){
   if(!active)return;

@@ -398,6 +398,46 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .login-lights.active span:nth-child(3) { animation-delay:.3s; }
 .login-lights.active span:nth-child(4) { animation-delay:.45s; }
 .login-lights.active span:nth-child(5) { animation-delay:.6s; }
+
+/* ── BOOT SPLASH (Starfield Warp) — masks the login flash while a saved session verifies ── */
+#boot-splash{
+  position:fixed; inset:0; z-index:3000;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  background:var(--bg0,#0b0d0f);
+  padding:max(20px,var(--sat,0px)) 20px max(20px,var(--sab,0px));
+  transition:opacity .55s ease; overflow:hidden;
+}
+#boot-stars{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+.boot-brand{
+  position:relative; z-index:1;
+  font:700 clamp(30px,9vw,56px)/1 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  letter-spacing:.22em; padding-left:.22em; color:var(--text,#c8d8e8);
+  text-shadow:0 0 18px var(--accent,#00d4aa), 0 0 44px var(--accent,#00d4aa);
+  animation:boot-glow 1.8s ease-in-out infinite;
+}
+.boot-sub{
+  position:relative; z-index:1; margin-top:14px;
+  font-size:12px; letter-spacing:.32em; text-transform:uppercase; color:var(--text3,#82a0b8);
+}
+.boot-bar{
+  position:relative; z-index:1; margin-top:20px; width:min(180px,46vw); height:2px;
+  border-radius:2px; overflow:hidden; background:rgba(127,127,127,.18);
+}
+.boot-bar::after{
+  content:''; position:absolute; left:-40%; top:0; height:100%; width:40%; border-radius:2px;
+  background:var(--accent,#00d4aa); box-shadow:0 0 10px var(--accent,#00d4aa);
+  animation:boot-sweep 1.1s ease-in-out infinite;
+}
+#boot-splash.warp-out{ opacity:0; pointer-events:none; }
+@keyframes boot-glow{
+  0%,100%{ text-shadow:0 0 14px var(--accent,#00d4aa), 0 0 30px transparent; opacity:.92; }
+  50%{ text-shadow:0 0 26px var(--accent,#00d4aa), 0 0 60px var(--accent,#00d4aa); opacity:1; }
+}
+@keyframes boot-sweep{ 0%{ left:-40%; } 100%{ left:100%; } }
+@media (prefers-reduced-motion: reduce){
+  .boot-brand{ animation:none; }
+  .boot-bar::after{ animation:none; left:0; width:100%; opacity:.6; }
+}
 .fav-star:hover { opacity:1!important; }
 .fav-star.active { opacity:1; color:var(--warn); }
 #sidebar-footer {
@@ -861,7 +901,7 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .row-system .msg-body { color:var(--warn); }
 .row-error .msg-body { color:var(--error); }
 .row-topic .msg-body { color:var(--accent); }
-.row-nick .msg-body, .row-mode .msg-body, .row-kick .msg-body { color:var(--text3); }
+.row-nick .msg-body, .row-mode .msg-body, .row-kick .msg-body, .row-chghost .msg-body { color:var(--text3); }
 /* ── Condensed status messages ── */
 /* The Lounge-style condensed status block: summary uses .msg-row layout so it
    aligns column-for-column with normal chat rows; expanded view re-renders each
@@ -925,7 +965,7 @@ html[data-theme='mirc'] .row-action .msg-body,html[data-theme='mirc'] .row-actio
 html[data-theme='mirc'] .row-notice .msg-body{color:#7f0000}
 html[data-theme='mirc'] .row-join .msg-body{color:#007f00}
 html[data-theme='mirc'] .row-part .msg-body,html[data-theme='mirc'] .row-quit .msg-body,html[data-theme='mirc'] .row-kick .msg-body{color:#7f0000}
-html[data-theme='mirc'] .row-mode .msg-body,html[data-theme='mirc'] .row-nick .msg-body{color:#00007f}
+html[data-theme='mirc'] .row-mode .msg-body,html[data-theme='mirc'] .row-nick .msg-body,html[data-theme='mirc'] .row-chghost .msg-body{color:#00007f}
 /* classic Windows navy text selection */
 html[data-theme='mirc'] ::selection{background:#000080;color:#ffffff}
 /* Win95 grey scrollbar with beveled arrow buttons */
@@ -1600,7 +1640,7 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
 // Apply theme colors immediately — :root no longer sets theme defaults,
 // so this MUST run to provide bg/border/text/accent values.
 (function(){try{var c=JSON.parse(localStorage.getItem('cryptirc_appear')||'{}');
-var T={midnight:{bg0:'#0b0d0f',bg1:'#111418',bg2:'#181d24',bg3:'#1e242e',bg4:'#252c38',border:'#2a3444',border2:'#3a4a60',text:'#c8d8e8',text2:'#7a9ab8',text3:'#82a0b8'/* lightened from #4a6278 for WCAG AA contrast (audit #92) */},dracula:{bg0:'#282a36',bg1:'#2d303e',bg2:'#343746',bg3:'#3b3f51',bg4:'#44495e',border:'#44475a',border2:'#6272a4',text:'#f8f8f2',text2:'#bd93f9',text3:'#6272a4'},monokai:{bg0:'#272822',bg1:'#2d2e27',bg2:'#383830',bg3:'#3e3d32',bg4:'#49483e',border:'#49483e',border2:'#75715e',text:'#f8f8f2',text2:'#a6e22e',text3:'#75715e'},nord:{bg0:'#2e3440',bg1:'#3b4252',bg2:'#434c5e',bg3:'#4c566a',bg4:'#576279',border:'#4c566a',border2:'#5e6779',text:'#eceff4',text2:'#88c0d0',text3:'#616e88'},solarize:{bg0:'#002b36',bg1:'#073642',bg2:'#0a3f4e',bg3:'#0d4a5a',bg4:'#1a5c6e',border:'#2aa198',border2:'#586e75',text:'#93a1a1',text2:'#839496',text3:'#586e75'},gruvbox:{bg0:'#282828',bg1:'#3c3836',bg2:'#504945',bg3:'#665c54',bg4:'#7c6f64',border:'#504945',border2:'#665c54',text:'#ebdbb2',text2:'#b8bb26',text3:'#928374'},abyss:{bg0:'#000',bg1:'#080808',bg2:'#101010',bg3:'#181818',bg4:'#222',border:'#1a1a1a',border2:'#333',text:'#ccc',text2:'#888',text3:'#555'},light:{bg0:'#f5f5f5',bg1:'#ebebeb',bg2:'#e0e0e0',bg3:'#d5d5d5',bg4:'#cacaca',border:'#c0c0c0',border2:'#aaa',text:'#1a1a1a',text2:'#444',text3:'#888'},cobalt:{bg0:'#002240',bg1:'#002b50',bg2:'#003460',bg3:'#003d70',bg4:'#004880',border:'#0050a0',border2:'#1a6ab5',text:'#fff',text2:'#80d4ff',text3:'#4488aa'}};
+var T={midnight:{bg0:'#0b0d0f',bg1:'#111418',bg2:'#181d24',bg3:'#1e242e',bg4:'#252c38',border:'#2a3444',border2:'#3a4a60',text:'#c8d8e8',text2:'#7a9ab8',text3:'#82a0b8'/* lightened from #4a6278 for WCAG AA contrast (audit #92) */},dracula:{bg0:'#282a36',bg1:'#2d303e',bg2:'#343746',bg3:'#3b3f51',bg4:'#44495e',border:'#44475a',border2:'#6272a4',text:'#f8f8f2',text2:'#bd93f9',text3:'#6272a4'},monokai:{bg0:'#272822',bg1:'#2d2e27',bg2:'#383830',bg3:'#3e3d32',bg4:'#49483e',border:'#49483e',border2:'#75715e',text:'#f8f8f2',text2:'#a6e22e',text3:'#75715e'},nord:{bg0:'#2e3440',bg1:'#3b4252',bg2:'#434c5e',bg3:'#4c566a',bg4:'#576279',border:'#4c566a',border2:'#5e6779',text:'#eceff4',text2:'#88c0d0',text3:'#616e88'},solarize:{bg0:'#002b36',bg1:'#073642',bg2:'#0a3f4e',bg3:'#0d4a5a',bg4:'#1a5c6e',border:'#2aa198',border2:'#586e75',text:'#93a1a1',text2:'#839496',text3:'#586e75'},gruvbox:{bg0:'#282828',bg1:'#3c3836',bg2:'#504945',bg3:'#665c54',bg4:'#7c6f64',border:'#504945',border2:'#665c54',text:'#ebdbb2',text2:'#b8bb26',text3:'#928374'},abyss:{bg0:'#000',bg1:'#080808',bg2:'#101010',bg3:'#181818',bg4:'#222',border:'#1a1a1a',border2:'#333',text:'#ccc',text2:'#888',text3:'#555'},light:{bg0:'#f5f5f5',bg1:'#ebebeb',bg2:'#e0e0e0',bg3:'#d5d5d5',bg4:'#cacaca',border:'#c0c0c0',border2:'#aaa',text:'#1a1a1a',text2:'#444',text3:'#888'},cobalt:{bg0:'#002240',bg1:'#002b50',bg2:'#003460',bg3:'#003d70',bg4:'#004880',border:'#0050a0',border2:'#1a6ab5',text:'#fff',text2:'#80d4ff',text3:'#4488aa'},arctic:{bg0:'#0c1218',bg1:'#101820',bg2:'#141e28',bg3:'#1a2632',bg4:'#202e3c',border:'#283a4c',border2:'#384e64',text:'#e4eef4',text2:'#66bbdd',text3:'#4a7a90'}};
 var r=document.documentElement.style;
 // Resolve the active theme name (respect mobile override if a phone-width viewport).
 var mob=(window.innerWidth<=768);
@@ -1609,7 +1649,7 @@ var themeName=(mob&&c.mobileTheme)?c.mobileTheme:c.theme;
 // there's no flash of a built-in fallback before app.js runs applyThemeCSS().
 var ct=null;
 if(typeof themeName==='string'&&themeName.indexOf('custom:')===0&&c.customThemes){ct=c.customThemes[themeName.slice(7)]||null;}
-var t=ct||T[themeName]||T.midnight;
+var t=ct||T[themeName]||T.arctic;
 r.setProperty('--bg0',t.bg0);r.setProperty('--bg1',t.bg1);r.setProperty('--bg2',t.bg2);r.setProperty('--bg3',t.bg3);r.setProperty('--bg4',t.bg4);
 r.setProperty('--border',t.border);r.setProperty('--border2',t.border2);r.setProperty('--text',t.text);r.setProperty('--text2',t.text2);r.setProperty('--text3',t.text3);
 // Accent/accent2/link: a custom theme carries its own; built-in themes use the global prefs.
@@ -1631,6 +1671,25 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </script>
 </head>
 <body>
+
+<!-- ── BOOT SPLASH (Starfield Warp) — masks the login flash while a saved session verifies ── -->
+<div id="boot-splash">
+  <canvas id="boot-stars"></canvas>
+  <div class="boot-brand">CRYPTIRC</div>
+  <div class="boot-sub">&lsaquo; secure link &rsaquo;</div>
+  <div class="boot-bar"></div>
+</div>
+<script>
+// Boot-splash decision (runs before paint): keep the warp splash up only when a
+// saved session token exists, to mask the verify-over-network gap. With no token,
+// drop it instantly so the login screen shows with NO splash flash. Safety timeout
+// guarantees it can never get stuck even if app.js fails to load.
+(function(){try{
+  var s=document.getElementById('boot-splash'); if(!s) return;
+  if(!localStorage.getItem('cryptirc_token')){ s.style.display='none'; return; }
+  setTimeout(function(){ try{ if(s.style.display!=='none'){ s.classList.add('warp-out'); setTimeout(function(){s.style.display='none';},600); } }catch(e){} }, 12000);
+}catch(e){ try{document.getElementById('boot-splash').style.display='none';}catch(_){}}})();
+</script>
 
 <!-- ── mIRC fake Win95 window chrome (decorative; shown only on the mIRC theme, desktop) ── -->
 <div id="mirc-titlebar" class="mirc-chrome"><span class="mt-ico">▦</span><span class="mt-title">mIRC - [CryptIRC @ frozen.gh0st.boo]</span><span class="mt-btns"><b>_</b><b>□</b><b class="mt-x">✕</b></span></div>
