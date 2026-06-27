@@ -837,6 +837,10 @@ function handleEvent(ev) {
       setTimeout(async()=>{
         if(swRegistration && Notification?.permission==='granted'){
           await loadNotifPrefs();
+          // Reconcile sidebar channel mutes into the push muted_channels list so
+          // mobile push respects channels muted via the sidebar 🔇 (not just the
+          // notification panel). Self-heals on every subsequent toggleMute too.
+          _syncMutedChannelsToServer();
           if(_notifPrefs?.enabled && !pushSubscription){
             pushSubscription=await swRegistration.pushManager.getSubscription();
             if(!pushSubscription) await subscribePush();
@@ -879,6 +883,9 @@ function handleEvent(ev) {
         if(saved&&saved.conn_id&&saved.target){
           if(isUploadsConn(saved.conn_id)){
             active={conn_id:UPLOAD_CONN,target:UPLOAD_TARGET};
+            renderSidebar(); renderChat(); updateTopbar(); updateInputPlaceholder();
+          } else if(isMessagesConn(saved.conn_id) && msgsTabEnabled()){
+            active={conn_id:MSGS_CONN,target:MSGS_TARGET};
             renderSidebar(); renderChat(); updateTopbar(); updateInputPlaceholder();
           } else {
             const net=networks.find(n=>n.config.id===saved.conn_id);
@@ -1186,7 +1193,11 @@ function handleEvent(ev) {
       const jNet=networks.find(n=>n.config.id===ev.conn_id);
       const jCh=jNet?.channels?.find(c=>c.name===ev.channel);
       if(jCh&&!jCh.names.some(n=>stripPfx(n)===ev.nick)) jCh.names.push(ev.nick);
-      renderSidebar(); refreshUserCount(ev.conn_id,ev.channel); blinkUserCount('join');
+      // Only a SELF-join changes the sidebar (a new channel row). Another user
+      // joining doesn't alter any sidebar row, so skip the full rebuild (it was a
+      // per-event flicker source on busy channels). Nick panel + count still update.
+      if(ev.nick===getNick(ev.conn_id)) renderSidebar();
+      refreshUserCount(ev.conn_id,ev.channel); blinkUserCount('join');
       if(ev.nick===getNick(ev.conn_id)){
         if(consumeUserJoin(ev.conn_id,ev.channel)) setActive(ev.conn_id,ev.channel);
         // Brand-new session with no saved view restored: land in the first channel we
@@ -1216,7 +1227,10 @@ function handleEvent(ev) {
           setActive(ev.conn_id,altCh?altCh.name:'status');
         }
       }
-      renderSidebar(); refreshUserCount(ev.conn_id,ev.channel); blinkUserCount('part');
+      // Only a SELF-part changes the sidebar (channel row removed). Other users
+      // parting don't alter any sidebar row — skip the full rebuild (flicker source).
+      if(ev.nick===getNick(ev.conn_id)) renderSidebar();
+      refreshUserCount(ev.conn_id,ev.channel); blinkUserCount('part');
       monitorOffline(ev.nick);
       break;
     }
@@ -1230,7 +1244,10 @@ function handleEvent(ev) {
         refreshUserCount(ev.conn_id,ch.name);
       }
       if(!quitChans.length) sysMsg(ev.conn_id,'status',`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{ts:ev.ts,from:ev.nick,self:quitSelf,subject:ev.nick});
-      renderSidebar(); blinkUserCount('part');
+      // Another user quitting doesn't change any sidebar row — skip the rebuild
+      // (a major flicker source during netsplits). Nick panel/count still refresh above.
+      if(quitSelf) renderSidebar();
+      blinkUserCount('part');
       monitorOffline(ev.nick);
       keepnickOnQuit(ev.conn_id,ev.nick);
       break;
@@ -1251,7 +1268,9 @@ function handleEvent(ev) {
       } else {
         keepnickOnNickChange(ev.conn_id,ev.old,ev.new);
       }
-      renderSidebar();
+      // Sidebar rows don't display member nicks, so only a SELF nick change can
+      // affect sidebar state — skip the rebuild for others (flicker source).
+      if(nickSelf) renderSidebar();
       break;
     }
     case 'irc_topic': {
@@ -1359,7 +1378,12 @@ function handleEvent(ev) {
       if(!window._awayNicks) window._awayNicks={};
       const snNet=networks.find(n=>n.config.id===ev.conn_id);
       if(!snNet) break;
-      const snCh=snNet.channels.find(c=>c.name===ev.channel);
+      // IRC channel names are case-insensitive; through a ZNC bouncer the away
+      // snapshot's channel can arrive in a different case than the one we stored
+      // from the JOIN echo. Match exactly first, then fall back to a case-fold
+      // compare so the away graying still applies (mirrors the backend irc_lower fix).
+      const _snChanLc=String(ev.channel||'').toLowerCase();
+      const snCh=snNet.channels.find(c=>c.name===ev.channel)||snNet.channels.find(c=>String(c.name||'').toLowerCase()===_snChanLc);
       if(!snCh) break;
       const awaySet=new Set((ev.away_nicks||[]).map(x=>x.toLowerCase()));
       let changed=false;
@@ -1841,8 +1865,16 @@ function addMessage(conn_id,target,msg){
     }
     if(_closedTs) clearQueryClosed(conn_id,_lc);       // genuinely newer message → reopen
     if(!queryBufs[conn_id])queryBufs[conn_id]=new Map();
+    // A brand-new (or reopened) conversation needs its sidebar row created NOW.
+    // The active-send path below does appendMsgRow and skips the else-branch render,
+    // so without this a freshly-messaged PM wouldn't appear in the left list until
+    // the next unrelated render (felt like a ~30s lag). renderSidebar is debounced,
+    // so it won't double-render with the non-active else-branch. Existing
+    // conversations don't re-render here (their row already exists).
+    const _newQueryRow=!queryBufs[conn_id].has(_lc);
     queryBufs[conn_id].set(_lc, target);
     saveQueryBufs();
+    if(_newQueryRow) renderSidebar();
   }
   if(isActive(conn_id,target)){appendMsgRow(msg);const isOwn=msg.from&&msg.from===getNick(conn_id);if(isOwn)scrollForce();else scrollBottom();}
   else{
@@ -1855,20 +1887,32 @@ function addMessage(conn_id,target,msg){
     // or trigger notifications — matches The Lounge's behavior where only real
     // chat (privmsg/action/notice) counts as unread.
     const _isStatus=['join','part','quit','nick','mode','kick','away','back','chghost'].includes(msg.kind);
+    // Muted target (channel/PM or whole network): suppress every mention ALERT —
+    // no red mention badge or desktop/taskbar mention count here, and below no
+    // notices-inbox row, sound, or popup. A plain unread still bumps (it stays
+    // hidden in the sidebar for muted rows). Non-muted targets behave as before.
+    const _muted=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
     if(!msg.noUnread && !_ownMsg && !_isStatus && !_isStatusBuf){
       const uk=bk(conn_id,target);
       unread.set(uk,(unread.get(uk)||0)+1);
-      if((msg.mentioned||isDM) && !_isStatusBuf) mentionUnread.set(uk,(mentionUnread.get(uk)||0)+1);
-      saveUnread();renderSidebar();
+      if((msg.mentioned||isDM) && !_isStatusBuf && !_muted) mentionUnread.set(uk,(mentionUnread.get(uk)||0)+1);
+      // Update just this row's badge in place; only fall back to a full sidebar
+      // render if the row doesn't exist yet (brand-new conversation). Avoids the
+      // per-message full #network-list teardown that caused the channel-bar flicker.
+      saveUnread();
+      if(!updateUnreadBadge(conn_id,target)) renderSidebar();
+      // The in-place badge path skips the full render, which is where the Messages
+      // tab's total-unread pin is rebuilt — refresh just that pin for a DM so its
+      // count doesn't go stale (e.g. a favorited PM whose row updated in place).
+      else if(isDM && msgsTabEnabled()){ const _mp=document.getElementById('messages-pin'); if(_mp){ _mp.innerHTML=''; const _me=_renderMessagesSidebarEntry(); if(_me) _mp.appendChild(_me); } }
     }
     // Notices inbox: one row per PM sender, first message only; only if that
     // PM view isn't currently active (handled by the enclosing else).
-    if(isDM && !_ownMsg && !_isStatus && (msg.kind==='privmsg'||msg.kind==='action')){
+    if(isDM && !_ownMsg && !_isStatus && !_muted && (msg.kind==='privmsg'||msg.kind==='action')){
       addPmNotice(conn_id,target,msg);
     }
     // Play sound for unread DMs and mentions — never for own or status messages.
-    const isMutedChan=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
-    if(!isMutedChan && !_ownMsg && !_isStatus && !_isStatusBuf){
+    if(!_muted && !_ownMsg && !_isStatus && !_isStatusBuf){
       const soundCfg=loadAppearance();
       if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
       else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
@@ -1891,6 +1935,8 @@ function addMessage(conn_id,target,msg){
       }
     }
   }
+  // Live-refresh the unified Messages inbox when it's the active view and a DM lands.
+  if(isDM && isMessagesActive()) renderMessagesView();
 }
 function sysMsg(c,t,text,kind='system',extras){
   // Allow extras to override `from` (e.g. subject nick for join/part/etc so
@@ -2109,6 +2155,38 @@ function renderSidebar(){
   if(_sidebarRenderTimer||_sidebarDragLock)return;
   _sidebarRenderTimer=setTimeout(()=>{_sidebarRenderTimer=null;_renderSidebarNow();},50);
 }
+// In-place unread-badge update for an EXISTING sidebar row, avoiding a full
+// renderSidebar() (which wipes #network-list innerHTML + recreates SortableJS =
+// per-message DOM churn / "flashing"). Updates every matching row (a PM can also
+// appear in #pm-list/#favorites-list). Returns false if no row exists yet (a
+// brand-new conversation), so the caller falls back to one full render to create it.
+function updateUnreadBadge(conn_id,target){
+  const sb=document.getElementById('sidebar-scroll'); if(!sb) return false;
+  const tl=String(target).toLowerCase();
+  const k=bk(conn_id,target);
+  const uc=unread.get(k)||0;
+  const muted=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
+  const mc=mentionUnread.get(k)||0;
+  const sel='.chan-item[data-conn-id="'+(window.CSS&&CSS.escape?CSS.escape(conn_id):conn_id)+'"]';
+  let found=false;
+  for(const row of sb.querySelectorAll(sel)){
+    if(String(row.dataset.target||'').toLowerCase()!==tl) continue;
+    const right=row.querySelector('.chan-right'); if(!right) continue;
+    found=true;
+    // Match renderSidebar's highlight rules: favorites/channels highlight only on a
+    // mention; per-network + favs-only PM rows always highlight when unread.
+    const inFav=!!row.closest('#favorites-list');
+    const isPMrow=row.dataset.kind==='pm' || !!row.closest('#pm-list') || !/^[#&+!]/.test(String(target));
+    const wantHighlight = inFav ? (mc>0) : (isPMrow ? true : (mc>0));
+    let badge=right.querySelector('.chan-unread-badge');
+    if(uc>0 && !muted){
+      if(!badge){ badge=document.createElement('span'); badge.className='chan-unread-badge'; right.insertBefore(badge, right.querySelector('.chan-kebab')||null); }
+      badge.textContent=uc>99?'99+':uc;
+      badge.classList.toggle('highlight', wantHighlight);
+    } else if(badge){ badge.remove(); }
+  }
+  return found;
+}
 function _renderSidebarNow(){
   // Native desktop unread badge (Electron v0.3.1+): count of mentions/DMs awaiting.
   // Old shells lack setUnread — the optional check makes this a no-op there.
@@ -2167,8 +2245,10 @@ function _renderSidebarNow(){
       chanContainer.appendChild(ci);
     }
     g.appendChild(chanContainer);
-    // Render query/PM buffers (NickServ, private messages, etc.)
-    if(queryBufs[id]){
+    // Render query/PM buffers (NickServ, private messages, etc.).
+    // When the unified Messages inbox tab is enabled, these per-network PM rows
+    // are hidden — every DM is surfaced in the Messages tab instead.
+    if(queryBufs[id] && !msgsTabEnabled()){
       for(const [lc, display] of queryBufs[id]){
         if(isFavorite(id,lc)) continue; // shown in favorites section
         const k=bk(id,lc),isA=isActive(id,lc),uc=unread.get(k)||0;
@@ -2203,6 +2283,13 @@ function _renderSidebarNow(){
     const upEntry=_renderUploadsSidebarEntry();
     if(upEntry) pin.appendChild(upEntry);
   }
+  // Unified Messages inbox tab — pinned at the top, always visible (incl. favs-only).
+  const mpin=document.getElementById('messages-pin');
+  if(mpin){
+    mpin.innerHTML='';
+    const mEntry=_renderMessagesSidebarEntry();
+    if(mEntry) mpin.appendChild(mEntry);
+  }
   updateCertBtn();
   renderFavorites();
   renderPMList();
@@ -2214,6 +2301,11 @@ function updateInputPlaceholder(){
   if(!active){inp.placeholder='Select a channel…';inp.disabled=true;return;}
   if(isUploadsConn(active.conn_id)){
     inp.placeholder='Upload Status — pick a chat to send messages';
+    inp.disabled=true;
+    return;
+  }
+  if(isMessagesConn(active.conn_id)){
+    inp.placeholder='Messages — tap a conversation to open & reply';
     inp.disabled=true;
     return;
   }
@@ -2272,6 +2364,14 @@ function setActive(conn_id,target){
     renderSidebar(); renderChat(); updateTopbar(); updateInputPlaceholder();
     return;
   }
+  // Messages inbox pseudo-view — not an IRC buffer; skip unread/sync/E2E plumbing.
+  if(isMessagesConn(conn_id)){
+    if(!_detMode){
+      try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){}
+    }
+    renderSidebar(); renderChat(); updateTopbar(); updateInputPlaceholder();
+    return;
+  }
   // Track the last real IRC view so files dropped/picked while on the Uploads
   // channel still associate with a sensible source for "Insert into chat".
   _lastIrcActive={conn_id,target};
@@ -2290,8 +2390,9 @@ function setActive(conn_id,target){
     try{localStorage.setItem('cryptirc_active',JSON.stringify({conn_id,target}));}catch(e){} flushPrefsToServer();
   }
   saveQueryBufs();
-  renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay(); scrollForce();
-  if(typeof updateE2EIndicator==='function') updateE2EIndicator(target);
+  // Fire get_logs/sync BEFORE renderChat so _pendingLogs is set when renderChat
+  // decides whether to show the "Loading messages…" placeholder for an empty buffer
+  // (these are fire-and-forget WS sends with no render dependency).
   if(getBuf(conn_id,target).length===0){
     wsend({type:'get_logs',conn_id,target,limit:200});
   } else {
@@ -2299,6 +2400,8 @@ function setActive(conn_id,target){
     const _sk=bk(conn_id,target),_lid=_lastMsgId[_sk];
     if(_lid>0) wsend({type:'sync',conn_id,target,after_id:_lid});
   }
+  renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay(); scrollForce();
+  if(typeof updateE2EIndicator==='function') updateE2EIndicator(target);
   updateInputPlaceholder();
   const net=networks.find(n=>n.config.id===conn_id);
   const inpNick=document.getElementById('input-nick');if(inpNick)inpNick.textContent=net?.nick||net?.config.nick||currentUser||'—';
@@ -2311,6 +2414,8 @@ function renderChat(){
   if(!active){area.style.display='none';welcome.style.display='flex';return;}
   // Uploads pseudo-channel uses its own renderer; bail before IRC paths run.
   if(isUploadsActive()){ welcome.style.display='none'; renderUploadsView(); updateTopbar(); updateInputPlaceholder(); return; }
+  // Messages inbox pseudo-view — its own renderer.
+  if(isMessagesActive()){ welcome.style.display='none'; renderMessagesView(); updateTopbar(); updateInputPlaceholder(); return; }
   area.style.display='block'; welcome.style.display='none'; area.innerHTML='';
   const buf=getBuf(active.conn_id,active.target);
   // History-view banner — buffer is a window from the past; tap to return to live.
@@ -2328,6 +2433,12 @@ function renderChat(){
     loadMore.textContent='↑ Load older messages';
     loadMore.onclick=()=>loadOlderMessages();
     area.appendChild(loadMore);
+  }
+  // Freshly-opened buffer with history still loading (get_logs in flight): show a
+  // placeholder instead of a blank window so it doesn't read as frozen/slow.
+  if(active.target!=='status' && buf.length===0 && _pendingLogs.has(active.conn_id+'/'+active.target)){
+    const ld=document.createElement('div'); ld.className='chat-loading'; ld.textContent='Loading messages…';
+    area.appendChild(ld);
   }
   let lastDate=null;
   const rmKey=bk(active.conn_id,active.target);
@@ -2435,6 +2546,9 @@ let _lastAppendTs=0;
 function _msgFp(m){ return (m && m.id>0) ? 'id:'+m.id : 'k:'+((m&&m.ts)|0)+'|'+((m&&m.from)||'')+'|'+((m&&m.kind)||'')+'|'+((m&&m.text)||'').slice(0,80); }
 function appendMsgRow(msg){
   const area=document.getElementById('chat-area');if(area.style.display==='none')return;
+  // A live line / optimistic echo can land before get_logs returns — drop the
+  // "Loading messages…" placeholder so the message doesn't sit beneath it.
+  area.querySelector('.chat-loading')?.remove();
   // Idempotency guard against the transient duplicate-row bug: if an identical
   // chat/notice row is already among the last few rendered, skip the append.
   // renderChat() stays authoritative (this only touches the live append path), own
@@ -2834,6 +2948,16 @@ function updateTopbar(){
   const topbarSpacer=document.getElementById('topbar-spacer');
   if(isUploadsConn(active.conn_id)){
     document.getElementById('chan-title').textContent='Upload Status';
+    document.getElementById('chan-title').style.color='var(--text)';
+    topicInline.style.display='none';
+    topicSep.style.display='none';
+    topicMenuBtn.style.display='none';
+    topbarSpacer.style.display='';
+    document.getElementById('usercount').textContent='';
+    return;
+  }
+  if(isMessagesConn(active.conn_id)){
+    document.getElementById('chan-title').textContent='Messages';
     document.getElementById('chan-title').style.color='var(--text)';
     topicInline.style.display='none';
     topicSep.style.display='none';
@@ -3674,7 +3798,7 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.1 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 121 themes • 135 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.2 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 121 themes • 135 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'GIPHY': case 'GIF': {
         const sub=(args[0]||'').toLowerCase();
         // ── Key management: /giphy key [value|clear] ────────────────────
@@ -4810,6 +4934,204 @@ function _renderUploadsSidebarEntry(){
   return el;
 }
 
+// ─── Messages: unified DM inbox (pseudo-view) ─────────────────────────────────
+// A single "Messages" tab aggregates every private message / query across ALL
+// networks into one iMessage-style inbox. Modeled on the Uploads pseudo-channel:
+// it's not a real IRC buffer, so it skips unread/sync/E2E plumbing in setActive.
+const MSGS_CONN   = '__msgs';
+const MSGS_TARGET = '__messages';
+const MSGS_KEY    = MSGS_CONN + '/' + MSGS_TARGET;
+function isMessagesActive(){return !!active && active.conn_id===MSGS_CONN && active.target===MSGS_TARGET;}
+function isMessagesConn(c){return c===MSGS_CONN;}
+// Default ON. Stored in the synced appearance blob so it follows the user across
+// devices (existing users get it on via the APPEAR_DEFAULTS spread).
+function msgsTabEnabled(){return loadAppearance().msgsTab!==false;}
+// A DM/query target = not status and not a channel prefix.
+function _isDMTarget(t){return typeof t==='string' && t!=='status' && !/^[#&+!]/.test(t);}
+// Sum of unread across every DM/query buffer on every network (the tab badge).
+function _msgsTotalUnread(){
+  let n=0;
+  for(const net of networks){
+    const id=net.config.id, m=queryBufs[id]; if(!m) continue;
+    // Muted DMs must not badge — mirrors the per-network rows' `uc&&!pmMuted` guard.
+    for(const [lc] of m){ if(isMuted(id+'/'+lc)||isMuted('net:'+id)) continue; n+=(unread.get(bk(id,lc))||0); }
+  }
+  return n;
+}
+// Strip mIRC formatting control codes for a plain-text preview.
+function _msgsPlain(s){
+  return String(s||'').replace(/\x03\d{0,2}(?:,\d{1,2})?|[\x02\x1d\x1f\x16\x0f\x04\x11\x12\x13]/g,'');
+}
+function _msgsTime(ts){
+  if(!ts) return '';
+  const d=new Date(ts*1000), now=new Date();
+  if(d.toDateString()===now.toDateString()) return d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+  return d.toLocaleDateString([],{month:'numeric',day:'numeric'});
+}
+// Build the sorted conversation list across all networks (most-recent first).
+function _msgsConversations(){
+  const out=[];
+  for(const net of networks){
+    const id=net.config.id, m=queryBufs[id]; if(!m) continue;
+    for(const [lc,display] of m){
+      const k=bk(id,lc), buf=buffers[k]||[];
+      // Last real message for the preview/sort (fall back to any line present).
+      let last=null;
+      for(let i=buf.length-1;i>=0;i--){
+        const mm=buf[i]; if(!mm) continue;
+        if(mm.kind==='privmsg'||mm.kind==='action'||mm.kind==='notice'){ last=mm; break; }
+        if(!last) last=mm;
+      }
+      // A muted DM keeps its place in the list but contributes no unread badge,
+      // no highlight tint, and doesn't float to the top (effective unread = 0).
+      const muted=isMuted(id+'/'+lc)||isMuted('net:'+id);
+      out.push({
+        conn_id:id, lc, display, net, muted,
+        netLabel: net.config.label||net.config.server||'',
+        unread: muted?0:(unread.get(k)||0),
+        mention: muted?0:(mentionUnread.get(k)||0),
+        last, ts: last?(last.ts||0):0,
+      });
+    }
+  }
+  // Unread conversations float to the top; otherwise most-recent first.
+  out.sort((a,b)=>{
+    if(!!b.unread!==!!a.unread) return b.unread?1:-1;
+    return (b.ts||0)-(a.ts||0);
+  });
+  return out;
+}
+function _renderMessagesSidebarEntry(){
+  if(!msgsTabEnabled()) return null;
+  const el=document.createElement('div');
+  el.className='net-group';
+  el.dataset.netId=MSGS_CONN;
+  // Lit when viewing the inbox OR any DM conversation opened from it.
+  const isA=isMessagesActive() || (!!active && !isMessagesConn(active.conn_id) && !isUploadsConn(active.conn_id) && _isDMTarget(active.target));
+  const total=_msgsTotalUnread();
+  el.innerHTML=`<div class="net-label${isA?' active':''}" style="${isA?'background:var(--bg4);':''}">
+    <span class="net-dot ${total?'online':''}"></span>
+    <span class="net-name">💬 Messages</span>
+    ${total?`<span class="chan-unread-badge highlight" style="margin-left:auto">${total>99?'99+':total}</span>`:''}
+  </div>`;
+  el.querySelector('.net-label').onclick=()=>{ setActive(MSGS_CONN,MSGS_TARGET); closeSidebar(); };
+  return el;
+}
+// Close EVERY DM/query conversation across all networks (the inbox "Close all"
+// button). Uses the same semantics as closing one PM: the buffer is kept (so
+// history reloads if it reopens) but the conversation is removed from the sidebar
+// and marked closed so a ZNC/server replay doesn't resurrect it.
+function closeAllMessages(){
+  let n=0;
+  for(const net of networks){
+    const id=net.config.id, m=queryBufs[id]; if(!m) continue;
+    for(const [lc] of m){
+      markQueryClosed(id,lc);
+      unread.delete(bk(id,lc));
+      mentionUnread.delete(bk(id,lc));
+      n++;
+    }
+    queryBufs[id]=new Map();
+  }
+  saveQueryBufs(); saveUnread();
+  // If a now-closed DM happened to be the active view, fall back to status.
+  if(active && _isDMTarget(active.target) && !isMessagesConn(active.conn_id)){
+    const net=networks.find(x=>x.config.id===active.conn_id);
+    if(net) setActive(active.conn_id,'status');
+  }
+  renderSidebar();
+  if(isMessagesActive()) renderMessagesView();
+  return n;
+}
+function renderMessagesView(){
+  const area=document.getElementById('chat-area');
+  area.style.display='block';
+  area.innerHTML='';
+  const wrap=document.createElement('div');
+  wrap.className='msgs-inbox';
+  const convs=_msgsConversations();
+  const totalUnread=convs.reduce((a,c)=>a+(c.unread||0),0);
+  const header=document.createElement('div');
+  header.className='msgs-inbox-header';
+  const hLeft=document.createElement('div'); hLeft.className='msgs-inbox-htext';
+  const title=document.createElement('div'); title.className='msgs-inbox-title'; title.textContent='💬 Messages';
+  const sub=document.createElement('div'); sub.className='msgs-inbox-sub';
+  sub.textContent=`${convs.length} conversation${convs.length===1?'':'s'}${totalUnread?` · ${totalUnread} unread`:''}`;
+  hLeft.appendChild(title); hLeft.appendChild(sub);
+  header.appendChild(hLeft);
+  // Close-all button — only when there's something to close.
+  if(convs.length){
+    const closeAll=document.createElement('button');
+    closeAll.className='msgs-closeall'; closeAll.type='button';
+    closeAll.textContent='Close all'; closeAll.title='Close all conversations';
+    closeAll.onclick=async()=>{
+      const ok=await customConfirm(`Close all ${convs.length} conversation${convs.length===1?'':'s'}? They'll reappear if someone messages you again.`,'Close all','Cancel');
+      if(!ok) return;
+      const n=closeAllMessages();
+      try{ showToast(`Closed ${n} conversation${n===1?'':'s'}`); }catch(_){}
+    };
+    header.appendChild(closeAll);
+  }
+  wrap.appendChild(header);
+  if(!convs.length){
+    const empty=document.createElement('div');
+    empty.className='msgs-inbox-empty';
+    empty.textContent='No private messages yet. When someone DMs you on any network, the conversation shows up here.';
+    wrap.appendChild(empty);
+    area.appendChild(wrap);
+    return;
+  }
+  for(const c of convs){
+    const row=document.createElement('div');
+    row.className='msgs-row'+(c.unread?' unread':'');
+    row.setAttribute('role','button'); row.tabIndex=0;
+    row.setAttribute('aria-label','Conversation with '+c.display+' on '+c.netLabel);
+    const initial=(String(c.display||'?').replace(/^[~&@%+]/,'').charAt(0)||'?').toUpperCase();
+    const av=document.createElement('div'); av.className='msgs-av'; av.textContent=initial;
+    const body=document.createElement('div'); body.className='msgs-body';
+    const top=document.createElement('div'); top.className='msgs-row-top';
+    const nameSpan=document.createElement('span'); nameSpan.className='msgs-name'; nameSpan.textContent=c.display;
+    const netSpan=document.createElement('span'); netSpan.className='msgs-net'; netSpan.textContent=c.netLabel;
+    const timeSpan=document.createElement('span'); timeSpan.className='msgs-time'; timeSpan.textContent=_msgsTime(c.ts);
+    top.appendChild(nameSpan); top.appendChild(netSpan); top.appendChild(timeSpan);
+    if(c.muted){ const mu=document.createElement('span'); mu.className='msgs-mute'; mu.title='Muted'; mu.textContent='🔇'; top.appendChild(mu); }
+    const prev=document.createElement('div'); prev.className='msgs-preview';
+    if(c.last){
+      const t=c.last.text||'';
+      if(typeof t==='string'&&t.startsWith('sd8~')) prev.textContent='🔒 Encrypted message';
+      else {
+        const who=(c.last.from&&c.last.from===getNick(c.conn_id))?'You: ':'';
+        const pt=_msgsPlain(t);
+        prev.textContent=(who+(c.last.kind==='action'?'• '+pt:pt)).slice(0,140)||'—';
+      }
+    } else prev.textContent='—';
+    body.appendChild(top); body.appendChild(prev);
+    row.appendChild(av); row.appendChild(body);
+    if(c.unread){
+      const b=document.createElement('div'); b.className='msgs-badge'+(c.mention?' mention':'');
+      b.textContent=c.unread>99?'99+':c.unread;
+      row.appendChild(b);
+    }
+    // Route through _sidebarActivate so a popped-out (detached) DM re-focuses its
+    // window instead of opening a duplicate inline (mirrors every other open path).
+    const open=()=>{ _sidebarActivate(c.conn_id, c.display); };
+    row.onclick=open;
+    row.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();open();}});
+    wrap.appendChild(row);
+  }
+  area.appendChild(wrap);
+}
+// Called right after the appearance toggle flips msgsTab on/off.
+function _onMsgsTabToggle(){
+  if(!msgsTabEnabled() && isMessagesActive()){
+    // Disabled while viewing the inbox → fall back to the last real chat.
+    if(_lastIrcActive) setActive(_lastIrcActive.conn_id,_lastIrcActive.target);
+    else if(networks[0]) setActive(networks[0].config.id,'status');
+    else { active=null; renderChat(); }
+  }
+  renderSidebar();
+}
+
 // ─── User Count Update + Blink ───────────────────────────────────────────────
 function refreshUserCount(connId,channel){
   if(!active||active.conn_id!==connId||typeof channel!=='string'||active.target.toLowerCase()!==channel.toLowerCase())return;
@@ -5784,6 +6106,9 @@ const APPEAR_DEFAULTS={
   timestamps:true, joinpart:true, statusMsg:'condense', compact:false, coloredNicks:true,
   accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'water-drop', msgGap:4, inputH:36,
   font:"'DM Sans',sans-serif", linkPreviews:true,
+  // Unified "Messages" inbox tab — aggregates every DM/query from all networks
+  // into one iMessage-style tab and hides the per-network PM rows. On by default.
+  msgsTab:true,
   // Persistent outgoing text color ("My Messages"). mode: off|solid|prism; fg/bg = mIRC 0-15 (bg null = none).
   msgColorMode:'off', msgColorFg:4, msgColorBg:null,
   // Chat-bar button visibility, per platform (desktop/mobile). Shown by default.
@@ -5903,6 +6228,8 @@ function applyAppearance(){
     barPasteM:  !el('a-bar-paste-m') ||el('a-bar-paste-m').classList.contains('on'),
     barColorD:  !el('a-bar-color-d') ||el('a-bar-color-d').classList.contains('on'),
     barColorM:  !el('a-bar-color-m') ||el('a-bar-color-m').classList.contains('on'),
+    // Unified Messages inbox tab (default on; absent element ⇒ keep default-on).
+    msgsTab:    !el('a-msgs-tab')||el('a-msgs-tab').classList.contains('on'),
     mediaShape:     el('a-media-shape')?.value || prev.mediaShape || 'rounded',
     mediaSize:      el('a-media-size')?.value || prev.mediaSize || 'medium',
     mediaBorder:    el('a-media-border')?.value || prev.mediaBorder || 'none',
@@ -6577,7 +6904,8 @@ function populateAppearanceModal(cfg){
   { const _bt=(id,v)=>{const e=el(id);if(e)(v!==false?e.classList.add('on'):e.classList.remove('on'));};
     _bt('a-bar-upload-d',cfg.barUploadD); _bt('a-bar-upload-m',cfg.barUploadM);
     _bt('a-bar-paste-d',cfg.barPasteD);   _bt('a-bar-paste-m',cfg.barPasteM);
-    _bt('a-bar-color-d',cfg.barColorD);   _bt('a-bar-color-m',cfg.barColorM); }
+    _bt('a-bar-color-d',cfg.barColorD);   _bt('a-bar-color-m',cfg.barColorM);
+    _bt('a-msgs-tab',cfg.msgsTab); }
   _renderMsgColorSection();
   { const _es=el('a-esheep'); if(_es){ _es.value=_esheepMode(cfg.esheep); } }
   { const _cr=el('a-crab'); if(_cr){ _cr.value=_crabMode(cfg.crab); } }
@@ -9132,9 +9460,11 @@ function renderFavorites(){
     const isChan=f.target.startsWith('#')||f.target.startsWith('&')||f.target.startsWith('+')||f.target.startsWith('!');
     ci.dataset.isChannel=isChan?'1':'0';
     const muteKey=f.conn_id+'/'+f.target;
-    const muted=isMuted(muteKey);
+    // Match the channel/PM rows + updateUnreadBadge: a muted buffer (or muted
+    // network) hides its unread badge, so the in-place and full-render paths agree.
+    const muted=isMuted(muteKey)||isMuted('net:'+f.conn_id);
     const fDet=isDetached(f.conn_id,f.target)?'<span class="chan-detached" title="Popped out" style="color:var(--accent);font-size:11px;margin-right:4px;opacity:.85">⧉</span>':'';
-    ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span><span class="chan-right">${fDet}${uc?`<span class="chan-unread-badge${fmc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${muted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
+    ci.innerHTML=`<span style="color:var(--warn);font-size:10px;margin-right:2px">★</span>${esc(f.target)}<span style="font-size:9px;color:var(--text3);margin-left:4px">${netLabel}</span><span class="chan-right">${fDet}${uc&&!muted?`<span class="chan-unread-badge${fmc?' highlight':''}">${uc>99?'99+':uc}</span>`:''}${muted?'<span style="font-size:10px;opacity:.4">🔇</span>':''}<span class="chan-kebab">⋮</span></span>`;
     ci.style.position='relative';
     ((connId,target,isChannel)=>{
       ci.querySelector('.chan-kebab').addEventListener('click',e=>{e.stopPropagation();toggleFavMenu(e.currentTarget,connId,target,isChannel);});
@@ -9202,6 +9532,9 @@ function renderPMList(){
   const el=document.getElementById('pm-list');
   if(!el)return;
   el.innerHTML='';
+  // When the unified Messages inbox tab is enabled, DMs live there only — don't
+  // also list them in the favorites-only PM section.
+  if(msgsTabEnabled())return;
   // Only show when favorites-only mode is active
   if(localStorage.getItem('cryptirc_favs_only')!=='true')return;
   const pms=[];
@@ -9354,7 +9687,35 @@ function filterChanList(){
 function loadMuted(){try{return JSON.parse(localStorage.getItem('cryptirc_muted')||'{}');}catch{return {};}}
 function saveMuted(m){try{localStorage.setItem('cryptirc_muted',JSON.stringify(m));}catch(e){} savePrefsToServer();}
 function isMuted(key){return !!loadMuted()[key];}
-function toggleMute(key){const m=loadMuted();if(m[key])delete m[key];else m[key]=true;saveMuted(m);renderSidebar();}
+function toggleMute(key){const m=loadMuted();if(m[key])delete m[key];else m[key]=true;saveMuted(m);_syncMutedChannelsToServer();renderSidebar();}
+// True when a channel/PM buffer is silenced — the buffer itself or its whole
+// network is muted. Used to suppress mention ALERTS (notices inbox, red/taskbar
+// badge, sound, popup) for muted targets while leaving non-muted targets normal.
+function _isBufMuted(conn_id,target){return isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);}
+// Mirror the sidebar channel/PM mutes into the server-side push settings
+// (muted_channels) so a mention in a muted channel doesn't fire a MOBILE PUSH
+// either — not just the in-browser alerts. (`net:` mutes are handled by the
+// notification panel's own per-network toggle, so they're excluded here.)
+function _syncMutedChannelsToServer(){
+  if(!sessionToken||!_notifPrefs)return;
+  const m=loadMuted();
+  // One-time migration: fold any network mutes that previously lived ONLY in the
+  // push settings (the notification panel's old per-network store) into the sidebar
+  // mute store, so cryptirc_muted is the single source of truth from here on and an
+  // unmute from EITHER place propagates correctly (no clobber, no lost mutes).
+  let _mig=false;
+  for(const id of (_notifPrefs.muted_networks||[])){ const k='net:'+id; if(!m[k]){ m[k]=true; _mig=true; } }
+  if(_mig) saveMuted(m);
+  const chans=[], nets=[];
+  for(const k in m){ if(!m[k])continue; if(k.startsWith('net:')) nets.push(k.slice(4)); else chans.push(k); }
+  const curC=(_notifPrefs.muted_channels||[]).slice().sort().join('\n');
+  const curN=(_notifPrefs.muted_networks||[]).slice().sort().join('\n');
+  const nextC=chans.slice().sort().join('\n'), nextN=nets.slice().sort().join('\n');
+  if(!_mig && curC===nextC && curN===nextN) return;   // unchanged → skip the PUT
+  _notifPrefs.muted_channels=chans;
+  _notifPrefs.muted_networks=nets;
+  try{ fetch('/cryptirc/push/settings',{method:'PUT',headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},body:JSON.stringify(_notifPrefs)}).catch(()=>{}); }catch(e){}
+}
 
 // ── Floating kebab dropdown (shared by net/chan/fav sidebar menus) ─────────
 // Attached to <body> so it survives sidebar re-renders caused by IRC activity.
@@ -10257,7 +10618,9 @@ function renderNotifNetworkList() {
   if (!networks.length) { list.innerHTML = '<div style="color:var(--text3);font-size:12px;">Connect to networks to configure per-network settings.</div>'; return; }
   list.innerHTML = '';
   for (const net of networks) {
-    const muted = _notifPrefs?.muted_networks?.includes(net.config.id);
+    // Network mute is now backed by the shared sidebar mute store (cryptirc_muted)
+    // so it stays in sync with the sidebar 🔇 and suppresses push + in-browser alike.
+    const muted = isMuted('net:'+net.config.id);
     const row = document.createElement('div'); row.className = 'notif-row';
     row.innerHTML = `
       <div style="flex:1">
@@ -10320,14 +10683,15 @@ async function onNotifToggle() {
   renderNotifModal();
 }
 
-async function toggleMuteNetwork(conn_id, checkbox) {
-  if (!_notifPrefs) return;
-  if (!checkbox.checked) {
-    if (!_notifPrefs.muted_networks.includes(conn_id)) _notifPrefs.muted_networks.push(conn_id);
-  } else {
-    _notifPrefs.muted_networks = _notifPrefs.muted_networks.filter(id => id !== conn_id);
-  }
-  await saveNotifPrefs();
+function toggleMuteNetwork(conn_id, checkbox) {
+  // Back the panel's per-network toggle with the shared sidebar mute store so the
+  // two stay consistent and a network mute suppresses BOTH push and in-browser
+  // alerts. (checkbox checked = notifications ON = not muted.)
+  const key='net:'+conn_id, m=loadMuted();
+  if (!checkbox.checked) { m[key]=true; } else { delete m[key]; }
+  saveMuted(m);
+  _syncMutedChannelsToServer();
+  renderSidebar();
 }
 
 async function subscribePush() {
@@ -11646,7 +12010,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.1';
+const CRYPTIRC_VERSION='0.3.2';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -11654,6 +12018,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.2', date:'June 2026', items:[
+    {tag:'new', text:'New unified Messages tab: all your private messages from every network land in one tidy inbox at the top of the sidebar (just like your phone). Tap a conversation to open and reply. On by default — turn it off in Appearance ▸ Messages tab.'},
+  ]},
   {version:'0.3.1', date:'June 2026', items:[
     {tag:'new', text:'Colour your own messages: pick a text & background colour, or flip on rainbow Prism mode for everything you send. Use the 🎨 button by the message box, or /color and /prism on|off.'},
     {tag:'new', text:'Refreshed Settings: the Settings menu, panels, and Channel Modes dialog got a cleaner, more consistent control-panel look.'},
@@ -12031,7 +12398,9 @@ function checkMention(conn_id,target,from,text,ts){
   // Only channel mentions enter the Notices list. PMs are recorded separately
   // via addPmNotice (one entry per sender) to avoid duplicate rows.
   const isChan=target&&(target.startsWith('#')||target.startsWith('&')||target.startsWith('+')||target.startsWith('!'));
-  if(mentioned && isChan){
+  // A muted channel (or muted network) must NOT light the Notices inbox / mentions
+  // badge — muting means no alert of any kind for that channel.
+  if(mentioned && isChan && !_isBufMuted(conn_id,target)){
     const net=networks.find(x=>x.config.id===conn_id);
     mentionsList.unshift({type:'mention',conn_id,target,from,text,ts,network:net?.config.label||net?.config.server||conn_id});
     if(mentionsList.length>100)mentionsList.length=100;

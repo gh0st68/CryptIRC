@@ -1715,6 +1715,46 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
 .cm-section{background:var(--bg3);border:1px solid var(--border);border-radius:12px;padding:13px 15px;margin-bottom:14px}
 @media (hover:hover){ .cm-section .cm-toggle:hover{background:var(--bg4)} }
 .cm-btn.primary{color:#001b16}
+/* ── Unified Messages inbox (pseudo-view) ───────────────────────────────── */
+#messages-pin .net-name{font-weight:700}
+.msgs-inbox{display:flex;flex-direction:column;max-width:820px;margin:0 auto;width:100%;padding:6px 0 18px}
+.msgs-inbox-header{padding:14px 16px 10px;border-bottom:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;gap:12px}
+.msgs-inbox-htext{flex:1;min-width:0}
+.msgs-inbox-title{font-weight:800;color:var(--text);font-size:16px;display:flex;align-items:center;gap:7px}
+.msgs-inbox-sub{color:var(--text3);font-size:12px;margin-top:3px}
+.msgs-closeall{flex-shrink:0;background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:8px;padding:8px 13px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;min-height:36px;white-space:nowrap;transition:background .12s,color .12s}
+@media (hover:hover){ .msgs-closeall:hover{background:var(--bg4);color:var(--text)} }
+.msgs-closeall:active{transform:scale(.97)}
+.msgs-closeall:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (max-width:768px){ .msgs-closeall{min-height:40px;padding:9px 14px} }
+.msgs-inbox-empty{padding:38px 26px;text-align:center;color:var(--text3);font-size:13px;line-height:1.6}
+.chat-loading{padding:30px 26px;text-align:center;color:var(--text3);font-size:13px;opacity:.8}
+.msgs-row{display:flex;align-items:center;gap:12px;padding:11px 16px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .12s}
+.msgs-row:last-child{border-bottom:none}
+@media (hover:hover){ .msgs-row:hover{background:var(--bg2)} }
+.msgs-row.unread{background:color-mix(in srgb,var(--accent) 7%,transparent)}
+.msgs-row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.msgs-av{flex-shrink:0;width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#001b16;font-weight:800;font-size:17px;display:flex;align-items:center;justify-content:center;text-transform:uppercase}
+.msgs-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.msgs-row-top{display:flex;align-items:baseline;gap:7px;min-width:0;overflow:hidden}
+.msgs-name{font-weight:700;color:var(--text);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:1;min-width:0}
+.msgs-row.unread .msgs-name{color:var(--text)}
+/* Network tag yields to the nick — a long/unlabeled server (e.g. a ZNC bouncer
+   hostname) truncates with an ellipsis instead of crowding out the nick/time. */
+.msgs-net{flex-shrink:3;max-width:40%;overflow:hidden;text-overflow:ellipsis;font-size:10px;color:var(--text3);background:var(--bg3);border-radius:4px;padding:1px 6px;white-space:nowrap}
+.msgs-time{margin-left:auto;flex-shrink:0;padding-left:4px;font-size:11px;color:var(--text3)}
+.msgs-mute{flex-shrink:0;font-size:11px;opacity:.55}
+.msgs-preview{color:var(--text2);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msgs-row.unread .msgs-preview{color:var(--text);font-weight:600}
+.msgs-badge{flex-shrink:0;min-width:20px;height:20px;line-height:20px;text-align:center;border-radius:10px;background:var(--bg3);color:var(--text2);font-size:11px;font-weight:700;padding:0 6px}
+.msgs-badge.mention{background:var(--accent);color:#001b16}
+@media (max-width:768px){
+  .msgs-row{padding:13px 14px;gap:11px;min-height:56px}
+  .msgs-av{width:44px;height:44px;font-size:18px}
+  .msgs-name{font-size:15px;max-width:48%}
+  .msgs-preview{font-size:13px}
+  .msgs-inbox-header{padding:14px 14px 10px}
+}
 </style>
 <script>
 // Apply theme colors immediately — :root no longer sets theme defaults,
@@ -2285,6 +2325,10 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <span class="appear-label">Show nick list</span>
           <button class="appear-toggle" id="a-nicklist" onclick="this.classList.toggle('on');applyAppearance()"></button>
         </div>
+        <div class="appear-row">
+          <span class="appear-label">Messages tab<span style="display:block;color:var(--text3);font-size:10px;margin-top:2px">Unified inbox of all DMs from every network</span></span>
+          <button class="appear-toggle" id="a-msgs-tab" onclick="this.classList.toggle('on');applyAppearance();_onMsgsTabToggle()"></button>
+        </div>
       </div>
 
       <div class="appear-section">
@@ -2749,6 +2793,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <span id="favs-label">Favorites</span>
     </div>
     <div id="sidebar-scroll">
+      <!-- Unified "Messages" inbox tab — pinned above favorites so it stays
+           visible even in favorites-only mode (which hides #network-list). -->
+      <div id="messages-pin"></div>
       <div id="favorites-list"></div>
       <div id="pm-list" style="padding:0"></div>
       <div id="network-list"></div>

@@ -243,9 +243,12 @@ impl NotificationManager {
 
         // Check muted network
         if prefs.muted_networks.contains(&conn_id.to_string()) { return; }
-        // Check muted channel
+        // Check muted channel. Case-INSENSITIVE: IRC channel names (and nicks for
+        // DM keys) are case-insensitive, and the client may store a mute key in a
+        // different case than the wire target (a ZNC bouncer can echo a channel in
+        // a different case than the JOIN, and DM mute keys are lowercased client-side).
         let chan_key = format!("{}/{}", conn_id, target);
-        if prefs.muted_channels.contains(&chan_key) { return; }
+        if prefs.muted_channels.iter().any(|c| c.eq_ignore_ascii_case(&chan_key)) { return; }
 
         let is_dm      = !target.starts_with(['#', '&', '+', '!']);
         let is_mention = text_mentions_nick(text, user_nick);

@@ -64,6 +64,29 @@ fn params_from(params: &[String], n: usize) -> String {
     params.get(n..).map(|s| s.join(" ")).unwrap_or_default()
 }
 
+/// RFC1459 case-fold for channel/nick comparison. EFnet (ircd-ratbox) and most
+/// legacy IRCds advertise CASEMAPPING=rfc1459, in which `{}|^` are the lowercase
+/// forms of `[]\~`. Channel names are case-INSENSITIVE on the wire, but a server
+/// — or, very commonly, a ZNC bouncer sitting between us and the network — can
+/// echo a channel in a different case than the JOIN we stored: ZNC replays the
+/// self-JOIN using its own configured channel case while WHO 352/315 replies pass
+/// through verbatim from the real server in the server's canonical case. When
+/// those two cases disagree (only possible for names with letters, e.g. `#IRC30`),
+/// a case-SENSITIVE who_pending lookup misses, so the automatic away-poll's WHO
+/// reply gets dumped into the user's view instead of being consumed silently —
+/// the "one channel spamming /who non-stop" symptom. Fold both sides to this
+/// canonical key before any HashSet/HashMap match so case never breaks matching.
+fn irc_lower(s: &str) -> String {
+    s.chars().map(|c| match c {
+        'A'..='Z' => (c as u8 + 32) as char,
+        '['  => '{',
+        ']'  => '}',
+        '\\' => '|',
+        '~'  => '^',
+        other => other,
+    }).collect()
+}
+
 /// #S7: outcome of a single capped line read. See `read_capped_line`.
 enum CappedLine {
     /// A complete (or final unterminated) line whose content fit within the cap.
@@ -575,6 +598,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
     // the set, so its output is still forwarded). `who_away` accumulates the away nicks
     // of the in-flight WHO, keyed by channel, flushed into a snapshot on 315 (end of WHO).
     let mut who_ticker = tokio::time::interval(WHO_INTERVAL);
+    // Don't let a busy event loop (e.g. a long burst of inbound traffic through a
+    // ZNC bouncer monopolising the read side) bank up missed WHO ticks and then
+    // fire them all back-to-back — `interval`'s default Burst behaviour would turn
+    // the 45s away-poll into a rapid WHO storm on catch-up. Skip missed ticks.
+    who_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut who_pending: HashSet<String> = HashSet::new();
     let mut who_away: HashMap<String, Vec<String>> = HashMap::new();
 
@@ -601,7 +629,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                 if registered {
                     let chans: Vec<String> = { conn.lock().await.channels.keys().cloned().collect() };
                     for ch in chans {
-                        who_pending.insert(ch.clone());
+                        // Key who_pending by the case-folded name so the 352/315
+                        // replies match even when the server/ZNC echoes the channel
+                        // in a different case than the JOIN-echo we stored.
+                        who_pending.insert(irc_lower(&ch));
                         // A send failure here just means the connection is going down;
                         // the read side will surface the real error and reconnect.
                         // strip_crlf: channel keys originate from server-supplied JOIN names;
@@ -1097,8 +1128,9 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             // who_pending, and the removing 315 reply is server-controlled. Without
                             // this guard a malicious peer's JOIN/PART churn (never sending 315) grows
                             // who_pending without bound → heap exhaustion. Mirrors the who_away guard.
-                            if who_pending.len() < NAMES_BUF_MAX_CHANNELS || who_pending.contains(&channel) {
-                                who_pending.insert(channel.clone());
+                            let chan_key = irc_lower(&channel);
+                            if who_pending.len() < NAMES_BUF_MAX_CHANNELS || who_pending.contains(&chan_key) {
+                                who_pending.insert(chan_key);
                             }
                             conn.lock().await.send_raw(&format!("WHO {}\r\n", strip_crlf(&channel))).await?;
                         }
@@ -1626,16 +1658,19 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let channel  = p.params.get(1).cloned().unwrap_or_default();
                         let who_nick = p.params.get(5).cloned().unwrap_or_default();
                         let status   = p.params.get(6).cloned().unwrap_or_default();
+                        // Case-fold the server-echoed channel for all internal lookups
+                        // (who_away keying + the who_pending auto/manual discrimination).
+                        let chan_key = irc_lower(&channel);
                         // 'G' = gone/away, 'H' = here. Accumulate away nicks for the snapshot;
                         // here-nicks are implied by absence (the frontend has the member list).
                         if status.starts_with('G') && !who_nick.is_empty()
-                            && (who_away.len() < NAMES_BUF_MAX_CHANNELS || who_away.contains_key(&channel)) {
-                            let v = who_away.entry(channel.clone()).or_default();
+                            && (who_away.len() < NAMES_BUF_MAX_CHANNELS || who_away.contains_key(&chan_key)) {
+                            let v = who_away.entry(chan_key.clone()).or_default();
                             if v.len() < NAMES_BUF_MAX_PER_CHAN { v.push(who_nick); }
                         }
                         // A user-typed /who isn't in who_pending — keep forwarding its raw
                         // reply to status so manual WHO still works as before.
-                        if !who_pending.contains(&channel) {
+                        if !who_pending.contains(&chan_key) {
                             let text = if p.params.len() > 1 { p.params[1..].join(" ") } else { String::new() };
                             if !text.is_empty() {
                                 let msg_id = state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await;
@@ -1649,15 +1684,25 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     }
                     "315" => { // RPL_ENDOFWHO: <me> <chan/mask> :End of /WHO list.
                         let channel  = p.params.get(1).cloned().unwrap_or_default();
-                        let was_auto = who_pending.remove(&channel);
+                        let chan_key = irc_lower(&channel);
+                        let was_auto = who_pending.remove(&chan_key);
                         // Emit a snapshot only for real channels (skip `WHO nick`-style masks).
                         if channel.starts_with(['#','&','+','!']) {
-                            let away_nicks = who_away.remove(&channel).unwrap_or_default();
+                            let away_nicks = who_away.remove(&chan_key).unwrap_or_default();
+                            // Resolve back to the canonical channel name we actually track
+                            // (the JOIN-echo case) so the frontend — which keys its channel
+                            // buffers by that exact string — can apply the snapshot. The
+                            // server/ZNC may have echoed this 315 in a different case;
+                            // emitting it verbatim would silently miss the away graying.
+                            let display_chan = {
+                                let c = conn.lock().await;
+                                c.channels.keys().find(|k| irc_lower(k.as_str()) == chan_key).cloned().unwrap_or(channel)
+                            };
                             send(ServerEvent::IrcAwaySnapshot {
-                                conn_id: conn_id.to_string(), channel, away_nicks,
+                                conn_id: conn_id.to_string(), channel: display_chan, away_nicks,
                             });
                         } else {
-                            who_away.remove(&channel);
+                            who_away.remove(&chan_key);
                         }
                         // Preserve the status line for a user-initiated /who.
                         if !was_auto {
