@@ -1729,6 +1729,10 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
 @media (max-width:768px){ .msgs-closeall{min-height:40px;padding:9px 14px} }
 .msgs-inbox-empty{padding:38px 26px;text-align:center;color:var(--text3);font-size:13px;line-height:1.6}
 .chat-loading{padding:30px 26px;text-align:center;color:var(--text3);font-size:13px;opacity:.8}
+/* Non-channel views (Messages inbox, Upload Status, DMs) have no member list —
+   hide the nick-list toggle + panel entirely (desktop + mobile/PWA). */
+body.no-nicklist #nick-toggle{display:none!important}
+body.no-nicklist #nick-panel{display:none!important}
 .msgs-row{display:flex;align-items:center;gap:12px;padding:11px 16px;cursor:pointer;border-bottom:1px solid var(--border);transition:background .12s}
 .msgs-row:last-child{border-bottom:none}
 @media (hover:hover){ .msgs-row:hover{background:var(--bg2)} }

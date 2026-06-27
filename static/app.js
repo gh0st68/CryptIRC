@@ -2942,6 +2942,10 @@ setInterval(()=>{
 },400);
 function updateTopbar(){
   if(!active)return;
+  // The user/nick list only makes sense for a CHANNEL. Hide its toggle button +
+  // panel for every non-channel view — the Messages inbox, Upload Status, and DMs
+  // (none have members). `no-nicklist` on <body> drives the CSS (desktop + mobile).
+  document.body.classList.toggle('no-nicklist', !/^[#&+!]/.test(String(active.target||'')));
   const topicInline=document.getElementById('topic-inline');
   const topicSep=document.getElementById('topic-sep');
   const topicMenuBtn=document.getElementById('topic-menu-btn');
@@ -4217,26 +4221,34 @@ function trackLastSpoke(conn_id,target,nick,ts){
   _lastSpoke[k][nick.toLowerCase()]=ts||Date.now()/1000;
   const nk=Object.keys(_lastSpoke[k]);if(nk.length>500){nk.sort((a,b)=>_lastSpoke[k][a]-_lastSpoke[k][b]);for(let i=0;i<100;i++)delete _lastSpoke[k][nk[i]];}
 }
-let _tabCycleState=null; // {partial, matches, index, stamp}
+let _tabCycleState=null; // {partial, matches, index, stamp, completed, suffix}
+function _tabPlaceCursorEnd(inp){ try{ inp.setSelectionRange(inp.value.length, inp.value.length); }catch(e){} }
 function tabComplete(inp){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
   const ch=net?.channels?.find(c=>c.name===active.target);
   if(!ch)return;
-  const val=inp.value,words=val.split(' ');
-  const partial=words[words.length-1].toLowerCase();
-  if(!partial)return;
-  // Check if we're cycling through previous tab results
   const now=Date.now();
-  if(_tabCycleState&&_tabCycleState.partial===partial&&now-_tabCycleState.stamp<3000){
-    // Cycle to next match
+  const val=inp.value;
+  // CYCLE: if the previous Tab just completed (the input still ends with what we
+  // wrote, e.g. "nick: ") and the state is fresh, swap in the NEXT match. The old
+  // code keyed the cycle off the re-typed `partial`, but completion appends a
+  // suffix (": "/" "), so the next partial was always empty and cycling never ran.
+  if(_tabCycleState && _tabCycleState.matches.length>1 && now-_tabCycleState.stamp<3000
+     && _tabCycleState.bufKey===bk(active.conn_id,active.target) && val===_tabCycleState.value){
     _tabCycleState.index=(_tabCycleState.index+1)%_tabCycleState.matches.length;
     _tabCycleState.stamp=now;
-    words[words.length-1]=_tabCycleState.matches[_tabCycleState.index]+(words.length===1?': ':' ');
-    inp.value=words.join(' ');
+    const next=_tabCycleState.matches[_tabCycleState.index]+_tabCycleState.suffix;
+    inp.value=val.slice(0, val.length-_tabCycleState.completed.length)+next;
+    _tabCycleState.completed=next;
+    _tabCycleState.value=inp.value;   // keep the exact-match anchor current for the next cycle
+    _tabPlaceCursorEnd(inp);
     return;
   }
-  // Build match list sorted by most recent speaker
+  // FRESH completion: build match list for the last word, sorted by recent speaker.
+  const words=val.split(' ');
+  const partial=words[words.length-1].toLowerCase();
+  if(!partial)return;
   const k=bk(active.conn_id,active.target);
   const spokeMap=_lastSpoke[k]||{};
   const nicks=(ch.names||[]).map(n=>stripPfx(n)).filter(n=>n.toLowerCase().startsWith(partial));
@@ -4247,9 +4259,15 @@ function tabComplete(inp){
     if(tb!==ta) return tb-ta;
     return a.toLowerCase().localeCompare(b.toLowerCase());
   });
-  _tabCycleState={partial,matches:nicks,index:0,stamp:now};
-  words[words.length-1]=nicks[0]+(words.length===1?': ':' ');
+  const suffix=(words.length===1?': ':' ');
+  const completed=nicks[0]+suffix;
+  words[words.length-1]=completed;
   inp.value=words.join(' ');
+  // bufKey + value anchor the cycle to THIS buffer and the exact text we produced,
+  // so a channel switch or manual typing within 3s falls through to a fresh
+  // completion instead of cycling the wrong channel's / a coincidental match.
+  _tabCycleState={partial,matches:nicks,index:0,stamp:now,completed,suffix,bufKey:k,value:inp.value};
+  _tabPlaceCursorEnd(inp);
 }
 function insertNick(nick){const inp=document.getElementById('msg-input');if(!inp.disabled){inp.value+=nick+': ';inp.focus();}}
 
@@ -7456,12 +7474,22 @@ document.addEventListener('click',e=>{
   nacEl.id='nick-autocomplete';
   nacEl.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:102;';
   inp.parentNode.appendChild(nacEl);
-  let nacIdx=-1;
+  let nacIdx=-1, nacNicks=[];   // nacNicks = the exact list as rendered (for keyboard completion)
   function getChannelNicks(){
     if(!active)return [];
     const net=networks.find(n=>n.config.id===active.conn_id);
     const ch=net?.channels?.find(c=>c.name===active.target);
-    return (ch?.names||[]).map(n=>stripPfx(n));
+    const names=(ch?.names||[]).map(n=>stripPfx(n));
+    // Order by most-recent speaker (from _lastSpoke) then alphabetical, so typing
+    // "@" surfaces the people who just talked first — especially handy on mobile
+    // where you tap a name rather than type it. Matches tabComplete's ordering.
+    const sm=_lastSpoke[bk(active.conn_id,active.target)]||{};
+    names.sort((a,b)=>{
+      const ta=sm[a.toLowerCase()]||0, tb=sm[b.toLowerCase()]||0;
+      if(tb!==ta) return tb-ta;
+      return a.toLowerCase().localeCompare(b.toLowerCase());
+    });
+    return names;
   }
   inp.addEventListener('input',()=>{
     const v=inp.value, pos=inp.selectionStart;
@@ -7470,7 +7498,8 @@ document.addEventListener('click',e=>{
     if(!m){nacEl.style.display='none';nacIdx=-1;return;}
     const q=m[1].toLowerCase();
     const nicks=getChannelNicks().filter(n=>n.toLowerCase().startsWith(q)).slice(0,10);
-    if(!nicks.length){nacEl.style.display='none';nacIdx=-1;return;}
+    if(!nicks.length){nacEl.style.display='none';nacIdx=-1;nacNicks=[];return;}
+    nacNicks=nicks;   // cache so keyboard Tab/Enter completes exactly the highlighted item
     nacEl.style.display='block'; nacIdx=0;
     nacEl.innerHTML=nicks.map((n,i)=>`<div class="emoji-ac-item${i===0?' active':''}" data-i="${i}" style="font-size:13px"><span class="nc${nickHash(n)}">${esc(n)}</span></div>`).join('');
     nacEl.querySelectorAll('.emoji-ac-item').forEach(el=>{
@@ -7505,10 +7534,9 @@ document.addEventListener('click',e=>{
       if(nacIdx>=0&&nacIdx<items.length){
         e.preventDefault();
         e.stopImmediatePropagation();
-        const nicks=getChannelNicks().filter(n=>n.toLowerCase().startsWith(
-          (inp.value.slice(0,inp.selectionStart).match(/@([a-zA-Z0-9_\-\[\]\\`^]{0,20})$/)||[])[1]?.toLowerCase()||''
-        )).slice(0,10);
-        if(nicks[nacIdx])completeNick(nicks[nacIdx]);
+        // Complete the EXACT highlighted item from the rendered list — not a fresh
+        // re-derivation, which could reorder (recency sort) if a nick spoke mid-pick.
+        if(nacNicks[nacIdx])completeNick(nacNicks[nacIdx]);
       }
     }
     else if(e.key==='Escape'){e.stopImmediatePropagation();nacEl.style.display='none';nacIdx=-1;}
