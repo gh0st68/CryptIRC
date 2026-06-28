@@ -284,6 +284,40 @@ function createWindow(url) {
     }
     if (items.length) Menu.buildFromTemplate(items).popup({ window: mainWindow });
   });
+
+  // ── Freeze / crash recovery ────────────────────────────────────────────────
+  // Over a very long session the page can hang or its renderer can die. Rather
+  // than make the user kill and relaunch the whole app, detect it and recover by
+  // reloading just the window (the IRC connections live server-side, so nothing
+  // is lost). A non-blocking dialog is used so the main process never stalls.
+  let unresponsivePromptOpen = false;
+  mainWindow.on('unresponsive', () => {
+    if (unresponsivePromptOpen || !mainWindow || mainWindow.isDestroyed()) return;
+    unresponsivePromptOpen = true;
+    dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      buttons: ['Reload', 'Keep waiting'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'CryptIRC is not responding',
+      message: 'CryptIRC has stopped responding.',
+      detail: 'Reload the window to recover — you stay connected on the server. Or keep waiting if it is just busy.',
+    }).then(({ response }) => {
+      unresponsivePromptOpen = false;
+      if (response === 0 && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+    }).catch(() => { unresponsivePromptOpen = false; });
+  });
+  mainWindow.on('responsive', () => { unresponsivePromptOpen = false; });
+
+  // If the renderer process actually goes away (crash / OOM / killed), auto-reload
+  // it once instead of leaving a blank, dead window. A clean exit is normal.
+  mainWindow.webContents.on('render-process-gone', (e, details) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (details && details.reason === 'clean-exit') return;
+    console.error('[render-process-gone]', details && details.reason);
+    const cfg = loadConfig();
+    mainWindow.loadURL(cfg.url || DEFAULT_URL);
+  });
 }
 
 function persistBounds() {
@@ -347,7 +381,10 @@ ipcMain.on('show-notification', (e, title, body, meta) => {
     if (!Notification.isSupported()) return;
     const notif = new Notification({ title: title || 'CryptIRC', body: body || '', icon: path.join(__dirname, 'icons', 'icon.png'), silent: true });
     _activeNotifs.add(notif);
-    const cleanup = () => _activeNotifs.delete(notif);
+    // Always release the reference, even if the platform never fires close/click/
+    // failed (some don't), so the Set can't grow unbounded over a long session.
+    const fallback = setTimeout(() => _activeNotifs.delete(notif), 30000);
+    const cleanup = () => { clearTimeout(fallback); _activeNotifs.delete(notif); };
     notif.on('click', () => {
       if (mainWindow) {
         if (mainWindow.isMinimized()) mainWindow.restore();
@@ -380,6 +417,7 @@ function createTray() {
   tray.setToolTip('CryptIRC');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Show CryptIRC', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },
+    { label: 'Reload', click: () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload(); } },
     { label: 'Change Server URL…', click: () => changeServerFlow() },
     { type: 'separator' },
     { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },

@@ -6,7 +6,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Native notifications (web frontend → main)
   showNotification: (title, body, meta) => ipcRenderer.send('show-notification', title, body, meta),
-  onNotificationClick: (cb) => ipcRenderer.on('notification-click', (e, meta) => cb(meta)),
+  // Replace any prior handler so repeated registration (e.g. on reconnect) can't
+  // stack ipcRenderer listeners over a long session.
+  onNotificationClick: (cb) => {
+    ipcRenderer.removeAllListeners('notification-click');
+    ipcRenderer.on('notification-click', (e, meta) => cb(meta));
+  },
 
   // Taskbar/dock unread badge — frontend can call window.electronAPI.setUnread(n)
   setUnread: (n) => ipcRenderer.send('set-unread', n),

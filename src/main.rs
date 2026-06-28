@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod auth;
+mod captcha;
 mod certs;
 mod crypto;
 mod e2e;
@@ -74,6 +75,12 @@ pub struct AppState {
     pub registration_open:   Arc<tokio::sync::RwLock<bool>>,
     pub registration_code:   Arc<tokio::sync::RwLock<String>>,
     pub max_upload_mb:       Arc<tokio::sync::RwLock<usize>>,
+    /// Whether an email address is required to self-register (admin-toggleable; default OFF).
+    pub email_required:      Arc<tokio::sync::RwLock<bool>>,
+    /// Whether the signup captcha is enforced (admin-toggleable; default ON).
+    pub captcha_enabled:     Arc<tokio::sync::RwLock<bool>>,
+    /// Live signup captchas: id -> (answer, expires_at unix secs). One-time use, short TTL.
+    pub captchas:            Arc<DashMap<String, (i64, i64)>>,
     pub admin_settings_lock: Arc<tokio::sync::Mutex<()>>,
     pub base_path:           String,
     pub static_index:        Arc<String>,
@@ -597,15 +604,16 @@ pub struct LogLine { pub id: u64, pub ts: i64, pub from: String, pub text: Strin
 
 // ─── HTTP types ───────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)] struct RegisterBody      { username: String, email: String, password: String, #[serde(default)] code: String }
-#[derive(Deserialize)] struct LoginBody          { username: String, password: String }
+#[derive(Deserialize)] struct RegisterBody      { username: String, #[serde(default)] email: String, password: String, #[serde(default)] code: String, #[serde(default)] captcha_id: String, #[serde(default)] captcha_answer: String }
+#[derive(Deserialize)] struct LoginBody          { username: String, password: String, #[serde(default)] captcha_id: String, #[serde(default)] captcha_answer: String }
 #[derive(Deserialize)] struct VerifyQuery        { token: String }
 #[derive(Deserialize)] struct ForgotBody         { email: String }
 #[derive(Deserialize)] struct ResetQuery         { token: String }
 #[derive(Deserialize)] struct ResetPasswordBody  { token: String, password: String }
 #[derive(Deserialize)] struct FileQuery    { token: Option<String> }
 #[derive(Serialize)]   struct AuthOkBody   { token: String, username: String }
-#[derive(Serialize)]   struct MeOk         { username: String }
+#[derive(Serialize)]   struct LoginErr     { message: String, captcha_required: bool }
+#[derive(Serialize)]   struct MeOk         { username: String, email: String, admin: bool }
 #[derive(Serialize)]   struct Msg          { message: String }
 
 /// S6: Maximum size of a single inbound WebSocket text message.
@@ -707,6 +715,16 @@ async fn main() -> Result<()> {
         let tk = v.get("tenor_server_key").and_then(|x| x.as_str()).unwrap_or("").to_string();
         (provider, mode, gk, tk)
     };
+    // Email-required + signup-captcha policy (admin-controlled). Defaults: email OPTIONAL
+    // (email_required=false) and captcha ON. Persisted in the same admin_settings.json.
+    let (email_required, captcha_enabled) = {
+        let v: serde_json::Value = if admin_settings_path.exists() {
+            serde_json::from_str(&std::fs::read_to_string(&admin_settings_path).unwrap_or_default()).unwrap_or_default()
+        } else { serde_json::json!({}) };
+        let er = v.get("email_required").and_then(|x| x.as_bool()).unwrap_or(false);
+        let ce = v.get("captcha_enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+        (er, ce)
+    };
     let gif_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build().unwrap_or_else(|_| reqwest::Client::new());
@@ -755,6 +773,9 @@ async fn main() -> Result<()> {
         registration_open: Arc::new(tokio::sync::RwLock::new(registration_open)),
         registration_code: Arc::new(tokio::sync::RwLock::new(reg_code)),
         max_upload_mb:     Arc::new(tokio::sync::RwLock::new(max_upload_mb)),
+        email_required:    Arc::new(tokio::sync::RwLock::new(email_required)),
+        captcha_enabled:   Arc::new(tokio::sync::RwLock::new(captcha_enabled)),
+        captchas:          Arc::new(DashMap::new()),
         admin_settings_lock: Arc::new(tokio::sync::Mutex::new(())),
         base_path: bp_trimmed.to_string(),
         static_index, static_manifest, static_sw, static_app_js,
@@ -786,6 +807,9 @@ async fn main() -> Result<()> {
           loop {
               iv.tick().await;
               a.purge_expired_sessions();
+              // Prune expired on-disk reset tokens + abandoned pending email-verifications
+              // (resets/, pending/) so they don't accumulate forever or slow the auth scans.
+              a.sweep_expired_tokens().await;
               s.prune_user_events();
               s.paste_store.cleanup_expired().await;
               // #87/#106: prune finished/aborted connect tasks and idle per-user
@@ -837,9 +861,13 @@ async fn main() -> Result<()> {
         .route("/fonts/:name",           get(serve_font))
         .route("/auth/register",         post(route_register).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/status",           get(route_auth_status))
+        .route("/auth/captcha",          get(route_captcha))
+        .route("/auth/set-email",        post(route_set_email).layer(DefaultBodyLimit::max(8_192)))
         .route("/admin/users",           get(route_admin_users))
         .route("/admin/user/:username",  axum::routing::delete(route_admin_delete_user))
         .route("/admin/user/:username/disable", post(route_admin_disable_user))
+        .route("/admin/user/:username/approve", post(route_admin_approve_user))
+        .route("/admin/user/:username/email", post(route_admin_set_email).layer(DefaultBodyLimit::max(8_192)))
         .route("/admin/user/:username/upload-permission", post(route_admin_toggle_upload))
         .route("/admin/settings",        get(route_admin_get_settings).put(route_admin_put_settings))
         .route("/admin/adduser",         post(route_admin_add_user).layer(DefaultBodyLimit::max(4_096)))
@@ -1056,7 +1084,12 @@ fn client_ip(headers: &HeaderMap) -> Option<String> {
 async fn route_auth_status(State(state): State<AppState>) -> impl IntoResponse {
     let open = *state.registration_open.read().await;
     let has_code = !state.registration_code.read().await.is_empty();
-    Json(serde_json::json!({ "registration_open": open, "requires_code": has_code }))
+    Json(serde_json::json!({
+        "registration_open": open,
+        "requires_code": has_code,
+        "email_required": *state.email_required.read().await,
+        "captcha_enabled": *state.captcha_enabled.read().await,
+    }))
 }
 
 // ── Admin endpoints ──────────────────────────────────────────────────────────
@@ -1110,6 +1143,21 @@ async fn route_admin_disable_user(State(state): State<AppState>, headers: Header
     }
 }
 
+async fn route_admin_approve_user(State(state): State<AppState>, headers: HeaderMap, Path(target): Path<String>) -> impl IntoResponse {
+    let Some(user) = extract_session_user(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    // Approve = verify the account without requiring the email link, and clear its pending
+    // verification record. Idempotent; harmless if the user is already verified.
+    match state.auth.approve_user(&target).await {
+        Ok(_) => (StatusCode::OK, Json(Msg { message: format!("User '{}' approved.", target) })).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(Msg { message: e.to_string() })).into_response(),
+    }
+}
+
 #[derive(Deserialize)]
 struct ToggleUpload { allow: bool }
 
@@ -1142,6 +1190,8 @@ async fn route_admin_get_settings(State(state): State<AppState>, headers: Header
         "registration_open": open,
         "registration_code": code,
         "max_upload_mb": upload_mb,
+        "email_required": *state.email_required.read().await,
+        "captcha_enabled": *state.captcha_enabled.read().await,
         // GIF policy: provider + mode + whether each shared key is set (masked, never raw).
         "gif_provider": state.gif_provider.read().await.clone(),
         "gif_mode": state.gif_mode.read().await.clone(),
@@ -1157,6 +1207,9 @@ struct AdminSettings {
     registration_open: Option<bool>,
     registration_code: Option<String>,
     max_upload_mb: Option<usize>,
+    // Signup policy (optional; omitted = keep current).
+    email_required: Option<bool>,
+    captcha_enabled: Option<bool>,
     // GIF picker policy (all optional; omitted/blank = keep current).
     gif_provider: Option<String>,
     gif_mode: Option<String>,
@@ -1185,10 +1238,12 @@ async fn route_admin_add_user(State(state): State<AppState>, headers: HeaderMap,
     if !state.auth.is_admin(&user).await {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let email = if body.email.is_empty() { format!("{}@localhost", body.username) } else { body.email };
-    // Admin-created users: no client-IP rate dimension needed (admin-gated route).
-    match state.auth.register(&body.username, &email, &body.password, None).await {
-        Ok(_token) => {
+    // Admin-created users: email is genuinely optional (blank = no email on file, not a fake
+    // @localhost address). email_required=false so register() never demands one and auto-
+    // verifies; set_verified(true) below is then a belt-and-suspenders.
+    let email = body.email.trim().to_string();
+    match state.auth.register(&body.username, &email, &body.password, None, false).await {
+        Ok(_outcome) => {
             // Auto-verify (admin-created users don't need email verification). Go through
             // set_verified so the read-modify-write runs under the per-user lock + atomic
             // write like every other mutator — the old raw unlocked write here could race a
@@ -1217,6 +1272,12 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
         // Clamp to 1–500 MB
         let clamped = mb.clamp(1, 500);
         *state.max_upload_mb.write().await = clamped;
+    }
+    if let Some(er) = body.email_required {
+        *state.email_required.write().await = er;
+    }
+    if let Some(ce) = body.captcha_enabled {
+        *state.captcha_enabled.write().await = ce;
     }
     // GIF policy. Provider/mode are validated against the allowed sets; an unknown
     // value is ignored (keeps current). Keys are blank-to-keep so the admin can flip
@@ -1247,6 +1308,8 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     existing["registration_open"] = serde_json::json!(*state.registration_open.read().await);
     existing["registration_code"] = serde_json::json!(*state.registration_code.read().await);
     existing["max_upload_mb"] = serde_json::json!(*state.max_upload_mb.read().await);
+    existing["email_required"] = serde_json::json!(*state.email_required.read().await);
+    existing["captcha_enabled"] = serde_json::json!(*state.captcha_enabled.read().await);
     existing["gif_provider"] = serde_json::json!(*state.gif_provider.read().await);
     existing["gif_mode"] = serde_json::json!(*state.gif_mode.read().await);
     existing["giphy_server_key"] = serde_json::json!(*state.giphy_server_key.read().await);
@@ -1260,6 +1323,11 @@ async fn route_register(State(state): State<AppState>, headers: HeaderMap, Json(
     let ip = client_ip(&headers);
     if !*state.registration_open.read().await {
         return (StatusCode::FORBIDDEN, Json(Msg { message: "Registration is closed. Contact the server admin.".into() })).into_response();
+    }
+    // Throttle EVERY registration attempt per IP up front, so a wrong captcha (or any bad
+    // attempt) consumes budget too — otherwise blind captcha-guessing would be unbounded.
+    if state.auth.check_ip_rate_limit("reg_attempt", ip.as_deref()).is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(Msg { message: "Too many attempts — try again later.".into() })).into_response();
     }
     let req_code = state.registration_code.read().await.clone();
     if !req_code.is_empty() {
@@ -1283,36 +1351,140 @@ async fn route_register(State(state): State<AppState>, headers: HeaderMap, Json(
             return (StatusCode::FORBIDDEN, Json(Msg { message: "Invalid registration code.".into() })).into_response();
         }
     }
-    match state.auth.register(&body.username, &body.email, &body.password, ip.as_deref()).await {
-        Ok(token) => {
-            let (email, uname, base, from) = (body.email.clone(), body.username.to_lowercase(), state.base_url.clone(), state.from_email.clone());
-            tokio::spawn(async move {
-                if let Err(e) = email::send_verification(&email, &uname, &token, &base, &from) { error!("Email: {}", e); }
-            });
-            (StatusCode::OK, Json(Msg { message: "Registered! Check your email.".into() })).into_response()
+    // Signup captcha (admin-toggleable). Verified + consumed here, after the registration
+    // code but before any account work, so a bad captcha costs nothing downstream.
+    if *state.captcha_enabled.read().await {
+        if !verify_captcha(&state, &body.captcha_id, &body.captcha_answer) {
+            return (StatusCode::BAD_REQUEST, Json(Msg { message: "Incorrect captcha — please try again.".into() })).into_response();
+        }
+    }
+    let email_required = *state.email_required.read().await;
+    match state.auth.register(&body.username, &body.email, &body.password, ip.as_deref(), email_required).await {
+        Ok(outcome) => {
+            if let Some(token) = outcome.verify_token {
+                // Email verification required → mail the link (email is non-empty here).
+                let (email, uname, base, from) = (body.email.clone(), body.username.to_lowercase(), state.base_url.clone(), state.from_email.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = email::send_verification(&email, &uname, &token, &base, &from) { error!("Email: {}", e); }
+                });
+                (StatusCode::OK, Json(Msg { message: "Registered! Check your email to verify your account.".into() })).into_response()
+            } else {
+                // Auto-verified (email optional / not required) → active immediately.
+                (StatusCode::OK, Json(Msg { message: "Account created! You can sign in now.".into() })).into_response()
+            }
         }
         Err(e) => {
             let msg = e.to_string();
             // #76: keep validation messages but never leak internal error detail.
-            let safe = if ["Username","Password","Email","taken","already","attempts","Invalid"].iter().any(|w| msg.contains(w)) { msg } else { "Registration failed".into() };
+            let safe = if ["Username","Password","Email","email","taken","already","attempts","Invalid","required"].iter().any(|w| msg.contains(w)) { msg } else { "Registration failed".into() };
             (StatusCode::BAD_REQUEST, Json(Msg { message: safe })).into_response()
         }
     }
 }
 
+/// GET /auth/captcha — issue a fresh signup captcha: an id + a distorted PNG (data URL).
+/// The answer lives only server-side, keyed by the id, with a short one-time-use TTL.
+async fn route_captcha(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let ip = client_ip(&headers);
+    if state.auth.check_ip_rate_limit("captcha", ip.as_deref()).is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(Msg { message: "Too many captcha requests — slow down.".into() })).into_response();
+    }
+    let now = chrono::Utc::now().timestamp();
+    // Opportunistic prune of expired entries + a hard cap so the map can't grow unbounded.
+    state.captchas.retain(|_, v| v.1 >= now);
+    if state.captchas.len() > 10_000 {
+        // Evict the soonest-to-expire half rather than clearing everything, so a flood can't
+        // wipe a just-issued legitimate challenge out from under an honest user mid-signup.
+        let mut ents: Vec<(String, i64)> = state.captchas.iter().map(|e| (e.key().clone(), e.value().1)).collect();
+        ents.sort_by_key(|(_, exp)| *exp);
+        for (k, _) in ents.into_iter().take(5_000) { state.captchas.remove(&k); }
+    }
+    let cap = captcha::generate();
+    let id = uuid::Uuid::new_v4().to_string();
+    state.captchas.insert(id.clone(), (cap.answer, now + 300)); // 5-minute TTL
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&cap.png);
+    (StatusCode::OK, Json(serde_json::json!({ "id": id, "image": format!("data:image/png;base64,{}", b64) }))).into_response()
+}
+
+/// Verify + consume a signup captcha. The id is removed whether or not the answer matches,
+/// so each challenge is one-shot — a wrong answer needs a fresh image (no brute-forcing one).
+fn verify_captcha(state: &AppState, id: &str, answer: &str) -> bool {
+    if id.is_empty() { return false; }
+    let now = chrono::Utc::now().timestamp();
+    let Some((_, (ans, exp))) = state.captchas.remove(id) else { return false; };
+    if exp < now { return false; }
+    answer.trim().parse::<i64>().map(|a| a == ans).unwrap_or(false)
+}
+
+#[derive(Deserialize)] struct EmailBody { #[serde(default)] email: String }
+
+/// POST /auth/set-email — the logged-in user sets / updates / clears their own email (Profile).
+async fn route_set_email(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<EmailBody>) -> impl IntoResponse {
+    let Some(user) = extract_session_user(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    // Throttle email changes (per IP + per user) so this can't be used to spray reset mail
+    // to many addresses or churn the email-lock table.
+    let ip = client_ip(&headers);
+    if state.auth.check_ip_rate_limit("set_email", ip.as_deref()).is_err()
+        || state.auth.check_user_create_rate_limit(&user, "set_email").is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(Msg { message: "Too many changes — try again later.".into() })).into_response();
+    }
+    match state.auth.set_email(&user, &body.email).await {
+        Ok(_) => {
+            let msg = if body.email.trim().is_empty() { "Email removed." } else { "Email saved." };
+            (StatusCode::OK, Json(Msg { message: msg.into() })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(Msg { message: e.to_string() })).into_response(),
+    }
+}
+
+/// POST /admin/user/:username/email — admin sets / updates an account's email (e.g. for a
+/// member who signed up without one). Same validator + uniqueness as the self path.
+async fn route_admin_set_email(State(state): State<AppState>, headers: HeaderMap, Path(target): Path<String>, Json(body): Json<EmailBody>) -> impl IntoResponse {
+    let Some(user) = extract_session_user(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match state.auth.set_email(&target, &body.email).await {
+        Ok(_) => (StatusCode::OK, Json(Msg { message: format!("Email updated for '{}'.", target) })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(Msg { message: e.to_string() })).into_response(),
+    }
+}
+
 async fn route_login(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<LoginBody>) -> impl IntoResponse {
     let ip = client_ip(&headers);
+    // Throttle every login POST per IP up front — bounds brute force AND the wrong-captcha
+    // early-return path below (which would otherwise never reach login()'s own rate limit).
+    if state.auth.check_ip_rate_limit("login_attempt", ip.as_deref()).is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(LoginErr { message: "Too many attempts — try again later.".into(), captcha_required: state.auth.login_captcha_required(ip.as_deref(), &body.username) })).into_response();
+    }
+    // After enough recent failures from this IP, require a captcha BEFORE checking the
+    // password, so password-guessing is captcha-gated. Normal logins are unaffected.
+    if state.auth.login_captcha_required(ip.as_deref(), &body.username) {
+        if !verify_captcha(&state, &body.captcha_id, &body.captcha_answer) {
+            return (StatusCode::UNAUTHORIZED, Json(LoginErr { message: "Please complete the captcha to continue.".into(), captcha_required: true })).into_response();
+        }
+    }
     match state.auth.login(&body.username, &body.password, ip.as_deref()).await {
         // login() resolves the identifier (username OR email) to the real account
         // username — return THAT so the client's identity isn't set to an email.
-        Ok((token, username)) => (StatusCode::OK, Json(AuthOkBody { token, username })).into_response(),
+        Ok((token, username)) => {
+            state.auth.reset_login_fails(ip.as_deref(), &body.username);
+            (StatusCode::OK, Json(AuthOkBody { token, username })).into_response()
+        }
         Err(e) => {
+            state.auth.record_login_fail(ip.as_deref(), &body.username);
             let msg = e.to_string();
             // #56: login now returns one generic "Invalid username or password" for
             // nonexistent/unverified/wrong-password — "verified" is no longer emitted,
             // so drop it from the whitelist to avoid ever reflecting that oracle.
             let safe = if ["Invalid","attempts"].iter().any(|w| msg.contains(w)) { msg } else { "Login failed".into() };
-            (StatusCode::UNAUTHORIZED, Json(Msg { message: safe })).into_response()
+            // Tell the client whether the NEXT attempt will need a captcha (>= threshold fails).
+            (StatusCode::UNAUTHORIZED, Json(LoginErr { message: safe, captcha_required: state.auth.login_captcha_required(ip.as_deref(), &body.username) })).into_response()
         }
     }
 }
@@ -1442,7 +1614,7 @@ async fn route_reset_password(State(state): State<AppState>, headers: HeaderMap,
         }
         Err(e) => {
             let msg = e.to_string();
-            let safe = if ["Invalid","expired","Password","10 characters"].iter().any(|w| msg.contains(w)) { msg } else { "Reset failed".into() };
+            let safe = if ["Invalid","expired","Password","10 characters","attempts"].iter().any(|w| msg.contains(w)) { msg } else { "Reset failed".into() };
             (StatusCode::BAD_REQUEST, Json(Msg { message: safe })).into_response()
         }
     }
@@ -1450,8 +1622,14 @@ async fn route_reset_password(State(state): State<AppState>, headers: HeaderMap,
 
 async fn route_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
-        Some(u) => (StatusCode::OK, Json(MeOk { username: u })).into_response(),
-        None    => (StatusCode::UNAUTHORIZED, Json(Msg { message: "Not authenticated".into() })).into_response(),
+        Some(u) => {
+            let (email, admin) = match state.auth.get_user(&u).await {
+                Some(usr) => (usr.email, usr.admin),
+                None => (String::new(), false),
+            };
+            (StatusCode::OK, Json(MeOk { username: u, email, admin })).into_response()
+        }
+        None => (StatusCode::UNAUTHORIZED, Json(Msg { message: "Not authenticated".into() })).into_response(),
     }
 }
 
@@ -1465,7 +1643,13 @@ async fn route_change_password(State(state): State<AppState>, headers: HeaderMap
         None => return (StatusCode::UNAUTHORIZED, Json(Msg { message: "Not authenticated".into() })).into_response(),
     };
     match state.auth.change_password(&user, &body.old_password, &body.new_password, ip.as_deref()).await {
-        Ok(_) => (StatusCode::OK, Json(Msg { message: "Password changed successfully.".into() })).into_response(),
+        Ok(_) => {
+            // change_password() purges ALL sessions (incl. this caller's) for security; re-issue
+            // a fresh session so the user who just changed their own password stays logged in
+            // (other devices remain logged out — that's the intent). Client swaps to this token.
+            let token = state.auth.issue_session(&user);
+            (StatusCode::OK, Json(AuthOkBody { token, username: user })).into_response()
+        }
         Err(e) => {
             let msg = e.to_string();
             let safe = if ["incorrect","10 characters","uppercase","lowercase","number","special"].iter().any(|w| msg.contains(w)) { msg } else { "Password change failed".into() };
@@ -3891,6 +4075,8 @@ fn js_escape(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '<'  => out.push_str("\\x3c"),  // prevent </script> breakout
             '>'  => out.push_str("\\x3e"),
+            '\u{2028}' => out.push_str("\\u2028"),  // JS line terminators (pre-ES2019 break-out)
+            '\u{2029}' => out.push_str("\\u2029"),
             _    => out.push(c),
         }
     }

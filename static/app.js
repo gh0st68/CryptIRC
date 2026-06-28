@@ -356,19 +356,34 @@ function switchAuthTab(tab) {
   document.getElementById('reg-success').style.display     = 'none';
   document.getElementById('tab-login').classList.toggle('active',    tab==='login' || tab==='forgot');
   document.getElementById('tab-register').classList.toggle('active', tab==='register');
+  // Freshen the captcha each time the signup form is shown (the prior one may have expired).
+  if(tab==='register' && window._captchaEnabled) loadCaptcha();
 }
 async function doLogin() {
   const user=document.getElementById('l-user').value.trim();
   const pass=document.getElementById('l-pass').value;
   if(!user||!pass){setErr('login-err','Fill in all fields');return;}
+  const capAns=document.getElementById('l-captcha')?.value?.trim()||'';
   const btn=document.getElementById('login-btn');
   const lights=document.getElementById('login-lights');
   btn.disabled=true; btn.textContent='Signing in…';
   lights.classList.add('active');
   try {
-    const r=await fetch('/cryptirc/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,password:pass})});
+    const r=await fetch('/cryptirc/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,password:pass,captcha_id:window._loginCaptchaId||'',captcha_answer:capAns})});
     const d=await r.json();
-    if(!r.ok){setErr('login-err',d.message||'Login failed');lights.classList.remove('active');return;}
+    if(!r.ok){
+      lights.classList.remove('active');
+      // After enough failures the server asks for a captcha — reveal it, load a fresh one,
+      // and make the requirement explicit.
+      if(d.captcha_required){
+        const f=document.getElementById('login-captcha-field'); if(f){ f.style.display=''; loadLoginCaptcha(); }
+        setErr('login-err',(d.message||'Login failed')+' — please complete the captcha below.');
+      } else {
+        setErr('login-err',d.message||'Login failed');
+      }
+      return;
+    }
+    { const f=document.getElementById('login-captcha-field'); if(f) f.style.display='none'; }
     sessionToken=d.token; currentUser=d.username;
     localStorage.setItem('cryptirc_token',sessionToken);
     localStorage.setItem('cryptirc_user',currentUser);
@@ -397,21 +412,49 @@ async function doRegister() {
   const email=document.getElementById('r-email').value.trim();
   const pass=document.getElementById('r-pass').value;
   const pass2=document.getElementById('r-pass2').value;
-  if(!user||!email||!pass||!pass2){setErr('reg-err','Fill in all fields');return;}
+  if(!user||!pass||!pass2){setErr('reg-err','Fill in all fields');return;}
+  if(window._emailRequired && !email){setErr('reg-err','Email is required');return;}
   if(pass!==pass2){setErr('reg-err','Passwords do not match');return;}
   if(pass.length<10){setErr('reg-err','Password must be at least 10 characters');return;}
+  const captchaAns=document.getElementById('r-captcha')?.value?.trim()||'';
+  if(window._captchaEnabled && !captchaAns){setErr('reg-err',"Please answer the captcha");return;}
   const btn=document.getElementById('reg-btn');
   btn.disabled=true; btn.textContent='Creating…';
   try {
     const code=document.getElementById('r-code')?.value?.trim()||'';
-    const r=await fetch('/cryptirc/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,email,password:pass,code})});
+    const r=await fetch('/cryptirc/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:user,email,password:pass,code,captcha_id:window._captchaId||'',captcha_answer:captchaAns})});
     const d=await r.json();
-    if(!r.ok){setErr('reg-err',d.message||'Registration failed');return;}
+    if(!r.ok){setErr('reg-err',d.message||'Registration failed'); if(window._captchaEnabled) loadCaptcha(); return;}
+    document.getElementById('reg-success').innerHTML='✓ '+esc(d.message||'Account created!');
     document.getElementById('register-form').style.display='none';
     document.getElementById('reg-success').style.display='';
     setErr('reg-err','');
-  } catch(e){setErr('reg-err','Network error');}
+  } catch(e){setErr('reg-err','Network error'); if(window._captchaEnabled) loadCaptcha();}
   finally{btn.disabled=false;btn.textContent='Create Account';}
+}
+
+// Fetch a fresh signup captcha (id + distorted PNG). Answer lives only on the server.
+async function loadCaptcha(){
+  const img=document.getElementById('reg-captcha-img'); if(!img) return;
+  const inp=document.getElementById('r-captcha'); if(inp) inp.value='';
+  try{
+    const r=await fetch('/cryptirc/auth/captcha');
+    if(!r.ok) return;
+    const d=await r.json();
+    window._captchaId=d.id; img.src=d.image;
+  }catch(e){}
+}
+
+// Fetch a captcha for the LOGIN form (shown only after repeated failed logins).
+async function loadLoginCaptcha(){
+  const img=document.getElementById('login-captcha-img'); if(!img) return;
+  const inp=document.getElementById('l-captcha'); if(inp) inp.value='';
+  try{
+    const r=await fetch('/cryptirc/auth/captcha');
+    if(!r.ok) return;
+    const d=await r.json();
+    window._loginCaptchaId=d.id; img.src=d.image;
+  }catch(e){}
 }
 async function doLogout() {
   if(!(await customConfirm('Sign out?','Sign out'))) return;
@@ -509,6 +552,14 @@ async function checkAuth() {
       if(sd.requires_code){
         const cf=document.getElementById('reg-code-field');
         if(cf) cf.style.display='';
+      }
+      window._emailRequired = !!sd.email_required;
+      window._captchaEnabled = !!sd.captcha_enabled;
+      const elab=document.getElementById('r-email-label');
+      if(elab) elab.textContent = sd.email_required ? 'Email' : 'Email (optional)';
+      if(sd.captcha_enabled){
+        const cf2=document.getElementById('reg-captcha-field');
+        if(cf2){ cf2.style.display=''; loadCaptcha(); }
       }
     }
   }catch(e){}
@@ -3803,7 +3854,7 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.4 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 172 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.7 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 172 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'GIPHY': case 'GIF': {
         const sub=(args[0]||'').toLowerCase();
         const _prov=_gifProviderLabel();
@@ -5208,6 +5259,78 @@ async function showChangePass(){
   wsend({type:'change_passphrase',old,new:nw});
   showToast('Vault passphrase changed');
 }
+// ─── User Profile window (account + email + security + danger zone) ──────────
+function closeProfilePanel(){ const o=document.getElementById('profile-overlay'); if(o){o.classList.remove('show');o.style.display='none';} }
+async function showProfilePanel(){
+  let ov=document.getElementById('profile-overlay');
+  if(!ov){
+    ov=document.createElement('div'); ov.id='profile-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1000;display:none;align-items:center;justify-content:center;padding:16px;';
+    ov.addEventListener('click',e=>{ if(e.target===ov) closeProfilePanel(); });
+    ov.innerHTML=`<div style="background:var(--bg1);border:1px solid var(--border);border-radius:14px;width:min(440px,94vw);max-height:min(90vh,90dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.6)">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
+        <span style="font-weight:700;font-size:15px;color:var(--text);display:flex;align-items:center;gap:8px">👤 User Profile</span>
+        <span onclick="closeProfilePanel()" style="cursor:pointer;color:var(--text3);font-size:18px;line-height:1">✕</span>
+      </div>
+      <div id="profile-body" style="padding:18px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch"></div>
+    </div>`;
+    document.body.appendChild(ov);
+  }
+  ov.style.display='flex'; ov.classList.add('show');
+  renderProfilePanel();
+}
+async function renderProfilePanel(){
+  const body=document.getElementById('profile-body'); if(!body) return;
+  body.innerHTML='<div style="color:var(--text3);font-size:12px;text-align:center;padding:24px">Loading…</div>';
+  let me={username:currentUser||'',email:'',admin:false};
+  try{ const r=await fetch('/cryptirc/auth/me',{headers:{'Authorization':'Bearer '+sessionToken}}); if(r.ok) me=await r.json(); }catch(e){}
+  const lbl='font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin:0 0 10px';
+  const card='background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px';
+  const hasEmail=!!(me.email&&me.email.trim());
+  body.innerHTML=`
+    <div style="${card}">
+      <div style="${lbl}">Account</div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+        <div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#00d4aa,#0099ff);display:flex;align-items:center;justify-content:center;color:#04212a;font-weight:800;font-size:17px;flex:0 0 auto">${esc((me.username||'?').charAt(0).toUpperCase())}</div>
+        <div style="min-width:0">
+          <div style="font-size:15px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(me.username||'')}${me.admin?' <span style="font-size:11px;color:#f0c040">👑 admin</span>':''}</div>
+          <div style="font-size:11px;color:var(--text3)">${hasEmail?esc(me.email):'No email set'}</div>
+        </div>
+      </div>
+      <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">Email${hasEmail?'':' <span style="color:var(--text3)">(optional — needed for password resets)</span>'}</label>
+      <div style="display:flex;gap:8px">
+        <input id="profile-email" type="email" value="${esc(me.email||'')}" placeholder="you@example.com" autocomplete="email" autocapitalize="none" style="flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:9px 11px;outline:none;box-sizing:border-box">
+        <button id="profile-email-save" onclick="saveProfileEmail()" style="background:var(--accent);border:none;border-radius:8px;color:#04212a;font-weight:700;font-size:13px;padding:0 16px;cursor:pointer;flex:0 0 auto">Save</button>
+      </div>
+      ${hasEmail?'':'<div style="font-size:11px;color:var(--warn);margin-top:8px">⚠ Without an email you cannot reset your password if you forget it.</div>'}
+      <div id="profile-email-msg" style="font-size:11px;margin-top:8px;min-height:14px"></div>
+    </div>
+    <div style="${card}">
+      <div style="${lbl}">Security</div>
+      <button onclick="closeProfilePanel();showChangeClientPassword()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">🔑 <span>Change login password</span></button>
+      <button onclick="closeProfilePanel();showChangePass()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px;margin-top:8px">🔐 <span>Change vault passphrase</span></button>
+      <button onclick="closeProfilePanel();showSessionManager()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px;margin-top:8px">💻 <span>Active sessions</span></button>
+    </div>
+    <div style="background:rgba(255,68,102,.06);border:1px solid rgba(255,68,102,.3);border-radius:10px;padding:16px">
+      <div style="${lbl};color:var(--error)">Danger zone</div>
+      <button onclick="closeProfilePanel();showDeleteAccount()" style="width:100%;text-align:left;background:none;border:1px solid var(--error);border-radius:8px;color:var(--error);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">⚠ <span>Delete account</span></button>
+    </div>`;
+  const inp=document.getElementById('profile-email');
+  if(inp) inp.addEventListener('keydown',e=>{ if(e.key==='Enter') saveProfileEmail(); });
+}
+async function saveProfileEmail(){
+  const inp=document.getElementById('profile-email'); const msg=document.getElementById('profile-email-msg'); if(!inp) return;
+  const email=inp.value.trim();
+  const btn=document.getElementById('profile-email-save'); if(btn){btn.disabled=true;btn.textContent='Saving…';}
+  try{
+    const r=await fetch('/cryptirc/auth/set-email',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({email})});
+    const d=await r.json();
+    if(msg){ msg.textContent=d.message||(r.ok?'Saved.':'Failed'); msg.style.color=r.ok?'var(--join)':'var(--error)'; }
+    if(r.ok){ showToast(d.message||'Email saved'); setTimeout(renderProfilePanel,700); }
+  }catch(e){ if(msg){msg.textContent='Network error';msg.style.color='var(--error)';} }
+  finally{ if(btn){btn.disabled=false;btn.textContent='Save';} }
+}
+
 async function showChangeClientPassword(){
   const old=await customPrompt('Current login password:','',true);if(!old)return;
   const nw=await customPrompt('New login password (min 10 chars, upper+lower+number+special):','',true);if(!nw)return;
@@ -5216,7 +5339,17 @@ async function showChangeClientPassword(){
   try{
     const r=await fetch('/cryptirc/auth/change-password',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({old_password:old,new_password:nw})});
     const d=await r.json();
-    if(r.ok){showToast('Login password changed successfully');}
+    if(r.ok){
+      // The server purged ALL sessions (incl. this one) and issued a fresh token — adopt it
+      // so we stay logged in, and reconnect the WS with the new token (cookie-authed).
+      if(d.token){
+        sessionToken=d.token;
+        localStorage.setItem('cryptirc_token',sessionToken);
+        document.cookie=`cryptirc_token=${sessionToken};path=/cryptirc;max-age=31536000;SameSite=Strict${location.protocol==='https:'?';Secure':''}`;
+        try{ connectWs(); }catch(_){}
+      }
+      showToast('Login password changed successfully');
+    }
     else{showToast(d.message||'Password change failed');}
   }catch(e){showToast('Network error — try again');}
 }
@@ -5247,7 +5380,7 @@ function showPasswordPanel(){
     ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1000;display:none;align-items:center;justify-content:center;padding:16px;';
     ov.innerHTML=`<div id="pwsafe-box" style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(500px,94vw);max-height:min(88vh,88dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
       <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
-        <span style="font-weight:700;font-size:14px;color:var(--text)">🔐 Password Management</span>
+        <span style="font-weight:700;font-size:14px;color:var(--text)">🔐 Password Safe</span>
         <span onclick="document.getElementById('pwsafe-overlay').classList.remove('show');document.getElementById('pwsafe-overlay').style.display='none'" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
       </div>
       <div id="pwsafe-body" style="padding:14px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch"></div>
@@ -5278,11 +5411,11 @@ function _bindPwSafeDelegation(){
     if(!s)return;
     if(act==='reveal'){
       if(s.textContent==='••••••••'){
-        s.textContent=atob(s.dataset.v);s.style.color='var(--accent)';
+        s.textContent=decodeURIComponent(escape(atob(s.dataset.v||'')));s.style.color='var(--accent)';
         setTimeout(()=>{s.textContent='••••••••';s.style.color='var(--text)';},5000);
       } else {s.textContent='••••••••';s.style.color='var(--text)';}
     } else if(act==='copypass'){
-      navigator.clipboard?.writeText(atob(s.dataset.v||''));showToast('Password copied');
+      navigator.clipboard?.writeText(decodeURIComponent(escape(atob(s.dataset.v||''))));showToast('Password copied');
     }
   });
 }
@@ -5290,30 +5423,13 @@ function renderPasswordPanel(){
   const body=document.getElementById('pwsafe-body');
   if(!body)return;
   _bindPwSafeDelegation();   // idempotent; binds the delegated item-action listener once
-  let html='';
-  // ── Change Passwords section ──
-  html+=`<div style="margin-bottom:18px">
-    <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:8px">Change Passwords</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button onclick="showChangePass()" style="flex:1;min-width:140px;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;cursor:pointer;color:var(--text);font-family:var(--mono);font-size:12px;text-align:left;display:flex;align-items:center;gap:8px">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-        <div><div style="font-weight:600">Vault Passphrase</div><div style="font-size:10px;color:var(--text3)">Encryption key for logs &amp; data</div></div>
-      </button>
-      <button onclick="showChangeClientPassword()" style="flex:1;min-width:140px;padding:10px 14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;cursor:pointer;color:var(--text);font-family:var(--mono);font-size:12px;text-align:left;display:flex;align-items:center;gap:8px">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-        <div><div style="font-weight:600">Login Password</div><div style="font-size:10px;color:var(--text3)">Account sign-in password</div></div>
-      </button>
-    </div>
-  </div>`;
-  // ── Password Safe section ──
-  html+=`<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:8px">Password Safe</div>
-  <div style="font-size:10px;color:var(--text3);margin-bottom:10px">Encrypted with your vault key — only accessible when unlocked. Syncs across all devices.</div>`;
-  html+=renderPasswordSafeHTML();
-  body.innerHTML=html;
-  // Set password data attributes after render
+  // Password changes (login + vault passphrase) now live in the Profile window; this page
+  // is JUST the credential vault.
+  body.innerHTML=renderPasswordSafeHTML();
+  // Set the base64 password on each entry's dataset (consumed by the reveal/copy delegation).
   for(let i=0;i<_pwSafe.length;i++){
     const el=document.getElementById('pw-'+i);
-    if(el) el.dataset.v=btoa(_pwSafe[i].password||'');
+    if(el) el.dataset.v=btoa(unescape(encodeURIComponent(_pwSafe[i].password||'')));
   }
 }
 function renderPasswordSafe(){
@@ -5321,37 +5437,23 @@ function renderPasswordSafe(){
   if(ov&&ov.classList.contains('show')) renderPasswordPanel();
 }
 function renderPasswordSafeHTML(){
-  let html=`<div style="display:flex;gap:6px;margin-bottom:10px">
-    <button onclick="pwSafeAdd()" style="padding:8px 14px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px;font-family:var(--mono)">+ Add Entry</button>
-  </div>`;
+  let html=`<div class="psafe-note"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>End-to-end encrypted with your vault key — only you can read these. Syncs across your devices.</span></div>
+  <button class="psafe-add" onclick="pwSafeAdd()">+ Add credential</button>`;
   if(!_pwSafe.length){
-    html+=`<div style="color:var(--text3);text-align:center;padding:30px 0;font-size:13px;background:var(--bg2);border:1px dashed var(--border);border-radius:8px">
-      No saved passwords yet.
-    </div>`;
+    html+=`<div class="psafe-empty"><b>Your vault is empty</b>Save a password and it's encrypted on your device before it ever leaves.</div>`;
     return html;
   }
   for(let i=0;i<_pwSafe.length;i++){
     const e=_pwSafe[i];
     const safeId='pw-'+i;
-    html+=`<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span style="font-weight:600;font-size:13px;color:var(--text)">${esc(e.name||'Untitled')}</span>
-        <div style="display:flex;gap:4px">
-          <button onclick="pwSafeEdit(${i})" style="padding:3px 8px;background:none;border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer;font-size:10px">Edit</button>
-          <button onclick="pwSafeDelete(${i})" style="padding:3px 8px;background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;cursor:pointer;font-size:10px">Delete</button>
-        </div>
-      </div>`;
-    // SECURITY: vault entry username is user-provided. It is no longer interpolated
-    // into an inline-handler JS-string (old onclick="...writeText('${esc(...)}')",
-    // #10); the copy control carries a data-pw-act/data-pw-idx and a delegated
-    // listener reads _pwSafe[idx].username at click time. Reveal/copy-password use
-    // the same delegated path (they already used the safe dataset.v mechanism).
-    if(e.username) html+=`<div style="font-size:11px;color:var(--text3);margin-bottom:3px">User: <span style="color:var(--text);font-family:var(--mono)">${esc(e.username)}</span>
-      <span data-pw-act="copyuser" data-pw-idx="${i}" style="cursor:pointer;margin-left:4px;opacity:.5">📋</span></div>`;
-    html+=`<div style="font-size:11px;color:var(--text3);margin-bottom:3px">Pass: <span id="${safeId}" style="color:var(--text);font-family:var(--mono)">••••••••</span>
-      <span data-pw-act="reveal" data-pw-target="${safeId}" style="cursor:pointer;margin-left:4px;opacity:.5">👁</span>
-      <span data-pw-act="copypass" data-pw-target="${safeId}" style="cursor:pointer;margin-left:2px;opacity:.5">📋</span></div>`;
-    if(e.notes) html+=`<div style="font-size:10px;color:var(--text3);margin-top:4px;line-height:1.3">${esc(e.notes)}</div>`;
+    // SECURITY (#10): the entry username is user-provided — never interpolated into an
+    // inline-handler JS-string. Copy/reveal carry data-pw-act/data-pw-idx/data-pw-target
+    // and a delegated listener reads _pwSafe[idx] / dataset.v at click time. Edit/Delete
+    // take a numeric index (safe). dataset.v (base64 password) is set after render.
+    html+=`<div class="psafe-card"><div class="top"><span class="nm">${esc(e.name||'Untitled')}</span><div class="acts"><button onclick="pwSafeEdit(${i})">Edit</button><button class="del" onclick="pwSafeDelete(${i})">Delete</button></div></div>`;
+    if(e.username) html+=`<div class="psafe-field"><span class="k">User</span><span class="v">${esc(e.username)}</span><span class="ico" data-pw-act="copyuser" data-pw-idx="${i}" title="Copy username">📋</span></div>`;
+    html+=`<div class="psafe-field"><span class="k">Pass</span><span class="v" id="${safeId}">••••••••</span><span class="ico" data-pw-act="reveal" data-pw-target="${safeId}" title="Reveal">👁</span><span class="ico" data-pw-act="copypass" data-pw-target="${safeId}" title="Copy password">📋</span></div>`;
+    if(e.notes) html+=`<div class="psafe-notes">${esc(e.notes)}</div>`;
     html+=`</div>`;
   }
   return html;
@@ -10453,7 +10555,7 @@ function customPrompt(message,defaultValue,isPassword){
     function finish(val){ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;inp.onkeydown=null;if(isPassword)inp.value='';resolve(val);}
     ok.onclick=()=>finish(inp.value);
     cancel.onclick=()=>finish(null);
-    inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();finish(inp.value);}else if(e.key==='Escape'){e.preventDefault();finish(null);}};
+    inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();e.stopPropagation();finish(inp.value);}else if(e.key==='Escape'){e.preventDefault();e.stopPropagation();finish(null);}};
   });
 }
 // customConfirm — Promise-based replacement for window.confirm(), which is
@@ -10481,8 +10583,8 @@ function customConfirm(message, okLabel, cancelLabel){
     box.appendChild(msgDiv); box.appendChild(btnRow);
     ov.appendChild(box); document.body.appendChild(ov);
     const keyH=(e)=>{
-      if(e.key==='Escape'){e.preventDefault();done(false);}
-      else if(e.key==='Enter'){e.preventDefault();done(true);}
+      if(e.key==='Escape'){e.preventDefault();e.stopPropagation();done(false);}
+      else if(e.key==='Enter'){e.preventDefault();e.stopPropagation();done(true);}
     };
     function done(val){document.removeEventListener('keydown',keyH,true);ov.remove();resolve(val);}
     cancelBtn.onclick=()=>done(false);
@@ -10511,7 +10613,7 @@ function customAlert(message){
     btnRow.appendChild(okBtn);
     box.appendChild(msgDiv); box.appendChild(btnRow);
     ov.appendChild(box); document.body.appendChild(ov);
-    const keyH=(e)=>{if(e.key==='Escape'||e.key==='Enter'){e.preventDefault();done();}};
+    const keyH=(e)=>{if(e.key==='Escape'||e.key==='Enter'){e.preventDefault();e.stopPropagation();done();}};
     function done(){document.removeEventListener('keydown',keyH,true);ov.remove();resolve();}
     okBtn.onclick=done;
     ov.onclick=(e)=>{if(e.target===ov)done();};
@@ -12151,7 +12253,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.4';
+const CRYPTIRC_VERSION='0.3.7';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -12159,6 +12261,22 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.7', date:'June 2026', items:[
+    {tag:'new', text:'Password Safe is now its own page in Settings, redesigned with a cleaner layout for your saved credentials.'},
+    {tag:'new', text:'Your Profile window now holds both password changes — your login password and your vault passphrase — alongside your account, email and active sessions.'},
+    {tag:'fix', text:'Saved passwords containing emoji or other non-Latin characters now reveal and copy correctly.'},
+    {tag:'fix', text:'Pressing Escape to cancel an admin confirmation no longer also closes the user-details panel underneath it.'},
+  ]},
+  {version:'0.3.6', date:'June 2026', items:[
+    {tag:'new', text:'New User Profile window (Settings ▸ Profile): your account, email, login password and account deletion are all in one place.'},
+    {tag:'new', text:'Email is now optional when you sign up (your server admin can require it). Add one any time in Profile to enable password resets.'},
+    {tag:'new', text:'Sign-ups are protected by a built-in math captcha instead of a third-party service. Admins can toggle the captcha and the email requirement in the Admin panel.'},
+    {tag:'new', text:'Admins can set or change the email address on any account from the Admin panel.'},
+  ]},
+  {version:'0.3.5', date:'June 2026', items:[
+    {tag:'new', text:'Admins can now approve a pending account straight from the Admin panel — it verifies the account instantly, with no need for the person to click their email link.'},
+    {tag:'fix', text:'Re-registering a username or email that was deleted is no longer blocked by a leftover verification record.'},
+  ]},
   {version:'0.3.4', date:'June 2026', items:[
     {tag:'new', text:'Sign in with your email or your username — either one works now.'},
     {tag:'fix', text:'Mobile: you can now scroll the @nick, :emoji and #channel suggestion lists with your finger without accidentally tapping the wrong one.'},
@@ -12220,191 +12338,191 @@ async function checkAdmin(){
 
 async function showAdminPanel(){
   const body=document.getElementById('admin-body');
-  body.innerHTML='<div style="color:var(--text3);text-align:center;padding:20px">Loading...</div>';
+  body.innerHTML='<div style="color:var(--text3);text-align:center;padding:24px">Loading…</div>';
   document.getElementById('admin-overlay').classList.add('show');
   _overlayOpen('adminPanel', closeAdminPanel);
 
   try{
-    // Load settings
-    const sr=await fetch('/cryptirc/admin/settings',{headers:{'Authorization':'Bearer '+sessionToken}});
+    const hdr={headers:{'Authorization':'Bearer '+sessionToken}};
+    const sr=await fetch('/cryptirc/admin/settings',hdr);
     const settings=sr.ok?await sr.json():{registration_open:true,registration_code:''};
-
-    // Load users
-    const ur=await fetch('/cryptirc/admin/users',{headers:{'Authorization':'Bearer '+sessionToken}});
+    const ur=await fetch('/cryptirc/admin/users',hdr);
     const users=ur.ok?await ur.json():[];
+    const lpR=await fetch('/cryptirc/admin/link-preview',hdr);
+    const lp=lpR.ok?await lpR.json():{mode:'whitelist',whitelist:[]};
+    window._adm={users,settings,lp};
 
-    const onlineCount=users.filter(u=>u.sessions>0).length;
-
-    body.innerHTML='';
-
-    // Stats
-    const stats=document.createElement('div');
-    stats.style.cssText='display:flex;gap:12px;margin-bottom:16px;flex-wrap:wrap;';
-    stats.innerHTML=`
-      <div style="flex:1;min-width:100px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center">
-        <div style="font-size:24px;font-weight:700;color:var(--accent)">${users.length}</div>
-        <div style="font-size:11px;color:var(--text3)">Total Users</div>
-      </div>
-      <div style="flex:1;min-width:100px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center">
-        <div style="font-size:24px;font-weight:700;color:var(--join)">${onlineCount}</div>
-        <div style="font-size:11px;color:var(--text3)">Online Now</div>
-      </div>
-    `;
-    body.appendChild(stats);
-
-    // Registration settings
-    const regSection=document.createElement('div');
-    regSection.style.cssText='margin-bottom:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;';
-    regSection.innerHTML=`
-      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Registration</div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <span style="font-size:13px;color:var(--text)">Open Registration</span>
-        <button class="appear-toggle${settings.registration_open?' on':''}" id="admin-reg-open" onclick="this.classList.toggle('on');adminSaveSettings()"></button>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
-        <span style="font-size:13px;color:var(--text);flex-shrink:0">Invite Code</span>
-        <input id="admin-reg-code" value="${esc(settings.registration_code)}" placeholder="Leave empty for no code" style="flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none" onchange="adminSaveSettings()">
-      </div>
-      <div style="font-size:10px;color:var(--text3);margin-top:6px">If set, users must enter this code when registering.</div>
-      <div style="display:flex;align-items:center;gap:8px;margin-top:12px">
-        <span style="font-size:13px;color:var(--text);flex-shrink:0">Max Upload Size</span>
-        <input id="admin-upload-mb" type="number" min="1" max="500" value="${settings.max_upload_mb||25}" style="width:70px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none;text-align:center" onchange="adminSaveSettings()">
-        <span style="font-size:13px;color:var(--text3)">MB</span>
-      </div>
-      <div style="font-size:10px;color:var(--text3);margin-top:4px">Maximum file upload size per file (1–500 MB).</div>
-    `;
-    body.appendChild(regSection);
-
-    // Link preview settings
-    const lpR=await fetch('/cryptirc/admin/link-preview',{headers:{'Authorization':'Bearer '+sessionToken}});
-    const lpSettings=lpR.ok?await lpR.json():{mode:'whitelist',whitelist:[]};
-    const lpSection=document.createElement('div');
-    lpSection.style.cssText='margin-bottom:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;';
-    lpSection.innerHTML=`
-      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Link Previews</div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="font-size:13px;color:var(--text);flex-shrink:0">Mode</span>
-        <select id="admin-lp-mode" style="flex:1;padding:6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px" onchange="adminSaveLinkPreview()">
-          <option value="off"${lpSettings.mode==='off'?' selected':''}>Off — No previews</option>
-          <option value="whitelist"${lpSettings.mode==='whitelist'?' selected':''}>Whitelist — Approved domains only</option>
-          <option value="all"${lpSettings.mode==='all'?' selected':''}>All — Preview any HTTPS link</option>
-        </select>
-      </div>
-      <div style="font-size:10px;color:var(--text3);margin-bottom:8px">Whitelist mode only fetches metadata from approved domains. "All" mode fetches any HTTPS link (blocks private IPs).</div>
-      <div style="margin-bottom:6px">
-        <span style="font-size:11px;color:var(--text2);font-weight:600">Whitelist</span>
-        <span style="font-size:10px;color:var(--text3);margin-left:4px">(one domain per line)</span>
-      </div>
-      <textarea id="admin-lp-whitelist" style="width:100%;min-height:120px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:12px;padding:8px;outline:none;resize:vertical;box-sizing:border-box" onchange="adminSaveLinkPreview()">${lpSettings.whitelist.map(esc).join('\n')}</textarea>
-    `;
-    body.appendChild(lpSection);
-
-    // GIF picker (Giphy / Tenor) — provider + mode + shared keys (held server-side)
-    const gifSection=document.createElement('div');
-    gifSection.style.cssText='margin-bottom:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;';
+    const online=users.filter(u=>u.sessions>0).length;
+    const verified=users.filter(u=>u.verified).length;
+    const totalSes=users.reduce((n,u)=>n+(u.sessions||0),0);
     const gp=settings.gif_provider||'giphy', gm=settings.gif_mode||'user';
     const gkPh=settings.giphy_key_set?`${esc(settings.giphy_key_masked||'')} — leave blank to keep`:'Paste your Giphy API key';
     const tkPh=settings.tenor_key_set?`${esc(settings.tenor_key_masked||'')} — leave blank to keep`:'Paste your Tenor (Google) API key';
-    gifSection.innerHTML=`
-      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">GIF Picker</div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="font-size:13px;color:var(--text);flex-shrink:0;width:70px">Provider</span>
-        <select id="admin-gif-provider" style="flex:1;padding:6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px" onchange="adminSaveGif()">
-          <option value="giphy"${gp==='giphy'?' selected':''}>Giphy</option>
-          <option value="tenor"${gp==='tenor'?' selected':''}>Tenor (Google)</option>
-        </select>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="font-size:13px;color:var(--text);flex-shrink:0;width:70px">Mode</span>
-        <select id="admin-gif-mode" style="flex:1;padding:6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px" onchange="adminSaveGif()">
-          <option value="off"${gm==='off'?' selected':''}>Off — disable GIFs server-wide</option>
-          <option value="user"${gm==='user'?' selected':''}>Own key — each user supplies their own</option>
-          <option value="server"${gm==='server'?' selected':''}>Shared key — everyone uses the key below</option>
-        </select>
-      </div>
-      <div style="font-size:10px;color:var(--text3);margin-bottom:10px">In Shared mode everyone uses the active provider's key below; a user who set their own key still uses theirs.</div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="font-size:13px;color:var(--text);flex-shrink:0;width:70px">Giphy key</span>
-        <input id="admin-gif-giphy-key" type="password" autocomplete="off" placeholder="${gkPh}" style="flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:13px;padding:8px;outline:none;box-sizing:border-box">
-      </div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-        <span style="font-size:13px;color:var(--text);flex-shrink:0;width:70px">Tenor key</span>
-        <input id="admin-gif-tenor-key" type="password" autocomplete="off" placeholder="${tkPh}" style="flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:13px;padding:8px;outline:none;box-sizing:border-box">
-        <button onclick="adminSaveGif()" style="background:linear-gradient(135deg,#00d4aa,#0099ff);border:none;border-radius:6px;color:#000;font-weight:700;padding:8px 14px;cursor:pointer;min-height:38px;flex-shrink:0">Save</button>
-      </div>
-      <div style="font-size:10px;color:var(--text3);margin-top:6px">Giphy: developers.giphy.com → Create App → API. Tenor: Google Cloud → enable the Tenor API → API key. Keys are stored on the server, never shown to users.</div>
-      <div id="admin-gif-msg" style="font-size:11px;color:var(--accent);margin-top:6px"></div>
-    `;
-    body.appendChild(gifSection);
 
-    // User list
-    const userSection=document.createElement('div');
-    userSection.innerHTML='<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Users</div>';
-    for(const u of users.sort((a,b)=>b.sessions-a.sessions)){
+    body.innerHTML=`
+      <div class="adm-stats">
+        <div class="adm-stat"><b>${users.length}</b><span>users</span></div>
+        <div class="adm-stat"><b>${online}</b><span>online</span></div>
+        <div class="adm-stat"><b>${verified}</b><span>verified</span></div>
+        <div class="adm-stat muted"><b>${totalSes}</b><span>sessions</span></div>
+      </div>
+
+      <div class="adm-card">
+        <div class="adm-ct">Sign-up</div>
+        <div class="adm-row"><span class="l">Open registration</span><button class="appear-toggle${settings.registration_open?' on':''}" id="admin-reg-open" onclick="this.classList.toggle('on');adminSaveSettings()"></button></div>
+        <div class="adm-row"><span class="l">Require email</span><button class="appear-toggle${settings.email_required?' on':''}" id="admin-email-required" onclick="this.classList.toggle('on');adminSaveSettings()"></button></div>
+        <div class="adm-hint">On: new sign-ups must give a verified email. Off: email is optional (they can add one later for password resets).</div>
+        <div class="adm-row"><span class="l">Sign-up captcha</span><button class="appear-toggle${settings.captcha_enabled?' on':''}" id="admin-captcha-enabled" onclick="this.classList.toggle('on');adminSaveSettings()"></button></div>
+        <div class="adm-hint">Show a math captcha on the sign-up form to deter bots.</div>
+        <div class="adm-row"><span class="l">Invite code</span><input id="admin-reg-code" class="adm-in" value="${esc(settings.registration_code)}" placeholder="None" onchange="adminSaveSettings()"></div>
+        <div class="adm-hint">If set, people must enter this code to register.</div>
+        <div class="adm-row"><span class="l">Max upload size</span><span style="display:flex;align-items:center;gap:6px;flex:0 0 auto"><input id="admin-upload-mb" type="number" min="1" max="500" value="${settings.max_upload_mb||25}" class="adm-in" style="width:74px;flex:0 0 auto;text-align:center" onchange="adminSaveSettings()"><span style="font-size:12px;color:var(--text3)">MB</span></span></div>
+      </div>
+
+      <div class="adm-card">
+        <div class="adm-ct">Link previews</div>
+        <div class="adm-row"><span class="l">Mode</span><select id="admin-lp-mode" class="adm-sel" onchange="adminSaveLinkPreview()">
+          <option value="off"${lp.mode==='off'?' selected':''}>Off — no previews</option>
+          <option value="whitelist"${lp.mode==='whitelist'?' selected':''}>Approved domains only</option>
+          <option value="all"${lp.mode==='all'?' selected':''}>Any HTTPS link</option>
+        </select></div>
+        <div class="adm-hint">"Approved domains only" fetches metadata just from the list below. "Any HTTPS link" previews everything (private IPs blocked).</div>
+        <div style="font-size:11px;color:var(--text2);font-weight:600;margin-bottom:5px">Approved domains <span style="color:var(--text3);font-weight:400">— one per line</span></div>
+        <textarea id="admin-lp-whitelist" class="adm-in" style="width:100%;min-height:108px;font-size:12px;resize:vertical" onchange="adminSaveLinkPreview()">${lp.whitelist.map(esc).join('\n')}</textarea>
+      </div>
+
+      <div class="adm-card">
+        <div class="adm-ct">GIF picker</div>
+        <div class="adm-row"><span class="l">Provider</span><select id="admin-gif-provider" class="adm-sel" onchange="adminSaveGif()"><option value="giphy"${gp==='giphy'?' selected':''}>Giphy</option><option value="tenor"${gp==='tenor'?' selected':''}>Tenor (Google)</option></select></div>
+        <div class="adm-row"><span class="l">Mode</span><select id="admin-gif-mode" class="adm-sel" onchange="adminSaveGif()"><option value="off"${gm==='off'?' selected':''}>Off — no GIFs</option><option value="user"${gm==='user'?' selected':''}>Each user's own key</option><option value="server"${gm==='server'?' selected':''}>Shared key (below)</option></select></div>
+        <div class="adm-hint">In shared mode everyone uses the key below; a user who set their own key still uses theirs.</div>
+        <div class="adm-row"><span class="l">Giphy key</span><input id="admin-gif-giphy-key" class="adm-in" type="password" autocomplete="off" placeholder="${gkPh}"></div>
+        <div class="adm-row"><span class="l">Tenor key</span><input id="admin-gif-tenor-key" class="adm-in" type="password" autocomplete="off" placeholder="${tkPh}"></div>
+        <button class="adm-save" style="width:100%;margin-top:4px" onclick="adminSaveGif()">Save GIF settings</button>
+        <div id="admin-gif-msg" style="font-size:11px;color:var(--accent);margin-top:8px"></div>
+        <div class="adm-hint" style="margin-top:8px">Keys live on the server, never shown to users. Giphy: developers.giphy.com. Tenor: Google Cloud → enable the Tenor API.</div>
+      </div>
+
+      <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.1em;margin:18px 0 11px;padding-left:9px;border-left:2px solid var(--accent)">Users <span style="color:var(--text3);font-weight:400;letter-spacing:0;text-transform:none;margin-left:4px">— tap to inspect</span></div>
+      <div class="adm-roster" id="admin-roster"></div>
+
+      <div class="adm-card" style="margin-top:16px">
+        <div class="adm-ct">Add a user</div>
+        <div class="adm-add">
+          <div><label>Username</label><input id="admin-add-user" class="adm-in" placeholder="username"></div>
+          <div><label>Password <span style="color:var(--text3)">(min 10)</span></label><input id="admin-add-pass" class="adm-in" type="password" placeholder="••••••••••"></div>
+          <div><label>Email <span style="color:var(--text3)">(optional)</span></label><input id="admin-add-email" class="adm-in" placeholder="user@example.com"></div>
+          <button class="adm-save" style="width:100%" onclick="adminAddUser()">Create user</button>
+          <div id="admin-add-err" style="font-size:11px;color:var(--error)"></div>
+        </div>
+      </div>
+    `;
+
+    // Roster — clean rows, tap to open the dossier. Username rides the row dataset (no
+    // user data in an inline-handler JS-string, #10); a delegated listener reads it.
+    const roster=document.getElementById('admin-roster');
+    for(const u of users.slice().sort((a,b)=>(b.sessions-a.sessions)||a.username.localeCompare(b.username))){
       const row=document.createElement('div');
-      row.className='admin-user-row';
-      row.style.cssText='display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);';
-      const online=u.sessions>0;
-      const uploadOn=u.admin||u.can_upload;
-      // SECURITY: username is user-controlled. Carry it on the row via a DOM property
-      // and tag each action button with a fixed data-admin-act; a delegated listener
-      // reads row.dataset.username — never an inline-handler JS-string (#10).
-      row.dataset.username=u.username;
-      row.innerHTML=`
-        <span style="font-size:10px">${online?'🟢':'⚫'}</span>
-        <span style="flex:1;font-size:13px;color:var(--text);font-weight:${u.admin?'700':'400'};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(u.username)}${u.admin?' 👑':''}</span>
-        <span style="font-size:10px;color:var(--text3)">${u.sessions} session${u.sessions!==1?'s':''}</span>
-        ${u.admin?'<span class="admin-always-upload" style="font-size:10px;color:var(--text3);padding:3px 8px">📎 always</span>':`<button data-admin-act="upload" data-admin-val="${!uploadOn}" title="${uploadOn?'Revoke':'Grant'} upload permission" style="background:${uploadOn?'rgba(0,212,170,.15)':'none'};border:1px solid ${uploadOn?'var(--accent)':'var(--border)'};color:${uploadOn?'var(--accent)':'var(--text3)'};border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">📎 ${uploadOn?'On':'Off'}</button>`}
-        ${u.admin?'':`<button data-admin-act="disable" style="background:none;border:1px solid var(--warn);color:var(--warn);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Disable</button>
-        <button data-admin-act="delete" style="background:none;border:1px solid var(--error);color:var(--error);border-radius:4px;font-size:10px;padding:3px 8px;cursor:pointer">Delete</button>`}
-      `;
-      userSection.appendChild(row);
+      row.className='adm-u'; row.dataset.username=u.username;
+      const dot=u.sessions>0?'var(--join)':'var(--text3)';
+      const badges=(u.admin?'<span class="adm-bdg adm">admin</span>':'')+(u.verified?'':'<span class="adm-bdg unv">unverified</span>');
+      row.innerHTML=`<span class="dot" style="background:${dot}"></span><span class="nm">${esc(u.username)}${badges}</span><span class="ses">${u.sessions>0?(u.sessions+' online'):'offline'}</span><span class="chev">›</span>`;
+      roster.appendChild(row);
     }
-    // Delegated handler for the per-user admin buttons (reads the username from the
-    // owning row's dataset — no user data in an inline-handler JS-string, #10).
-    userSection.addEventListener('click',ev=>{
-      const btn=ev.target.closest('[data-admin-act]');
-      if(!btn||!userSection.contains(btn))return;
-      const uname=btn.closest('.admin-user-row')?.dataset.username;
-      if(!uname)return;
-      switch(btn.dataset.adminAct){
-        case 'upload': adminToggleUpload(uname, btn.dataset.adminVal==='true'); break;
-        case 'disable': adminDisableUser(uname); break;
-        case 'delete': adminDeleteUser(uname); break;
-      }
+    roster.addEventListener('click',ev=>{
+      const r=ev.target.closest('.adm-u'); if(!r||!roster.contains(r))return;
+      if(r.dataset.username) showUserDetail(r.dataset.username);
     });
-    body.appendChild(userSection);
 
-    // Add user form
-    const addSection=document.createElement('div');
-    addSection.style.cssText='margin-top:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;';
-    addSection.innerHTML=`
-      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Add User</div>
-      <div class="admin-add-row" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
-        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Username</label><input id="admin-add-user" placeholder="username" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none;box-sizing:border-box"></div>
-        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Password (min 10)</label><input id="admin-add-pass" type="password" placeholder="password" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none;box-sizing:border-box"></div>
-        <div style="flex:1;min-width:100px"><label style="font-size:10px;color:var(--text3)">Email (optional)</label><input id="admin-add-email" placeholder="user@example.com" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:8px;outline:none;box-sizing:border-box"></div>
-        <button onclick="adminAddUser()" style="background:linear-gradient(135deg,#00d4aa,#0099ff);border:none;border-radius:6px;color:#000;font-weight:700;padding:8px 16px;cursor:pointer;min-height:38px">Add</button>
-      </div>
-      <div id="admin-add-err" style="font-size:11px;color:var(--error);margin-top:6px"></div>
-    `;
-    body.appendChild(addSection);
-
+    // If the user dossier is open, refresh it from the new data (or close it if the user
+    // is gone, e.g. after a delete) — this is how the per-user actions reflect their result.
+    const dov=document.getElementById('admin-detail-overlay');
+    if(dov && dov.classList.contains('show')){
+      const du=document.getElementById('admin-detail-body')?.dataset.username;
+      const u=du && users.find(x=>x.username===du);
+      if(u) renderUserDetail(u); else closeUserDetail();
+    }
   }catch(e){
-    body.innerHTML='<div style="color:var(--error);padding:20px;text-align:center">Failed to load admin data</div>';
+    body.innerHTML='<div style="color:var(--error);padding:24px;text-align:center">Couldn\'t load admin data. Try again.</div>';
   }
 }
 
-function closeAdminPanel(){_overlayClose('adminPanel');document.getElementById('admin-overlay').classList.remove('show');}
+// ─── User dossier (tap a roster row) ─────────────────────────────────────────
+function closeUserDetail(){ _overlayClose('adminUserDetail'); const o=document.getElementById('admin-detail-overlay'); if(o){o.classList.remove('show');o.style.display='none';} }
+function showUserDetail(uname){
+  const u=(window._adm&&window._adm.users||[]).find(x=>x.username===uname);
+  if(!u) return;
+  let ov=document.getElementById('admin-detail-overlay');
+  if(!ov){
+    ov=document.createElement('div'); ov.id='admin-detail-overlay';
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:1100;display:none;align-items:center;justify-content:center;padding:16px';
+    ov.addEventListener('click',e=>{ if(e.target===ov) closeUserDetail(); });
+    document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const o=document.getElementById('admin-detail-overlay'); if(o&&o.classList.contains('show')){ e.stopPropagation(); closeUserDetail(); } } });
+    ov.innerHTML='<div style="background:var(--bg1);border:1px solid var(--border);border-radius:16px;width:min(420px,94vw);max-height:min(90vh,90dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.65)"><div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0"><span style="font-family:var(--sans);font-weight:700;font-size:13px;color:var(--text2);text-transform:uppercase;letter-spacing:.08em">User</span><span onclick="closeUserDetail()" style="cursor:pointer;color:var(--text3);font-size:18px;line-height:1">✕</span></div><div id="admin-detail-body" style="padding:18px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch"></div></div>';
+    document.body.appendChild(ov);
+    // Delegated action handler — username on the body dataset, fixed data-act on buttons (#10).
+    document.getElementById('admin-detail-body').addEventListener('click',ev=>{
+      const btn=ev.target.closest('[data-act]'); const bd=document.getElementById('admin-detail-body');
+      if(!btn||!bd.contains(btn))return;
+      const un=bd.dataset.username; if(!un)return;
+      switch(btn.dataset.act){
+        case 'approve': adminApproveUser(un); break;
+        case 'setemail': adminSetUserEmail(un); break;
+        case 'upload': adminToggleUpload(un, btn.dataset.val==='true'); break;
+        case 'disable': adminDisableUser(un); break;
+        case 'delete': adminDeleteUser(un); break;
+      }
+    });
+  }
+  ov.style.display='flex'; ov.classList.add('show');
+  _overlayOpen('adminUserDetail', closeUserDetail);
+  renderUserDetail(u);
+}
+function renderUserDetail(u){
+  const b=document.getElementById('admin-detail-body'); if(!b) return;
+  b.dataset.username=u.username;
+  const fmt=ts=>{ if(!ts) return '—'; try{ return new Date(ts*1000).toLocaleString([],{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }catch(e){ return '—'; } };
+  const online=u.sessions>0;
+  const uploads=u.admin?'Always (admin)':(u.can_upload?'Allowed':'Not allowed');
+  b.innerHTML=`
+    <div class="adm-dh">
+      <div class="adm-av">${esc((u.username||'?').charAt(0).toUpperCase())}</div>
+      <div style="min-width:0">
+        <div style="font-family:var(--mono);font-size:17px;color:var(--text);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(u.username)}</div>
+        <div style="font-size:12px;color:${online?'var(--join)':'var(--text3)'};margin-top:2px">${online?('● online · '+u.sessions+' session'+(u.sessions!==1?'s':'')):'○ offline'}</div>
+      </div>
+    </div>
+    <dl class="adm-grid">
+      <dt>Role</dt><dd>${u.admin?'Admin 👑':'Member'}</dd>
+      <dt>Status</dt><dd style="color:${u.verified?'var(--accent)':'var(--warn)'}">${u.verified?'Verified':'Unverified'}</dd>
+      <dt>Email</dt><dd>${u.email?esc(u.email):'<span style="color:var(--text3)">none on file</span>'}</dd>
+      <dt>Signed up</dt><dd>${fmt(u.created_at)}</dd>
+      <dt>Last login</dt><dd>${u.last_login?fmt(u.last_login):'<span style="color:var(--text3)">never</span>'}</dd>
+      <dt>Uploads</dt><dd>${uploads}</dd>
+    </dl>
+    <div class="adm-acts">
+      ${u.verified?'':'<button class="ok" data-act="approve">✓ Approve account</button>'}
+      <button data-act="setemail">✉ ${u.email?'Edit email':'Set email'}</button>
+      ${u.admin?'':`<button data-act="upload" data-val="${!u.can_upload}">📎 ${u.can_upload?'Revoke uploads':'Allow uploads'}</button>`}
+      ${u.admin?'':'<button class="warn" data-act="disable">⊘ Disable login</button>'}
+      ${u.admin?'':'<button class="bad" data-act="delete">🗑 Delete account</button>'}
+    </div>`;
+}
+
+function closeAdminPanel(){closeUserDetail();_overlayClose('adminPanel');document.getElementById('admin-overlay').classList.remove('show');}
 
 async function adminSaveSettings(){
   const open=document.getElementById('admin-reg-open').classList.contains('on');
   const code=document.getElementById('admin-reg-code').value;
   const uploadEl=document.getElementById('admin-upload-mb');
   const uploadMb=uploadEl?Math.max(1,Math.min(500,parseInt(uploadEl.value)||25)):undefined;
+  const emailReqEl=document.getElementById('admin-email-required');
+  const captchaEl=document.getElementById('admin-captcha-enabled');
   try{
     const payload={registration_open:open,registration_code:code};
     if(uploadMb!==undefined) payload.max_upload_mb=uploadMb;
+    if(emailReqEl) payload.email_required=emailReqEl.classList.contains('on');
+    if(captchaEl) payload.captcha_enabled=captchaEl.classList.contains('on');
     await fetch('/cryptirc/admin/settings',{
       method:'PUT',
       headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
@@ -12450,6 +12568,28 @@ async function adminSaveGif(){
       _loadGifConfig();   // refresh this admin's own client so their picker reflects the change
     } else if(msg){ msg.textContent='Save failed.'; }
   }catch(e){ if(msg) msg.textContent='Save failed.'; }
+}
+
+async function adminSetUserEmail(username){
+  const u=(window._adm&&window._adm.users||[]).find(x=>x.username===username);
+  const cur=u?(u.email||''):'';
+  const email=await customPrompt(`Set email for "${username}" (leave blank to remove):`,cur);
+  if(email===null) return;
+  try{
+    const r=await fetch(`/cryptirc/admin/user/${username}/email`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({email:email.trim()})});
+    const d=await r.json();
+    if(r.ok){showToast(d.message||'Email updated');showAdminPanel();}
+    else{showToast(d.message||'Failed to set email');}
+  }catch(e){showToast('Failed to set email');}
+}
+
+async function adminApproveUser(username){
+  if(!(await customConfirm(`Approve "${username}"? This verifies their account now, so they can sign in without clicking the email link.`,'Approve')))return;
+  try{
+    const r=await fetch(`/cryptirc/admin/user/${username}/approve`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
+    if(r.ok){showToast(`${username} approved`);showAdminPanel();}
+    else{showToast('Failed to approve user');}
+  }catch(e){showToast('Failed to approve user');}
 }
 
 async function adminDisableUser(username){
