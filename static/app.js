@@ -3803,7 +3803,7 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.3 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 121 themes • 135 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.4 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 172 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'GIPHY': case 'GIF': {
         const sub=(args[0]||'').toLowerCase();
         const _prov=_gifProviderLabel();
@@ -7442,8 +7442,15 @@ document.addEventListener('click',e=>{
     acEl.style.display='block'; acIdx=0;
     acEl.innerHTML=matches.map((em,i)=>`<div class="emoji-ac-item${i===0?' active':''}" data-i="${i}">${em.e} :${em.n}:</div>`).join('');
     acEl.querySelectorAll('.emoji-ac-item').forEach(el=>{
-      // pointerdown + preventDefault — same iOS-blur-cascade fix as nick picker.
+      // Tap-vs-scroll on touch (same fix as the nick picker): passive start/move so
+      // the list scrolls, commit on a non-moving touchend (also dodges the iOS blur
+      // cascade); mouse keeps pointerdown.
+      let ts=null;
+      el.addEventListener('touchstart',ev=>{const t=ev.touches[0];ts={x:t.clientX,y:t.clientY};},{passive:true});
+      el.addEventListener('touchmove',ev=>{if(!ts)return;const t=ev.touches[0];if(Math.hypot(t.clientX-ts.x,t.clientY-ts.y)>10)ts=null;},{passive:true});
+      el.addEventListener('touchend',ev=>{if(!ts)return;ts=null;ev.preventDefault();completeEmoji(matches[+el.dataset.i]);},{passive:false});
       el.addEventListener('pointerdown',e=>{
+        if(e.pointerType==='touch')return;
         if(e.button!==undefined && e.button!==0) return;
         e.preventDefault();
         completeEmoji(matches[+el.dataset.i]);
@@ -7483,7 +7490,7 @@ document.addEventListener('click',e=>{
   if(!inp)return;
   let nacEl=document.createElement('div');
   nacEl.id='nick-autocomplete';
-  nacEl.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:102;';
+  nacEl.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:102;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;';
   inp.parentNode.appendChild(nacEl);
   let nacIdx=-1, nacNicks=[];   // nacNicks = the exact list as rendered (for keyboard completion)
   function getChannelNicks(){
@@ -7514,12 +7521,18 @@ document.addEventListener('click',e=>{
     nacEl.style.display='block'; nacIdx=0;
     nacEl.innerHTML=nicks.map((n,i)=>`<div class="emoji-ac-item${i===0?' active':''}" data-i="${i}" style="font-size:13px"><span class="nc${nickHash(n)}">${esc(n)}</span></div>`).join('');
     nacEl.querySelectorAll('.emoji-ac-item').forEach(el=>{
-      // pointerdown + preventDefault to dodge the iOS input-blur cascade:
-      // a plain click handler gets eaten because the tap blurs the input,
-      // dismisses the keyboard, slides the overlay down out of the original
-      // tap coordinates, and the synthetic click lands on empty space →
-      // user has to tap twice. This is the same fix slash uses below.
+      // Touch: let the list SCROLL (passive touchstart/move) and commit only on a
+      // genuine tap (touchend without >10px movement). The old pointerdown-commit
+      // fired on touch-START, so dragging the list to find a nick selected whatever
+      // was under the finger. touchend + preventDefault also dodges the iOS input-
+      // blur cascade (keyboard stays up). Mouse keeps pointerdown (skips touch so it
+      // can't double-fire) — the original non-touch blur fix.
+      let ts=null;
+      el.addEventListener('touchstart',ev=>{const t=ev.touches[0];ts={x:t.clientX,y:t.clientY};},{passive:true});
+      el.addEventListener('touchmove',ev=>{if(!ts)return;const t=ev.touches[0];if(Math.hypot(t.clientX-ts.x,t.clientY-ts.y)>10)ts=null;},{passive:true});
+      el.addEventListener('touchend',ev=>{if(!ts)return;ts=null;ev.preventDefault();completeNick(nicks[+el.dataset.i]);},{passive:false});
       el.addEventListener('pointerdown',e=>{
+        if(e.pointerType==='touch')return;
         if(e.button!==undefined && e.button!==0) return;
         e.preventDefault();
         completeNick(nicks[+el.dataset.i]);
@@ -8787,7 +8800,7 @@ function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFi
 (function(){
   const inp=document.getElementById('msg-input');if(!inp)return;
   let chEl=document.createElement('div');chEl.id='chan-autocomplete';
-  chEl.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:102;';
+  chEl.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:102;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;';
   inp.parentNode.appendChild(chEl);
   let chIdx=-1;
   function getAllChannels(){
@@ -8807,8 +8820,15 @@ function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFi
     chEl.style.display='block';chIdx=0;
     chEl.innerHTML=chans.map((c,i)=>`<div class="emoji-ac-item${i===0?' active':''}" data-i="${i}" style="font-size:13px;color:var(--text2)">${esc(c)}</div>`).join('');
     chEl.querySelectorAll('.emoji-ac-item').forEach(el=>{
-      // pointerdown + preventDefault — same iOS-blur-cascade fix as nick picker.
+      // Tap-vs-scroll on touch (same fix as the nick picker): passive start/move so
+      // the list scrolls, commit on a non-moving touchend (also dodges the iOS blur
+      // cascade); mouse keeps pointerdown.
+      let ts=null;
+      el.addEventListener('touchstart',ev=>{const t=ev.touches[0];ts={x:t.clientX,y:t.clientY};},{passive:true});
+      el.addEventListener('touchmove',ev=>{if(!ts)return;const t=ev.touches[0];if(Math.hypot(t.clientX-ts.x,t.clientY-ts.y)>10)ts=null;},{passive:true});
+      el.addEventListener('touchend',ev=>{if(!ts)return;ts=null;ev.preventDefault();completeChan(chans[+el.dataset.i]);},{passive:false});
       el.addEventListener('pointerdown',e=>{
+        if(e.pointerType==='touch')return;
         if(e.button!==undefined && e.button!==0) return;
         e.preventDefault();
         completeChan(chans[+el.dataset.i]);
@@ -12064,8 +12084,8 @@ function showHelpPanel(){
   // Features section
   const feat=document.createElement('div');feat.className='help-section';
   feat.innerHTML=`<div class="help-section-title">Features</div>
-    <div class="help-cmd"><span class="help-cmd-name">121 themes</span><span class="help-cmd-desc">32 animated (canvas effects) + 89 static themes</span></div>
-    <div class="help-cmd"><span class="help-cmd-name">135 fonts</span><span class="help-cmd-desc">Monospace, sans-serif, serif, display, handwriting</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">172 themes</span><span class="help-cmd-desc">57 animated (canvas effects) + 115 static themes</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">140 fonts</span><span class="help-cmd-desc">Monospace, sans-serif, serif, display, handwriting</span></div>
     <div class="help-cmd"><span class="help-cmd-name">E2E encryption</span><span class="help-cmd-desc">Signal protocol for DMs + AES-256-GCM for channels</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Encrypted vault</span><span class="help-cmd-desc">Argon2id KDF — all data encrypted at rest</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Auto-identify</span><span class="help-cmd-desc">NickServ IDENTIFY on connect (network settings)</span></div>
@@ -12131,7 +12151,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.3';
+const CRYPTIRC_VERSION='0.3.4';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -12139,6 +12159,12 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.4', date:'June 2026', items:[
+    {tag:'new', text:'Sign in with your email or your username — either one works now.'},
+    {tag:'fix', text:'Mobile: you can now scroll the @nick, :emoji and #channel suggestion lists with your finger without accidentally tapping the wrong one.'},
+    {tag:'fix', text:'Deleting an account (your own, or someone else’s as an admin) now frees the username and email right away, so it can be registered again immediately.'},
+    {tag:'fix', text:'Channels that need a key (+k) now reliably auto-rejoin after a restart once their key is known.'},
+  ]},
   {version:'0.3.3', date:'June 2026', items:[
     {tag:'new', text:'Redesigned GIF picker: type /gif <search> for a smooth, scrollable grid of results — pick one with a tap, or the arrow keys + Enter. Much nicer on mobile.'},
     {tag:'new', text:'GIFs now work with Giphy or Tenor. Your server admin can set a shared key so /gif just works with no setup — or keep using your own (set it with /gif key). Admins pick the provider and mode in the Admin panel.'},

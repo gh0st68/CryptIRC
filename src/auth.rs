@@ -329,6 +329,27 @@ impl AuthManager {
 
     /// #14: Returns true if any user account OR pending verification already uses
     /// this (lowercased) email. Used to block multiple accounts per email.
+    /// Resolve a (lowercased) email to its owning User so login() can accept the email
+    /// in place of the username. Mirrors email_in_use's scan; at most one match exists
+    /// (register enforces one account per email). Returns the first verified-or-not match;
+    /// login() then applies the same verified+password checks it does for username login.
+    async fn find_user_by_email(&self, email_lower: &str) -> Option<User> {
+        let users_dir = PathBuf::from(&self.data_dir).join("users");
+        if let Ok(mut entries) = tokio::fs::read_dir(&users_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(json) = tokio::fs::read_to_string(&path).await {
+                        if let Ok(user) = serde_json::from_str::<User>(&json) {
+                            if user.email == email_lower { return Some(user); }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     async fn email_in_use(&self, email_lower: &str) -> bool {
         // Scan verified/created user records.
         let users_dir = PathBuf::from(&self.data_dir).join("users");
@@ -503,25 +524,44 @@ impl AuthManager {
 
     // ── Login ─────────────────────────────────────────────────────────────────
 
-    pub async fn login(&self, username: &str, password: &str, ip: Option<&str>) -> Result<String> {
-        let uname = username.trim().to_lowercase();
+    /// Authenticate by EITHER username OR account email. Returns (session token,
+    /// resolved account username) so callers always get the real username even when
+    /// the user signed in with their email.
+    pub async fn login(&self, identifier: &str, password: &str, ip: Option<&str>) -> Result<(String, String)> {
+        let ident = identifier.trim().to_lowercase();
         // #15: IP dimension FIRST so credential-stuffing across many usernames from one
         // IP is throttled. Order matters: check_rate_limit INSERTS a per-key bucket before
         // it can reject, so the per-IP check must run BEFORE the per-username one —
         // otherwise an over-budget IP still mints a fresh login:<rand> bucket per request
         // and can fill the global RATE_LIMIT_MAX_BUCKETS table, locking out all auth.
         self.check_ip_rate_limit("login", ip)?;
-        self.check_rate_limit(&format!("login:{}", uname))?;
 
-        let user_path = PathBuf::from(&self.data_dir)
-            .join("users")
-            .join(format!("{}.json", uname));
+        // Resolve the identifier to a User. Usernames can never contain '@' (register
+        // restricts to [A-Za-z0-9_-]); an email always does — so '@' cleanly selects the
+        // lookup, and email_in_use() guarantees at most one account per email.
         // #56: read the user, but DON'T early-return on missing/unverified before
         // running Argon2 — that created a message+timing enumeration oracle. We
         // always do equivalent CPU work and return ONE generic message.
-        let user_opt: Option<User> = tokio::fs::read_to_string(&user_path).await
-            .ok()
-            .and_then(|json| serde_json::from_str::<User>(&json).ok());
+        let user_opt: Option<User> = if ident.contains('@') {
+            self.find_user_by_email(&ident).await
+        } else {
+            let user_path = PathBuf::from(&self.data_dir)
+                .join("users")
+                .join(format!("{}.json", ident));
+            tokio::fs::read_to_string(&user_path).await
+                .ok()
+                .and_then(|json| serde_json::from_str::<User>(&json).ok())
+        };
+
+        // Per-account brute-force throttle, keyed on the RESOLVED username so an
+        // account's username and email aliases share ONE bucket — logging in by email
+        // must not grant a second 10/min budget. Runs AFTER the IP gate (so an over-
+        // budget IP still can't mint fresh per-key buckets to exhaust the bucket table)
+        // and BEFORE the Argon2 verify so it short-circuits the KDF. Unknown identifiers
+        // fall back to the raw ident (login:<username> is identical whether or not the
+        // username exists, so this is not an enumeration oracle).
+        let rl_key = match &user_opt { Some(u) => u.username.clone(), None => ident.clone() };
+        self.check_rate_limit(&format!("login:{}", rl_key))?;
 
         // Verify against the real hash if present and verified, otherwise verify
         // against a fixed dummy Argon2 hash so the Argon2 cost is always paid.
@@ -535,11 +575,12 @@ impl AuthManager {
             .unwrap_or(false);
 
         // #56: single generic error for nonexistent / unverified / wrong-password.
-        if user_opt.as_ref().map(|u| u.verified).unwrap_or(false) && verify_ok {
-            // fall through to issue a session
-        } else {
-            bail!("Invalid username or password");
-        }
+        // On success bind to the RESOLVED account username (NOT the identifier, which may
+        // be an email) so the lock, session filtering, and returned identity are correct.
+        let uname = match &user_opt {
+            Some(u) if u.verified && verify_ok => u.username.clone(),
+            _ => bail!("Invalid username or password"),
+        };
 
         // #63: serialize the session-cap eviction + insert under the per-user lock
         // so concurrent logins for the same user cannot both snapshot the same
@@ -564,10 +605,10 @@ impl AuthManager {
 
         let token = Uuid::new_v4().to_string();
         self.sessions.insert(token.clone(), Session {
-            username: uname, created_at: Utc::now().timestamp(),
+            username: uname.clone(), created_at: Utc::now().timestamp(),
             last_used: Utc::now().timestamp(),
         });
-        Ok(token)
+        Ok((token, uname))
     }
 
     // ── Session management ────────────────────────────────────────────────────
@@ -695,6 +736,27 @@ impl AuthManager {
         // Remove user JSON
         let user_file = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", uname));
         let _ = tokio::fs::remove_file(&user_file).await;
+        // Remove any pending email-verification record(s) for this user. register() writes
+        // one for EVERY signup (keyed by token, holding the email + a 24h expiry) and it is
+        // removed only by verify_email — NOT by set_verified/admin-create, and not here until
+        // now. A surviving non-expired record makes email_in_use() reject re-registration
+        // with the same email for up to 24h ("Username already taken"), so a deleted user (or
+        // one who deleted their own account) could not sign up again. Scan + drop by username.
+        let pending_dir = PathBuf::from(&self.data_dir).join("pending");
+        if let Ok(mut rd) = tokio::fs::read_dir(&pending_dir).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(json) = tokio::fs::read_to_string(&path).await {
+                        if let Ok(p) = serde_json::from_str::<PendingVerification>(&json) {
+                            if p.username == uname {
+                                let _ = tokio::fs::remove_file(&path).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // Remove user data directory (appearance, etc.)
         let user_dir = PathBuf::from(&self.data_dir).join("users").join(&uname);
         let _ = tokio::fs::remove_dir_all(&user_dir).await;

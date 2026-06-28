@@ -17,7 +17,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::{certs::CertStore, strip_crlf, AppState, MessageKind, NetworkConfig, ServerEvent};
+use crate::{certs::CertStore, network_config_lock, strip_crlf, AppState, MessageKind, NetworkConfig, ServerEvent};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -280,6 +280,54 @@ enum SaslMethod {
 }
 
 // ─── Entry point: reconnect loop ─────────────────────────────────────────────
+
+/// Extract the +k key from a 324-style "<+modes> <param…>" string (the currently-set
+/// modes, all additive). Only param-taking modes consume a param, in letter order;
+/// returns the key if present and not masked ('*'). Best-effort: lets us learn a keyed
+/// channel's key on join so auto-rejoin can re-enter it even when we didn't /join with it.
+fn channel_key_from_modes(modes: &str) -> Option<String> {
+    let mut it = modes.split_whitespace();
+    let letters = it.next()?.trim_start_matches('+');
+    for c in letters.chars() {
+        match c {
+            'k' => {
+                let k = it.next()?;
+                return if !k.is_empty() && k != "*" { Some(k.to_string()) } else { None };
+            }
+            // Other additive param-taking channel modes consume their param first so the
+            // key lines up with the right token (ratbox: l limit, f forward, j throttle).
+            'l' | 'j' | 'f' | 'L' | 'J' => { let _ = it.next(); }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Persist a learned channel key into the network config's channel_keys (under the
+/// per-config lock, mirroring the JoinChannel/PartChannel writers) so auto-rejoin — and
+/// a fresh connect after a full server restart — can re-enter a keyed channel whose +k
+/// was set/changed AFTER we joined. key=Some(k) saves; key=None removes (-k). Only writes
+/// when the value actually changes, so repeated 324s/MODE echoes don't churn the disk.
+async fn persist_channel_key(state: &AppState, username: &str, conn_id: &str, channel: &str, key: Option<&str>) {
+    let lc = channel.to_lowercase();
+    let lock = network_config_lock(username, conn_id);
+    let _guard = lock.lock().await;
+    if let Some(mut cfg) = state.get_network_config(conn_id, username).await {
+        let mut changed = false;
+        match key {
+            Some(k) if !k.is_empty() && k != "*" => {
+                if cfg.channel_keys.get(&lc).map(|s| s.as_str()) != Some(k) {
+                    cfg.channel_keys.insert(lc, strip_crlf(k));
+                    changed = true;
+                }
+            }
+            _ => {
+                if cfg.channel_keys.remove(&lc).is_some() { changed = true; }
+            }
+        }
+        if changed { let _ = state.save_network(&cfg, username).await; }
+    }
+}
 
 pub async fn connect(
     conn_id:  String,
@@ -1419,6 +1467,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let setter = nick_from_prefix(&p.prefix);
                         let target = p.params.get(0).cloned().unwrap_or_default();
                         let modes  = params_from(&p.params, 1); // #19: guard against parameterless MODE
+                        // Capture a +k/-k channel-key change so the auto-rejoin store stays
+                        // current. Outer Some = a k mode was seen; inner Some(key) = +k <key>,
+                        // inner None = -k. Persisted AFTER the conn lock is dropped (below).
+                        let mut k_change: Option<Option<String>> = None;
                         // Update nick prefixes in server-side names list so reconnecting
                         // clients get accurate op/voice/etc. status from the State event.
                         if target.starts_with(['#','&','+','!']) {
@@ -1453,10 +1505,33 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                                 }
                                             }
                                         }
-                                    } else if "beIkl".contains(mc) { arg_idx += 1; }
+                                    } else if mc == 'k' {
+                                        // Type-B mode: always carries a param (+k <key>, -k [*]).
+                                        // Capture it for the auto-rejoin store.
+                                        if adding {
+                                            if let Some(&kp) = parts.get(arg_idx) {
+                                                if !kp.is_empty() && kp != "*" { k_change = Some(Some(kp.to_string())); }
+                                            }
+                                        } else {
+                                            k_change = Some(None); // -k removes the saved key
+                                        }
+                                        arg_idx += 1;
+                                    } else if "beI".contains(mc) {
+                                        arg_idx += 1;                          // type-A list modes: param on + and -
+                                    } else if adding && "lfjLJ".contains(mc) {
+                                        arg_idx += 1;                          // type-C modes: param on set only
+                                    }
                                 }
                             }
                             drop(c);
+                        }
+                        // Persist a captured +k/-k change to the network config so a fresh
+                        // connect() after a full server restart re-enters this keyed channel,
+                        // even though its key was set/changed AFTER we joined. (do_connect only
+                        // borrows cfg, so we can't update the in-task snapshot — disk is the
+                        // source of truth the next connect() reads.)
+                        if let Some(kc) = k_change {
+                            persist_channel_key(&state, &username, &conn_id, &target, kc.as_deref()).await;
                         }
                         // Route non-channel modes (user modes) to status window
                         let display_target = if target.starts_with(['#','&','+','!']) {
@@ -1619,6 +1694,16 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "324" => {
                         let chan = p.params.get(1).cloned().unwrap_or_default();
                         let modes = params_from(&p.params, 2); // #19: guard against <2 params
+                        // Learn this channel's key (when it's keyed and the server reveals it
+                        // to us) so auto-rejoin can re-enter even if we didn't /join with the
+                        // key — e.g. joined an already-keyed channel from favorites/the list.
+                        // ADD-only: a masked '*' / absent key means "not told", NOT keyless, so
+                        // we never remove here (that would clobber a key we legitimately hold).
+                        if chan.starts_with(['#','&','+','!']) {
+                            if let Some(key) = channel_key_from_modes(&modes) {
+                                persist_channel_key(&state, &username, &conn_id, &chan, Some(key.as_str())).await;
+                            }
+                        }
                         // Structured event so the Channel Modes GUI can parse current
                         // modes; the frontend also shows a sysMsg for manual /mode users.
                         send(ServerEvent::IrcChannelModes {

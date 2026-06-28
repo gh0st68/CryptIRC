@@ -1303,7 +1303,9 @@ async fn route_register(State(state): State<AppState>, headers: HeaderMap, Json(
 async fn route_login(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<LoginBody>) -> impl IntoResponse {
     let ip = client_ip(&headers);
     match state.auth.login(&body.username, &body.password, ip.as_deref()).await {
-        Ok(token) => (StatusCode::OK, Json(AuthOkBody { token, username: body.username.to_lowercase() })).into_response(),
+        // login() resolves the identifier (username OR email) to the real account
+        // username — return THAT so the client's identity isn't set to an email.
+        Ok((token, username)) => (StatusCode::OK, Json(AuthOkBody { token, username })).into_response(),
         Err(e) => {
             let msg = e.to_string();
             // #56: login now returns one generic "Invalid username or password" for
@@ -3454,7 +3456,7 @@ async fn handle_command(
             // user's repeated DeleteAccount attempts fill the shared bucket and block
             // every other user's self-service deletion for the rest of the window.
             match state.auth.login(username, &password, Some(username)).await {
-                Ok(temp_token) => {
+                Ok((temp_token, _)) => {
                     state.auth.logout(&temp_token); // L35: clean up orphaned session
                     // Full teardown: disconnect IRC connections + delete account data +
                     // clear all on-disk residue. Shared with the admin delete route so the
@@ -3763,7 +3765,7 @@ fn network_config_locks() -> &'static DashMap<String, Arc<Mutex<()>>> {
 }
 
 /// Acquire (creating if needed) the per-config lock for one user's network.
-fn network_config_lock(username: &str, conn_id: &str) -> Arc<Mutex<()>> {
+pub(crate) fn network_config_lock(username: &str, conn_id: &str) -> Arc<Mutex<()>> {
     network_config_locks()
         .entry(format!("{}:{}", username, conn_id))
         .or_insert_with(|| Arc::new(Mutex::new(())))

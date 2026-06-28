@@ -12,9 +12,9 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.3.0-brightgreen" alt="Version">
-  <img src="https://img.shields.io/badge/themes-171-9b59ff" alt="Themes">
-  <img src="https://img.shields.io/badge/fonts-139-blue" alt="Fonts">
+  <img src="https://img.shields.io/badge/version-0.3.4-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/themes-172-9b59ff" alt="Themes">
+  <img src="https://img.shields.io/badge/fonts-140-blue" alt="Fonts">
   <img src="https://img.shields.io/badge/commands-100+-red" alt="Commands">
   <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
 </p>
@@ -89,10 +89,10 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 - **Multi-network** — connect to as many IRC networks as you want simultaneously
 - **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
 - **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
-- **172 themes** (32 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin: title/menu/tool/status bars, `<nick>` brackets, `[HH:MM]` timestamps) + **139 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
-- **🐑🦀👻 Desktop pets** — three to pick from (desktop, mobile, or both): the classic '95 **eSheep** (wanders, climbs walls, naps, UFO abduction), a furious **Angry Crab** (scuttles sideways, snaps its claws, eats shrimp, naps, digs — drag it around, and it pesters the sheep), and a friendly **Ghost** (floats freely, fades through walls, the odd spooky "BOO!"). The sheep and crab are draggable
+- **172 themes** (57 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin: title/menu/tool/status bars, `<nick>` brackets, `[HH:MM]` timestamps) + **140 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
+- **🐑🦀👻🐟👽 Desktop pets** — five to pick from (desktop, mobile, or both): the classic '95 **eSheep** (wanders, climbs walls, naps, UFO abduction), a furious **Angry Crab** (scuttles sideways, snaps its claws, eats shrimp, naps, digs — drag it around, and it pesters the sheep), a friendly **Ghost** (floats freely, fades through walls, the odd spooky "BOO!"), a serene **Calm Fish** (drifts around, click near it to feed), and a **Little Alien** flying saucer (UFO tractor-beam abductions). The sheep and crab are draggable; the ghost, fish, and alien let clicks pass through
 - **In-app News & changelog** with an auto-versioning build badge, so you always see exactly what changed
-- **Full IRCv3 support** — 17 capabilities including typing indicators, away-notify, SASL, MONITOR
+- **Full IRCv3 support** — 17 user-toggleable capabilities including typing indicators, away-notify, server-time, message-tags, plus SASL PLAIN/EXTERNAL and nick MONITOR
 - **100+ slash commands** — everything from `/ascii` art to `/ud` Urban Dictionary lookups
 - **Nick monitoring** — track when specific users come online/offline with push alerts
 - **Inline media** — images, videos, YouTube rich cards, audio player, link previews
@@ -118,21 +118,21 @@ cd CryptIRC
 sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
 ```
 
-That's it. Visit `https://yourdomain.com`, register an account, unlock your vault, and connect.
+That's it. Visit `https://yourdomain.com`, register an account, unlock your vault, and connect. You can sign in with either your username or your email.
 
 ## Features
 
 ### Themes & Personalization
 
-**172 built-in themes** — 140 static + 32 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more), including a pixel-perfect **mIRC** skin with full Windows-95 window chrome. Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
+**172 built-in themes** — 115 static + 57 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more), including a pixel-perfect **mIRC** skin with full Windows-95 window chrome. Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
 
 <p align="center">
   <a href="https://gh0st68.github.io/CryptIRC/">
-    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 171 live theme previews">
+    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 172 live theme previews">
   </a>
   <br>
   <b><a href="https://gh0st68.github.io/CryptIRC/">🎨 Browse the live Theme Gallery →</a></b><br>
-  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter, and preview all 171</sub>
+  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter, and preview all 172</sub>
 </p>
 
 A taste of the range:
@@ -175,7 +175,7 @@ A taste of the range:
 
 ### IRC & IRCv3
 - Full IRC protocol support -- channels, DMs, modes, kicks, bans, CTCP, the works
-- **IRCv3 capabilities**: away-notify, account-notify, extended-join, server-time, multi-prefix, cap-notify, message-tags, batch, echo-message, invite-notify, setname, account-tag, userhost-in-names, chghost, labeled-response, typing indicators, standard-replies, MONITOR
+- **IRCv3 capabilities** (17 user-toggleable): away-notify, account-notify, extended-join, server-time, multi-prefix, cap-notify, message-tags, batch, echo-message, invite-notify, setname, account-tag, userhost-in-names, chghost, labeled-response, typing indicators, standard-replies (plus SASL, negotiated separately; nick MONITOR is a separate feature)
 - **IRCv3 CAP toggle** -- enable/disable individual capabilities per network in settings
 - **SASL PLAIN & EXTERNAL** authentication
 - Multi-network support -- connect to as many networks as you want simultaneously
@@ -206,6 +206,7 @@ A taste of the range:
 - **#channel autocomplete** -- type `#` to autocomplete channel names
 - **Inline media previews** -- images, videos (.mp4/.webm/.mov), YouTube rich cards with title/author
 - **Inline audio player** -- .mp3, .ogg, .flac, .wav, .m4a, .aac, .opus with playback controls
+- **GIF picker** -- type `/gif <search>` (or `/giphy`) for a smooth in-line grid of results, navigable by tap or arrow keys + Enter. Powered by **Giphy or Tenor** -- the admin picks the provider and can set a shared key so it works for everyone with no setup, or each user can supply their own
 - **Image lightbox** -- click to zoom, scroll wheel zoom, pinch-to-zoom on mobile, pan when zoomed
 - **Link previews** -- server-side metadata fetcher with admin whitelist (SSRF protected)
 - **Pastebin** -- share text snippets with password protection and expiration
@@ -235,18 +236,21 @@ A taste of the range:
 - **Network drag-and-drop** -- reorder networks with all their channels (desktop drag + mobile hold-to-drag)
 - **Channel drag-and-drop** -- reorder channels within a network
 - **Favorites filter** -- funnel icon filter bar to show only favorited channels
+- **Messages inbox** -- an optional pinned tab at the top of the sidebar that gathers every DM from all your networks into one unified inbox, iMessage-style (toggle in Appearance ▸ Messages tab)
 - **Encryption indicators** -- SVG lock/unlock icons on every channel and DM in the sidebar
 - **Mobile lag indicator** -- ping time shown next to channel name in topbar
 - **SVG icon settings menu** -- clean Lucide-style line icons, scrollable on small screens
 - **Standalone security panel** -- vault auto-lock, message expiry, rate limit, PM blocking, spellcheck, link previews
-- **139 fonts** -- monospace, sans-serif, serif, display, and cursive/handwriting, mostly from Google Fonts
+- **140 fonts** -- monospace, sans-serif, serif, display, and cursive/handwriting, mostly from Google Fonts
 - **Clear all data** -- one-click deletion of logs, notepad, and pastes with confirmation
 
 ### Admin
-- **Admin panel** -- user management, stats, registration settings
-- **Link preview whitelist** -- admin controls which domains get metadata fetched
+- **Admin panel** -- user management, live stats (total / online), registration settings
+- **GIF Picker settings** -- choose the provider (**Giphy** or **Tenor**), the mode (Off / per-user own-key / shared server key), and store the server-held Giphy + Tenor API keys (never exposed to users)
+- **Max upload size** -- admin-set per-file upload cap (1–500 MB)
+- **Link preview controls** -- pick a mode (Off / Whitelist approved-domains-only / All HTTPS links, with private IPs blocked) plus the domain whitelist
 - **Registration modes** -- open, invite-code, or closed (persists across reboots)
-- **User management** -- disable, delete, promote to admin
+- **User management** -- disable, delete, promote to admin, toggle upload permission
 - **All admin settings persist** to disk with mutex protection (survives server restarts)
 
 ### Commands
@@ -307,8 +311,7 @@ All 100+ commands show in the `/` autocomplete dropdown. Type `/` to browse.
 |---------|-------------|
 | `/opall` | Op everyone in the channel |
 | `/deopall` | Deop everyone |
-| `/mdop` | Mass deop all except yourself |
-| `/drop` | Strip ALL status (~&@%+) from everyone except you |
+| `/mdop` (aliases `/massdeop`, `/drop`) | Strip ALL status (~&@%+) from everyone except you |
 | `/voiceall` `/devoiceall` | Voice/devoice everyone |
 | `/kickall` | Kick everyone except yourself |
 
@@ -365,6 +368,7 @@ All 100+ commands show in the `/` autocomplete dropdown. Type `/` to browse.
 |---------|-------------|
 | `/ascii text` | Generate ASCII block-letter art |
 | `/ud word` | Urban Dictionary lookup (sends to channel) |
+| `/gif query` (alias `/giphy`) | Search a GIF and send the top match; add a trailing space to open the live picker; `/gif key <k>`, `/gif rating <g\|pg\|pg-13\|r>` — Giphy or Tenor (admin-selectable) |
 | `/shorten url` | Shorten a URL with built-in shortener |
 | `/stats` | Channel statistics dashboard (top talkers) |
 | `/note nick [text]` | Set or view private notes on a nick |
@@ -400,12 +404,14 @@ All 100+ commands show in the `/` autocomplete dropdown. Type `/` to browse.
 | `/time nick` | CTCP time a user |
 | `/monitor nick` | Monitor nick online/offline |
 | `/unmonitor nick` | Stop monitoring |
+| `/advertise` (alias `/ad`) | Post the CryptIRC promo banner to the current channel |
 
 **Fun & Emotes:**
 
 | Command | Output |
 |---------|--------|
-| `/prism text` | Rainbow mIRC colored text |
+| `/prism text` · `/prism on\|off` | Rainbow mIRC colored text, or toggle rainbow for all your outgoing messages |
+| `/color <fg>[,<bg>]` · `/color off` | Set a persistent mIRC colour for your messages (codes 0–15 or names like red, blue) |
 | `/shrug` | ¯\\\_(ツ)\_/¯ |
 | `/tableflip` | (╯°□°)╯︵ ┻━┻ |
 | `/unflip` | ┬─┬ノ( º \_ ºノ) |
@@ -444,7 +450,7 @@ Accessible from the sidebar gear menu:
 | Panel | Contents |
 |-------|----------|
 | Notifications | Push alerts, desktop popups, sounds, trigger rules, custom highlight words (tag UI), per-network mute |
-| Theme | 171 themes (32 animated), 139 fonts, custom theme editor, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
+| Theme | 172 themes (57 animated), 140 fonts, custom theme editor, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
 | Security | Vault auto-lock timer, message expiry, rate limit, block PMs (+g), auto-rejoin, link previews, spellcheck |
 | Monitor | Nick online/offline tracking with push notifications |
 | Notepad | Private encrypted auto-saving notes |
@@ -455,11 +461,11 @@ Accessible from the sidebar gear menu:
 | Sessions | View and revoke active sessions across devices |
 | Vault Password | Change vault passphrase (re-encrypts all data) |
 | Help | Complete command reference, features list, keyboard shortcuts |
-| Admin | User management, registration settings, link preview whitelist |
+| Admin | User management, registration settings, link-preview mode (off/whitelist/all), GIF picker (provider/mode/keys), max upload size |
 
 ### Deployment
 - **Single binary** -- one `cargo build` and you're done
-- Interactive deploy script for Debian/Ubuntu with Caddy, Postfix, and systemd
+- Interactive deploy script for Debian/Ubuntu and Arch Linux with Caddy, Postfix, and systemd
 - Automatic HTTPS via Caddy + Let's Encrypt
 - Hardened systemd unit with full sandboxing
 
@@ -486,11 +492,11 @@ Browser (PWA)
 |-------|-----------|
 | Backend | Rust, Tokio, Axum |
 | Encryption | AES-256-GCM, Argon2id, HKDF-SHA256, Signal Protocol (X3DH + Double Ratchet + Authenticated Headers) |
-| TLS | OpenSSL (client certs), native-tls (server connections) |
+| TLS | OpenSSL (client certs), native-tls (IRC connections), rustls (outbound HTTP: link previews, GIF search, Web Push) |
 | Frontend | Vanilla JS, Web Crypto API, SVG icons (Lucide), CSS custom properties |
 | Push | Web Push with VAPID (RFC 8292), iOS PWA support |
 | IRC | IRCv3.2 with CAP negotiation (17 capabilities, user-toggleable) |
-| Reverse Proxy | Caddy or Nginx (automatic HTTPS) |
+| Reverse Proxy | Caddy (automatic HTTPS via Let's Encrypt) |
 | Mail | Postfix (local relay) |
 
 ## Configuration
@@ -501,6 +507,7 @@ Browser (PWA)
 | `CRYPTIRC_BASE_URL` | `http://localhost:9000` | Public URL of your instance |
 | `CRYPTIRC_BASE_PATH` | `/cryptirc` | URL path prefix |
 | `CRYPTIRC_PORT` | `9001` | Port the server listens on |
+| `CRYPTIRC_HSTS` | `on` | Set to `off` to disable the HSTS header (for self-signed / bare-IP deployments) |
 | `CRYPTIRC_FROM_EMAIL` | `noreply@cryptirc.local` | Sender address for emails |
 | `CRYPTIRC_REGISTRATION` | `open` | Registration mode: `open`, `closed` |
 | `CRYPTIRC_REG_CODE` | (none) | Invite code required for registration |

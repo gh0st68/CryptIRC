@@ -1079,6 +1079,7 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
   position:absolute; bottom:100%; left:0; right:0; background:var(--bg1);
   border:1px solid var(--border); border-radius:6px; max-height:200px; overflow-y:auto;
   display:none; z-index:101;
+  touch-action:pan-y; -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
 }
 .emoji-ac-item {
   padding:8px 10px; cursor:pointer; font-size:13px; display:flex; align-items:center; gap:6px; min-height:44px;
@@ -1951,8 +1952,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <button class="auth-tab"        id="tab-register" onclick="switchAuthTab('register')">Register</button>
     </div>
     <div id="login-form">
-      <div class="auth-field"><label class="auth-label">Username</label>
-        <input class="auth-input" type="text"     id="l-user" placeholder="your_nick" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
+      <div class="auth-field"><label class="auth-label">Username or email</label>
+        <input class="auth-input" type="text"     id="l-user" placeholder="username or email" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
       <div class="auth-field"><label class="auth-label">Password</label>
         <input class="auth-input" type="password" id="l-pass" placeholder="••••••••" autocomplete="current-password"></div>
       <div class="auth-err" id="login-err"></div>
