@@ -89,6 +89,20 @@ pub struct AppState {
     /// (rather than the tight 10/60s auth limiter) throttles abuse without breaking
     /// normal scrolling.
     pub preview_rate:        Arc<DashMap<String, (std::time::Instant, u32)>>,
+    /// Admin-controlled GIF picker provider/policy. provider = "giphy" | "tenor";
+    /// mode = "off" | "user" (each user supplies their own key) | "server" (the
+    /// instance proxies through the admin's shared key, with a user's personal key
+    /// taking precedence if they set one). Server keys are held here and NEVER sent
+    /// to non-admin clients — only the active provider + mode are exposed.
+    pub gif_provider:        Arc<tokio::sync::RwLock<String>>,
+    pub gif_mode:            Arc<tokio::sync::RwLock<String>>,
+    pub giphy_server_key:    Arc<tokio::sync::RwLock<String>>,
+    pub tenor_server_key:    Arc<tokio::sync::RwLock<String>>,
+    /// Per-user sliding-window limiter for the GIF search proxy — protects the
+    /// shared server key's quota from one user hammering it.
+    pub gif_rate:            Arc<DashMap<String, (std::time::Instant, u32)>>,
+    /// Shared outbound HTTP client for the GIF proxy (fixed hosts, so no SSRF risk).
+    pub gif_client:          reqwest::Client,
 }
 
 /// #33: max simultaneous outbound link-preview fetches, process-wide.
@@ -97,6 +111,9 @@ const PREVIEW_MAX_CONCURRENT: usize = 8;
 /// auto-preview-on-render scrolling, tight enough to stop an abuse loop.
 const PREVIEW_RATE_MAX: u32 = 30;
 const PREVIEW_RATE_WINDOW_SECS: u64 = 60;
+/// Per-user GIF-search budget (the picker debounces, so this is per live search).
+const GIF_RATE_MAX: u32 = 40;
+const GIF_RATE_WINDOW_SECS: u64 = 60;
 
 impl AppState {
     pub fn user_tx(&self, username: &str) -> broadcast::Sender<ServerEvent> {
@@ -183,6 +200,19 @@ impl AppState {
         }
         *count += 1;
         *count <= PREVIEW_RATE_MAX
+    }
+    /// Per-user sliding-window rate gate for the GIF search proxy.
+    pub fn gif_rate_ok(&self, username: &str) -> bool {
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(GIF_RATE_WINDOW_SECS);
+        let mut e = self.gif_rate.entry(username.to_string()).or_insert((now, 0));
+        let (start, count) = &mut *e;
+        if now.duration_since(*start) > window {
+            *start = now;
+            *count = 0;
+        }
+        *count += 1;
+        *count <= GIF_RATE_MAX
     }
     /// Get the active-session counter for a user (creates if needed).
     pub fn active_counter(&self, username: &str) -> Arc<AtomicUsize> {
@@ -634,7 +664,7 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
         "default-src 'self'; object-src 'none'; base-uri 'self'; script-src 'self' 'unsafe-inline'; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          font-src https://fonts.gstatic.com; img-src 'self' data: https:; \
-         connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com https://api.urbandictionary.com https://api.giphy.com; \
+         connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com https://api.urbandictionary.com https://api.giphy.com https://tenor.googleapis.com; \
          frame-src https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';"
     ));
     response
@@ -664,6 +694,22 @@ async fn main() -> Result<()> {
         let code = std::env::var("CRYPTIRC_REG_CODE").unwrap_or_default();
         (open, code, 25)
     };
+    // GIF picker policy (admin-controlled). Defaults preserve today's behavior
+    // exactly: provider=giphy, mode=user (everyone uses their own key). Loaded
+    // from the same admin_settings.json so it survives restarts.
+    let (gif_provider, gif_mode, giphy_server_key, tenor_server_key) = {
+        let v: serde_json::Value = if admin_settings_path.exists() {
+            serde_json::from_str(&std::fs::read_to_string(&admin_settings_path).unwrap_or_default()).unwrap_or_default()
+        } else { serde_json::json!({}) };
+        let provider = v.get("gif_provider").and_then(|x| x.as_str()).unwrap_or("giphy").to_string();
+        let mode = v.get("gif_mode").and_then(|x| x.as_str()).unwrap_or("user").to_string();
+        let gk = v.get("giphy_server_key").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let tk = v.get("tenor_server_key").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        (provider, mode, gk, tk)
+    };
+    let gif_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build().unwrap_or_else(|_| reqwest::Client::new());
     // #7: create the data dir and all subtrees with mode 0700 so at-rest secrets
     // (vault salts, Argon2 hashes, VAPID key, client TLS keys, encrypted configs)
     // are not world-readable. On a host shared with other local accounts, the
@@ -715,6 +761,12 @@ async fn main() -> Result<()> {
         // #33: bound outbound link-preview fetch concurrency + per-user rate.
         preview_sem:  Arc::new(Semaphore::new(PREVIEW_MAX_CONCURRENT)),
         preview_rate: Arc::new(DashMap::new()),
+        gif_provider:     Arc::new(tokio::sync::RwLock::new(gif_provider)),
+        gif_mode:         Arc::new(tokio::sync::RwLock::new(gif_mode)),
+        giphy_server_key: Arc::new(tokio::sync::RwLock::new(giphy_server_key)),
+        tenor_server_key: Arc::new(tokio::sync::RwLock::new(tenor_server_key)),
+        gif_rate:         Arc::new(DashMap::new()),
+        gif_client,
     };
 
     // #31: sweep abandoned in-progress chunked uploads once at startup so a restart
@@ -820,6 +872,8 @@ async fn main() -> Result<()> {
         .route("/s/:id",                get(route_short_redirect))
         .route("/preview",              get(route_link_preview))
         .route("/admin/link-preview",   get(route_admin_get_preview_settings).put(route_admin_put_preview_settings))
+        .route("/api/gif/config",       get(route_gif_config))
+        .route("/api/gif/search",       get(route_gif_search))
         .route("/push/vapid-public-key", get(route_push_vapid_key))
         .route("/push/subscribe",        post(route_push_subscribe).layer(DefaultBodyLimit::max(4_096)))
         .route("/push/subscribe",        axum::routing::delete(route_push_unsubscribe).layer(DefaultBodyLimit::max(2_048)))
@@ -1082,15 +1136,44 @@ async fn route_admin_get_settings(State(state): State<AppState>, headers: Header
     let open = *state.registration_open.read().await;
     let code = state.registration_code.read().await.clone();
     let upload_mb = *state.max_upload_mb.read().await;
+    let giphy_key = state.giphy_server_key.read().await.clone();
+    let tenor_key = state.tenor_server_key.read().await.clone();
     Json(serde_json::json!({
         "registration_open": open,
         "registration_code": code,
         "max_upload_mb": upload_mb,
+        // GIF policy: provider + mode + whether each shared key is set (masked, never raw).
+        "gif_provider": state.gif_provider.read().await.clone(),
+        "gif_mode": state.gif_mode.read().await.clone(),
+        "giphy_key_set": !giphy_key.is_empty(),
+        "tenor_key_set": !tenor_key.is_empty(),
+        "giphy_key_masked": mask_key(&giphy_key),
+        "tenor_key_masked": mask_key(&tenor_key),
     })).into_response()
 }
 
 #[derive(Deserialize)]
-struct AdminSettings { registration_open: Option<bool>, registration_code: Option<String>, max_upload_mb: Option<usize> }
+struct AdminSettings {
+    registration_open: Option<bool>,
+    registration_code: Option<String>,
+    max_upload_mb: Option<usize>,
+    // GIF picker policy (all optional; omitted/blank = keep current).
+    gif_provider: Option<String>,
+    gif_mode: Option<String>,
+    giphy_server_key: Option<String>,
+    tenor_server_key: Option<String>,
+}
+
+/// Mask a secret for display in the admin UI: "abcd…yz", never the full key.
+fn mask_key(k: &str) -> String {
+    if k.is_empty() { return String::new(); }
+    // Slice by chars, not bytes — a non-ASCII key would panic on a byte boundary.
+    let chars: Vec<char> = k.chars().collect();
+    if chars.len() < 8 { return format!("{}…", chars[0]); }
+    let first: String = chars[..4].iter().collect();
+    let last:  String = chars[chars.len()-2..].iter().collect();
+    format!("{}…{}", first, last)
+}
 
 #[derive(Deserialize)]
 struct AdminAddUser { username: String, password: String, #[serde(default)] email: String }
@@ -1135,6 +1218,26 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
         let clamped = mb.clamp(1, 500);
         *state.max_upload_mb.write().await = clamped;
     }
+    // GIF policy. Provider/mode are validated against the allowed sets; an unknown
+    // value is ignored (keeps current). Keys are blank-to-keep so the admin can flip
+    // provider/mode without re-typing a key, and the masked GET never round-trips a
+    // real key back as an update. NOTE: this never touches per-user personal keys.
+    if let Some(p) = body.gif_provider {
+        let p = p.to_lowercase();
+        if p == "giphy" || p == "tenor" { *state.gif_provider.write().await = p; }
+    }
+    if let Some(m) = body.gif_mode {
+        let m = m.to_lowercase();
+        if m == "off" || m == "user" || m == "server" { *state.gif_mode.write().await = m; }
+    }
+    if let Some(k) = body.giphy_server_key {
+        let k = k.trim();
+        if !k.is_empty() { *state.giphy_server_key.write().await = k.to_string(); }
+    }
+    if let Some(k) = body.tenor_server_key {
+        let k = k.trim();
+        if !k.is_empty() { *state.tenor_server_key.write().await = k.to_string(); }
+    }
     // Persist admin settings to disk under lock to prevent concurrent read-modify-write races
     let _guard = state.admin_settings_lock.lock().await;
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
@@ -1144,6 +1247,10 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     existing["registration_open"] = serde_json::json!(*state.registration_open.read().await);
     existing["registration_code"] = serde_json::json!(*state.registration_code.read().await);
     existing["max_upload_mb"] = serde_json::json!(*state.max_upload_mb.read().await);
+    existing["gif_provider"] = serde_json::json!(*state.gif_provider.read().await);
+    existing["gif_mode"] = serde_json::json!(*state.gif_mode.read().await);
+    existing["giphy_server_key"] = serde_json::json!(*state.giphy_server_key.read().await);
+    existing["tenor_server_key"] = serde_json::json!(*state.tenor_server_key.read().await);
     let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
     drop(_guard);
     (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
@@ -1865,6 +1972,135 @@ async fn route_admin_put_preview_settings(
     let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
     drop(_guard);
     Json(serde_json::json!({"message":"Settings saved"})).into_response()
+}
+
+// ─── GIF picker (Giphy / Tenor) ───────────────────────────────────────────────
+
+/// Tells the client which provider is active and how keys are sourced, WITHOUT
+/// exposing any server key. server_available is true only when mode=="server" and
+/// the active provider's shared key is configured (so the client may use the proxy).
+async fn route_gif_config(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if extract_session_user(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response();
+    }
+    let provider = state.gif_provider.read().await.clone();
+    let mode = state.gif_mode.read().await.clone();
+    let server_available = mode == "server" && match provider.as_str() {
+        "tenor" => !state.tenor_server_key.read().await.is_empty(),
+        _       => !state.giphy_server_key.read().await.is_empty(),
+    };
+    Json(serde_json::json!({
+        "provider": provider,
+        "mode": mode,
+        "server_available": server_available,
+    })).into_response()
+}
+
+/// Map a Giphy-style rating (g|pg|pg-13|r) to a Tenor contentfilter level.
+fn tenor_contentfilter(rating: &str) -> &'static str {
+    match rating {
+        "g"  => "high",
+        "pg" => "medium",
+        "r"  => "low",
+        _    => "medium", // pg-13 and anything unknown
+    }
+}
+
+/// Flatten a Giphy or Tenor search response into [{preview,url,title}].
+fn normalize_gif_results(provider: &str, body: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    if provider == "tenor" {
+        if let Some(arr) = body.get("results").and_then(|v| v.as_array()) {
+            for g in arr {
+                let mf = g.get("media_formats");
+                let preview = mf.and_then(|m| m.get("tinygif")).and_then(|x| x.get("url")).and_then(|x| x.as_str())
+                    .or_else(|| mf.and_then(|m| m.get("nanogif")).and_then(|x| x.get("url")).and_then(|x| x.as_str()));
+                let full = mf.and_then(|m| m.get("gif")).and_then(|x| x.get("url")).and_then(|x| x.as_str())
+                    .or_else(|| mf.and_then(|m| m.get("mediumgif")).and_then(|x| x.get("url")).and_then(|x| x.as_str()));
+                let title = g.get("content_description").and_then(|x| x.as_str()).unwrap_or("");
+                if let Some(full) = full {
+                    out.push(serde_json::json!({ "preview": preview.unwrap_or(full), "url": full, "title": title }));
+                }
+            }
+        }
+    } else if let Some(arr) = body.get("data").and_then(|v| v.as_array()) {
+        for g in arr {
+            let images = g.get("images");
+            let preview = images.and_then(|i| i.get("fixed_height_small")).and_then(|x| x.get("url")).and_then(|x| x.as_str())
+                .or_else(|| images.and_then(|i| i.get("preview_gif")).and_then(|x| x.get("url")).and_then(|x| x.as_str()));
+            let full = images.and_then(|i| i.get("original")).and_then(|x| x.get("url")).and_then(|x| x.as_str());
+            let title = g.get("title").and_then(|x| x.as_str()).unwrap_or("");
+            if let Some(full) = full {
+                out.push(serde_json::json!({ "preview": preview.unwrap_or(full), "url": full, "title": title }));
+            }
+        }
+    }
+    out
+}
+
+/// Server-side GIF search proxy. Only serves in mode=="server", spending the admin's
+/// shared key for the active provider; normalizes both providers to a common
+/// {results:[{preview,url,title}]} shape so the frontend parsing is provider-agnostic.
+async fn route_gif_search(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(user) = extract_session_user(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response();
+    };
+    // The proxy exists only to spend the admin's shared key; refuse outside server mode.
+    if *state.gif_mode.read().await != "server" {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"Shared GIF key is not enabled"}))).into_response();
+    }
+    if !state.gif_rate_ok(&user) {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error":"Too many GIF requests — slow down"}))).into_response();
+    }
+    let q = params.get("q").map(|s| s.trim()).unwrap_or("");
+    if q.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Missing q"}))).into_response();
+    }
+    let q: String = q.chars().take(100).collect();
+    let limit: u32 = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(12).clamp(1, 50);
+    let limit_s = limit.to_string();
+    let rating = match params.get("rating").map(|s| s.as_str()).unwrap_or("pg-13") {
+        r @ ("g" | "pg" | "pg-13" | "r") => r,
+        _ => "pg-13",
+    };
+    let provider = state.gif_provider.read().await.clone();
+    let resp = if provider == "tenor" {
+        let key = state.tenor_server_key.read().await.clone();
+        if key.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"No shared GIF key configured"}))).into_response();
+        }
+        state.gif_client.get("https://tenor.googleapis.com/v2/search")
+            .query(&[("key", key.as_str()), ("q", q.as_str()), ("limit", limit_s.as_str()),
+                     ("contentfilter", tenor_contentfilter(rating)), ("media_filter", "tinygif,gif"), ("client_key", "cryptirc")])
+            .send().await
+    } else {
+        let key = state.giphy_server_key.read().await.clone();
+        if key.is_empty() {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"No shared GIF key configured"}))).into_response();
+        }
+        state.gif_client.get("https://api.giphy.com/v1/gifs/search")
+            .query(&[("api_key", key.as_str()), ("q", q.as_str()), ("limit", limit_s.as_str()), ("rating", rating)])
+            .send().await
+    };
+    let resp = match resp {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => { info!("[gif] {} upstream status {}", provider, r.status());
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"GIF search failed"}))).into_response(); }
+        // Do NOT log the raw reqwest::Error — its Display includes the request URL,
+        // which carries the shared key in ?key=/?api_key=. Log a sanitized class only.
+        Err(e) => { info!("[gif] {} fetch error: timeout={} connect={}", provider, e.is_timeout(), e.is_connect());
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"GIF search failed"}))).into_response(); }
+    };
+    let body: serde_json::Value = match resp.text().await {
+        // reqwest's `json` feature isn't enabled in this build, so parse the text ourselves.
+        Ok(t) => serde_json::from_str(&t).unwrap_or_else(|_| serde_json::json!({})),
+        Err(_) => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"GIF search failed"}))).into_response(),
+    };
+    Json(serde_json::json!({ "results": normalize_gif_results(&provider, &body) })).into_response()
 }
 
 // ─── Push notification routes ─────────────────────────────────────────────────

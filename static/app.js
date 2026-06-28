@@ -533,6 +533,7 @@ function showApp() {
   document.getElementById('app').style.display='flex';
   connectWs();
   checkAdmin();
+  _loadGifConfig();   // learn the active GIF provider + mode (giphy/user by default)
   // Check for notification_click from SW (URL params path)
   const params=new URLSearchParams(location.search);
   const openTarget=params.get('open');
@@ -3603,7 +3604,7 @@ async function handleInput(raw){
         // Kick everyone except yourself
         const self = getNick(conn_id);
         const reason = args.join(' ') || 'Kicked';
-        const nicks = getChannelNicks(conn_id, target).filter(n => n !== self);
+        const nicks = getChannelNicksByTarget(conn_id, target).filter(n => n !== self);
         if(!nicks.length){sysMsg(conn_id,target,'No one else to kick','system');break;}
         // Stagger kicks to avoid flood protection
         nicks.forEach((n,i)=>setTimeout(()=>wsend({type:'send',conn_id,raw:`KICK ${target} ${n} :${reason}`}),i*200));
@@ -3611,7 +3612,7 @@ async function handleInput(raw){
       }
       case 'MASSVOICE': case 'MVALL': {
         // Voice everyone including ops (all non-voiced)
-        const all = getChannelNicks(conn_id, target);
+        const all = getChannelNicksByTarget(conn_id, target);
         batchMode(conn_id,target,'+v',all);
         sysMsg(conn_id,target,`Voicing all ${all.length} users…`,'system'); break;
       }
@@ -3802,52 +3803,62 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.2 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 121 themes • 135 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.3 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 121 themes • 135 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'GIPHY': case 'GIF': {
         const sub=(args[0]||'').toLowerCase();
-        // ── Key management: /giphy key [value|clear] ────────────────────
+        const _prov=_gifProviderLabel();
+        // ── Key management: /gif key [value|clear] — sets the ACTIVE provider's key.
+        // Giphy keys live in cryptirc_giphy_key, Tenor in cryptirc_tenor_key; clearing
+        // one never touches the other.
         if(sub==='key'){
           const v=args[1];
           if(!v){
             const cur=_giphyKey();
-            if(cur) sysMsg(conn_id,target,`Giphy key set: ${_giphyMaskKey(cur)} — rating: ${_giphyRating()}. Use /giphy key clear to remove, /giphy key <newkey> to replace.`,'system');
-            else sysMsg(conn_id,target,'No Giphy key set. Get one free at https://developers.giphy.com/ → Create App → API. Then: /giphy key YOUR_KEY_HERE','system');
+            if(cur) sysMsg(conn_id,target,`${_prov} key set: ${_giphyMaskKey(cur)} — rating: ${_giphyRating()}. Use /gif key clear to remove, /gif key <newkey> to replace.`,'system');
+            else if(_gifProvider()==='tenor') sysMsg(conn_id,target,'No Tenor key set. Get one free from Google Cloud → enable the Tenor API → create an API key. Then: /gif key YOUR_KEY','system');
+            else sysMsg(conn_id,target,'No Giphy key set. Get one free at https://developers.giphy.com/ → Create App → API. Then: /gif key YOUR_KEY','system');
             break;
           }
           if(v.toLowerCase()==='clear'){
-            try{localStorage.removeItem('cryptirc_giphy_key');}catch(e){}
+            try{localStorage.removeItem(_gifKeyName());}catch(e){}
             flushPrefsToServer(); // push the clear to the server so other devices un-set too
-            sysMsg(conn_id,target,'Giphy key cleared (synced to your account).','system');break;
+            sysMsg(conn_id,target,`${_prov} key cleared (synced to your account).`,'system');break;
           }
-          try{localStorage.setItem('cryptirc_giphy_key',v);}catch(e){sysMsg(conn_id,target,'Failed to save key (localStorage unavailable).','error');break;}
+          try{localStorage.setItem(_gifKeyName(),v);}catch(e){sysMsg(conn_id,target,'Failed to save key (localStorage unavailable).','error');break;}
           flushPrefsToServer(); // push to server so other devices pick it up on next unlock
-          sysMsg(conn_id,target,`Giphy key saved: ${_giphyMaskKey(v)} (synced to your account — other devices will pick it up on unlock). Try /giphy dog — or type /giphy dog (with a space) to see the live picker.`,'system');
+          sysMsg(conn_id,target,`${_prov} key saved: ${_giphyMaskKey(v)} (synced to your account). Try /gif dog — or type /gif dog (with a space) for the live picker.`,'system');
           break;
         }
-        // ── Rating filter: /giphy rating <g|pg|pg-13|r> ─────────────────
+        // ── Rating filter: /gif rating <g|pg|pg-13|r> (auto-mapped for Tenor) ──
         if(sub==='rating'){
           const r=(args[1]||'').toLowerCase();
           if(!['g','pg','pg-13','r'].includes(r)){
-            sysMsg(conn_id,target,`Usage: /giphy rating <g|pg|pg-13|r>. Current: ${_giphyRating()}`,'error');break;
+            sysMsg(conn_id,target,`Usage: /gif rating <g|pg|pg-13|r>. Current: ${_giphyRating()}`,'error');break;
           }
           try{localStorage.setItem('cryptirc_giphy_rating',r);}catch(e){}
           flushPrefsToServer();
-          sysMsg(conn_id,target,`Giphy rating filter set to ${r} (synced).`,'system');break;
+          sysMsg(conn_id,target,`GIF rating filter set to ${r} (synced).`,'system');break;
         }
-        // ── Bare /giphy (no args): show status + help ───────────────────
+        // ── Off (admin-disabled) ────────────────────────────────────────────
+        if(_gifCfg.mode==='off'){
+          sysMsg(conn_id,target,'GIFs are disabled on this server.','error');break;
+        }
+        // ── Bare /gif (no args): show status + help ─────────────────────────
         if(!sub){
           const cur=_giphyKey();
-          const status=cur?`Key: ${_giphyMaskKey(cur)}, rating: ${_giphyRating()}`:'No key set — run /giphy key YOUR_KEY (get one at developers.giphy.com)';
-          sysMsg(conn_id,target,`Giphy — ${status}. Usage:\n• /giphy <query>  send top match\n• /giphy <query>  (with space, then keep typing) live picker\n• /giphy key <k>  save your API key\n• /giphy key clear  remove\n• /giphy rating <g|pg|pg-13|r>  content filter`,'system');
+          const src=cur?`your ${_prov} key (${_giphyMaskKey(cur)})`:((_gifCfg.mode==='server'&&_gifCfg.server_available)?`this server's shared ${_prov} key`:'no key set');
+          sysMsg(conn_id,target,`GIF — provider: ${_prov}, using ${src}, rating: ${_giphyRating()}. Usage:\n• /gif <query>  send top match\n• /gif <query>  (with space, then keep typing) live picker\n• /gif key <k>  save your ${_prov} API key\n• /gif key clear  remove\n• /gif rating <g|pg|pg-13|r>  content filter`,'system');
           break;
         }
         // ── Default: search and send top match ───────────────────────────
         const q=args.join(' ').trim();
-        if(!_giphyKey()){
-          sysMsg(conn_id,target,'No Giphy key set. Run /giphy key YOUR_KEY_HERE first. Get a free key at developers.giphy.com (Create App → API).','error');break;
+        if(!_gifHasSource()){
+          if(_gifProvider()==='tenor') sysMsg(conn_id,target,'No Tenor key set. Run /gif key YOUR_KEY first (free from Google Cloud → Tenor API).','error');
+          else sysMsg(conn_id,target,'No Giphy key set. Run /gif key YOUR_KEY first (free at developers.giphy.com → Create App → API).','error');
+          break;
         }
         const url=await giphyFetchTop(q);
-        if(!url){ sysMsg(conn_id,target,'Giphy search failed — invalid key, no result, or rate-limited.','error'); break; }
+        if(!url){ sysMsg(conn_id,target,'GIF search failed — invalid key, no result, or rate-limited.','error'); break; }
         const gifWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,url):null;
         if(gifWire)wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${gifWire}`});
         else wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${url}`});
@@ -7610,8 +7621,8 @@ document.addEventListener('click',e=>{
     {cmd:'pmallowlist',desc:'Show PM allow list',usage:'/pmallowlist'},
     {cmd:'pmprotection',desc:'Open PM protection settings',usage:'/pmprotection'},
     // ── Giphy ──
-    {cmd:'giphy',desc:'Search Giphy (live picker — arrow keys + Enter)',usage:'/giphy query'},
-    {cmd:'gif',desc:'Alias for /giphy',usage:'/gif query'},
+    {cmd:'giphy',desc:'Search GIFs (Giphy/Tenor live picker — arrow keys + Enter)',usage:'/giphy query'},
+    {cmd:'gif',desc:'Search GIFs (alias for /giphy)',usage:'/gif query'},
     // ── Services ──
     {cmd:'ns',desc:'NickServ command',usage:'/ns identify password'},
     {cmd:'cs',desc:'ChanServ command',usage:'/cs op #chan nick'},
@@ -7755,22 +7766,60 @@ document.addEventListener('click',e=>{
 // ─── Giphy live picker ──────────────────────────────────────────────────────
 // No shared key — each user stores their own free key via `/giphy key <k>`.
 // Key lives in localStorage (per-device); rating filter too.
-function _giphyKey(){try{return localStorage.getItem('cryptirc_giphy_key')||null;}catch{return null;}}
+// ── GIF provider/policy (admin-controlled; loaded from /api/gif/config on login).
+// Defaults preserve today's behavior EXACTLY: giphy + user-key mode.
+let _gifCfg={provider:'giphy',mode:'user',server_available:false};
+function _gifProvider(){return _gifCfg.provider==='tenor'?'tenor':'giphy';}
+function _gifProviderLabel(){return _gifProvider()==='tenor'?'Tenor':'Giphy';}
+// Per-provider PERSONAL key. Giphy stays in cryptirc_giphy_key (back-compat — NEVER
+// wiped or migrated); Tenor in cryptirc_tenor_key. _giphyKey() = active provider's key.
+function _gifKeyName(p){return (p||_gifProvider())==='tenor'?'cryptirc_tenor_key':'cryptirc_giphy_key';}
+function _giphyKey(){try{return localStorage.getItem(_gifKeyName())||null;}catch{return null;}}
 function _giphyRating(){return localStorage.getItem('cryptirc_giphy_rating')||'pg-13';}
 function _giphyMaskKey(k){if(!k)return '(none)';if(k.length<8)return k[0]+'…';return k.slice(0,4)+'…'+k.slice(-2);}
-async function giphyFetchTop(query){
-  const key=_giphyKey(); if(!key)return null;
+// True if the active provider has a usable source right now (personal key OR shared proxy).
+function _gifHasSource(){return !!_giphyKey()||(_gifCfg.mode==='server'&&_gifCfg.server_available);}
+async function _loadGifConfig(){
+  if(!sessionToken)return;
   try{
-    const r=await fetch(`https://api.giphy.com/v1/gifs/search?api_key=${encodeURIComponent(key)}&q=${encodeURIComponent(query)}&limit=1&rating=${encodeURIComponent(_giphyRating())}`);
-    if(!r.ok)return null;
-    const d=await r.json();
-    const g=d?.data?.[0];
-    return g?.images?.original?.url||null;
-  }catch(e){return null;}
+    const r=await fetch('/cryptirc/api/gif/config',{headers:{'Authorization':'Bearer '+sessionToken}});
+    if(r.ok){const d=await r.json();
+      _gifCfg={provider:(d.provider==='tenor'?'tenor':'giphy'),
+               mode:(['off','user','server'].includes(d.mode)?d.mode:'user'),
+               server_available:!!d.server_available};}
+  }catch(e){}
 }
+// Normalized [{preview,url,title}] for the active provider. Precedence:
+//  1) personal key for the active provider → that provider's API directly (override)
+//  2) else server mode + shared key available → same-origin proxy (admin key)
+//  3) else → [] (caller shows the right no-key / disabled message)
 async function giphyFetchList(query, n){
-  const key=_giphyKey(); if(!key)return [];
+  const prov=_gifProvider();
+  const key=_giphyKey();
+  if(key) return _gifFetchDirect(prov,key,query,n);
+  if(_gifCfg.mode==='server' && _gifCfg.server_available){
+    try{
+      const r=await fetch(`/cryptirc/api/gif/search?q=${encodeURIComponent(query)}&limit=${n|0}&rating=${encodeURIComponent(_giphyRating())}`,{headers:{'Authorization':'Bearer '+sessionToken}});
+      if(!r.ok)return [];
+      const d=await r.json();
+      return (d?.results||[]).filter(x=>x&&x.url);
+    }catch(e){return [];}
+  }
+  return [];
+}
+async function _gifFetchDirect(prov,key,query,n){
   try{
+    if(prov==='tenor'){
+      const cf={'g':'high','pg':'medium','pg-13':'medium','r':'low'}[_giphyRating()]||'medium';
+      const r=await fetch(`https://tenor.googleapis.com/v2/search?key=${encodeURIComponent(key)}&q=${encodeURIComponent(query)}&limit=${n|0}&contentfilter=${cf}&media_filter=tinygif,gif&client_key=cryptirc`);
+      if(!r.ok)return [];
+      const d=await r.json();
+      return (d?.results||[]).map(g=>({
+        preview:g?.media_formats?.tinygif?.url||g?.media_formats?.nanogif?.url||g?.media_formats?.gif?.url,
+        url:g?.media_formats?.gif?.url||g?.media_formats?.mediumgif?.url,
+        title:g?.content_description||'',
+      })).filter(x=>x.url);
+    }
     const r=await fetch(`https://api.giphy.com/v1/gifs/search?api_key=${encodeURIComponent(key)}&q=${encodeURIComponent(query)}&limit=${n|0}&rating=${encodeURIComponent(_giphyRating())}`);
     if(!r.ok)return [];
     const d=await r.json();
@@ -7781,200 +7830,242 @@ async function giphyFetchList(query, n){
     })).filter(x=>x.url);
   }catch(e){return [];}
 }
+async function giphyFetchTop(query){
+  const list=await giphyFetchList(query,1);
+  return (list[0]&&list[0].url)||null;
+}
 (function(){
   const inp=document.getElementById('msg-input');if(!inp)return;
-  // Picker element — floats above the input like the slash-autocomplete does.
-  // Append to #input-wrap (which slash-autocomplete sets to position:relative)
-  // so our `bottom:100%` anchors against the input bar, not against whatever
-  // position:relative ancestor the inner flex child lives inside.
-  let picker=document.createElement('div');
+  // Reaction tray that rises above the input bar (like the slash-autocomplete).
+  // Skin lives in CSS (#giphy-picker / .giphy-*); JS stays logic-only here.
+  const picker=document.createElement('div');
   picker.id='giphy-picker';
-  // Edge fade masks the left+right edges to hint at horizontal overflow.
-  // `touch-action:pan-x` limits gesture interpretation to horizontal pan so
-  // vertical scrolls don't get captured. Height is responsive via media query.
-  picker.style.cssText='position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:linear-gradient(to bottom,var(--bg1) 0%,var(--bg2) 100%);border:1px solid var(--border2);border-radius:12px;display:none;z-index:102;box-shadow:0 -8px 28px rgba(0,0,0,.55),0 -2px 8px rgba(0,0,0,.3);padding:14px 12px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-x;';
+  picker.style.display='none';
   const wrap=inp.closest('#input-wrap')||inp.parentNode;
   wrap.style.position='relative';
+
+  // Scaffold is built ONCE: head (eyebrow + live query + kbd hint + close) /
+  // scrollable grid / footer. The old code wiped innerHTML and re-bound the
+  // close button's tuned iOS handlers on every search — this avoids that.
+  const head=document.createElement('div'); head.className='giphy-head';
+  const eyebrow=document.createElement('span'); eyebrow.className='giphy-eyebrow'; eyebrow.textContent='Giphy';
+  const qEl=document.createElement('span'); qEl.className='giphy-query';
+  const hint=document.createElement('span'); hint.className='giphy-hint'; hint.textContent='←→↑↓ move · ↵ send · esc close';
+  const closeBtn=document.createElement('button');
+  closeBtn.type='button'; closeBtn.className='giphy-close-btn'; closeBtn.textContent='✕';
+  closeBtn.title='Close'; closeBtn.setAttribute('aria-label','Close Giphy picker');
+  closeBtn.style.touchAction='manipulation';
+  head.append(eyebrow,qEl,hint,closeBtn);
+  // The listbox role lives on the GRID (so it contains only role=option cells),
+  // not the outer panel (which also holds header text + the close button).
+  const grid=document.createElement('div'); grid.className='giphy-grid';
+  grid.id='giphy-grid'; grid.setAttribute('role','listbox'); grid.setAttribute('aria-label','Giphy results');
+  const foot=document.createElement('div'); foot.className='giphy-foot'; foot.textContent='powered by GIPHY';
+  picker.append(head,grid,foot);
   wrap.appendChild(picker);
-  let items=[]; // [{preview,url,title,el}]
+
+  const LIMIT=12;     // results AND skeleton count — matched so the swap doesn't jump
+  let items=[];       // [{preview,url,title,el}]
   let idx=-1;
   let debounceTimer=null;
   let lastQuery='';
-  // Timestamp of the most recent thumb pick. Used to suppress the stray
-  // synthetic click that iOS fires AFTER layout shift from the on-tap keyboard
-  // dismissal — that click can land on body/etc and would otherwise trigger
-  // the outside-click close() below.
+  let hideTimer=null;
+  // Timestamp of the most recent thumb pick. Suppresses the stray synthetic
+  // click iOS fires AFTER the on-tap keyboard dismissal shifts layout (that
+  // click can land on body and would otherwise trigger the outside-click close).
   let _giphyJustPicked=0;
 
-  function close(){picker.style.display='none';items=[];idx=-1;picker.innerHTML='';lastQuery='';}
+  const _reduceMotion=()=>{try{return matchMedia('(prefers-reduced-motion: reduce)').matches;}catch(e){return false;}};
+  function isOpen(){return picker.classList.contains('open');}
+  function show(){
+    clearTimeout(hideTimer);
+    if(picker.style.display!=='flex'){
+      picker.style.display='flex';
+      // Flush layout in the hidden (opacity:0) state, synchronously, so adding
+      // .open animates reliably — a rAF-based reveal can stall when frames are
+      // throttled (backgrounded tab / iOS), leaving the tray briefly invisible.
+      void picker.offsetWidth;
+    }
+    picker.classList.add('open');
+    // While open, the message input acts as a combobox owning the results listbox.
+    inp.setAttribute('role','combobox');
+    inp.setAttribute('aria-controls','giphy-grid');
+    inp.setAttribute('aria-haspopup','listbox');
+    inp.setAttribute('aria-expanded','true');
+  }
+  function close(){
+    clearTimeout(debounceTimer);
+    picker.classList.remove('open');
+    items=[];idx=-1;lastQuery='';
+    // Tear the combobox ARIA back down so the shared input is a plain textbox again.
+    ['role','aria-controls','aria-haspopup','aria-expanded','aria-activedescendant']
+      .forEach(a=>inp.removeAttribute(a));
+    clearTimeout(hideTimer);
+    // Keep content visible through the fade-out, then clear and hide.
+    hideTimer=setTimeout(()=>{
+      if(!isOpen()){ picker.style.display='none'; grid.innerHTML=''; qEl.textContent=''; }
+    },220);
+  }
   function setActive(i){
+    if(!items.length)return;
     idx=Math.max(0,Math.min(i,items.length-1));
     items.forEach((it,j)=>{
-      if(j===idx) it.el.classList.add('giphy-thumb-active');
-      else it.el.classList.remove('giphy-thumb-active');
+      it.el.classList.toggle('giphy-thumb-active',j===idx);
+      it.el.setAttribute('aria-selected',j===idx?'true':'false');
     });
-    items[idx]?.el.scrollIntoView({block:'nearest',inline:'nearest',behavior:'smooth'});
+    const a=items[idx]?.el;
+    if(a){
+      inp.setAttribute('aria-activedescendant',a.id);
+      a.scrollIntoView({block:'nearest',inline:'nearest',behavior:_reduceMotion()?'auto':'smooth'});
+    }
   }
-  // Add a close (X) button in the top-right corner of the picker. Clicking
-  // it clears the input's "/giphy ..." prefix so the picker doesn't
-  // immediately reopen on the next input event.
-  function addCloseBtn(){
-    const btn=document.createElement('button');
-    btn.textContent='✕';
-    btn.title='Close';
-    btn.setAttribute('aria-label','Close Giphy picker');
-    btn.type='button';
-    btn.className='giphy-close-btn';
-    btn.style.touchAction='manipulation';
-    const doClose=e=>{
-      e.preventDefault();e.stopPropagation();
-      if(_extractQuery(inp.value)!=null) inp.value='';
-      close();
-    };
-    // Same iOS fix as thumbs: handle on touchend to avoid the blur cascade
-    // misfiring the outside-click handler in the layout-shift window.
-    let tstart=null;
-    btn.addEventListener('touchstart',ev=>{
-      const t=ev.touches[0];tstart={x:t.clientX,y:t.clientY};
-    },{passive:true});
-    btn.addEventListener('touchend',ev=>{
-      if(!tstart)return;tstart=null;
-      _giphyJustPicked=Date.now();
-      doClose(ev);
-    },{passive:false});
-    btn.addEventListener('click',ev=>{
-      if(Date.now()-_giphyJustPicked<600)return;
-      doClose(ev);
-    });
-    picker.appendChild(btn);
+  function gridCols(){
+    const tpl=getComputedStyle(grid).gridTemplateColumns;
+    const n=(tpl&&tpl!=='none')?tpl.split(' ').filter(Boolean).length:1;
+    return Math.max(1,n);
+  }
+  function showMsg(html){
+    grid.innerHTML='';
+    const m=document.createElement('div'); m.className='giphy-msg'; m.innerHTML=html;
+    grid.appendChild(m);
+    items=[];idx=-1;
   }
   function renderLoading(q){
-    picker.innerHTML='';
-    picker.style.position='relative';
-    const msg=document.createElement('div');
-    msg.style.cssText='color:var(--text3);font-size:11px;padding:8px 28px 8px 10px;font-family:var(--mono)';
-    msg.textContent=`Searching Giphy for "${q}"…`;
-    picker.appendChild(msg);
-    addCloseBtn();
-    picker.style.display='block';
+    qEl.textContent=q;
+    grid.innerHTML='';
+    for(let i=0;i<LIMIT;i++){ const sk=document.createElement('div'); sk.className='giphy-skel'; grid.appendChild(sk); }
+    items=[];idx=-1;
+    show();
+  }
+  // Reflect the active provider in the tray chrome (eyebrow + footer attribution).
+  function _brand(){
+    eyebrow.textContent=_gifProviderLabel();
+    foot.textContent='powered by '+(_gifProvider()==='tenor'?'Tenor':'GIPHY');
   }
   function renderNoKey(){
-    picker.innerHTML='';
-    picker.style.position='relative';
-    const msg=document.createElement('div');
-    msg.style.cssText='color:var(--text2);font-size:12px;padding:10px 28px 10px 12px;font-family:var(--mono);line-height:1.5';
-    msg.innerHTML='⚠ No Giphy API key set. Get a free key at <strong>developers.giphy.com</strong> → Create App → API. Then run: <code style="color:var(--accent)">/giphy key YOUR_KEY</code>';
-    picker.appendChild(msg);
-    addCloseBtn();
-    picker.style.display='block';
-    items=[];idx=-1;
+    qEl.textContent=''; _brand();
+    if(_gifProvider()==='tenor')
+      showMsg('⚠ No Tenor API key set. Get a free key from <strong>Google Cloud → Tenor API</strong>, then run <code>/gif key YOUR_KEY</code>');
+    else
+      showMsg('⚠ No Giphy API key set. Get a free key at <strong>developers.giphy.com</strong> → Create App → API, then run <code>/giphy key YOUR_KEY</code>');
+    show();
+  }
+  function renderDisabled(){
+    qEl.textContent=''; _brand();
+    showMsg('GIFs are disabled on this server.');
+    show();
   }
   function renderResults(list,q){
-    picker.innerHTML='';
-    picker.style.position='relative';
+    qEl.textContent=q;
+    grid.innerHTML='';
     items=[];idx=-1;
-    if(!list.length){
-      const msg=document.createElement('div');
-      msg.style.cssText='color:var(--text3);font-size:11px;padding:8px 28px 8px 10px;font-family:var(--mono)';
-      msg.textContent=`No Giphy results for "${q}"`;
-      picker.appendChild(msg);
-      addCloseBtn();
-      return;
-    }
+    if(!list.length){ showMsg('No results for “'+esc(q)+'”'); return; }
     for(const g of list){
-      const el=document.createElement('img');
-      el.src=g.preview;
-      el.alt=g.title||'gif';
-      el.title=g.title||'';
-      el.loading='lazy';
-      el.draggable=false;
-      el.className='giphy-thumb';
-      // `touch-action:manipulation` disables the 300ms double-tap delay on iOS
-      // and avoids the parent picker's `pan-x` gesture being inherited for the
-      // thumb itself — the thumb is tap-only; horizontal scroll happens on the
-      // picker background between thumbs.
-      el.style.cssText='display:inline-block;width:auto;margin:0 3px;border-radius:10px;cursor:pointer;outline:2px solid transparent;outline-offset:-2px;transition:outline .12s ease,transform .12s ease,box-shadow .12s ease;vertical-align:top;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;background:var(--bg3);touch-action:manipulation;';
-      // iOS tap handling: on a tap, touchend → synthetic click sequence causes
-      // input blur → keyboard dismiss → visualViewport resize → #input-wrap
-      // slides down → picker slides with it → synthetic click lands on empty
-      // space → document-level outside-click handler closes the picker. Net
-      // effect: tap does nothing, picker "just goes away". Fix: handle the
-      // tap on touchend with preventDefault to suppress the synthetic click
-      // and its blur cascade. Guard scroll-vs-tap with a small move threshold.
+      const cell=document.createElement('div');
+      cell.className='giphy-cell';
+      cell.id='giphy-opt-'+items.length;
+      cell.setAttribute('role','option');
+      cell.setAttribute('aria-selected','false');
+      const img=document.createElement('img');
+      img.className='giphy-thumb';
+      img.alt=g.title||'gif'; img.title=g.title||'';
+      img.loading='lazy'; img.decoding='async'; img.draggable=false;
+      // Fade the GIF in over its shimmering cell; stop the scan once it lands.
+      img.addEventListener('load',()=>{ img.classList.add('loaded'); cell.classList.add('loaded-cell'); },{once:true});
+      // On a failed preview, stop the shimmer AND mark the cell broken so it
+      // shows a ⚠ glyph instead of a silent blank tile.
+      img.addEventListener('error',()=>{ cell.classList.add('loaded-cell','giphy-broken'); },{once:true});
+      img.src=g.preview;
+      cell.appendChild(img);
+      // iOS tap handling (behaviour unchanged from the strip version): commit the
+      // pick on touchend with preventDefault to suppress the synthetic click +
+      // input-blur cascade. A 10px move threshold distinguishes tap from scroll.
       let tstart=null;
-      el.addEventListener('touchstart',ev=>{
-        const t=ev.touches[0];
-        tstart={x:t.clientX,y:t.clientY};
-      },{passive:true});
-      el.addEventListener('touchmove',ev=>{
+      cell.addEventListener('touchstart',ev=>{const t=ev.touches[0];tstart={x:t.clientX,y:t.clientY};},{passive:true});
+      cell.addEventListener('touchmove',ev=>{
         if(!tstart)return;
         const t=ev.touches[0];
         if(Math.hypot(t.clientX-tstart.x,t.clientY-tstart.y)>10)tstart=null;
       },{passive:true});
-      el.addEventListener('touchend',ev=>{
-        if(!tstart)return;
-        tstart=null;
-        ev.preventDefault(); // suppress synthetic click + blur on iOS
+      cell.addEventListener('touchend',ev=>{
+        if(!tstart)return;tstart=null;
+        ev.preventDefault();
         _giphyJustPicked=Date.now();
-        pick({...g,el});
+        pick({...g,el:cell});
       },{passive:false});
-      // Mouse fallback for non-touch devices. Will not double-fire because
-      // touchend's preventDefault cancels the synthetic click on iOS.
-      el.addEventListener('click',ev=>{
+      // Mouse fallback; won't double-fire because touchend cancels the synthetic click.
+      cell.addEventListener('click',ev=>{
         if(Date.now()-_giphyJustPicked<600)return;
-        ev.preventDefault();pick({...g,el});
+        ev.preventDefault();pick({...g,el:cell});
       });
-      picker.appendChild(el);
-      items.push({...g,el});
+      grid.appendChild(cell);
+      items.push({...g,el:cell});
     }
-    addCloseBtn();
+    show();
     setActive(0);
   }
   async function search(q){
     if(q===lastQuery)return;
     lastQuery=q;
-    if(!_giphyKey()){ renderNoKey(); return; }
+    if(_gifCfg.mode==='off'){ renderDisabled(); return; }
+    if(!_gifHasSource()){ renderNoKey(); return; }
+    _brand();
     renderLoading(q);
-    const list=await giphyFetchList(q,10);
-    const now=_extractQuery(inp.value);
-    if(now!==q)return;
+    const list=await giphyFetchList(q,LIMIT);
+    if(_extractQuery(inp.value)!==q){ if(lastQuery===q)lastQuery=''; return; }   // user moved on while the fetch was in flight; clear lastQuery so re-typing the same term re-fetches (no skeleton wedge)
     renderResults(list,q);
   }
   function _extractQuery(v){
     const m=v.match(/^\/(giphy|gif)\s+(.+)$/i);
     if(!m)return null;
     const rest=m[2].trim();
-    // Don't trigger the live picker when the input is actually a subcommand
-    // like `/giphy key <secret>` or `/giphy rating pg`. Otherwise the picker
-    // would search Giphy with your API KEY as the query — leaking it in the
-    // GET URL to Giphy's servers.
+    // Don't trigger the live picker for subcommands like `/giphy key <secret>`
+    // or `/giphy rating pg` — otherwise the picker would search Giphy with your
+    // API KEY as the query, leaking it in the GET URL to Giphy's servers.
     const firstWord=rest.split(/\s+/)[0].toLowerCase();
     if(firstWord==='key'||firstWord==='rating')return null;
     return rest;
   }
+  // Close (X) button — clears the "/giphy ..." prefix so the picker doesn't
+  // immediately reopen on the next input event. Same iOS touchend fix as thumbs.
+  const doClose=e=>{
+    if(e){e.preventDefault();e.stopPropagation();}
+    if(_extractQuery(inp.value)!=null) inp.value='';
+    close();
+  };
+  let _cbStart=null;
+  closeBtn.addEventListener('touchstart',ev=>{const t=ev.touches[0];_cbStart={x:t.clientX,y:t.clientY};},{passive:true});
+  closeBtn.addEventListener('touchend',ev=>{ if(!_cbStart)return;_cbStart=null;_giphyJustPicked=Date.now();doClose(ev); },{passive:false});
+  closeBtn.addEventListener('click',ev=>{ if(Date.now()-_giphyJustPicked<600)return; doClose(ev); });
+
   inp.addEventListener('input',()=>{
-    // Cancel any pending search when input changes — even if we're about to
-    // call search() again, this prevents a stale fetch from landing after the
-    // user has started typing `/giphy key` or otherwise moved on.
+    // Cancel any pending search on every change so a stale fetch can't land after
+    // the user has started typing `/giphy key` or moved on entirely.
     clearTimeout(debounceTimer);
     const q=_extractQuery(inp.value);
-    if(!q){close();return;}
+    if(!q){ if(picker.style.display!=='none')close(); return; }
     debounceTimer=setTimeout(()=>search(q),300);
   });
-  // Register at document CAPTURE phase so we intercept Enter BEFORE the
-  // msg-input's own bubble-phase handler (which would send "/giphy query" as
-  // a literal command). stopImmediatePropagation ensures nothing downstream
-  // sees the Enter once we've committed to a pick.
-  document.addEventListener('keydown',async e=>{
-    if(picker.style.display==='none')return;
+  // Capture phase so we intercept Enter/Arrows BEFORE msg-input's own bubble
+  // handler (which would send "/giphy query" as a literal command).
+  document.addEventListener('keydown',e=>{
+    if(!isOpen())return;
     if(document.activeElement!==inp)return;
     if(!items.length){
-      // Even with an empty picker, Escape should close it
-      if(e.key==='Escape'){e.preventDefault();e.stopImmediatePropagation();close();}
+      // Tray open but nothing to pick yet (loading skeletons / no results / no key):
+      // swallow nav + commit keys so Enter doesn't fall through to msg-input and
+      // send the literal "/giphy <query>" as a message. Normal typing passes through.
+      if(e.key==='Enter'||e.key==='Tab'||e.key==='Escape'||e.key.indexOf('Arrow')===0){
+        e.preventDefault();e.stopImmediatePropagation();
+        if(e.key==='Escape')close();
+      }
       return;
     }
-    if(e.key==='ArrowRight'||e.key==='Tab'){e.preventDefault();e.stopImmediatePropagation();setActive(idx+1);}
-    else if(e.key==='ArrowLeft'){e.preventDefault();e.stopImmediatePropagation();setActive(idx-1);}
+    const cols=gridCols();
+    if(e.key==='ArrowRight'||(e.key==='Tab'&&!e.shiftKey)){e.preventDefault();e.stopImmediatePropagation();setActive(idx+1);}
+    else if(e.key==='ArrowLeft'||(e.key==='Tab'&&e.shiftKey)){e.preventDefault();e.stopImmediatePropagation();setActive(idx-1);}
+    else if(e.key==='ArrowDown'){e.preventDefault();e.stopImmediatePropagation();setActive(idx+cols);}
+    else if(e.key==='ArrowUp'){e.preventDefault();e.stopImmediatePropagation();setActive(idx-cols);}
     else if(e.key==='Enter'){
       const sel=items[idx];
       if(sel){e.preventDefault();e.stopImmediatePropagation();pick(sel);}
@@ -7985,23 +8076,20 @@ async function giphyFetchList(query, n){
     if(!active)return;
     const{conn_id,target}=active;
     const url=sel.url;
-    // Clear the input and close the picker first
     inp.value=''; close();
     const gifWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,url):null;
     if(gifWire) wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${gifWire}`});
     else wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${url}`});
     addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:url,kind:'privmsg',encrypted:!!gifWire});
   }
-  // Close on click outside. The <600ms guard suppresses the stray synthetic
-  // click iOS fires after a thumb tap — at that point the picker has shifted
-  // due to keyboard dismissal layout, so the click target is likely body/html,
-  // which would otherwise incorrectly close an already-handled pick.
+  // Close on click outside. The <600ms guard suppresses the stray synthetic click
+  // iOS fires after a thumb tap (by then the picker has shifted from keyboard
+  // dismissal, so the click target is likely body/html).
   document.addEventListener('click',e=>{
     if(Date.now()-_giphyJustPicked<600)return;
     if(!e.target.closest('#giphy-picker')&&!e.target.closest('#msg-input'))close();
   });
 })();
-
 // ─── Security panel ──────────────────────────────────────────────────────────
 function showSecurityPanel(){
   const el=id=>document.getElementById(id);
@@ -9178,6 +9266,7 @@ function gatherPreferences(){
     // Giphy: per-user API key + content rating, synced across devices via
     // the user's encrypted prefs blob so they only have to set it once.
     giphyKey: localStorage.getItem('cryptirc_giphy_key')||'',
+    tenorKey: localStorage.getItem('cryptirc_tenor_key')||'',
     giphyRating: localStorage.getItem('cryptirc_giphy_rating')||'',
   };
 }
@@ -9309,6 +9398,10 @@ function restorePreferences(p){
     if(p.giphyKey!==undefined){
       if(p.giphyKey) localStorage.setItem('cryptirc_giphy_key',p.giphyKey);
       else localStorage.removeItem('cryptirc_giphy_key');
+    }
+    if(p.tenorKey!==undefined){
+      if(p.tenorKey) localStorage.setItem('cryptirc_tenor_key',p.tenorKey);
+      else localStorage.removeItem('cryptirc_tenor_key');
     }
     if(p.giphyRating){
       localStorage.setItem('cryptirc_giphy_rating',p.giphyRating);
@@ -12038,7 +12131,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.2';
+const CRYPTIRC_VERSION='0.3.3';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -12046,6 +12139,11 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.3', date:'June 2026', items:[
+    {tag:'new', text:'Redesigned GIF picker: type /gif <search> for a smooth, scrollable grid of results — pick one with a tap, or the arrow keys + Enter. Much nicer on mobile.'},
+    {tag:'new', text:'GIFs now work with Giphy or Tenor. Your server admin can set a shared key so /gif just works with no setup — or keep using your own (set it with /gif key). Admins pick the provider and mode in the Admin panel.'},
+    {tag:'fix', text:'Channel operators: /kickall, /massvoice and /mvall work again (they were silently failing).'},
+  ]},
   {version:'0.3.2', date:'June 2026', items:[
     {tag:'new', text:'New unified Messages tab: all your private messages from every network land in one tidy inbox at the top of the sidebar (just like your phone). Tap a conversation to open and reply. On by default — turn it off in Appearance ▸ Messages tab.'},
   ]},
@@ -12175,6 +12273,44 @@ async function showAdminPanel(){
     `;
     body.appendChild(lpSection);
 
+    // GIF picker (Giphy / Tenor) — provider + mode + shared keys (held server-side)
+    const gifSection=document.createElement('div');
+    gifSection.style.cssText='margin-bottom:16px;padding:14px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;';
+    const gp=settings.gif_provider||'giphy', gm=settings.gif_mode||'user';
+    const gkPh=settings.giphy_key_set?`${esc(settings.giphy_key_masked||'')} — leave blank to keep`:'Paste your Giphy API key';
+    const tkPh=settings.tenor_key_set?`${esc(settings.tenor_key_masked||'')} — leave blank to keep`:'Paste your Tenor (Google) API key';
+    gifSection.innerHTML=`
+      <div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">GIF Picker</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:13px;color:var(--text);flex-shrink:0;width:70px">Provider</span>
+        <select id="admin-gif-provider" style="flex:1;padding:6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px" onchange="adminSaveGif()">
+          <option value="giphy"${gp==='giphy'?' selected':''}>Giphy</option>
+          <option value="tenor"${gp==='tenor'?' selected':''}>Tenor (Google)</option>
+        </select>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:13px;color:var(--text);flex-shrink:0;width:70px">Mode</span>
+        <select id="admin-gif-mode" style="flex:1;padding:6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px" onchange="adminSaveGif()">
+          <option value="off"${gm==='off'?' selected':''}>Off — disable GIFs server-wide</option>
+          <option value="user"${gm==='user'?' selected':''}>Own key — each user supplies their own</option>
+          <option value="server"${gm==='server'?' selected':''}>Shared key — everyone uses the key below</option>
+        </select>
+      </div>
+      <div style="font-size:10px;color:var(--text3);margin-bottom:10px">In Shared mode everyone uses the active provider's key below; a user who set their own key still uses theirs.</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:13px;color:var(--text);flex-shrink:0;width:70px">Giphy key</span>
+        <input id="admin-gif-giphy-key" type="password" autocomplete="off" placeholder="${gkPh}" style="flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:13px;padding:8px;outline:none;box-sizing:border-box">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span style="font-size:13px;color:var(--text);flex-shrink:0;width:70px">Tenor key</span>
+        <input id="admin-gif-tenor-key" type="password" autocomplete="off" placeholder="${tkPh}" style="flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:13px;padding:8px;outline:none;box-sizing:border-box">
+        <button onclick="adminSaveGif()" style="background:linear-gradient(135deg,#00d4aa,#0099ff);border:none;border-radius:6px;color:#000;font-weight:700;padding:8px 14px;cursor:pointer;min-height:38px;flex-shrink:0">Save</button>
+      </div>
+      <div style="font-size:10px;color:var(--text3);margin-top:6px">Giphy: developers.giphy.com → Create App → API. Tenor: Google Cloud → enable the Tenor API → API key. Keys are stored on the server, never shown to users.</div>
+      <div id="admin-gif-msg" style="font-size:11px;color:var(--accent);margin-top:6px"></div>
+    `;
+    body.appendChild(gifSection);
+
     // User list
     const userSection=document.createElement('div');
     userSection.innerHTML='<div style="font-size:12px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Users</div>';
@@ -12263,6 +12399,31 @@ async function adminSaveLinkPreview(){
     });
     showToast('Link preview settings saved');
   }catch(e){}
+}
+async function adminSaveGif(){
+  const provider=document.getElementById('admin-gif-provider')?.value;
+  const mode=document.getElementById('admin-gif-mode')?.value;
+  const gk=document.getElementById('admin-gif-giphy-key');
+  const tk=document.getElementById('admin-gif-tenor-key');
+  const payload={};
+  if(provider) payload.gif_provider=provider;
+  if(mode) payload.gif_mode=mode;
+  // Blank key field = keep current (server side honors this); only send non-empty.
+  if(gk&&gk.value.trim()) payload.giphy_server_key=gk.value.trim();
+  if(tk&&tk.value.trim()) payload.tenor_server_key=tk.value.trim();
+  const msg=document.getElementById('admin-gif-msg');
+  try{
+    const r=await fetch('/cryptirc/admin/settings',{
+      method:'PUT',
+      headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
+      body:JSON.stringify(payload)
+    });
+    if(r.ok){
+      if(gk) gk.value=''; if(tk) tk.value='';   // don't leave raw keys sitting in the DOM
+      if(msg){ msg.textContent='GIF settings saved.'; setTimeout(()=>{ if(msg) msg.textContent=''; },2500); }
+      _loadGifConfig();   // refresh this admin's own client so their picker reflects the change
+    } else if(msg){ msg.textContent='Save failed.'; }
+  }catch(e){ if(msg) msg.textContent='Save failed.'; }
 }
 
 async function adminDisableUser(username){

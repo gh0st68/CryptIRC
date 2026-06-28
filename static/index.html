@@ -1335,41 +1335,159 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
 #theme-bg-layer.repeat {
   background-size: auto; background-repeat: repeat;
 }
-/* ── Giphy picker thumbnails ─────────────────────────────────────────────── */
+/* ── Giphy reaction tray ──────────────────────────────────────────────────────
+   Rises from the input bar like the slash-autocomplete. A scannable GIF GRID
+   (was a 1-row horizontal strip) with a "decrypt-scan" shimmer skeleton, so
+   frames appear to decrypt into view — on theme for an encrypted client, and it
+   doubles as the loading state (no reflow as GIFs arrive). All chrome is mono to
+   match the terminal identity; the GIFs carry the colour. Skin lives here so the
+   JS stays logic-only. */
+#giphy-picker {
+  position: absolute; left: 0; right: 0; bottom: calc(100% + 8px);
+  z-index: 102;
+  display: none;                       /* JS flips to flex on open */
+  flex-direction: column;
+  max-height: min(44vh, 420px);
+  background: linear-gradient(180deg, var(--bg1), var(--bg2));
+  border: 1px solid var(--border2);
+  border-radius: 14px;
+  box-shadow: 0 -10px 34px rgba(0,0,0,.55), 0 -2px 10px rgba(0,0,0,.32);
+  overflow: hidden;                    /* the grid scrolls, not the panel */
+  opacity: 0; transform: translateY(8px) scale(.985); transform-origin: bottom center;
+  transition: opacity .18s cubic-bezier(.2,.8,.2,1), transform .18s cubic-bezier(.2,.8,.2,1);
+  will-change: opacity, transform;
+}
+#giphy-picker.open { opacity: 1; transform: none; }
+#giphy-picker:not(.open) { pointer-events: none; }   /* fading-out tray can't be tapped */
+
+.giphy-head {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 10px 8px 13px;
+  border-bottom: 1px solid var(--border2);
+  font-family: var(--mono);
+}
+.giphy-eyebrow {
+  flex: 0 0 auto;
+  font-size: 10px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--accent);
+}
+.giphy-query {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12px; color: var(--text); font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.giphy-query::before { content: '▸\00a0'; color: var(--text3); font-weight: 400; }
+.giphy-query:empty { display: none; }
+.giphy-hint {
+  flex: 0 0 auto;
+  font-size: 10px; letter-spacing: .02em; color: var(--text3);
+  white-space: nowrap;
+}
+
+.giphy-grid {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  align-content: start;          /* top-align rows + scroll; don't stretch rows to fill */
+  gap: 8px; padding: 12px;
+  overflow-y: auto; overflow-x: hidden;
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  touch-action: pan-y; scrollbar-width: thin;
+}
+
+.giphy-cell, .giphy-skel {
+  position: relative; height: 104px;   /* fixed (definite) height: rows can't compress, grid scrolls */
+  border-radius: 10px; overflow: hidden;
+  background: var(--bg3);
+}
+.giphy-cell {
+  cursor: pointer;
+  outline: 2px solid transparent; outline-offset: -2px;
+  transition: outline-color .14s ease, transform .14s ease, box-shadow .14s ease;
+  -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
+  touch-action: manipulation;
+}
 .giphy-thumb {
-  height: 140px;
-  box-shadow: 0 2px 6px rgba(0,0,0,.4);
+  width: 100%; height: 100%;
+  object-fit: cover; display: block;
+  opacity: 0; transition: opacity .24s ease;   /* fade in on load → natural stagger */
 }
-.giphy-thumb:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0,0,0,.5);
+.giphy-thumb.loaded { opacity: 1; }
+.giphy-cell:hover { transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,0,0,.45); }
+.giphy-cell:active { transform: translateY(-1px) scale(.985); }
+.giphy-thumb-active {                 /* applied to the .giphy-cell */
+  outline-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent),
+              0 6px 18px color-mix(in srgb, var(--accent) 30%, transparent) !important;
+  transform: translateY(-2px);
 }
-/* Mobile: shorter thumbs to free vertical space and fit more per scroll */
-@media (max-width: 600px) {
-  .giphy-thumb { height: 96px; }
-  #giphy-picker { padding: 8px 10px !important; }
+
+/* "decrypt-scan" shimmer — on skeletons, and on each cell until its GIF loads */
+.giphy-skel::after,
+.giphy-cell:not(.loaded-cell)::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(100deg,
+    transparent 18%,
+    color-mix(in srgb, var(--accent) 10%, transparent) 42%,
+    color-mix(in srgb, var(--accent) 20%, transparent) 50%,
+    color-mix(in srgb, var(--accent) 10%, transparent) 58%,
+    transparent 82%);
+  background-size: 220% 100%;
+  animation: giphyScan 1.15s linear infinite;
 }
-@media (max-width: 400px) {
-  .giphy-thumb { height: 84px; }
-}
-.giphy-thumb-active {
-  outline: 2px solid var(--accent) !important;
-  box-shadow: 0 0 0 2px rgba(0,212,170,.15), 0 4px 14px rgba(0,212,170,.25) !important;
-  transform: translateY(-1px);
-}
-.giphy-close-btn {
-  position: absolute; top: 6px; right: 8px;
-  background: rgba(20,24,32,.85); border: 1px solid var(--border2);
-  color: var(--text2); cursor: pointer;
-  border-radius: 50%; width: 24px; height: 24px;
-  font-size: 12px; line-height: 1; padding: 0;
-  z-index: 3;
+@keyframes giphyScan { from { background-position: 150% 0; } to { background-position: -150% 0; } }
+
+.giphy-broken::before {        /* failed preview → ⚠ instead of a blank tile */
+  content: '⚠'; position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
-  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
-  transition: background .12s, color .12s, transform .12s;
+  color: var(--text3); font-size: 20px;
 }
-.giphy-close-btn:hover { background: var(--bg4); color: var(--text); transform: scale(1.08); }
-.giphy-close-btn:active { transform: scale(.94); }
+.giphy-msg {
+  grid-column: 1 / -1;
+  padding: 16px 14px;
+  font-family: var(--mono); font-size: 12px; line-height: 1.55; color: var(--text2);
+}
+.giphy-msg code { color: var(--accent); }
+.giphy-msg strong { color: var(--text); }
+
+.giphy-foot {
+  flex: 0 0 auto;
+  padding: 6px 13px 7px; text-align: right;
+  border-top: 1px solid var(--border2);
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; color: var(--text3);
+}
+
+.giphy-close-btn {
+  flex: 0 0 auto; position: relative;   /* anchors the touch hit-area expander below */
+  width: 26px; height: 26px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg3); border: 1px solid var(--border2);
+  color: var(--text2); cursor: pointer;
+  border-radius: 8px; font-size: 12px; line-height: 1;
+  transition: background .12s, color .12s, transform .12s, border-color .12s;
+}
+.giphy-close-btn:hover { background: var(--bg4); color: var(--text); border-color: var(--accent); transform: translateY(-1px); }
+.giphy-close-btn:active { transform: scale(.92); }
+
+/* Mobile: more columns of smaller cells, taller tray, hide the keyboard hint */
+@media (max-width: 600px) {
+  #giphy-picker { max-height: min(50dvh, 50vh); border-radius: 12px; }
+  .giphy-grid { grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 7px; padding: 10px; }
+  .giphy-cell, .giphy-skel { height: 88px; }
+  .giphy-hint { display: none; }
+}
+@media (max-width: 380px) {
+  .giphy-grid { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); }
+  .giphy-cell, .giphy-skel { height: 78px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #giphy-picker { transition: opacity .12s linear; transform: none; }
+  .giphy-thumb { transition: none; }
+  .giphy-skel::after, .giphy-cell:not(.loaded-cell)::after {
+    animation: none; background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+}
 /* ── Animation overlay ─────────────────────────────────────────────────────── */
 #anim-overlay {
   display:none; position:fixed; inset:0; pointer-events:none; z-index:0; overflow:hidden;
@@ -1537,7 +1655,9 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
   .msg-img:hover { opacity:1; transform:none; }
   .msg-yt:hover, .msg-link-preview:hover { box-shadow:none; }
   .msg-nick:hover, .msg-body a:hover, .nick-mention:hover, .monitor-nick:hover { text-decoration:none; }
-  .giphy-close-btn:hover { transform:none; }
+  .giphy-close-btn:hover { transform:none; background:var(--bg3); color:var(--text2); border-color:var(--border2); }
+  .giphy-close-btn::after { content:''; position:absolute; inset:-9px; }  /* ~44px tap target, visual size unchanged */
+  .giphy-cell:hover { transform:none; box-shadow:none; }
   /* Per-message reply button: the hover-reveal at .msg-row:hover never triggers
      on touch, so keep it faintly visible with a real 44px hit area. */
   .msg-reply-btn { opacity:.4; padding:8px; right:2px; top:0; min-width:44px; min-height:44px; display:inline-flex; align-items:center; justify-content:center; }
