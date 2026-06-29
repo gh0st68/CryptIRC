@@ -68,6 +68,12 @@ pub struct User {
     /// Unix time of the most recent successful login (0 = never). Updated by login().
     #[serde(default)]
     pub last_login:    i64,
+    /// Last.fm username for the /np now-playing command (empty = not linked).
+    #[serde(default)]
+    pub lastfm_user:   String,
+    /// Optional per-user Last.fm API key; overrides the server's shared key.
+    #[serde(default)]
+    pub lastfm_key:    String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +357,8 @@ impl AuthManager {
             admin:         false,
             can_upload:    false,
             last_login:    0,
+            lastfm_user:   String::new(),
+            lastfm_key:    String::new(),
         };
         let json = serde_json::to_string_pretty(&user)?;
 
@@ -1105,6 +1113,43 @@ impl AuthManager {
             bail!("That email is already in use");
         }
         user.email = email_lower;
+        self.write_user_atomic(&uname, &user).await?;
+        Ok(())
+    }
+
+    /// Link / unlink the user's Last.fm username (+ optional own API key).
+    /// Empty user = disconnect (clears both). key = None/blank keeps the saved key.
+    pub async fn set_lastfm(&self, username: &str, lfm_user: &str, lfm_key: Option<&str>) -> Result<()> {
+        let uname = username.to_lowercase();
+        if !is_safe_username(&uname) { anyhow::bail!("Invalid username"); }
+        let lfm_user = lfm_user.trim();
+        if !lfm_user.is_empty() && (lfm_user.len() > 32
+            || !lfm_user.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')) {
+            bail!("Invalid Last.fm username (letters, numbers, _ and - only)");
+        }
+        // A provided key is validated; None or blank means "keep the current key".
+        let new_key = match lfm_key.map(|k| k.trim()) {
+            Some(k) if !k.is_empty() => {
+                if k.len() > 64 || !k.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    bail!("Invalid Last.fm API key");
+                }
+                Some(k.to_string())
+            }
+            _ => None,
+        };
+        let lock = self.user_lock(&uname);
+        let _guard = lock.lock().await;
+        let path = PathBuf::from(&self.data_dir).join("users").join(format!("{}.json", uname));
+        let json = tokio::fs::read_to_string(&path).await
+            .map_err(|_| anyhow::anyhow!("Account not found"))?;
+        let mut user: User = serde_json::from_str(&json)?;
+        if lfm_user.is_empty() {
+            user.lastfm_user = String::new();
+            user.lastfm_key = String::new();   // disconnect clears the saved key too
+        } else {
+            user.lastfm_user = lfm_user.to_string();
+            if let Some(k) = new_key { user.lastfm_key = k; }  // else keep existing key
+        }
         self.write_user_atomic(&uname, &user).await?;
         Ok(())
     }

@@ -3854,7 +3854,13 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v0.3.7 ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 172 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 172 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'NP': case 'NOWPLAYING': {
+        const sub=(args[0]||'').toLowerCase();
+        if(sub==='set'){ const u=(args[1]||'').trim(); if(!u){ sysMsg(conn_id,target,'Usage: /np set <your-lastfm-username>','error'); break; } doSetLastfm(conn_id,target,u); break; }
+        if(sub==='clear'||sub==='off'){ doSetLastfm(conn_id,target,''); break; }
+        doNowPlaying(conn_id,target,(args[0]||'').trim()); break;
+      }
       case 'GIPHY': case 'GIF': {
         const sub=(args[0]||'').toLowerCase();
         const _prov=_gifProviderLabel();
@@ -5305,6 +5311,22 @@ async function renderProfilePanel(){
       ${hasEmail?'':'<div style="font-size:11px;color:var(--warn);margin-top:8px">⚠ Without an email you cannot reset your password if you forget it.</div>'}
       <div id="profile-email-msg" style="font-size:11px;margin-top:8px;min-height:14px"></div>
     </div>
+    ${me.lastfm_enabled?`
+    <div style="${card}">
+      <div style="${lbl}">Last.fm 🎵</div>
+      <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">Last.fm username <span style="color:var(--text3)">— enables the /np now-playing command</span></label>
+      <div style="display:flex;gap:8px">
+        <input id="profile-lfm-user" type="text" value="${esc(me.lastfm_user||'')}" placeholder="your-lastfm-name" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:9px 11px;outline:none;box-sizing:border-box">
+        <button id="profile-lfm-save" onclick="saveProfileLastfm()" style="background:var(--accent);border:none;border-radius:8px;color:#04212a;font-weight:700;font-size:13px;padding:0 16px;cursor:pointer;flex:0 0 auto">Save</button>
+      </div>
+      <details style="margin-top:10px">
+        <summary style="font-size:11px;color:var(--text3);cursor:pointer">Advanced: use your own Last.fm API key</summary>
+        <input id="profile-lfm-key" type="text" placeholder="${me.lastfm_own_key?'•••• saved — leave blank to keep':'optional — overrides the server key'}" autocapitalize="none" autocomplete="off" spellcheck="false" style="width:100%;margin-top:8px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:9px 11px;outline:none;box-sizing:border-box">
+        <div style="font-size:11px;color:var(--text3);margin-top:6px">Most people leave this blank. Make one at last.fm/api only if the server has no shared key.</div>
+      </details>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px">Then type <b>/np</b> in any channel to share what you're playing. Clear the field and Save to disconnect.</div>
+      <div id="profile-lfm-msg" style="font-size:11px;margin-top:6px;min-height:14px"></div>
+    </div>`:''}
     <div style="${card}">
       <div style="${lbl}">Security</div>
       <button onclick="closeProfilePanel();showChangeClientPassword()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">🔑 <span>Change login password</span></button>
@@ -5327,6 +5349,43 @@ async function saveProfileEmail(){
     const d=await r.json();
     if(msg){ msg.textContent=d.message||(r.ok?'Saved.':'Failed'); msg.style.color=r.ok?'var(--join)':'var(--error)'; }
     if(r.ok){ showToast(d.message||'Email saved'); setTimeout(renderProfilePanel,700); }
+  }catch(e){ if(msg){msg.textContent='Network error';msg.style.color='var(--error)';} }
+  finally{ if(btn){btn.disabled=false;btn.textContent='Save';} }
+}
+// Fetch + post a now-playing line to the current channel/PM. `who` empty = your own.
+async function doNowPlaying(conn_id,target,who){
+  try{
+    const url='/cryptirc/api/lastfm/np'+(who?('?user='+encodeURIComponent(who)):'');
+    const r=await fetch(url,{headers:{'Authorization':'Bearer '+sessionToken}});
+    const d=await r.json();
+    if(!r.ok){ sysMsg(conn_id,target,d.error||'Last.fm lookup failed.','error'); return; }
+    const name=who?(d.user||who):getNick(conn_id);
+    const verb=d.now_playing?'is listening to':'last played';
+    const at=[d.artist,d.track].filter(Boolean).join(' – ');
+    if(!at){ sysMsg(conn_id,target,'Nothing to show for that user.','error'); return; }
+    // Strip control chars (incl CR/LF) so external track metadata can't inject IRC commands.
+    const line=('🎵 '+name+' '+verb+' '+at+(d.album?' ('+d.album+')':'')).replace(/[\u0000-\u001f]/g,' ');
+    wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${line}`});
+    addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:line,kind:'privmsg'});
+  }catch(e){ sysMsg(conn_id,target,'Network error talking to Last.fm.','error'); }
+}
+async function doSetLastfm(conn_id,target,user){
+  try{
+    const r=await fetch('/cryptirc/auth/lastfm',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({user})});
+    const d=await r.json();
+    sysMsg(conn_id,target,d.message||(r.ok?'Saved.':'Failed'),r.ok?'system':'error');
+  }catch(e){ sysMsg(conn_id,target,'Network error.','error'); }
+}
+async function saveProfileLastfm(){
+  const inp=document.getElementById('profile-lfm-user'); const keyInp=document.getElementById('profile-lfm-key'); const msg=document.getElementById('profile-lfm-msg'); if(!inp) return;
+  const user=inp.value.trim(); const key=keyInp?keyInp.value.trim():'';
+  const btn=document.getElementById('profile-lfm-save'); if(btn){btn.disabled=true;btn.textContent='Saving…';}
+  try{
+    const body={user}; if(key) body.key=key;  // omit blank key so the server keeps the saved one
+    const r=await fetch('/cryptirc/auth/lastfm',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify(body)});
+    const d=await r.json();
+    if(msg){ msg.textContent=d.message||(r.ok?'Saved.':'Failed'); msg.style.color=r.ok?'var(--join)':'var(--error)'; }
+    if(r.ok){ showToast(d.message||'Last.fm saved'); setTimeout(renderProfilePanel,700); }
   }catch(e){ if(msg){msg.textContent='Network error';msg.style.color='var(--error)';} }
   finally{ if(btn){btn.disabled=false;btn.textContent='Save';} }
 }
@@ -12253,7 +12312,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.7';
+const CRYPTIRC_VERSION='0.3.8';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -12261,6 +12320,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.8', date:'June 2026', items:[
+    {tag:'new', text:'Last.fm now-playing: link your Last.fm username in Settings ▸ Profile, then type /np in any channel to share what you’re playing (/np <user> looks up anyone). Your server admin enables it in the Admin panel.'},
+  ]},
   {version:'0.3.7', date:'June 2026', items:[
     {tag:'new', text:'Password Safe is now its own page in Settings, redesigned with a cleaner layout for your saved credentials.'},
     {tag:'new', text:'Your Profile window now holds both password changes — your login password and your vault passphrase — alongside your account, email and active sessions.'},
@@ -12358,6 +12420,8 @@ async function showAdminPanel(){
     const gp=settings.gif_provider||'giphy', gm=settings.gif_mode||'user';
     const gkPh=settings.giphy_key_set?`${esc(settings.giphy_key_masked||'')} — leave blank to keep`:'Paste your Giphy API key';
     const tkPh=settings.tenor_key_set?`${esc(settings.tenor_key_masked||'')} — leave blank to keep`:'Paste your Tenor (Google) API key';
+    const lfmOn=!!settings.lastfm_enabled;
+    const lfmPh=settings.lastfm_key_set?`${esc(settings.lastfm_key_masked||'')} — leave blank to keep`:'Paste a Last.fm API key (optional)';
 
     body.innerHTML=`
       <div class="adm-stats">
@@ -12401,6 +12465,15 @@ async function showAdminPanel(){
         <button class="adm-save" style="width:100%;margin-top:4px" onclick="adminSaveGif()">Save GIF settings</button>
         <div id="admin-gif-msg" style="font-size:11px;color:var(--accent);margin-top:8px"></div>
         <div class="adm-hint" style="margin-top:8px">Keys live on the server, never shown to users. Giphy: developers.giphy.com. Tenor: Google Cloud → enable the Tenor API.</div>
+      </div>
+
+      <div class="adm-card">
+        <div class="adm-ct">Last.fm now-playing 🎵</div>
+        <div class="adm-row"><span class="l">Enabled</span><select id="admin-lfm-enabled" class="adm-sel" onchange="adminSaveLastfm()"><option value="off"${lfmOn?'':' selected'}>Off</option><option value="on"${lfmOn?' selected':''}>On — users can /np</option></select></div>
+        <div class="adm-row"><span class="l">Shared API key</span><input id="admin-lfm-key" class="adm-in" type="password" autocomplete="off" placeholder="${lfmPh}"></div>
+        <button class="adm-save" style="width:100%;margin-top:4px" onclick="adminSaveLastfm()">Save Last.fm settings</button>
+        <div id="admin-lfm-msg" style="font-size:11px;color:var(--accent);margin-top:8px"></div>
+        <div class="adm-hint" style="margin-top:8px">One free key serves everyone — get it at last.fm/api. Users set their Last.fm username in Settings ▸ Profile; a user who pastes their own key uses theirs.</div>
       </div>
 
       <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.1em;margin:18px 0 11px;padding-left:9px;border-left:2px solid var(--accent)">Users <span style="color:var(--text3);font-weight:400;letter-spacing:0;text-transform:none;margin-left:4px">— tap to inspect</span></div>
@@ -12566,6 +12639,21 @@ async function adminSaveGif(){
       if(gk) gk.value=''; if(tk) tk.value='';   // don't leave raw keys sitting in the DOM
       if(msg){ msg.textContent='GIF settings saved.'; setTimeout(()=>{ if(msg) msg.textContent=''; },2500); }
       _loadGifConfig();   // refresh this admin's own client so their picker reflects the change
+    } else if(msg){ msg.textContent='Save failed.'; }
+  }catch(e){ if(msg) msg.textContent='Save failed.'; }
+}
+async function adminSaveLastfm(){
+  const en=document.getElementById('admin-lfm-enabled')?.value;
+  const k=document.getElementById('admin-lfm-key');
+  const payload={};
+  if(en) payload.lastfm_enabled=(en==='on');
+  if(k&&k.value.trim()) payload.lastfm_api_key=k.value.trim();   // blank = keep current
+  const msg=document.getElementById('admin-lfm-msg');
+  try{
+    const r=await fetch('/cryptirc/admin/settings',{method:'PUT',headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    if(r.ok){
+      if(k) k.value='';   // don't leave the raw key sitting in the DOM
+      if(msg){ msg.textContent='Last.fm settings saved.'; setTimeout(()=>{ if(msg) msg.textContent=''; },2500); }
     } else if(msg){ msg.textContent='Save failed.'; }
   }catch(e){ if(msg) msg.textContent='Save failed.'; }
 }

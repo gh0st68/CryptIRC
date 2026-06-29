@@ -29,6 +29,7 @@ mod crypto;
 mod e2e;
 mod email;
 mod irc;
+mod lastfm;
 mod logs;
 mod notifications;
 mod paste;
@@ -79,6 +80,9 @@ pub struct AppState {
     pub email_required:      Arc<tokio::sync::RwLock<bool>>,
     /// Whether the signup captcha is enforced (admin-toggleable; default ON).
     pub captcha_enabled:     Arc<tokio::sync::RwLock<bool>>,
+    /// Last.fm now-playing: feature on/off + the shared API key (admin-controlled).
+    pub lastfm_enabled:      Arc<tokio::sync::RwLock<bool>>,
+    pub lastfm_api_key:      Arc<tokio::sync::RwLock<String>>,
     /// Live signup captchas: id -> (answer, expires_at unix secs). One-time use, short TTL.
     pub captchas:            Arc<DashMap<String, (i64, i64)>>,
     pub admin_settings_lock: Arc<tokio::sync::Mutex<()>>,
@@ -613,7 +617,7 @@ pub struct LogLine { pub id: u64, pub ts: i64, pub from: String, pub text: Strin
 #[derive(Deserialize)] struct FileQuery    { token: Option<String> }
 #[derive(Serialize)]   struct AuthOkBody   { token: String, username: String }
 #[derive(Serialize)]   struct LoginErr     { message: String, captcha_required: bool }
-#[derive(Serialize)]   struct MeOk         { username: String, email: String, admin: bool }
+#[derive(Serialize)]   struct MeOk         { username: String, email: String, admin: bool, lastfm_user: String, lastfm_enabled: bool, lastfm_own_key: bool }
 #[derive(Serialize)]   struct Msg          { message: String }
 
 /// S6: Maximum size of a single inbound WebSocket text message.
@@ -725,6 +729,15 @@ async fn main() -> Result<()> {
         let ce = v.get("captcha_enabled").and_then(|x| x.as_bool()).unwrap_or(true);
         (er, ce)
     };
+    // Last.fm now-playing (admin-controlled). Default OFF; shared API key blank.
+    let (lastfm_enabled, lastfm_api_key) = {
+        let v: serde_json::Value = if admin_settings_path.exists() {
+            serde_json::from_str(&std::fs::read_to_string(&admin_settings_path).unwrap_or_default()).unwrap_or_default()
+        } else { serde_json::json!({}) };
+        let en = v.get("lastfm_enabled").and_then(|x| x.as_bool()).unwrap_or(false);
+        let key = v.get("lastfm_api_key").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        (en, key)
+    };
     let gif_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build().unwrap_or_else(|_| reqwest::Client::new());
@@ -775,6 +788,8 @@ async fn main() -> Result<()> {
         max_upload_mb:     Arc::new(tokio::sync::RwLock::new(max_upload_mb)),
         email_required:    Arc::new(tokio::sync::RwLock::new(email_required)),
         captcha_enabled:   Arc::new(tokio::sync::RwLock::new(captcha_enabled)),
+        lastfm_enabled:    Arc::new(tokio::sync::RwLock::new(lastfm_enabled)),
+        lastfm_api_key:    Arc::new(tokio::sync::RwLock::new(lastfm_api_key)),
         captchas:          Arc::new(DashMap::new()),
         admin_settings_lock: Arc::new(tokio::sync::Mutex::new(())),
         base_path: bp_trimmed.to_string(),
@@ -863,6 +878,8 @@ async fn main() -> Result<()> {
         .route("/auth/status",           get(route_auth_status))
         .route("/auth/captcha",          get(route_captcha))
         .route("/auth/set-email",        post(route_set_email).layer(DefaultBodyLimit::max(8_192)))
+        .route("/auth/lastfm",           post(route_set_lastfm).layer(DefaultBodyLimit::max(4_096)))
+        .route("/api/lastfm/np",         get(route_lastfm_np))
         .route("/admin/users",           get(route_admin_users))
         .route("/admin/user/:username",  axum::routing::delete(route_admin_delete_user))
         .route("/admin/user/:username/disable", post(route_admin_disable_user))
@@ -1186,6 +1203,7 @@ async fn route_admin_get_settings(State(state): State<AppState>, headers: Header
     let upload_mb = *state.max_upload_mb.read().await;
     let giphy_key = state.giphy_server_key.read().await.clone();
     let tenor_key = state.tenor_server_key.read().await.clone();
+    let lastfm_key = state.lastfm_api_key.read().await.clone();
     Json(serde_json::json!({
         "registration_open": open,
         "registration_code": code,
@@ -1199,6 +1217,9 @@ async fn route_admin_get_settings(State(state): State<AppState>, headers: Header
         "tenor_key_set": !tenor_key.is_empty(),
         "giphy_key_masked": mask_key(&giphy_key),
         "tenor_key_masked": mask_key(&tenor_key),
+        "lastfm_enabled": *state.lastfm_enabled.read().await,
+        "lastfm_key_set": !lastfm_key.is_empty(),
+        "lastfm_key_masked": mask_key(&lastfm_key),
     })).into_response()
 }
 
@@ -1215,6 +1236,9 @@ struct AdminSettings {
     gif_mode: Option<String>,
     giphy_server_key: Option<String>,
     tenor_server_key: Option<String>,
+    // Last.fm (optional; omitted = keep current, blank key = keep current).
+    lastfm_enabled: Option<bool>,
+    lastfm_api_key: Option<String>,
 }
 
 /// Mask a secret for display in the admin UI: "abcd…yz", never the full key.
@@ -1299,6 +1323,11 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
         let k = k.trim();
         if !k.is_empty() { *state.tenor_server_key.write().await = k.to_string(); }
     }
+    if let Some(e) = body.lastfm_enabled { *state.lastfm_enabled.write().await = e; }
+    if let Some(k) = body.lastfm_api_key {
+        let k = k.trim();
+        if !k.is_empty() { *state.lastfm_api_key.write().await = k.to_string(); }
+    }
     // Persist admin settings to disk under lock to prevent concurrent read-modify-write races
     let _guard = state.admin_settings_lock.lock().await;
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
@@ -1314,6 +1343,8 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     existing["gif_mode"] = serde_json::json!(*state.gif_mode.read().await);
     existing["giphy_server_key"] = serde_json::json!(*state.giphy_server_key.read().await);
     existing["tenor_server_key"] = serde_json::json!(*state.tenor_server_key.read().await);
+    existing["lastfm_enabled"] = serde_json::json!(*state.lastfm_enabled.read().await);
+    existing["lastfm_api_key"] = serde_json::json!(*state.lastfm_api_key.read().await);
     let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
     drop(_guard);
     (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
@@ -1452,6 +1483,66 @@ async fn route_admin_set_email(State(state): State<AppState>, headers: HeaderMap
     match state.auth.set_email(&target, &body.email).await {
         Ok(_) => (StatusCode::OK, Json(Msg { message: format!("Email updated for '{}'.", target) })).into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, Json(Msg { message: e.to_string() })).into_response(),
+    }
+}
+
+#[derive(Deserialize)] struct LastfmBody { #[serde(default)] user: String, key: Option<String> }
+
+/// POST /auth/lastfm — link/unlink the caller's Last.fm username (+ optional own key).
+async fn route_set_lastfm(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<LastfmBody>) -> impl IntoResponse {
+    let Some(user) = extract_session_user(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let ip = client_ip(&headers);
+    if state.auth.check_ip_rate_limit("set_lastfm", ip.as_deref()).is_err()
+        || state.auth.check_user_create_rate_limit(&user, "set_lastfm").is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(Msg { message: "Too many changes — try again later.".into() })).into_response();
+    }
+    match state.auth.set_lastfm(&user, &body.user, body.key.as_deref()).await {
+        Ok(_) => {
+            let msg = if body.user.trim().is_empty() { "Last.fm disconnected." } else { "Last.fm username saved." };
+            (StatusCode::OK, Json(Msg { message: msg.into() })).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(Msg { message: e.to_string() })).into_response(),
+    }
+}
+
+/// GET /api/lastfm/np?user=<lastfm-user> — server-side now-playing lookup. ?user overrides
+/// the caller's linked username. Key resolves: caller's own key -> server shared key.
+async fn route_lastfm_np(State(state): State<AppState>, headers: HeaderMap, Query(params): Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    let Some(user) = extract_session_user(&state, &headers) else {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response();
+    };
+    if !*state.lastfm_enabled.read().await {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"Last.fm is not enabled on this server"}))).into_response();
+    }
+    if state.auth.check_user_create_rate_limit(&user, "lastfm_np").is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error":"Too many requests — slow down"}))).into_response();
+    }
+    let me = state.auth.get_user(&user).await;
+    // Whose now-playing? ?user= overrides; else the caller's own linked username.
+    let target = params.get("user").map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        .or_else(|| me.as_ref().map(|u| u.lastfm_user.clone()).filter(|s| !s.is_empty()));
+    let Some(target) = target else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Set your Last.fm username in Profile first, or use /np <lastfm-user>."}))).into_response();
+    };
+    // Validate before it goes into the outbound API URL (reqwest encodes, but keep it clean).
+    if target.len() > 32 || !target.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Invalid Last.fm username"}))).into_response();
+    }
+    // Key: the caller's own key wins, else the admin's shared key.
+    let key = {
+        let own = me.as_ref().map(|u| u.lastfm_key.clone()).unwrap_or_default();
+        if !own.is_empty() { own } else { state.lastfm_api_key.read().await.clone() }
+    };
+    if key.is_empty() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"No Last.fm API key — set your own in Profile, or ask the admin to add a shared key."}))).into_response();
+    }
+    match lastfm::now_playing(&state.gif_client, &key, &target).await {
+        Ok(t) => (StatusCode::OK, Json(serde_json::json!({
+            "user": target, "artist": t.artist, "track": t.track, "album": t.album, "now_playing": t.now_playing
+        }))).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e.to_string()}))).into_response(),
     }
 }
 
@@ -1623,11 +1714,12 @@ async fn route_reset_password(State(state): State<AppState>, headers: HeaderMap,
 async fn route_me(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     match bearer_token(&headers).and_then(|t| state.auth.validate_session(&t)) {
         Some(u) => {
-            let (email, admin) = match state.auth.get_user(&u).await {
-                Some(usr) => (usr.email, usr.admin),
-                None => (String::new(), false),
+            let (email, admin, lfm_user, lfm_own_key) = match state.auth.get_user(&u).await {
+                Some(usr) => (usr.email, usr.admin, usr.lastfm_user, !usr.lastfm_key.is_empty()),
+                None => (String::new(), false, String::new(), false),
             };
-            (StatusCode::OK, Json(MeOk { username: u, email, admin })).into_response()
+            let lfm_enabled = *state.lastfm_enabled.read().await;
+            (StatusCode::OK, Json(MeOk { username: u, email, admin, lastfm_user: lfm_user, lastfm_enabled: lfm_enabled, lastfm_own_key: lfm_own_key })).into_response()
         }
         None => (StatusCode::UNAUTHORIZED, Json(Msg { message: "Not authenticated".into() })).into_response(),
     }

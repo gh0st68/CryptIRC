@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Add a CryptIRC user from the command line (pre-verified, no email needed)
-# Usage: sudo bash adduser.sh <username> <email> <password>
-#   or:  sudo CRYPTIRC_NEW_PASS=<password> bash adduser.sh <username> <email>
+# Add a CryptIRC user from the command line (pre-verified; email is optional)
+# Usage: sudo CRYPTIRC_NEW_PASS=<password> bash adduser.sh <username> [email]
+#   or:  sudo bash adduser.sh <username> <email> <password>   (email may be empty: "")
 #
 # Prefer the env form — a password passed as the 3rd argument is briefly visible
 # to other local users via `ps` / /proc/<pid>/cmdline.
@@ -12,14 +12,31 @@ USERNAME="${1:-}"
 EMAIL="${2:-}"
 PASSWORD="${3:-${CRYPTIRC_NEW_PASS:-}}"
 
-if [[ -z "$USERNAME" || -z "$EMAIL" || -z "$PASSWORD" ]]; then
-    echo "Usage: sudo bash adduser.sh <username> <email> <password>"
-    echo "   or: sudo CRYPTIRC_NEW_PASS=<password> bash adduser.sh <username> <email>"
-    echo "Example: sudo CRYPTIRC_NEW_PASS=MySecurePass123 bash adduser.sh gh0st gh0st@example.com"
+if [[ -z "$USERNAME" || -z "$PASSWORD" ]]; then
+    echo "Usage: sudo CRYPTIRC_NEW_PASS=<password> bash adduser.sh <username> [email]"
+    echo "   or: sudo bash adduser.sh <username> <email> <password>   (email is optional — pass \"\" to skip)"
+    echo "Example: sudo CRYPTIRC_NEW_PASS=MySecurePass123 bash adduser.sh gh0st"
     exit 1
 fi
 
 USERNAME=$(echo "$USERNAME" | tr '[:upper:]' '[:lower:]')
+
+# Match the app's account rules (src/auth.rs register): 3-32 chars, [A-Za-z0-9_-].
+# Skipping this would let us write an account the app can't manage — delete/disable/
+# set-admin all reject it via is_safe_username() — i.e. an orphaned first admin.
+if [[ ${#USERNAME} -lt 3 || ${#USERNAME} -gt 32 ]]; then
+    echo "Error: Username must be 3-32 characters"
+    exit 1
+fi
+if [[ ! "$USERNAME" =~ ^[a-z0-9_-]+$ ]]; then
+    echo "Error: Username may only contain letters, numbers, underscore (_) and hyphen (-)"
+    exit 1
+fi
+if [[ -n "$EMAIL" && ( "$EMAIL" != *"@"* || ${#EMAIL} -gt 254 || "$EMAIL" == *" "* ) ]]; then
+    echo "Error: '$EMAIL' is not a valid email address (must contain @, no spaces) — or omit it to skip"
+    exit 1
+fi
+
 USER_FILE="$DATA_DIR/users/${USERNAME}.json"
 
 if [[ -f "$USER_FILE" ]]; then

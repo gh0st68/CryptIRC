@@ -1023,20 +1023,48 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         }
                     }
 
-                    // S4: bounded nick collision retry
+                    // S4: bounded nick collision retry — ONLY while still registering (pre-001).
+                    // During registration we need *a* nick to finish connecting, so auto-append
+                    // "_N". But once registered, a manual /nick that collides must surface the
+                    // server's message (e.g. "Nickname is already in use") and keep the user's
+                    // current nick — NOT silently switch it.
                     "432" | "433" | "436" => {
-                        nick_retries += 1;
-                        if nick_retries > MAX_NICK_RETRIES {
-                            return Err(anyhow::anyhow!("Nick collision: exhausted {} retries", MAX_NICK_RETRIES));
+                        if registered {
+                            // Show whatever the server said, in the status window (same as the
+                            // default numeric handler) instead of auto-changing the nick.
+                            let text = if p.params.len() > 1 {
+                                p.params[1..].join(" ")
+                            } else if !p.params.is_empty() {
+                                p.params.join(" ")
+                            } else {
+                                p.command.clone()
+                            };
+                            if !text.is_empty() {
+                                send(ServerEvent::IrcMessage {
+                                    conn_id: conn_id.to_string(),
+                                    from: nick_from_prefix(&p.prefix),
+                                    target: "status".to_string(),
+                                    text,
+                                    ts,
+                                    kind: MessageKind::Notice,
+                                    msg_id: 0,
+                                    prefix: None,
+                                });
+                            }
+                        } else {
+                            nick_retries += 1;
+                            if nick_retries > MAX_NICK_RETRIES {
+                                return Err(anyhow::anyhow!("Nick collision: exhausted {} retries", MAX_NICK_RETRIES));
+                            }
+                            let mut c = conn.lock().await;
+                            // Truncate to 28 chars before appending to stay within limits.
+                            // #19: take whole chars — c.nick is adopted from remote 001/NICK and
+                            // byte-slicing a multibyte nick would panic the connection task.
+                            let base = truncate_chars(&c.nick, 28);
+                            let new_nick = format!("{}_{}", base, nick_retries);
+                            c.nick = new_nick.clone();
+                            c.send_raw(&format!("NICK {}\r\n", new_nick)).await?;
                         }
-                        let mut c = conn.lock().await;
-                        // Truncate to 28 chars before appending to stay within limits.
-                        // #19: take whole chars — c.nick is adopted from remote 001/NICK and
-                        // byte-slicing a multibyte nick would panic the connection task.
-                        let base = truncate_chars(&c.nick, 28);
-                        let new_nick = format!("{}_{}", base, nick_retries);
-                        c.nick = new_nick.clone();
-                        c.send_raw(&format!("NICK {}\r\n", new_nick)).await?;
                     }
 
                     "PRIVMSG" => {

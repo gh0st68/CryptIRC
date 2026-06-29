@@ -24,14 +24,21 @@ if [[ "$SKIP_BACKUP" == "false" ]]; then
     TIMESTAMP=$(date +%Y%m%d-%H%M%S)
     BACKUP_FILE="$BACKUP_DIR/cryptirc-backup-${TIMESTAMP}.tar.gz"
     mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
 
     echo -e "${BOLD}Backing up data...${NC}"
-    tar czf "$BACKUP_FILE" -C /var/lib cryptirc 2>/dev/null && {
+    # The backup bundles Argon2 hashes, vaults and admin_settings (reg code) — create it
+    # 0600 (umask), not world-readable. And a FAILED backup must ABORT: it's the only
+    # safety net before we swap the binary, so continuing would defeat its whole purpose.
+    if (umask 0077; tar czf "$BACKUP_FILE" -C /var/lib cryptirc 2>/dev/null); then
         BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
         echo -e "  ${GREEN}✓ Backup saved:${NC} $BACKUP_FILE (${BACKUP_SIZE})"
-    } || {
-        echo -e "  ${YELLOW}⚠ Backup failed — continuing anyway${NC}"
-    }
+    else
+        rm -f "$BACKUP_FILE"
+        echo -e "  ${RED}✗ Backup failed — aborting update; nothing was changed.${NC}"
+        echo -e "  ${DIM}Check free space (df -h /var/lib) and that /var/lib/cryptirc exists, then retry.${NC}"
+        exit 1
+    fi
 
     # Keep only the last 5 backups
     ls -1t "$BACKUP_DIR"/cryptirc-backup-*.tar.gz 2>/dev/null | tail -n +6 | xargs rm -f 2>/dev/null || true
@@ -51,7 +58,16 @@ echo ""
 # ── Build ─────────────────────────────────────────────────────────────────────
 echo -e "${BOLD}Building new binary...${NC}"
 source "$HOME/.cargo/env" 2>/dev/null || true
-cargo build --release 2>&1 | tail -5
+BUILD_LOG=$(mktemp "${TMPDIR:-/tmp}/cryptirc-build.XXXXXX")   # mktemp: unpredictable name, no symlink-follow
+if ! cargo build --release 2>&1 | tee "$BUILD_LOG" | tail -5; then
+    echo -e "  ${RED}✗ Build failed — the service was NOT touched. First errors:${NC}"
+    grep -m3 -E '^error' "$BUILD_LOG" || tail -20 "$BUILD_LOG"
+    rm -f "$BUILD_LOG"; exit 1
+fi
+rm -f "$BUILD_LOG"
+# Guard the build-succeeded-but-no-binary case (e.g. an upstream bin rename) BEFORE we
+# stop the service — matches deploy.sh. A cp on a missing source would leave it down.
+[[ -f target/release/cryptirc ]] || { echo -e "  ${RED}✗ Build reported success but target/release/cryptirc is missing — aborting; service untouched.${NC}"; exit 1; }
 echo ""
 
 # ── Stop service ─────────────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ cd CryptIRC
 sudo bash deploy/deploy.sh
 ```
 
-The script is interactive — it asks for domain, email, registration mode, and creates the first admin user. **No domain?** Just press Enter at the domain prompt to serve on your server's IP with a self-signed certificate.
+The script is interactive — it asks for your domain, then walks through registration one question at a time (open sign-up? registration code? require email? set up email for password resets? captcha?), and finally creates the first admin user. **Email is optional** — open registration is protected by a built-in captcha, so a mail server is only needed if you want email verification or password resets. Every one of these is also changeable later in **Settings → Admin**. **No domain?** Just press Enter at the domain prompt to serve on your server's IP with a self-signed certificate (open registration still works there, captcha-protected).
 
 For a **fully non-interactive** install (no prompts — registration defaults to invite-only, no first user created):
 
@@ -152,7 +152,7 @@ LimitNPROC=512
 WantedBy=multi-user.target
 ```
 
-**Important**: Replace `yourdomain.com` and `noreply@yourdomain.com` with your actual domain and email.
+**Important**: Replace `yourdomain.com` and `noreply@yourdomain.com` with your actual domain and email. **On a bare IP / no domain**, also set `CRYPTIRC_BASE_URL` to `https://<your-ip>` and add `Environment=CRYPTIRC_HSTS=off` — HSTS on a self-signed cert makes browsers refuse the warning click-through and locks everyone out for ~2 years.
 
 Then enable and start:
 
@@ -214,6 +214,17 @@ yourdomain.com {
 
 **Important**: Replace `yourdomain.com` and `admin@yourdomain.com` with your actual values.
 
+> **No domain (bare IP / self-signed)?** Don't use the Let's Encrypt Caddyfile above — Caddy can't obtain a public cert for an IP, and the HSTS header would lock browsers out. Easiest path is the automated installer (`sudo bash deploy/deploy.sh <your-ip>`), which generates a self-signed cert and writes the right Caddyfile. To do it by hand, use the IP as the site address with Caddy's internal CA and **no** HSTS header:
+>
+> ```
+> https://203.0.113.10 {
+>     tls internal
+>     reverse_proxy localhost:9001
+> }
+> ```
+>
+> and set `CRYPTIRC_HSTS=off` in the service (above). Browsers show a one-time "proceed anyway" warning — expected and safe.
+
 ```bash
 sudo systemctl reload-or-restart caddy
 ```
@@ -237,8 +248,10 @@ Create an admin user:
 
 ```bash
 cd /path/to/CryptIRC
-# Pass the password via the environment so it isn't visible in `ps`:
-sudo CRYPTIRC_NEW_PASS=mypassword bash adduser.sh myusername myemail@example.com
+# Pass the password via the environment so it isn't visible in `ps`.
+# Email is optional — omit it to create an account with no email:
+sudo CRYPTIRC_NEW_PASS=mypassword bash adduser.sh myusername
+# ...or include one: sudo CRYPTIRC_NEW_PASS=mypassword bash adduser.sh myusername you@example.com
 ```
 
 Make them admin:
@@ -314,6 +327,8 @@ sudo certbot --nginx -d yourdomain.com
 | `CRYPTIRC_HSTS` | `on` | Set to `off` for self-signed/IP installs. HSTS on a self-signed cert makes browsers refuse the cert-warning click-through and locks users out for ~2 years. The installer sets this automatically. |
 | `RUST_LOG` | `info` | Log level: `error`, `warn`, `info`, `debug`, `trace` |
 
+> **Registration, email-required and the captcha** live in `admin_settings.json` in your data directory (the installer seeds it from your answers) and are edited live in **Settings → Admin**. `CRYPTIRC_REGISTRATION` / `CRYPTIRC_REG_CODE` above are only fallbacks used when that file doesn't exist yet. **`email_required` and the signup captcha have no environment variable** — they exist only in `admin_settings.json` / the Admin panel.
+
 ---
 
 ## Updating
@@ -358,6 +373,7 @@ journalctl -u cryptirc -n 50 --no-pager
 - Make sure the data directory is writable: `ls -la /var/lib/cryptirc/`
 
 ### Email verification not working
+- Email is **optional** — if you didn't enable it at install, open registration still works (captcha-protected) and accounts are auto-verified. You only need this section if you chose to require email or want password resets.
 - Install Postfix: `sudo apt-get install postfix`
 - Configure for local delivery: `sudo postconf -e "inet_interfaces = loopback-only"`
 - Check mail log: `tail -f /var/log/mail.log`

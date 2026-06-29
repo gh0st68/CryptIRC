@@ -133,10 +133,16 @@ url_host() { if is_ipv6 "$1"; then echo "[$1]"; else echo "$1"; fi; }
 # ── Banner ────────────────────────────────────────────────────────────────────
 logo
 
+# Preflight: make sure we're on the right distro family for THIS installer.
+command -v apt-get &>/dev/null || die "This is the Debian/Ubuntu installer, but apt-get isn't here. On Arch, run:  sudo bash deploy/deploy-arch.sh"
+
 # ── Step 1: where will this run? (domain vs bare IP / self-signed) ─────────────
 DOMAIN="${1:-}"
 EMAIL="${2:-}"
 INTERACTIVE=true; [[ -n "$DOMAIN" ]] && INTERACTIVE=false
+# No controlling terminal (AI assistant, CI, cloud-init, `ssh host '…'` without -t)?
+# Don't prompt — an unguarded read would hit EOF and exit 1 silently under set -e.
+[[ ! -t 0 ]] && INTERACTIVE=false
 SELF_SIGNED=false
 HOSTADDR=""
 
@@ -218,33 +224,62 @@ if [[ "$SELF_SIGNED" == false ]]; then
     fi
 fi
 
-# ── Step 3: registration mode ─────────────────────────────────────────────────
-step "[3/6] Registration"
-ENABLE_EMAIL=false
+# ── Step 3: registration & access ─────────────────────────────────────────────
+# Each setting is its own question with a sensible default — press Enter to take it.
+# Email is OPTIONAL (v0.3.6+): open registration is protected by the built-in
+# captcha, so a mail server is only needed for email verification or password
+# resets. email_required + captcha_enabled have no env var, so they're seeded into
+# admin_settings.json (Step 4). Everything here is also changeable later in the
+# Admin panel.
+step "[3/6] Registration & access"
+REG_OPEN=false           # open sign-up vs invite-only
+ENABLE_EMAIL=false       # configure Postfix (email sending) — only if needed
+EMAIL_REQUIRED=false     # require email verification to register
+CAPTCHA_ENABLED=true     # signup captcha (default on)
 REG_CODE=""
-REG_MODE="1"
+SETTINGS_KEPT=false
 
-if [[ "$SELF_SIGNED" == true ]]; then
-    # Open registration relies on email verification, which needs a real domain.
-    # On a bare IP we force invite-only and create accounts with adduser.sh.
-    echo -e "  ${GREEN}→ Invite only${NC} ${DIM}(open registration needs a domain for email; create users with adduser.sh)${NC}"
+if [[ -f "$DATA_DIR/admin_settings.json" ]]; then
+    # Re-run over an existing install: keep the operator's current settings rather than
+    # silently overwriting them. Skip the questions — they'd be ignored anyway, since the
+    # app treats admin_settings.json as the source of truth — and say so plainly.
+    SETTINGS_KEPT=true
+    echo -e "  ${DIM}Existing admin_settings.json found — keeping your current registration / email / captcha settings (change them in Settings → Admin).${NC}"
 elif [[ "$INTERACTIVE" == true ]]; then
-    echo "  How should new users register?"
-    echo -e "    ${BOLD}1)${NC} ${GREEN}Invite only${NC} — you create accounts manually (most secure)"
-    echo -e "    ${BOLD}2)${NC} ${CYAN}Open${NC} — anyone can register with email verification"
-    echo ""
-    read -rp "  Choose [1/2] (default 1): " REG_MODE
-    REG_MODE="${REG_MODE:-1}"
-    if [[ "$REG_MODE" == "2" ]]; then
-        ENABLE_EMAIL=true
-        echo -e "  ${CYAN}→ Open registration. Postfix will be configured for email.${NC}"
-        read -rp "  Require a registration code? (y/N): " WANT_CODE
+    read -rp "  Allow open registration (anyone can sign up)? [y/N]: " WANT_OPEN
+    if [[ "$WANT_OPEN" =~ ^[Yy] ]]; then
+        REG_OPEN=true
+        read -rp "  Require a registration code? [y/N]: " WANT_CODE
         if [[ "$WANT_CODE" =~ ^[Yy] ]]; then
-            read -rp "  Registration code: " REG_CODE
-            [[ -n "$REG_CODE" ]] && echo -e "  ${CYAN}→ Users must enter '${REG_CODE}' to register.${NC}"
+            # Loop until a non-blank code is entered — a blank one would silently
+            # mean "no gate", the opposite of what they just asked for.
+            while [[ -z "$REG_CODE" ]]; do
+                read -rp "    Registration code (cannot be blank): " REG_CODE
+                [[ -z "$REG_CODE" ]] && echo -e "  ${DIM}A blank code means no gate — type one, or Ctrl-C to abort.${NC}"
+            done
         fi
+        if [[ "$SELF_SIGNED" == true ]]; then
+            # No domain → outbound mail from a bare IP won't deliver reliably, so
+            # email verification/resets are off here; the captcha protects sign-up.
+            echo -e "  ${DIM}No domain set — sign-up is captcha-protected with no email (verification/resets need a domain).${NC}"
+        else
+            read -rp "  Require email verification to register? [y/N]: " WANT_REQ_EMAIL
+            if [[ "$WANT_REQ_EMAIL" =~ ^[Yy] ]]; then
+                EMAIL_REQUIRED=true
+                ENABLE_EMAIL=true   # verification can't work without a mail server
+                echo -e "  ${CYAN}→ Email required — Postfix will be configured.${NC}"
+            else
+                read -rp "  Set up email sending (enables password resets)? [y/N]: " WANT_EMAIL
+                [[ "$WANT_EMAIL" =~ ^[Yy] ]] && ENABLE_EMAIL=true
+            fi
+        fi
+        read -rp "  Enable the signup captcha? [Y/n]: " WANT_CAPTCHA
+        [[ "$WANT_CAPTCHA" =~ ^[Nn] ]] && CAPTCHA_ENABLED=false
+        _em="off"; [[ "$ENABLE_EMAIL" == true ]] && _em="optional"; [[ "$EMAIL_REQUIRED" == true ]] && _em="required"
+        _cap="on"; [[ "$CAPTCHA_ENABLED" == false ]] && _cap="off"
+        echo -e "  ${GREEN}→ Open registration${NC} ${DIM}(code: $([[ -n "$REG_CODE" ]] && echo set || echo none) · email: ${_em} · captcha: ${_cap})${NC}"
     else
-        echo -e "  ${GREEN}→ Invite only.${NC} ${DIM}Add users with adduser.sh.${NC}"
+        echo -e "  ${GREEN}→ Invite only.${NC} ${DIM}Create accounts with adduser.sh.${NC}"
     fi
 else
     echo -e "  ${GREEN}→ Invite only${NC} ${DIM}(default for non-interactive installs; add users with adduser.sh)${NC}"
@@ -264,7 +299,7 @@ pip3 install argon2-cffi --quiet --break-system-packages 2>/dev/null \
     || pip3 install argon2-cffi --quiet 2>/dev/null || true
 
 if [[ "$ENABLE_EMAIL" == true ]]; then
-    run "Installing Postfix" apt-get install -y postfix libsasl2-dev
+    run "Installing Postfix" apt-get install -y postfix
 fi
 ok "System packages installed"
 
@@ -302,7 +337,14 @@ if [[ "$ENABLE_EMAIL" == true ]]; then
     postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
     postconf -e "smtpd_relay_restrictions = permit_mynetworks, reject"
     systemctl enable --now postfix >/dev/null 2>&1 || true
+    # `enable --now` is a no-op if postfix's postinst already started it with stale
+    # config; reload (or restart) so the new myhostname/myorigin actually take effect.
+    systemctl reload postfix >/dev/null 2>&1 || systemctl restart postfix >/dev/null 2>&1 || true
     ok "Postfix configured"
+    warn "Heads up: email is sent straight from this server, so messages can land in spam"
+    echo -e "    ${DIM}or be rejected until you add DNS — a PTR/reverse-DNS record for this IP, an SPF${NC}"
+    echo -e "    ${DIM}record, and DKIM signing. A blacklisted VPS IP may be blocked outright; for${NC}"
+    echo -e "    ${DIM}reliable delivery, relay Postfix through a provider (Gmail / SES / SendGrid).${NC}"
 fi
 
 # Service user + directories
@@ -310,6 +352,37 @@ id "$SERVICE_USER" &>/dev/null || useradd --system --no-create-home --shell /bin
 mkdir -p "$INSTALL_DIR" "$DATA_DIR" "$LOG_DIR" /var/log/caddy
 chown "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR" "$LOG_DIR"
 chmod 750 "$DATA_DIR" "$LOG_DIR"
+
+# Seed admin_settings.json — the authoritative config the Admin panel also edits.
+# email_required + captcha_enabled have NO env var, so this is the only way to set
+# them at install. Written only on a fresh install; an existing file (e.g. an
+# operator's later Admin-panel changes) is never clobbered.
+SETTINGS_FILE="$DATA_DIR/admin_settings.json"
+if [[ ! -f "$SETTINGS_FILE" ]]; then
+    # Write via python3 (already a dependency) so the reg code is correctly JSON-encoded
+    # for ANY input — control chars, quotes, unicode — and the file is always valid JSON.
+    # An invalid file would make the server silently fall back to open, codeless registration.
+    CRYPTIRC_S_OPEN="$REG_OPEN" CRYPTIRC_S_CODE="$REG_CODE" \
+    CRYPTIRC_S_EMAILREQ="$EMAIL_REQUIRED" CRYPTIRC_S_CAPTCHA="$CAPTCHA_ENABLED" \
+    python3 - "$SETTINGS_FILE" <<'PY'
+import json, os, sys
+b = lambda v: v == "true"
+data = {
+    "registration_open": b(os.environ["CRYPTIRC_S_OPEN"]),
+    "registration_code": os.environ["CRYPTIRC_S_CODE"],
+    "email_required":    b(os.environ["CRYPTIRC_S_EMAILREQ"]),
+    "captcha_enabled":   b(os.environ["CRYPTIRC_S_CAPTCHA"]),
+}
+with open(sys.argv[1], "w") as f:
+    json.dump(data, f, indent=2)
+PY
+    chown "$SERVICE_USER:$SERVICE_USER" "$SETTINGS_FILE"
+    chmod 600 "$SETTINGS_FILE"
+    ok "Admin settings seeded (registration · email · captcha)"
+else
+    echo -e "  ${DIM}admin_settings.json exists — keeping current settings.${NC}"
+fi
+
 # Caddy runs as the 'caddy' user and writes its access log here; make sure it can.
 chown caddy:caddy /var/log/caddy 2>/dev/null || true
 
@@ -416,9 +489,12 @@ ok "Caddy configured"
 
 # systemd unit. For self-signed/IP, HSTS is turned OFF — otherwise the browser
 # would refuse the cert-warning click-through and lock everyone out for 2 years.
-CRYPTIRC_REG_VALUE="closed"; [[ "$ENABLE_EMAIL" == true ]] && CRYPTIRC_REG_VALUE="open"
+CRYPTIRC_REG_VALUE="closed"; [[ "$REG_OPEN" == true ]] && CRYPTIRC_REG_VALUE="open"
 HSTS_VALUE="on";            [[ "$SELF_SIGNED" == true ]] && HSTS_VALUE="off"
 FROM_EMAIL="${EMAIL:-noreply@localhost}"
+# Escape the reg code for systemd's Environment="K=v" quoting (admin_settings.json
+# is authoritative; this env var is only a fallback, but keep the unit file valid).
+REG_CODE_SYSTEMD=$(printf '%s' "$REG_CODE" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
 cat > /etc/systemd/system/cryptirc.service <<UNIT
 [Unit]
@@ -451,7 +527,7 @@ Environment=CRYPTIRC_BASE_PATH=/
 Environment=CRYPTIRC_PORT=9001
 Environment="CRYPTIRC_FROM_EMAIL=$FROM_EMAIL"
 Environment=CRYPTIRC_REGISTRATION=${CRYPTIRC_REG_VALUE}
-Environment="CRYPTIRC_REG_CODE=$REG_CODE"
+Environment="CRYPTIRC_REG_CODE=$REG_CODE_SYSTEMD"
 Environment=CRYPTIRC_HSTS=${HSTS_VALUE}
 Environment=RUST_LOG=info
 
@@ -498,8 +574,13 @@ ok "Services started"
 sleep 3
 if systemctl is-active --quiet cryptirc; then
     ok "CryptIRC is running"
+    SERVICE_OK=true
 else
     warn "CryptIRC isn't active yet. Check:  journalctl -u cryptirc -n 50 --no-pager"
+    SERVICE_OK=false
+fi
+if ! systemctl is-active --quiet caddy; then
+    warn "Caddy (reverse proxy) isn't active. Check:  journalctl -u caddy -n 50 --no-pager"
 fi
 
 # ── Firewall (ufw → firewalld → iptables) ─────────────────────────────────────
@@ -526,17 +607,16 @@ if [[ "$INTERACTIVE" == true ]]; then
     echo -e "${BOLD}Create your first user (admin)${NC}\n"
     read -rp "  Would you like to create a user now? (y/N): " CREATE_USER
     if [[ "$CREATE_USER" =~ ^[Yy] ]]; then
-        read -rp  "  Username (3-32 chars, letters/numbers/_): " NEW_USER
-        read -rp  "  Email [${NEW_USER:-user}@${DOMAIN}]: " NEW_EMAIL
+        read -rp  "  Username (3-32 chars; letters, numbers, _ and -): " NEW_USER
+        read -rp  "  Email (optional — Enter to skip): " NEW_EMAIL
         read -rsp "  Password (min 10 chars): " NEW_PASS; echo ""
-        NEW_EMAIL="${NEW_EMAIL:-${NEW_USER}@${DOMAIN}}"
         if [[ -z "$NEW_USER" || -z "$NEW_PASS" ]]; then
             warn "Skipped — username and password are required."
         elif [[ ${#NEW_PASS} -lt 10 ]]; then
             warn "Skipped — password must be at least 10 characters."
         else
             # Pass the password via env (NOT argv) so it never shows in ps / /proc.
-            if CRYPTIRC_NEW_PASS="$NEW_PASS" bash "$REPO_DIR/adduser.sh" "$NEW_USER" "$NEW_EMAIL" 2>"$RUN_LOG"; then
+            if CRYPTIRC_NEW_PASS="$NEW_PASS" bash "$REPO_DIR/adduser.sh" "$NEW_USER" "$NEW_EMAIL" >"$RUN_LOG" 2>&1; then
                 ok "User '${NEW_USER}' created"
                 USER_FILE="$DATA_DIR/users/$(echo "$NEW_USER" | tr '[:upper:]' '[:lower:]').json"
                 if [[ -f "$USER_FILE" ]] && CRYPTIRC_USER_FILE="$USER_FILE" python3 - <<'PY' 2>/dev/null
@@ -562,21 +642,35 @@ rm -f "$RUN_LOG" 2>/dev/null || true
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
+if [[ "$SERVICE_OK" == true ]]; then
 echo -e "${CYAN}║${NC}  ${GREEN}✓ CryptIRC is live!${NC}"
+else
+echo -e "${CYAN}║${NC}  ${YELLOW}⚠ Installed — but the service isn't running yet.${NC}"
+echo -e "${CYAN}║${NC}  ${DIM}Check: journalctl -u cryptirc -n 50 --no-pager${NC}"
+fi
 echo -e "${CYAN}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${CYAN}║${NC}  ${BOLD}URL${NC}: ${GREEN}https://${URL_HOST}${NC}"
 if [[ "$SELF_SIGNED" == true ]]; then
 echo -e "${CYAN}║${NC}  ${YELLOW}Self-signed cert:${NC} your browser shows a one-time warning."
 echo -e "${CYAN}║${NC}  ${DIM}Click \"Advanced\" → \"Proceed\" — that's expected & safe.${NC}"
-echo -e "${CYAN}║${NC}  Registration: ${GREEN}Invite only${NC}"
-echo -e "${CYAN}║${NC}  Add users: ${DIM}sudo CRYPTIRC_NEW_PASS=pw bash adduser.sh <user> <email>${NC}"
-elif [[ "$ENABLE_EMAIL" == true ]]; then
-echo -e "${CYAN}║${NC}  Registration: ${CYAN}Open${NC} (email verification)"
+fi
+if [[ "$SETTINGS_KEPT" == true ]]; then
+    echo -e "${CYAN}║${NC}  Registration: ${DIM}unchanged (existing settings kept — change in Settings → Admin)${NC}"
+elif [[ "$REG_OPEN" == true ]]; then
+    _rnote="captcha-protected"; [[ "$CAPTCHA_ENABLED" == false ]] && _rnote="no captcha"
+    if [[ "$EMAIL_REQUIRED" == true ]]; then _rdesc="email verification required"
+    elif [[ "$ENABLE_EMAIL" == true ]]; then _rdesc="email optional · ${_rnote}"
+    else _rdesc="${_rnote}"; fi
+    echo -e "${CYAN}║${NC}  Registration: ${CYAN}Open${NC} (${_rdesc})"
+    [[ -n "$REG_CODE" ]] && echo -e "${CYAN}║${NC}  ${DIM}Sign-up also requires your registration code.${NC}"
 else
 echo -e "${CYAN}║${NC}  Registration: ${GREEN}Invite only${NC}"
-echo -e "${CYAN}║${NC}  Add users: ${DIM}sudo CRYPTIRC_NEW_PASS=pw bash adduser.sh <user> <email>${NC}"
+echo -e "${CYAN}║${NC}  Add users: ${DIM}sudo CRYPTIRC_NEW_PASS=pw bash adduser.sh <user> [email]${NC}"
 fi
 echo -e "${CYAN}║${NC}"
+if [[ "$ENABLE_EMAIL" == true ]]; then
+echo -e "${CYAN}║${NC}  ${YELLOW}Email${NC}${DIM} can spam-folder until you set up SPF/DKIM/PTR (see notes above).${NC}"
+fi
 echo -e "${CYAN}║${NC}  ${DIM}status:  systemctl status cryptirc${NC}"
 echo -e "${CYAN}║${NC}  ${DIM}logs:    journalctl -u cryptirc -f${NC}"
 echo -e "${CYAN}║${NC}  ${DIM}update:  sudo bash deploy/update.sh${NC}"
