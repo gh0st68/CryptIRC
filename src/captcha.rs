@@ -27,12 +27,32 @@ pub fn generate() -> Captcha {
 }
 
 fn make_problem<R: Rng>(rng: &mut R) -> (String, i64) {
-    // EASY problems (small single-digit-ish operands) — but a mix of +/-/x so the answer
-    // isn't one obvious number. The per-IP register/login throttles are the real anti-bot bound.
+    // Widen the answer space (audit #8): use two-digit operands and a multi-term form
+    // (a*b + c) so the distinct-answer space runs into the hundreds/thousands rather than
+    // the trivially small ~1..27 range an OCR/brute-force attacker could enumerate.
+    // Answers are always non-negative integers. The per-IP register/login throttles plus
+    // the global attempt-counter (main.rs) remain the real anti-bot bound.
     match rng.gen_range(0..3) {
-        0 => { let a = rng.gen_range(2..=12); let b = rng.gen_range(1..=9); (format!("{} + {} = ?", a, b), a + b) }
-        1 => { let a = rng.gen_range(8..=15); let b = rng.gen_range(1..=7); (format!("{} - {} = ?", a, b), a - b) }
-        _ => { let a = rng.gen_range(2..=9);  let b = rng.gen_range(2..=3); (format!("{} x {} = ?", a, b), a * b) }
+        // Two-digit addition: answers ~24..198.
+        0 => {
+            let a = rng.gen_range(12..=99);
+            let b = rng.gen_range(12..=99);
+            (format!("{} + {} = ?", a, b), a + b)
+        }
+        // Two-digit subtraction with a >= b so the result stays non-negative: answers 0..87.
+        1 => {
+            let a = rng.gen_range(20..=99);
+            let b = rng.gen_range(10..=a);
+            (format!("{} - {} = ?", a, b), a - b)
+        }
+        // Multiply then add: a*b + c, answers up to ~12*12+50 = 194, with a large
+        // distinct-value spread that is not derivable from a single operand.
+        _ => {
+            let a = rng.gen_range(3..=12);
+            let b = rng.gen_range(3..=12);
+            let c = rng.gen_range(1..=50);
+            (format!("{} x {} + {} = ?", a, b, c), a * b + c)
+        }
     }
 }
 
@@ -94,13 +114,21 @@ fn render<R: Rng>(text: &str, rng: &mut R) -> Vec<u8> {
         }
     }
 
-    // Draw each glyph with independent jitter + slight colour variation.
+    // Draw each glyph with independent jitter, per-glyph rotation and slight colour
+    // variation (audit #8 — strengthen distortion to resist per-glyph segmentation/OCR).
+    let glyph_w = GW * scale;
+    let glyph_h = GH * scale;
+    let cx = (glyph_w as f32 - 1.0) / 2.0;
+    let cy = (glyph_h as f32 - 1.0) / 2.0;
     for (i, &ch) in chars.iter().enumerate() {
         let g = glyph(ch);
-        let jx = rng.gen_range(-1i32..=1);
-        let jy = rng.gen_range(-2i32..=2);
+        let jx = rng.gen_range(-2i32..=2);
+        let jy = rng.gen_range(-3i32..=3);
+        // Small per-glyph rotation in radians (±~17°).
+        let theta = rng.gen_range(-0.30f32..=0.30);
+        let (st, ct) = theta.sin_cos();
         let vary = |base: u8, r: &mut R| -> u8 {
-            (base as i32 + r.gen_range(-6i32..=6)).clamp(0, 255) as u8
+            (base as i32 + r.gen_range(-8i32..=8)).clamp(0, 255) as u8
         };
         let gc = (vary(fg.0, rng), vary(fg.1, rng), vary(fg.2, rng));
         let x0 = pad as i32 + (i * (GW * scale + gap)) as i32 + jx;
@@ -109,11 +137,16 @@ fn render<R: Rng>(text: &str, rng: &mut R) -> Vec<u8> {
             let row = g[r];
             for c in 0..GW {
                 if (row >> (GW - 1 - c)) & 1 == 1 {
-                    // Draw a scale x scale block for this font pixel.
+                    // Draw a scale x scale block for this font pixel, rotating each
+                    // sub-pixel about the glyph centre.
                     for dy in 0..scale {
                         for dx in 0..scale {
-                            let px = x0 + (c * scale + dx) as i32;
-                            let py = y0 + (r * scale + dy) as i32;
+                            let lx = (c * scale + dx) as f32 - cx;
+                            let ly = (r * scale + dy) as f32 - cy;
+                            let rx = lx * ct - ly * st + cx;
+                            let ry = lx * st + ly * ct + cy;
+                            let px = x0 + rx.round() as i32;
+                            let py = y0 + ry.round() as i32;
                             if px >= 0 && py >= 0 { put(&mut buf, px as usize, py as usize, gc); }
                         }
                     }
@@ -122,10 +155,15 @@ fn render<R: Rng>(text: &str, rng: &mut R) -> Vec<u8> {
         }
     }
 
-    // Interference: ONE thin, light line through the text — enough to break naive OCR
-    // without obscuring the digits.
+    // Interference: several thin lines through the text — enough to break naive OCR
+    // segmentation. Mix dark and mid tones so they can't be trivially thresholded away.
     let mid = (rng.gen_range(150..=190), rng.gen_range(150..=190), rng.gen_range(150..=190));
-    for _ in 0..1 {
+    for _ in 0..rng.gen_range(4..=6) {
+        let line_c = if rng.gen_bool(0.5) {
+            mid
+        } else {
+            (rng.gen_range(60..=110), rng.gen_range(60..=110), rng.gen_range(60..=110))
+        };
         let (mut x0, mut y0) = (rng.gen_range(0..w) as i32, rng.gen_range(0..h) as i32);
         let (x1, y1) = (rng.gen_range(0..w) as i32, rng.gen_range(0..h) as i32);
         // Bresenham
@@ -133,17 +171,22 @@ fn render<R: Rng>(text: &str, rng: &mut R) -> Vec<u8> {
         let dy = -(y1 - y0).abs(); let sy = if y0 < y1 { 1 } else { -1 };
         let mut err = dx + dy;
         loop {
-            put(&mut buf, x0 as usize, y0 as usize, mid);
+            put(&mut buf, x0 as usize, y0 as usize, line_c);
             if x0 == x1 && y0 == y1 { break; }
             let e2 = 2 * err;
             if e2 >= dy { err += dy; x0 += sx; }
             if e2 <= dx { err += dx; y0 += sy; }
         }
     }
-    // Light, sparse speckle in a mid tone (faint texture, not obscuring dots).
-    for _ in 0..(w * h / 220) {
+    // Denser speckle in mixed tones (texture that defeats simple denoise/threshold OCR).
+    for _ in 0..(w * h / 40) {
         let x = rng.gen_range(0..w); let y = rng.gen_range(0..h);
-        put(&mut buf, x, y, mid);
+        let dot = if rng.gen_bool(0.4) {
+            (rng.gen_range(40..=100), rng.gen_range(40..=100), rng.gen_range(40..=100))
+        } else {
+            mid
+        };
+        put(&mut buf, x, y, dot);
     }
 
     // Sine warp: remap each output pixel from a source shifted by sin(y) horizontally

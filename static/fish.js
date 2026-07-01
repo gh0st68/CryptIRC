@@ -235,9 +235,9 @@ Fish.prototype.start = function(){
 
 // drop a food flake at (clamped) screen coords; the fish will glide over to eat it
 Fish.prototype.feed = function(px, py){
-  if(this._dead || this._food.length >= FOOD_CAP) return;
+  if(this._dead || document.hidden || this._food.length >= FOOD_CAP) return;
   var f = document.createElement('div');
-  f.className = 'fishfood';
+  f.className = 'fishfood'; f.setAttribute('data-pet','fish');
   var x = Math.max(2, Math.min(px - 3.5, this.screenW - 9));
   // Keep the flake within the fish's vertical reach so it can always be eaten
   // (the fish centre can descend to screenH - H/2; require the flake centre at/above it).
@@ -407,8 +407,8 @@ Fish.prototype._removePlankton = function(i, eaten){
 
 // ── tiny effect spawners (all pointer-events:none; tracked removal) ──────────
 Fish.prototype._spawnRing = function(cx, cy, sz){
-  if(this._dead) return;
-  var r = document.createElement('div'); r.className='fishring';
+  if(this._dead || document.hidden) return;
+  var r = document.createElement('div'); r.className='fishring'; r.setAttribute('data-pet','fish');
   r.style.width=sz+'px'; r.style.height=sz+'px';
   r.style.left=Math.max(0,Math.min(cx-sz/2,this.screenW-sz))+'px';
   r.style.top =Math.max(0,Math.min(cy-sz/2,this.screenH-sz))+'px';
@@ -416,8 +416,8 @@ Fish.prototype._spawnRing = function(cx, cy, sz){
   this._after(3500, function(){ if(r.parentNode) r.parentNode.removeChild(r); });
 };
 Fish.prototype._spawnSpark = function(cx, cy){
-  if(this._dead) return;
-  var s = document.createElement('div'); s.className='fishspark';
+  if(this._dead || document.hidden) return;
+  var s = document.createElement('div'); s.className='fishspark'; s.setAttribute('data-pet','fish');
   s.style.left=Math.max(0,Math.min(cx-2.5,this.screenW-5))+'px';
   s.style.top =Math.max(0,Math.min(cy-2.5,this.screenH-5))+'px';
   document.body.appendChild(s);
@@ -462,7 +462,7 @@ Fish.prototype._fancySurfaceNibble = function(){
   this.ty = this._bandTop(); this.tx = this.x; this.restT = 240;   // glide up & linger
   this._after(2600, function(){
     if(self._dead){ self._fancyBusy=false; return; }
-    var rp = document.createElement('div'); rp.className='fishripple';
+    var rp = document.createElement('div'); rp.className='fishripple'; rp.setAttribute('data-pet','fish');
     var w=34;
     rp.style.width=w+'px'; rp.style.height=(w*0.4)+'px';
     rp.style.left=Math.max(0,Math.min(self.x+self.W/2-w/2,self.screenW-w))+'px';
@@ -492,7 +492,7 @@ Fish.prototype._fancyFriendsPass = function(){
     (function(idx){
       self._after(idx*600, function(){
         if(self._dead) return;
-        var fr = document.createElement('div'); fr.className='fishfriend';
+        var fr = document.createElement('div'); fr.className='fishfriend'; fr.setAttribute('data-pet','fish');
         var startX = dir>0 ? -24 : self.screenW+24;
         var fy = baseY + (idx*9) + (Math.random()*8-4);
         fr.style.left=startX+'px'; fr.style.top=fy+'px';
@@ -562,7 +562,7 @@ Fish.prototype._fancyPlankton = function(){
   var self=this; this._fancyBusy=true;
   var px = Math.max(20, Math.min(this.x + (this._dir>0 ? -40 : this.W+40), this.screenW-20));
   var py = Math.max(this._bandTop()+8, Math.min(this.y + this.H*0.4 + (Math.random()*30-15), this._bandBot()+this.H/2));
-  var el = document.createElement('div'); el.className='fishplank';
+  var el = document.createElement('div'); el.className='fishplank'; el.setAttribute('data-pet','fish');
   el.style.left=(px-2)+'px'; el.style.top=(py-2)+'px';
   document.body.appendChild(el);
   this._planktons.push({ el:el, x:px, y:py, phase:Math.random()*Math.PI*2, life:0 });
@@ -578,9 +578,9 @@ Fish.prototype._fancyHover = function(){
 };
 
 Fish.prototype.bubble = function(bx, by){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var b = document.createElement('div');
-  b.className = 'fishbub';
+  b.className = 'fishbub'; b.setAttribute('data-pet','fish');
   var sz = 4 + (Math.random()*4|0);
   b.style.width = sz+'px'; b.style.height = sz+'px';
   b.style.left = Math.max(0, Math.min(bx, this.screenW-sz)) + 'px';
@@ -603,7 +603,9 @@ Fish.prototype.destroy = function(){
   this._planktons.length = 0;
   if(this.el && this.el.parentNode) this.el.parentNode.removeChild(this.el);
   this.el = null;
-  var stray = document.querySelectorAll('.fishfood, .fishbub, .fishring, .fishripple, .fishspark, .fishfriend, .fishplank');
+  // sweep by the shared marker attribute (catches any future fish-fx node even if
+  // it isn't in the hand-maintained class list) plus the classes.
+  var stray = document.querySelectorAll('[data-pet="fish"], .fishfood, .fishbub, .fishring, .fishripple, .fishspark, .fishfriend, .fishplank');
   for(var m=0;m<stray.length;m++){ if(stray[m].parentNode) stray[m].parentNode.removeChild(stray[m]); }
 };
 

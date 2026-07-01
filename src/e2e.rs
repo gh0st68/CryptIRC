@@ -42,7 +42,10 @@ use tracing::warn;
 // an empty pool (the initiator falls back to 3-DH) — so legitimate lookups never
 // fail, only the drain primitive is rate-limited.
 const OTPK_CONSUME_WINDOW: Duration = Duration::from_secs(60);
-const OTPK_CONSUME_MAX_PER_WINDOW: u32 = 5;
+// #23: lowered from 5 to 2. At 5/min a single attacker drains MAX_OTPK_TOTAL=1024
+// in <9 min; 2/min raises that to >8h while staying well above any legitimate
+// rate (a real initiator consumes one OTPK per new conversation).
+const OTPK_CONSUME_MAX_PER_WINDOW: u32 = 2;
 
 // HIGH: cap the number of one-time-prekey files written per call. A single
 // publish/add carrying an unbounded `Vec<OneTimePrekey>` would create one inode
@@ -123,7 +126,16 @@ pub struct E2EStore {
 
 impl E2EStore {
     pub fn new(data_dir: &str) -> Self {
-        std::fs::create_dir_all(format!("{}/e2e", data_dir)).ok();
+        // #32/#142: create e2e/ with mode 0700 (secret-bearing) and surface failures.
+        let e2e_dir = format!("{}/e2e", data_dir);
+        #[cfg(unix)]
+        let res = {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&e2e_dir)
+        };
+        #[cfg(not(unix))]
+        let res = std::fs::create_dir_all(&e2e_dir);
+        if let Err(e) = res { warn!("[E2E] could not create {} (0700): {}", e2e_dir, e); }
         Self {
             data_dir:          data_dir.to_string(),
             otpk_locks:        Arc::new(DashMap::new()),
@@ -134,7 +146,7 @@ impl E2EStore {
 
     fn user_dir(&self, username: &str) -> PathBuf {
         let safe: String = username.chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
             .take(64).collect();
         PathBuf::from(&self.data_dir).join("e2e").join(safe)
     }
@@ -203,6 +215,12 @@ impl E2EStore {
     // ── Public key bundle ─────────────────────────────────────────────────────
 
     pub async fn store_bundle(&self, username: &str, bundle: &KeyBundle) -> Result<()> {
+        // #88: reject malformed/oversized key material before persisting it.
+        if !valid_key_field(&bundle.identity_sign_key)
+            || !valid_key_field(&bundle.identity_dh_key)
+            || !valid_signed_prekey(&bundle.signed_prekey) {
+            anyhow::bail!("Invalid key bundle");
+        }
         let dir = self.user_dir(username);
         tokio::fs::create_dir_all(&dir).await?;
 
@@ -228,7 +246,7 @@ impl E2EStore {
         let existing = self.otpk_count(username).await;
         let headroom = MAX_OTPK_TOTAL.saturating_sub(existing);
         let limit = headroom.min(MAX_OTPK_WRITES_PER_CALL);
-        for opk in bundle.one_time_prekeys.iter().take(limit) {
+        for opk in bundle.one_time_prekeys.iter().filter(|o| valid_key_field(&o.public_key)).take(limit) {
             tokio::fs::write(
                 otpk_dir.join(format!("{}.json", opk.key_id)),
                 serde_json::to_string(opk)?,
@@ -249,13 +267,15 @@ impl E2EStore {
         let json = tokio::fs::read_to_string(dir.join("bundle.json")).await.ok()?;
         let bundle: KeyBundle = serde_json::from_str(&json).ok()?;
 
-        // #27: throttle OTPK consumption per target so a third party cannot drain
+        // #27/#23: throttle OTPK consumption per target so a third party cannot drain
         // the victim's pool on demand. Over budget → return the bundle without an
-        // OTPK (3-DH fallback), exactly as if the pool were empty.
+        // OTPK (3-DH fallback), exactly as if the pool were empty. The rate check MUST
+        // run INSIDE the otpk_lock critical section (atomic with the consume) — checking
+        // it before acquiring the lock let concurrent fetches diverge the recorded budget
+        // from actual consumption (#23).
+        let lock = self.otpk_lock(username);
+        let _guard = lock.lock().await;
         let otpk = if self.otpk_consume_allowed(username) {
-            // S2: hold lock while reading + deleting OTPK
-            let lock = self.otpk_lock(username);
-            let _guard = lock.lock().await;
             self.consume_one_time_prekey_locked(username).await
         } else {
             warn!(
@@ -264,6 +284,7 @@ impl E2EStore {
             );
             None
         };
+        drop(_guard);
 
         Some(FetchedBundle {
             identity_sign_key: bundle.identity_sign_key,
@@ -325,7 +346,7 @@ impl E2EStore {
         // inodes/disk. Caps at MAX_OTPK_WRITES_PER_CALL files per call and at the
         // remaining total headroom, whichever is smaller.
         let limit = headroom.min(MAX_OTPK_WRITES_PER_CALL);
-        for opk in keys.into_iter().take(limit) {
+        for opk in keys.into_iter().filter(|o| valid_key_field(&o.public_key)).take(limit) { // #88
             tokio::fs::write(
                 otpk_dir.join(format!("{}.json", opk.key_id)),
                 serde_json::to_string(&opk)?,
@@ -350,7 +371,7 @@ impl E2EStore {
         let dir = self.user_dir(username).join("sessions");
         tokio::fs::create_dir_all(&dir).await?;
         let safe: String = partner.chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
             .take(128).collect();
         let path = dir.join(format!("{}.enc", safe));
         // MEDIUM: one session file per partner with no cap lets a user create an
@@ -374,7 +395,7 @@ impl E2EStore {
 
     pub async fn load_session(&self, username: &str, partner: &str) -> Option<String> {
         let safe: String = partner.chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
             .take(128).collect();
         tokio::fs::read_to_string(
             self.user_dir(username).join("sessions").join(format!("{}.enc", safe))
@@ -383,7 +404,7 @@ impl E2EStore {
 
     pub async fn delete_session(&self, username: &str, partner: &str) -> Result<()> {
         let safe: String = partner.chars()
-            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
             .take(128).collect();
         let _ = tokio::fs::remove_file(
             self.user_dir(username).join("sessions").join(format!("{}.enc", safe))
@@ -437,8 +458,16 @@ impl E2EStore {
         let mut out = Vec::new();
         if let Ok(mut rd) = tokio::fs::read_dir(&dir).await {
             while let Ok(Some(e)) = rd.next_entry().await {
-                if let Some(stem) = e.path().file_stem().and_then(|s| s.to_str()) {
+                let path = e.path();
+                // #89: only real `.enc` channel-key files (skip strays) — the `.enc`
+                // extension filter is the load-bearing part — and cap the vector so a
+                // reconnect can't trigger an unbounded fan-out of load round-trips.
+                // (L11: the prior `foo.bar.enc → foo.bar` example can't actually arise —
+                // safe_channel strips `.` from channel names before they become filenames.)
+                if path.extension().and_then(|x| x.to_str()) != Some("enc") { continue; }
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     out.push(stem.to_string());
+                    if out.len() >= MAX_CHANNEL_KEY_FILES { break; }
                 }
             }
         }
@@ -449,14 +478,37 @@ impl E2EStore {
 
     pub async fn load_trust(&self, username: &str) -> Vec<TrustRecord> {
         let path = self.user_dir(username).join("trust.json");
-        let Ok(json) = tokio::fs::read_to_string(path).await else { return vec![]; };
-        serde_json::from_str(&json).unwrap_or_default()
+        let Ok(json) = tokio::fs::read_to_string(&path).await else { return vec![]; };
+        match serde_json::from_str(&json) {
+            Ok(records) => records,
+            Err(e) => {
+                // #90: a corrupt trust.json must NOT silently become an empty pin set —
+                // that downgrades every pinned peer to "first contact", masking a
+                // key-change. Log loudly and preserve the bad file as a `.corrupt`
+                // backup so update_trust's subsequent save doesn't overwrite/erase the
+                // (recoverable) pins. Returning empty here is unavoidable for the
+                // signature, but the operator is alerted and the data is retained.
+                warn!("[E2E] CORRUPT trust.json for '{}' ({}). Backing up to trust.json.corrupt; \
+                       TOFU pins are temporarily unavailable — manual recovery required.", username, e);
+                let backup = self.user_dir(username).join("trust.json.corrupt");
+                let _ = tokio::fs::rename(&path, &backup).await;
+                vec![]
+            }
+        }
     }
 
     pub async fn save_trust(&self, username: &str, records: &[TrustRecord]) -> Result<()> {
         let dir = self.user_dir(username);
         tokio::fs::create_dir_all(&dir).await?;
-        tokio::fs::write(dir.join("trust.json"), serde_json::to_string_pretty(records)?).await?;
+        // #90: atomic tmp+rename so a crash mid-write can't leave a truncated
+        // (corrupt) trust.json that would erase all pins on next load.
+        let final_path = dir.join("trust.json");
+        let tmp = dir.join(format!("trust.json.tmp.{}", uuid::Uuid::new_v4()));
+        tokio::fs::write(&tmp, serde_json::to_string_pretty(records)?).await?;
+        if let Err(e) = tokio::fs::rename(&tmp, &final_path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -523,9 +575,27 @@ async fn count_dir_entries(dir: &std::path::Path) -> usize {
     n
 }
 
+/// #88: validate a client-supplied base64 public-key / signature field before it is
+/// written to disk. The store persists these strings verbatim, ×MAX_OTPK_TOTAL files,
+/// so an unbounded field is a disk-amplification primitive. We require valid base64
+/// decoding to a small, sane byte length (covers raw 32-byte X25519/Ed25519 keys,
+/// 65-byte uncompressed P-256 points, and 64-byte signatures) and reject anything
+/// larger. Empty is rejected.
+fn valid_key_field(s: &str) -> bool {
+    use base64::Engine;
+    if s.is_empty() || s.len() > 256 { return false; }
+    let dec = base64::engine::general_purpose::STANDARD.decode(s)
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(s));
+    matches!(dec, Ok(b) if (1..=128).contains(&b.len()))
+}
+
+fn valid_signed_prekey(spk: &SignedPrekey) -> bool {
+    valid_key_field(&spk.public_key) && valid_key_field(&spk.signature)
+}
+
 fn safe_channel(channel: &str) -> String {
     channel.chars()
-        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '#' || *c == '&')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '#' || *c == '&')
         .take(64)
         .collect()
 }

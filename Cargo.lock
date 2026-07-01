@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "cryptirc"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -466,6 +466,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "tokio",
  "tokio-native-tls",
  "tokio-openssl",
@@ -473,6 +474,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "web-push",
+ "zeroize",
 ]
 
 [[package]]

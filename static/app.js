@@ -173,8 +173,24 @@ try{inputHistory=(JSON.parse(localStorage.getItem('cryptirc_input_history')||'[]
 // before it is stored in history, persisted to localStorage, or uploaded to
 // the server. The visible/sent command is unaffected — only the stored copy
 // has its secret replaced with a placeholder.
+// #4/#63/#80: centralized helper that strips CR/LF and other control characters from
+// any string that will be interpolated into a raw IRC command. A bare CR/LF would let
+// remote/external/operator-form data break out of the intended command into an
+// arbitrary injected IRC line; control chars also corrupt the protocol. Collapses each
+// to a single space. Use everywhere remote or free-form text is placed on the wire.
+function ircSafe(s){
+  return (s==null?'':String(s)).replace(/[\x00-\x1f]/g,' ');
+}
 function redactSensitive(line){
   if(typeof line!=='string')return line;
+  // #5: mask channel-encryption PSKs (/key, /chankey) and the GIF key (/gif key <v>) —
+  // these are secrets that must not be persisted to localStorage or synced to the
+  // server in the input history. Mask the key argument(s).
+  // L7 fix (#5): require a channel token AND a key token before masking, so the
+  // key-CLEARING form `/key #chan` (no secret present) keeps its channel name in
+  // history instead of being cosmetically masked to `/key •••`.
+  line=line.replace(/^(\/(?:key|chankey)\s+\S+)\s+\S[\s\S]*$/i,'$1 •••')
+           .replace(/^(\/gif\s+key)\s+\S[\s\S]*$/i,'$1 •••');
   // Mask credentials before a line is stored in input history / uploaded to the server.
   // We do NOT enumerate per-service auth subcommands (identify/setpass/sidentify/confirm/
   // set/login/...): that blocklist can never be complete — every services package adds its
@@ -459,6 +475,9 @@ async function loadLoginCaptcha(){
 async function doLogout() {
   if(!(await customConfirm('Sign out?','Sign out'))) return;
   if(sessionToken) fetch('/cryptirc/auth/logout',{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}}).catch(()=>{});
+  // #75: clear the SW notif-intent cache (last notification's conn_id/from/ts) so it
+  // doesn't persist on disk across logout / to the next user.
+  try{ navigator.serviceWorker?.controller?.postMessage({type:'clear_notif_intent'}); }catch(_){}
   sessionToken=null; currentUser=null;
   localStorage.removeItem('cryptirc_token'); localStorage.removeItem('cryptirc_user');
   if(ws) ws.close();
@@ -585,18 +604,29 @@ function showApp() {
   connectWs();
   checkAdmin();
   _loadGifConfig();   // learn the active GIF provider + mode (giphy/user by default)
-  // Check for notification_click from SW (URL params path)
+  // Check for notification_click from SW (URL params path).
+  // #77: conn and target now arrive as SEPARATE params (?conn=…&target=…), each
+  // individually encoded, so a '/' inside either field can't shift the boundary the
+  // way the old single `open=conn/target` (split on first '/') allowed. Fall back to
+  // the legacy `open=` form for older cached service workers.
   const params=new URLSearchParams(location.search);
-  const openTarget=params.get('open');
-  if(openTarget) {
-    let decodedTarget;
-    try{decodedTarget=decodeURIComponent(openTarget);}catch(e){decodedTarget=openTarget;}
-    const [cid,tgt]=decodedTarget.split('/');
+  let cid=params.get('conn'), tgt=params.get('target');
+  if(cid==null && tgt==null){
+    const openTarget=params.get('open');
+    if(openTarget){
+      let decodedTarget;
+      try{decodedTarget=decodeURIComponent(openTarget);}catch(e){decodedTarget=openTarget;}
+      const slash=decodedTarget.indexOf('/');
+      cid=slash>=0?decodedTarget.slice(0,slash):decodedTarget;
+      tgt=slash>=0?decodedTarget.slice(slash+1):'';
+    }
+  }
+  if(cid!=null) {
     const ts=params.get('ts');
     const from=params.get('from');
     // Stash as pending nav — will execute once networks load via the state handler.
     // (jumpToMessage re-stashes if networks aren't ready yet.)
-    _pendingNotifNav={conn_id:cid, target:tgt, ts:ts?parseInt(ts):null, from:from||null};
+    _pendingNotifNav={conn_id:cid, target:tgt||'', ts:ts?parseInt(ts):null, from:from||null};
     // Clean the URL so a refresh doesn't re-trigger the nav
     try{history.replaceState(null,'',location.pathname+location.hash);}catch(e){}
   }
@@ -1081,9 +1111,11 @@ function handleEvent(ev) {
           ev.target=active&&active.conn_id===ev.conn_id?active.target:'status';
         }
       }
-      // Suppress noisy 401 "No such nick/channel" errors
-      // Suppress noisy server errors (typing on unsupported networks, offline nicks, etc)
-      if(ev.text&&(ev.text.includes('No such nick/channel')||ev.text.includes('Command disabled')||ev.text.includes('Unknown command')||ev.text.includes('@+typing'))) break;
+      // Suppress noisy server errors (typing on unsupported networks, offline nicks, etc).
+      // #61: gate on a NON-user-message kind so a legitimate user PRIVMSG that merely
+      // *contains* one of these phrases isn't silently dropped — only server-originated
+      // notices/errors are suppressed.
+      if(ev.kind!=='Privmsg'&&ev.kind!=='Action'&&ev.text&&(ev.text.includes('No such nick/channel')||ev.text.includes('Command disabled')||ev.text.includes('Unknown command')||ev.text.includes('@+typing'))) break;
       // Intercept ISON (303) replies for keepnick — narrow window to prevent swallowing other messages
       if(ev.target==='status'&&_keepnickIsonPending[ev.conn_id]){
         const pendingTs=_keepnickIsonPending[ev.conn_id];
@@ -1117,9 +1149,13 @@ function handleEvent(ev) {
       // (e.g. a null/non-string ev.text) can't permanently poison the chain and
       // silently drop every subsequent incoming message.
       window._e2eQueue=window._e2eQueue.catch(()=>{}).then(async()=>{
-        const { plaintext, encrypted } = await e2eDecryptIncoming(ev.from, ev.target, ev.text);
+        // #62: coerce ev.text to a string up front so a null/non-string value from the
+        // server can't throw inside e2eDecryptIncoming/startsWith and silently drop the
+        // message via the queue's catch.
+        const _txt = String(ev.text||'');
+        const { plaintext, encrypted } = await e2eDecryptIncoming(ev.from, ev.target, _txt);
         // Suppress x3dh header messages (handled internally, not displayed)
-        if (plaintext === null && !encrypted && ev.text.startsWith('[e2ex3dh]')) return;
+        if (plaintext === null && !encrypted && _txt.startsWith('[e2ex3dh]')) return;
         const displayText = plaintext !== null ? plaintext : ev.text;
         // Block PMs if enabled — per-network settings with global fallback; allow list bypasses
         const _isDmIncoming=ev.target!=='status'&&!ev.target.startsWith('#')&&!ev.target.startsWith('&')&&ev.from!==getNick(ev.conn_id)&&ev.from!=='*';
@@ -3293,6 +3329,9 @@ document.addEventListener('DOMContentLoaded',()=>{
       else { _pendingNotifNav={conn_id:e.data.conn_id, target:e.data.target, ts:null, from:null}; }
     }
     if(e.data?.type==='push_resubscribe'&&e.data.subscription){reregisterPushSubscription(e.data.subscription);}
+    // #136: the SW couldn't re-subscribe after the browser rotated the subscription —
+    // tell the user so push doesn't silently stop working.
+    if(e.data?.type==='push_resubscribe_failed'){ try{ showToast('Push notifications need re-enabling (subscription expired).'); }catch(_){} }
   });
   // Electron notification click
   if(window.electronAPI?.onNotificationClick){
@@ -3621,20 +3660,25 @@ async function handleInput(raw){
         const ch=net?.channels?.find(c=>c.name===target);
         if(!ch){sysMsg(conn_id,target,'Not in a channel','error');break;}
         let count=0;
+        // #43: derive each user's status from the LEADING prefix run only (the chars
+        // before the nick), not `.includes()` over the whole entry — a nick/hostmask
+        // fragment containing @ % + ~ & would otherwise be miscategorized and fed a
+        // wrong MODE change. `pfx(n)` is exactly the prefix chars stripPfx removes.
+        const pfx=n=>n.slice(0, n.length - stripPfx(n).length);
         // Remove owners (~) → -q
-        const owners=ch.names.filter(n=>n.startsWith('~')).map(n=>stripPfx(n)).filter(n=>n!==self);
+        const owners=ch.names.filter(n=>pfx(n).includes('~')).map(n=>stripPfx(n)).filter(n=>n!==self);
         if(owners.length){batchMode(conn_id,target,'-q',owners);count+=owners.length;}
         // Remove admins (&) → -a
-        const admins=ch.names.filter(n=>n.startsWith('&')||n.startsWith('~&')).map(n=>stripPfx(n)).filter(n=>n!==self&&!owners.includes(n));
+        const admins=ch.names.filter(n=>pfx(n).includes('&')).map(n=>stripPfx(n)).filter(n=>n!==self&&!owners.includes(n));
         if(admins.length){batchMode(conn_id,target,'-a',admins);count+=admins.length;}
         // Remove ops (@) → -o
-        const ops=ch.names.filter(n=>n.includes('@')).map(n=>stripPfx(n)).filter(n=>n!==self&&!owners.includes(n)&&!admins.includes(n));
+        const ops=ch.names.filter(n=>pfx(n).includes('@')).map(n=>stripPfx(n)).filter(n=>n!==self&&!owners.includes(n)&&!admins.includes(n));
         if(ops.length){batchMode(conn_id,target,'-o',ops);count+=ops.length;}
         // Remove halfops (%) → -h
-        const hops=ch.names.filter(n=>n.includes('%')).map(n=>stripPfx(n)).filter(n=>n!==self);
+        const hops=ch.names.filter(n=>pfx(n).includes('%')).map(n=>stripPfx(n)).filter(n=>n!==self);
         if(hops.length){batchMode(conn_id,target,'-h',hops);count+=hops.length;}
         // Remove voice (+) → -v
-        const voiced=ch.names.filter(n=>n.startsWith('+')||n.includes('+')).map(n=>stripPfx(n)).filter(n=>n!==self);
+        const voiced=ch.names.filter(n=>pfx(n).includes('+')).map(n=>stripPfx(n)).filter(n=>n!==self);
         if(voiced.length){batchMode(conn_id,target,'-v',voiced);count+=voiced.length;}
         sysMsg(conn_id,target,count?`Stripping all status from ${count} users…`:'No users to strip','system');
         break;
@@ -3655,10 +3699,14 @@ async function handleInput(raw){
         // Kick everyone except yourself
         const self = getNick(conn_id);
         const reason = args.join(' ') || 'Kicked';
-        const nicks = getChannelNicksByTarget(conn_id, target).filter(n => n !== self);
+        let nicks = getChannelNicksByTarget(conn_id, target).filter(n => n !== self);
         if(!nicks.length){sysMsg(conn_id,target,'No one else to kick','system');break;}
-        // Stagger kicks to avoid flood protection
-        nicks.forEach((n,i)=>setTimeout(()=>wsend({type:'send',conn_id,raw:`KICK ${target} ${n} :${reason}`}),i*200));
+        // #41: cap the number of staggered timers so a huge channel can't schedule
+        // thousands of pending setTimeouts. Each callback re-validates that we're still
+        // on this connection/channel before firing (network-switch / disconnect safety).
+        const KICK_CAP=100;
+        if(nicks.length>KICK_CAP){ sysMsg(conn_id,target,`Too many users (${nicks.length}); kicking the first ${KICK_CAP}.`,'system'); nicks=nicks.slice(0,KICK_CAP); }
+        nicks.forEach((n,i)=>setTimeout(()=>{ if(networks.some(nw=>nw.config.id===conn_id)) wsend({type:'send',conn_id,raw:`KICK ${target} ${ircSafe(n)} :${ircSafe(reason)}`}); },i*200));
         sysMsg(conn_id,target,`Kicking ${nicks.length} users…`,'system'); break;
       }
       case 'MASSVOICE': case 'MVALL': {
@@ -3697,10 +3745,12 @@ async function handleInput(raw){
         const tbnick=args[0]; let tbsecs=parseInt(args[1])||60;
         tbsecs=Math.min(tbsecs,86400);
         const tbreason=args.slice(2).join(' ')||'Temporary ban';
-        const tbmask=`${tbnick}!*@*`;
+        const tbmask=ircSafe(`${tbnick}!*@*`);
         wsend({type:'send',conn_id,raw:`MODE ${target} +b ${tbmask}`});
-        setTimeout(()=>wsend({type:'send',conn_id,raw:`KICK ${target} ${tbnick} :${tbreason} (${tbsecs}s ban)`}),300);
-        setTimeout(()=>wsend({type:'send',conn_id,raw:`MODE ${target} -b ${tbmask}`}),tbsecs*1000);
+        // #41: re-validate the connection still exists before the (up-to-24h) unban
+        // fires — don't MODE a channel on a network that was since removed.
+        setTimeout(()=>{ if(networks.some(nw=>nw.config.id===conn_id)) wsend({type:'send',conn_id,raw:`KICK ${target} ${ircSafe(tbnick)} :${ircSafe(tbreason)} (${tbsecs}s ban)`}); },300);
+        setTimeout(()=>{ if(networks.some(nw=>nw.config.id===conn_id)) wsend({type:'send',conn_id,raw:`MODE ${target} -b ${tbmask}`}); },tbsecs*1000);
         sysMsg(conn_id,target,`Temp-banned ${tbnick} for ${tbsecs}s`,'system'); break;
       }
 
@@ -3969,8 +4019,11 @@ async function handleInput(raw){
       case 'ASCII': case 'FIGLET': {
         const text=args.join(' ');if(!text){sysMsg(conn_id,target,'Usage: /ascii <text>','error');break;}
         const art=makeAsciiArt(text);
-        for(const line of art.split('\n')){
-          if(!line.trim())continue;
+        // D5: cap multi-line output to avoid channel-flood / server flood-throttle.
+        const _lines=art.split('\n').filter(l=>l.trim());
+        if(_lines.length>12){sysMsg(conn_id,target,'ASCII output too tall — try shorter text','error');break;}
+        for(const rawline of _lines){
+          const line=ircSafe(rawline).slice(0,400);
           const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,line):null;
           wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||line}`});
           addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:line,kind:'privmsg',encrypted:!!wire});
@@ -3987,7 +4040,9 @@ async function handleInput(raw){
           const d=await r.json();
           if(d.list&&d.list.length>0){
             const def=d.list[0];const clean=def.definition.replace(/\[|\]/g,'').slice(0,300);
-            const msg=`📖 ${term}: ${clean}${def.definition.length>300?'...':''} (👍${def.thumbs_up} 👎${def.thumbs_down})`;
+            // #4: UD definitions are uncontrolled user submissions — strip CR/LF/control
+            // chars from the assembled line so a definition can't inject an IRC command.
+            const msg=ircSafe(`📖 ${term}: ${clean}${def.definition.length>300?'...':''} (👍${def.thumbs_up} 👎${def.thumbs_down})`);
             const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,msg):null;
             wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||msg}`});
             addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:msg,kind:'privmsg',encrypted:!!wire});
@@ -3999,7 +4054,9 @@ async function handleInput(raw){
         const url=args[0];if(!url||(!url.startsWith('http://')&&!url.startsWith('https://'))){sysMsg(conn_id,target,'Usage: /shorten <url>','error');break;}
         try{
           const token=sessionToken;
-          const r=await fetch(`${location.pathname}s`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},body:JSON.stringify({url})});
+          // #42: build the endpoint robustly (the old `${location.pathname}s` produced
+          // `/cryptircs` when the path had no trailing slash). The short-create route is `/s`.
+          const r=await fetch(`${location.pathname.replace(/\/+$/,'')}/s`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},body:JSON.stringify({url})});
           const d=await r.json();
           if(d.url){document.getElementById('msg-input').value=d.url;sysMsg(conn_id,target,`Short URL: ${d.url}`,'system');}
           else sysMsg(conn_id,target,'Failed to create short URL','error');
@@ -8298,7 +8355,9 @@ function showOperPanel(){
 function closeOperPanel(){_overlayClose('operPanel');document.getElementById('oper-overlay').classList.remove('show');}
 function operSend(raw){
   if(!_operConnId){showToast('Select a network first');return;}
-  wsend({type:'send',conn_id:_operConnId,raw});
+  // #63: strip CR/LF/control chars so a newline in any oper-form field can't inject a
+  // second IRC line. (Field values are interpolated into the raw command by callers.)
+  wsend({type:'send',conn_id:_operConnId,raw:ircSafe(raw)});
 }
 function operPrompt(title,fields,onSubmit){
   const body=document.getElementById('oper-body');
@@ -9103,12 +9162,34 @@ function handleStatsData(data){
     const d=JSON.parse(data);
     _chanStatsEnabled=!!d.enabled;
     const server=d.channels||{};
-    // Always replace local with server's stored state. Any in-session increments
-    // since the last auto-save would be lost here, but that window is at most
-    // 30s (save timer) and the alternative — merging — double-counts the server
-    // data into already-synced local state when handleStatsData runs twice.
-    _chanStats=server;
-    _chanStatsDirty=false;
+    // #65: merge per-nick with max(local, server) instead of blindly replacing, so up
+    // to 30s of unsynced local increments aren't discarded. max() is idempotent — it
+    // won't double-count if handleStatsData runs twice (unlike additive merging), since
+    // local was itself last seeded from the server's value.
+    let _merged=false;
+    for(const ch in server){
+      const s=server[ch], l=_chanStats[ch];
+      if(!l){ _chanStats[ch]=s; continue; }
+      for(const nick in s){ const sv=s[nick]||0, lv=l[nick]||0; if(sv>lv){l[nick]=sv;} else if(sv<lv){_merged=true;} }
+      for(const nick in s){ if(!(nick in l)) l[nick]=s[nick]; }
+    }
+    // P5 fix (#65): any channel/nick we hold locally but the server doesn't yet
+    // is an unsynced local increment — flag dirty so saveStatsToServer() pushes
+    // it rather than early-returning. (Previously this case was only described in
+    // a comment and never actually marked dirty.)
+    if(!_merged){
+      for(const ch in _chanStats){
+        const s=server[ch];
+        if(!s){ _merged=true; break; }
+        const l=_chanStats[ch];
+        let found=false;
+        for(const nick in l){ if(!(nick in s)){ found=true; break; } }
+        if(found){ _merged=true; break; }
+      }
+    }
+    // P5 fix: OR into the existing dirty flag so a pending increment recorded by
+    // trackStat() between the load request and this response isn't clobbered.
+    _chanStatsDirty=_chanStatsDirty||_merged;
     if(_statsRefreshing){
       _statsRefreshing=false;
       if(document.getElementById('chanstats-overlay').classList.contains('show')) renderStatsChannelList();
@@ -10197,7 +10278,9 @@ function cmParseModes(s){
     if(adding)_cm.flags.add(ch);
   }
 }
-function _cmSend(raw){ if(_cm)wsend({type:'send',conn_id:_cm.connId,raw}); }
+// #80: strip CR/LF/control chars client-side (defense in depth — the server also strips
+// them) so a key/mask MODE input can't inject a second IRC line.
+function _cmSend(raw){ if(_cm)wsend({type:'send',conn_id:_cm.connId,raw:ircSafe(raw)}); }
 function cmToggleFlag(letter,on){ if(_cm&&_cm.isOp)_cmSend(`MODE ${_cm.target} ${on?'+':'-'}${letter}`); }
 function cmSetKey(){ if(!_cm||!_cm.isOp)return; const v=(document.getElementById('cm-key-input').value||'').trim(); if(!v){showToast('Enter a key');return;} if(/\s/.test(v)){showToast('Key cannot contain spaces');return;} _cmSend(`MODE ${_cm.target} +k ${v}`); }
 function cmClearKey(){ if(_cm&&_cm.isOp)_cmSend(`MODE ${_cm.target} -k ${_cm.key||'*'}`); }
@@ -11015,7 +11098,11 @@ async function subscribePush() {
       headers: {'Authorization':'Bearer '+sessionToken, 'Content-Type':'application/json'},
       body: JSON.stringify({ ...pushSubscription.toJSON(), label: navigator.userAgent.slice(0,80) }),
     });
-  } catch(e) { console.warn('Push subscribe failed:', e); }
+  } catch(e) {
+    console.warn('Push subscribe failed:', e);
+    // #132: surface the failure instead of leaving push silently "enabled".
+    try { showToast('Could not enable push notifications: ' + (e.message || e)); } catch(_){}
+  }
 }
 
 async function unsubscribePush() {
@@ -11136,6 +11223,11 @@ async function sendTestNotification() {
 }
 
 function urlBase64ToUint8Array(base64String) {
+  // #132: validate before atob (which throws on malformed input). A bad/empty VAPID
+  // key must surface clearly rather than leaving push silently "enabled" with no sub.
+  if (typeof base64String !== 'string' || !/^[A-Za-z0-9_\-]+$/.test(base64String)) {
+    throw new Error('Invalid VAPID public key');
+  }
   const padding = '='.repeat((4 - base64String.length % 4) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
   const raw = atob(base64);
@@ -11517,7 +11609,7 @@ function showIgnorePanel(){
     const list=[...ignoreList].sort();
     let html=`<div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-weight:700;font-size:14px;color:var(--text)">🚫 Ignored Users</span>
-      <span onclick="this.closest('[style*=fixed]').remove()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+      <span data-ov-close style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
     </div>
     <div style="padding:12px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch">
       <div style="display:flex;gap:6px;margin-bottom:12px">
@@ -11547,8 +11639,11 @@ function showIgnorePanel(){
   // once on the stable box element; re-renders after removal to update the list.
   box.addEventListener('click',e=>{const b=e.target.closest('[data-ignore-rm]');if(b&&box.contains(b)){removeIgnore(b.dataset.ignoreRm);render();}});
   ov.appendChild(box);
-  ov.onclick=e=>{if(e.target===ov)ov.remove();};
+  // D4: register in the overlay stack for Escape / Android Back dismissal.
+  const close=()=>{ if(ov.parentNode) ov.remove(); _overlayClose('ignorePanel'); };
+  ov.onclick=e=>{ if(e.target===ov || (e.target.closest && e.target.closest('[data-ov-close]'))) close(); };
   document.body.appendChild(ov);
+  _overlayOpen('ignorePanel', close);
   // Handle Enter key in add input
   setTimeout(()=>{
     const inp=document.getElementById('ignore-add-input');
@@ -11617,7 +11712,7 @@ function showPmProtectionPanel(){
 
     let html=`<div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
       <span style="font-weight:700;font-size:14px;color:var(--text)">🛡 PM Protection</span>
-      <span onclick="this.closest('[style*=fixed]').remove()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+      <span data-ov-close style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
     </div>
     <div style="padding:14px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch">
 
@@ -11919,8 +12014,13 @@ function showPmProtectionPanel(){
 
   render();
   ov.appendChild(box);
-  ov.onclick=e=>{if(e.target===ov){ov.remove();_pmPanelScope=null;}};
+  // D4: register in the overlay stack so Escape AND the Android Back button dismiss it,
+  // matching every other overlay. close() is idempotent. The ✕ (data-ov-close) and the
+  // backdrop both route through it.
+  const close=()=>{ if(ov.parentNode) ov.remove(); _pmPanelScope=null; _overlayClose('pmProtection'); };
+  ov.onclick=e=>{ if(e.target===ov || (e.target.closest && e.target.closest('[data-ov-close]'))) close(); };
   document.body.appendChild(ov);
+  _overlayOpen('pmProtection', close);
 }
 
 function isIgnored(nick, prefix) {
@@ -12312,7 +12412,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.8';
+const CRYPTIRC_VERSION='0.3.9';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -12320,8 +12420,10 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
-  {version:'0.3.8', date:'June 2026', items:[
-    {tag:'new', text:'Last.fm now-playing: link your Last.fm username in Settings ▸ Profile, then type /np in any channel to share what you’re playing (/np <user> looks up anyone). Your server admin enables it in the Admin panel.'},
+  {version:'0.3.9', date:'June 2026', items:[
+    {tag:'sec', text:'Hardened security throughout: end-to-end DM encryption now enforces client-authoritative key pinning (rejecting silent server key overwrites), real Signal-spec ratchet KDFs, mandatory identity binding and per-prekey selection. NOTE: this is a one-time protocol upgrade — existing DM sessions are re-established (re-encrypted) on first contact.'},
+    {tag:'sec', text:'Began migrating away from inline scripts/handlers (font-src, favicon and partial source delegation done; full ‘unsafe-inline’ removal still pending). Tightened image/connect sources, file permissions (0600/0700) on all secret files, link-preview SSRF (HTTPS:443 only), push-notification fan-out, and login rate-limiting.'},
+    {tag:'fix', text:'Numerous robustness fixes: bounded log reads & retention, captcha hardening, CRLF/control-character stripping on all command inputs, key redaction in input history, and Escape/Back dismissal for the PM-Protection and Ignore panels.'},
   ]},
   {version:'0.3.7', date:'June 2026', items:[
     {tag:'new', text:'Password Safe is now its own page in Settings, redesigned with a cleaner layout for your saved credentials.'},
@@ -12389,11 +12491,16 @@ let _isAdmin=false;
 async function checkAdmin(){
   if(!sessionToken)return;
   try{
-    const r=await fetch('/cryptirc/admin/settings',{headers:{'Authorization':'Bearer '+sessionToken}});
+    // D3: read the admin flag from /auth/me instead of probing /admin/settings, which
+    // returned 403 for every non-admin on every load (an unconditional console error).
+    const r=await fetch('/cryptirc/auth/me',{headers:{'Authorization':'Bearer '+sessionToken}});
     if(r.ok){
-      _isAdmin=true;
-      const btn=document.getElementById('admin-menu-btn');
-      if(btn) btn.style.display='';
+      const me=await r.json().catch(()=>({}));
+      if(me&&me.admin){
+        _isAdmin=true;
+        const btn=document.getElementById('admin-menu-btn');
+        if(btn) btn.style.display='';
+      }
     }
   }catch(e){}
 }
@@ -12664,8 +12771,10 @@ async function adminSetUserEmail(username){
   const email=await customPrompt(`Set email for "${username}" (leave blank to remove):`,cur);
   if(email===null) return;
   try{
-    const r=await fetch(`/cryptirc/admin/user/${username}/email`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({email:email.trim()})});
-    const d=await r.json();
+    const r=await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}/email`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({email:email.trim()})});
+    // #39: tolerate a non-JSON error body — parse after, defaulting to {}, so a 4xx/5xx
+    // with a plain-text body doesn't throw and mask the real status.
+    const d=await r.json().catch(()=>({}));
     if(r.ok){showToast(d.message||'Email updated');showAdminPanel();}
     else{showToast(d.message||'Failed to set email');}
   }catch(e){showToast('Failed to set email');}
@@ -12674,7 +12783,7 @@ async function adminSetUserEmail(username){
 async function adminApproveUser(username){
   if(!(await customConfirm(`Approve "${username}"? This verifies their account now, so they can sign in without clicking the email link.`,'Approve')))return;
   try{
-    const r=await fetch(`/cryptirc/admin/user/${username}/approve`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
+    const r=await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}/approve`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
     if(r.ok){showToast(`${username} approved`);showAdminPanel();}
     else{showToast('Failed to approve user');}
   }catch(e){showToast('Failed to approve user');}
@@ -12683,7 +12792,7 @@ async function adminApproveUser(username){
 async function adminDisableUser(username){
   if(!(await customConfirm(`Disable user "${username}"? They won't be able to log in.`,'Disable')))return;
   try{
-    await fetch(`/cryptirc/admin/user/${username}/disable`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
+    await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}/disable`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
     showToast(`${username} disabled`);
     showAdminPanel();
   }catch(e){}
@@ -12691,7 +12800,7 @@ async function adminDisableUser(username){
 
 async function adminToggleUpload(username,allow){
   try{
-    const r=await fetch(`/cryptirc/admin/user/${username}/upload-permission`,{
+    const r=await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}/upload-permission`,{
       method:'POST',
       headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
       body:JSON.stringify({allow})
@@ -12726,7 +12835,7 @@ async function adminDeleteUser(username){
   if(!(await customConfirm(`DELETE user "${username}"? This removes all their data permanently.`,'Delete')))return;
   if(!(await customConfirm(`Are you SURE? This cannot be undone.`,'Yes, delete')))return;
   try{
-    await fetch(`/cryptirc/admin/user/${username}`,{method:'DELETE',headers:{'Authorization':'Bearer '+sessionToken}});
+    await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}`,{method:'DELETE',headers:{'Authorization':'Bearer '+sessionToken}});
     showToast(`${username} deleted`);
     showAdminPanel();
   }catch(e){}

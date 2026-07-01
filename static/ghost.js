@@ -23,6 +23,27 @@ var Z = 88;                  // paints UNDER the crab (89) and sheep (90)
 var _enabled = false;
 var _ghost = null;
 
+// Topmost element at (x,y) that is NOT a desktop-pet node, so a forwarded click
+// resolves to the real UI beneath instead of another pet.
+var PET_SELECTOR = '.cryptirc-ghost, .gh-friend, .cryptirc-crab, .cryptirc-esheep, .cryptirc-alien, .al-buddy, .cryptirc-fish';
+function topUnderPets(x, y){
+  var stack = (document.elementsFromPoint ? document.elementsFromPoint(x, y) : null);
+  if(stack){
+    for(var i=0;i<stack.length;i++){
+      var el = stack[i];
+      if(el && el.closest && el.closest(PET_SELECTOR)) continue;
+      return el;
+    }
+    return null;
+  }
+  var pets = document.querySelectorAll(PET_SELECTOR), saved=[];
+  for(var j=0;j<pets.length;j++){ saved.push([pets[j], pets[j].style.pointerEvents]); pets[j].style.pointerEvents='none'; }
+  var under = document.elementFromPoint(x, y);
+  for(var m=0;m<saved.length;m++){ saved[m][0].style.pointerEvents = saved[m][1]; }
+  if(under && under.closest && under.closest(PET_SELECTOR)) return null;
+  return under;
+}
+
 // pale, sickly spectre; the companion is a darker shadow-wraith
 var TINT_MAIN   = { body:'#e8efea', sh:'#9fb0ab' };
 var TINT_FRIEND = { body:'#c4cfca', sh:'#7f8e89' };
@@ -50,8 +71,8 @@ function injectStyle(){
     '@keyframes ghSway{0%,100%{transform:rotate(-2.5deg)}50%{transform:rotate(2.5deg)}}',
     '@keyframes ghTatter{0%,100%{transform:translateY(0) scaleY(1)}50%{transform:translateY(2px) scaleY(1.06)}}',
     '@keyframes ghEye{0%,92%,100%{opacity:.0}40%,60%{opacity:.5}}',
-    /* fade: phase through the wall */
-    '.cryptirc-ghost.fade{opacity:.08}',
+    /* fade: phase through the wall (effectively invisible → don't intercept clicks) */
+    '.cryptirc-ghost.fade{opacity:.08;pointer-events:none;cursor:default}',
     /* flicker: a dying-bulb glitch + tiny jitter */
     '.cryptirc-ghost.flicker{animation:ghFlicker .5s steps(2) infinite}',
     '@keyframes ghFlicker{0%{opacity:.86;transform:translateX(0)}20%{opacity:.18;transform:translateX(1px)}40%{opacity:.86;transform:translateX(-1px)}60%{opacity:.3}80%{opacity:.86;transform:translateX(1px)}100%{opacity:.5}}',
@@ -86,8 +107,8 @@ function injectStyle(){
     /* melt: drip toward the floor then re-form */
     '.cryptirc-ghost.melt{animation:ghMelt 2s ease-in-out}',
     '@keyframes ghMelt{0%{transform:scaleY(1)}45%{transform:scale(1.12,.55) translateY(16px)}72%{transform:scale(.9,1.18)}100%{transform:scale(1,1)}}',
-    /* vanish: gone for a moment */
-    '.cryptirc-ghost.vanish{opacity:0}',
+    /* vanish: gone for a moment (fully invisible → don't intercept clicks) */
+    '.cryptirc-ghost.vanish{opacity:0;pointer-events:none;cursor:default}',
     /* split after-image clone */
     '.gh-clone{position:fixed;z-index:'+Z+';pointer-events:none;opacity:.4;will-change:left,top,opacity;transition:left .55s ease,top .55s ease,opacity .55s ease;filter:drop-shadow(0 0 7px rgba(150,200,190,.4))}',
     '.gh-clone svg{display:block;width:100%;height:100%;overflow:visible}',
@@ -147,7 +168,9 @@ function injectStyle(){
     '@keyframes ghRune{0%{opacity:0;transform:scale(.4) rotate(-30deg)}25%{opacity:.95;transform:scale(1) rotate(0)}55%{opacity:.55}70%{opacity:.95}100%{opacity:0;transform:scale(1.4) rotate(20deg)}}',
     /* possess-the-cursor: the ghost shrinks & shadows the pointer (movement via JS) */
     '.cryptirc-ghost.possess{transform:scale(.62);opacity:.7}',
-    '@media(prefers-reduced-motion:reduce){.cryptirc-ghost *,.cryptirc-ghost,.gh-friend *,.gh-friend{animation:none!important;transition:opacity .6s ease!important}}'
+    '@media(prefers-reduced-motion:reduce){.cryptirc-ghost *,.cryptirc-ghost,.gh-friend *,.gh-friend{animation:none!important;transition:opacity .6s ease!important}',
+      // also silence the spawned FX nodes (gh-*) and hide the decorative ones
+      '.gh-mist,.gh-ring,.gh-clone,.gh-drip,.gh-eyes,.gh-web,.gh-wisp,.gh-bat,.gh-frost,.gh-puddle,.gh-mirror,.gh-pumpkin,.gh-candle,.gh-chain,.gh-grave,.gh-rune{animation:none!important;opacity:0!important}}'
   ].join('');
   document.head.appendChild(s);
 }
@@ -268,14 +291,13 @@ Ghost.prototype._wire = function(){
     if(self._didDrag){ self._didDrag=false; return; }
     self.poke();
     e.stopPropagation();
-    var prev=self.el.style.pointerEvents; self.el.style.pointerEvents='none';
-    var pets=document.querySelectorAll('.cryptirc-ghost, .gh-friend, .cryptirc-crab, .cryptirc-esheep'), saved=[];
-    for(var i=0;i<pets.length;i++){ saved.push([pets[i],pets[i].style.pointerEvents]); pets[i].style.pointerEvents='none'; }
-    var under=document.elementFromPoint(e.clientX,e.clientY);
-    self.el.style.pointerEvents=prev;
-    for(var j=0;j<saved.length;j++){ saved[j][0].style.pointerEvents=saved[j][1]; }
-    if(under && !(under.closest && under.closest('.cryptirc-ghost'))){
-      under.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:e.clientX,clientY:e.clientY,view:window}));
+    // Resolve the real UI underneath via elementsFromPoint, skipping ANY pet node
+    // in the stack, then re-dispatch with full pointer fidelity.
+    var under=topUnderPets(e.clientX,e.clientY);
+    if(under){
+      under.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window,
+        clientX:e.clientX,clientY:e.clientY,button:e.button,detail:e.detail,
+        ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey}));
     }
   });
   this._on(this.el, 'contextmenu', function(e){ e.preventDefault(); return false; });
@@ -406,11 +428,11 @@ Ghost.prototype._vanishBack = function(){
 };
 // two glowing eyes blink in a corner, then it materializes there
 Ghost.prototype._eyesThenAppear = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this, pad=14;
   var ex = Math.max(0, (Math.random()<0.5?pad:(this.screenW-this.W-pad)));
   var ey = Math.max(0, (Math.random()<0.5?pad:(this.screenH-this.H-pad)));
-  var e=document.createElement('div'); e.className='gh-eyes'; e.textContent='👁 👁';
+  var e=document.createElement('div'); e.className='gh-eyes'; e.setAttribute('data-pet','ghost'); e.textContent='👁 👁';
   e.style.left=(ex+this.W*0.16)+'px'; e.style.top=(ey+this.H*0.34)+'px';
   document.body.appendChild(e);
   this._after(1150, function(){ if(e.parentNode) e.parentNode.removeChild(e); });
@@ -422,9 +444,9 @@ Ghost.prototype._eyesThenAppear = function(){
 };
 // a faint after-image splits off and merges back
 Ghost.prototype.split = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
-  var c=document.createElement('div'); c.className='gh-clone';
+  var c=document.createElement('div'); c.className='gh-clone'; c.setAttribute('data-pet','ghost');
   c.style.width=this.W+'px'; c.style.height=this.H+'px';
   c.style.left=this.x+'px'; c.style.top=this.y+'px';
   c.innerHTML=this.el.innerHTML;
@@ -436,8 +458,8 @@ Ghost.prototype.split = function(){
 };
 // a slow red drip falls from it
 Ghost.prototype.drip = function(){
-  if(this._dead) return;
-  var d=document.createElement('div'); d.className='gh-drip'; d.textContent='🩸';
+  if(this._dead || document.hidden) return;
+  var d=document.createElement('div'); d.className='gh-drip'; d.setAttribute('data-pet','ghost'); d.textContent='🩸';
   d.style.left=(this.x + this.W*0.4 + Math.random()*this.W*0.2)+'px';
   d.style.top =(this.y + this.H*0.5)+'px';
   document.body.appendChild(d);
@@ -445,8 +467,8 @@ Ghost.prototype.drip = function(){
 };
 // a spider descends on a thread beside it
 Ghost.prototype.cobweb = function(){
-  if(this._dead) return;
-  var w=document.createElement('div'); w.className='gh-web'; w.textContent='🕷️';
+  if(this._dead || document.hidden) return;
+  var w=document.createElement('div'); w.className='gh-web'; w.setAttribute('data-pet','ghost'); w.textContent='🕷️';
   w.style.left=(this.x + this.W + 2)+'px'; w.style.top=(this.y + 8)+'px';
   document.body.appendChild(w);
   this._after(2400, function(){ if(w.parentNode) w.parentNode.removeChild(w); });
@@ -455,10 +477,10 @@ Ghost.prototype.cobweb = function(){
 // ── NEW spooky behaviors ──────────────────────────────────────────────────────
 // a few will-o'-wisps orbit the ghost, then snuff out
 Ghost.prototype.wisps = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this, n=3+(Math.random()*2|0), cx=this.x+this.W/2, cy=this.y+this.H/2;
   for(var i=0;i<n;i++){
-    var w=document.createElement('div'); w.className='gh-wisp';
+    var w=document.createElement('div'); w.className='gh-wisp'; w.setAttribute('data-pet','ghost');
     var ang=Math.random()*Math.PI*2, rad=18+(Math.random()*22|0);
     w.style.left=(cx + Math.cos(ang)*rad - 4.5)+'px';
     w.style.top =(cy + Math.sin(ang)*rad - 4.5)+'px';
@@ -469,8 +491,8 @@ Ghost.prototype.wisps = function(){
 };
 // a bat detaches and flutters away
 Ghost.prototype.bat = function(){
-  if(this._dead) return;
-  var b=document.createElement('div'); b.className='gh-bat'; b.textContent='🦇';
+  if(this._dead || document.hidden) return;
+  var b=document.createElement('div'); b.className='gh-bat'; b.setAttribute('data-pet','ghost'); b.textContent='🦇';
   b.style.left=(this.x + this.W*0.3 + Math.random()*this.W*0.4)+'px';
   b.style.top =(this.y + this.H*0.2)+'px';
   document.body.appendChild(b);
@@ -478,8 +500,8 @@ Ghost.prototype.bat = function(){
 };
 // exhales a creeping cloud of frost-breath
 Ghost.prototype.frost = function(){
-  if(this._dead) return;
-  var f=document.createElement('div'); f.className='gh-frost';
+  if(this._dead || document.hidden) return;
+  var f=document.createElement('div'); f.className='gh-frost'; f.setAttribute('data-pet','ghost');
   var sz=34+(Math.random()*26|0);
   f.style.width=sz+'px'; f.style.height=sz+'px';
   f.style.left=(this.x + this.W*0.5 - sz/2)+'px';
@@ -489,8 +511,8 @@ Ghost.prototype.frost = function(){
 };
 // a dark shadow-puddle pools beneath as it oozes into the floor
 Ghost.prototype.puddle = function(){
-  if(this._dead) return;
-  var p=document.createElement('div'); p.className='gh-puddle';
+  if(this._dead || document.hidden) return;
+  var p=document.createElement('div'); p.className='gh-puddle'; p.setAttribute('data-pet','ghost');
   var pw=this.W*1.6;
   p.style.width=pw+'px'; p.style.height=(this.H*0.3)+'px';
   p.style.left=(this.x + this.W/2 - pw/2)+'px';
@@ -500,9 +522,9 @@ Ghost.prototype.puddle = function(){
 };
 // a horizontally-flipped doppelganger fades in beside it, mimics, then fades
 Ghost.prototype.mirror = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
-  var m=document.createElement('div'); m.className='gh-mirror';
+  var m=document.createElement('div'); m.className='gh-mirror'; m.setAttribute('data-pet','ghost');
   m.style.width=this.W+'px'; m.style.height=this.H+'px';
   var side=(this.x < this.screenW/2) ? 1 : -1;
   var mx=Math.max(0, Math.min(this.x + side*(this.W*1.1), this.screenW - this.W));
@@ -516,8 +538,8 @@ Ghost.prototype.mirror = function(){
 };
 // a grinning jack-o'-lantern bobs up beside it
 Ghost.prototype.pumpkin = function(){
-  if(this._dead) return;
-  var p=document.createElement('div'); p.className='gh-pumpkin'; p.textContent='🎃';
+  if(this._dead || document.hidden) return;
+  var p=document.createElement('div'); p.className='gh-pumpkin'; p.setAttribute('data-pet','ghost'); p.textContent='🎃';
   p.style.left=(this.x + this.W + 2)+'px';
   p.style.top =(this.y + this.H*0.4)+'px';
   document.body.appendChild(p);
@@ -525,8 +547,8 @@ Ghost.prototype.pumpkin = function(){
 };
 // it lights a guttering candle beside itself
 Ghost.prototype.candle = function(){
-  if(this._dead) return;
-  var c=document.createElement('div'); c.className='gh-candle'; c.textContent='🕯️';
+  if(this._dead || document.hidden) return;
+  var c=document.createElement('div'); c.className='gh-candle'; c.setAttribute('data-pet','ghost'); c.textContent='🕯️';
   c.style.left=(this.x - 14)+'px';
   c.style.top =(this.y + this.H*0.5)+'px';
   document.body.appendChild(c);
@@ -534,8 +556,8 @@ Ghost.prototype.candle = function(){
 };
 // spectral chains rattle around it
 Ghost.prototype.chains = function(){
-  if(this._dead) return;
-  var c=document.createElement('div'); c.className='gh-chain'; c.textContent='⛓️';
+  if(this._dead || document.hidden) return;
+  var c=document.createElement('div'); c.className='gh-chain'; c.setAttribute('data-pet','ghost'); c.textContent='⛓️';
   c.style.left=(this.x + this.W*0.3)+'px';
   c.style.top =(this.y - 6)+'px';
   document.body.appendChild(c);
@@ -543,8 +565,8 @@ Ghost.prototype.chains = function(){
 };
 // a gravestone heaves up out of the floor below it, then sinks back
 Ghost.prototype.grave = function(){
-  if(this._dead) return;
-  var g=document.createElement('div'); g.className='gh-grave'; g.textContent='🪦';
+  if(this._dead || document.hidden) return;
+  var g=document.createElement('div'); g.className='gh-grave'; g.setAttribute('data-pet','ghost'); g.textContent='🪦';
   g.style.left=(this.x + this.W*0.3)+'px';
   g.style.top =(this.y + this.H - 10)+'px';
   document.body.appendChild(g);
@@ -552,9 +574,9 @@ Ghost.prototype.grave = function(){
 };
 // an eerie rune flares into being then fades
 Ghost.prototype.rune = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var glyphs=['ᚦ','ᚱ','ᛟ','ᛉ','ᛏ','ᚷ','ᛞ','ᚹ'];
-  var u=document.createElement('div'); u.className='gh-rune';
+  var u=document.createElement('div'); u.className='gh-rune'; u.setAttribute('data-pet','ghost');
   u.textContent=glyphs[(Math.random()*glyphs.length)|0];
   u.style.left=(this.x + this.W*0.5 - 9)+'px';
   u.style.top =(this.y - 18)+'px';
@@ -616,7 +638,7 @@ Ghost.prototype.pickState = function(){
 Ghost.prototype._spawnFriend = function(){
   if(this._dead || this._friend) return;
   var f = document.createElement('div');
-  f.className = 'gh-friend';
+  f.className = 'gh-friend'; f.setAttribute('data-pet','ghost');
   var fw = Math.round(this.W*0.74), fh = Math.round(this.H*0.74);
   f.style.width = fw+'px'; f.style.height = fh+'px';
   f.innerHTML = ghostSVG(TINT_FRIEND);
@@ -653,8 +675,8 @@ Ghost.prototype._friendTick = function(k){
 
 // ── cold fx (visual only — no text) ───────────────────────────────────────────
 Ghost.prototype.mist = function(){
-  if(this._dead) return;
-  var m = document.createElement('div'); m.className='gh-mist';
+  if(this._dead || document.hidden) return;
+  var m = document.createElement('div'); m.className='gh-mist'; m.setAttribute('data-pet','ghost');
   var sz = 7 + (Math.random()*9|0);
   m.style.width=sz+'px'; m.style.height=sz+'px';
   m.style.left = (this.x + 14 + Math.random()*30) + 'px';
@@ -664,8 +686,8 @@ Ghost.prototype.mist = function(){
   this._after(2800, function(){ if(m.parentNode) m.parentNode.removeChild(m); });
 };
 Ghost.prototype.ring = function(){
-  if(this._dead) return;
-  var r = document.createElement('div'); r.className='gh-ring';
+  if(this._dead || document.hidden) return;
+  var r = document.createElement('div'); r.className='gh-ring'; r.setAttribute('data-pet','ghost');
   var sz = 40;
   r.style.width=sz+'px'; r.style.height=sz+'px';
   r.style.left = (this.x + this.W/2 - sz/2) + 'px';
@@ -683,7 +705,9 @@ Ghost.prototype.destroy = function(){
   this._listeners.length = 0;
   if(this.el && this.el.parentNode) this.el.parentNode.removeChild(this.el);
   this._friend = null; this._mirror = null;
-  var stray = document.querySelectorAll('.gh-mist, .gh-ring, .gh-friend, .gh-clone, .gh-drip, .gh-eyes, .gh-web, .gh-wisp, .gh-bat, .gh-frost, .gh-puddle, .gh-mirror, .gh-pumpkin, .gh-candle, .gh-chain, .gh-grave, .gh-rune');
+  // sweep by the shared marker attribute (catches any future gh-* node even if it
+  // isn't in the hand-maintained class list) plus the classes.
+  var stray = document.querySelectorAll('[data-pet="ghost"], .gh-mist, .gh-ring, .gh-friend, .gh-clone, .gh-drip, .gh-eyes, .gh-web, .gh-wisp, .gh-bat, .gh-frost, .gh-puddle, .gh-mirror, .gh-pumpkin, .gh-candle, .gh-chain, .gh-grave, .gh-rune');
   for(var k=0;k<stray.length;k++){ if(stray[k].parentNode) stray[k].parentNode.removeChild(stray[k]); }
 };
 

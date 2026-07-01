@@ -11,6 +11,10 @@
 <meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="/cryptirc/manifest.json">
 <link rel="apple-touch-icon" href="/cryptirc/icon.svg">
+<!-- D2: declare the favicon explicitly so the browser doesn't fall back to a 404ing
+     /favicon.ico request at the web root (the app is served under /cryptirc/). -->
+<link rel="icon" href="/cryptirc/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/cryptirc/icon-192.png" sizes="192x192" type="image/png">
 <title>CryptIRC</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

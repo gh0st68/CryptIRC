@@ -30,7 +30,9 @@
 var Z = 91;                 // a UFO rides above the other pets (sheep 90); still below panels/menus/modals (>=100)
 var _enabled = false;
 var _alien = null;
-var STRAY = '.al-beam, .al-obj, .al-bolt, .al-spark, .al-ring, .al-portal, .al-buddy, .al-dust, .al-glyph, .al-probe, .al-zzz';
+// Sweep stray fx by the shared marker attribute (catches any future al-* node even
+// if it isn't listed below) plus the hand-maintained class list.
+var STRAY = '[data-pet="alien"], .al-beam, .al-obj, .al-bolt, .al-spark, .al-ring, .al-portal, .al-buddy, .al-dust, .al-glyph, .al-probe, .al-zzz';
 
 // ── styles (injected once) ─────────────────────────────────────────────────────
 var STYLE_ID = 'cryptirc-alien-style';
@@ -101,7 +103,9 @@ function injectStyle(){
     '.al-probe{position:fixed;z-index:'+(Z-1)+';pointer-events:none;font-size:15px;transition:left .5s ease,top .5s ease}',
     '.al-zzz{position:fixed;z-index:'+(Z-1)+';pointer-events:none;font-size:13px;color:#cfe;animation:alZzz 1.8s ease-in forwards}',
     '@keyframes alZzz{0%{opacity:0;transform:translate(0,0) rotate(0)}20%{opacity:.9}100%{opacity:0;transform:translate(12px,-26px) rotate(14deg)}}',
-    '@media(prefers-reduced-motion:reduce){.cryptirc-alien *,.cryptirc-alien,.al-buddy{animation:none!important}}'
+    '@media(prefers-reduced-motion:reduce){.cryptirc-alien *,.cryptirc-alien,.al-buddy{animation:none!important}',
+      // also silence the spawned FX nodes (al-*) and hide the decorative ones
+      '.al-beam,.al-obj,.al-bolt,.al-spark,.al-ring,.al-portal,.al-dust,.al-glyph,.al-probe,.al-zzz{animation:none!important;opacity:0!important}}'
   ].join('');
   document.head.appendChild(s);
 }
@@ -312,11 +316,11 @@ Alien.prototype._saucerBottom = function(){ return { x:this.x + this.W/2, y:this
 
 // tractor beam straight down from the saucer; returns the beam's reach (px)
 Alien.prototype.beam = function(reach){
-  if(this._dead) return 0;
+  if(this._dead || document.hidden) return 0;
   var b = this._saucerBottom();
   var h = Math.max(40, Math.min(reach || 150, this.screenH - b.y - 4));
   var w = this.W * 0.5;
-  var d = document.createElement('div'); d.className = 'al-beam';
+  var d = document.createElement('div'); d.className = 'al-beam'; d.setAttribute('data-pet','alien');
   d.style.width = w + 'px'; d.style.height = h + 'px';
   d.style.left = (b.x - w/2) + 'px'; d.style.top = b.y + 'px';
   document.body.appendChild(d);
@@ -326,10 +330,10 @@ Alien.prototype.beam = function(reach){
 
 var ABDUCT_OBJS = ['🐄','🌟','🛰️','❓','🐟','🌵','📦','🚗','🧀','🪨'];
 Alien.prototype.abduct = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var h = this.beam(160);
   var b = this._saucerBottom();
-  var o = document.createElement('div'); o.className = 'al-obj';
+  var o = document.createElement('div'); o.className = 'al-obj'; o.setAttribute('data-pet','alien');
   o.textContent = ABDUCT_OBJS[(Math.random()*ABDUCT_OBJS.length)|0];
   var startY = b.y + h - 16, endY = b.y - 6;
   o.style.left = (b.x - 9) + 'px'; o.style.top = startY + 'px';
@@ -342,18 +346,18 @@ Alien.prototype.abduct = function(){
 };
 
 Alien.prototype.fireZap = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   this.el.classList.remove('charge');
   var b = this._saucerBottom();
   var len = Math.max(40, Math.min(120 + (Math.random()*120|0), this.screenH - b.y - 4));
-  var bolt = document.createElement('div'); bolt.className = 'al-bolt';
+  var bolt = document.createElement('div'); bolt.className = 'al-bolt'; bolt.setAttribute('data-pet','alien');
   bolt.style.height = len + 'px'; bolt.style.left = (b.x - 1.5) + 'px'; bolt.style.top = b.y + 'px';
   bolt.style.transformOrigin = 'top center';
   document.body.appendChild(bolt);
   this._after(520, function(){ if(bolt.parentNode) bolt.parentNode.removeChild(bolt); });
   // impact spark where the bolt lands
   var sx = b.x, sy = b.y + len;
-  var sp = document.createElement('div'); sp.className = 'al-spark';
+  var sp = document.createElement('div'); sp.className = 'al-spark'; sp.setAttribute('data-pet','alien');
   var sz = 18; sp.style.width=sz+'px'; sp.style.height=sz+'px';
   sp.style.left=(sx-sz/2)+'px'; sp.style.top=(sy-sz/2)+'px';
   document.body.appendChild(sp);
@@ -361,9 +365,9 @@ Alien.prototype.fireZap = function(){
 };
 
 Alien.prototype.scan = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var b = this._saucerBottom();
-  var r = document.createElement('div'); r.className = 'al-ring';
+  var r = document.createElement('div'); r.className = 'al-ring'; r.setAttribute('data-pet','alien');
   var sz = 30; r.style.width=sz+'px'; r.style.height=sz+'px';
   r.style.left=(b.x-sz/2)+'px'; r.style.top=(this.y + this._floatY + this.H/2 - sz/2)+'px';
   document.body.appendChild(r);
@@ -372,13 +376,13 @@ Alien.prototype.scan = function(){
 
 var GLYPHS = ['✦','⌬','☌','⏃','◬','⟁','✶','⍟','⏚','⊹'];
 Alien.prototype.signal = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var n = 2 + (Math.random()*2|0), self=this;
   for(var i=0;i<n;i++){
     (function(idx){
       self._after(idx*180, function(){
         if(self._dead) return;
-        var g = document.createElement('div'); g.className='al-glyph';
+        var g = document.createElement('div'); g.className='al-glyph'; g.setAttribute('data-pet','alien');
         g.textContent = GLYPHS[(Math.random()*GLYPHS.length)|0];
         g.style.left = (self.x + self.W*0.5 + (Math.random()*24-12)) + 'px';
         g.style.top  = (self.y + self._floatY + 6) + 'px';
@@ -390,13 +394,13 @@ Alien.prototype.signal = function(){
 };
 
 Alien.prototype.stardust = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var n = 4 + (Math.random()*4|0), self=this;
   for(var i=0;i<n;i++){
     (function(idx){
       self._after(idx*90, function(){
         if(self._dead) return;
-        var d = document.createElement('div'); d.className='al-dust';
+        var d = document.createElement('div'); d.className='al-dust'; d.setAttribute('data-pet','alien');
         var sz = 3 + (Math.random()*4|0);
         d.style.width=sz+'px'; d.style.height=sz+'px';
         d.style.left = (self.x + self.W*0.5 + (Math.random()*40-20)) + 'px';
@@ -410,9 +414,9 @@ Alien.prototype.stardust = function(){
 
 // a little probe droid drops, hovers, then is recalled
 Alien.prototype.probe = function(){
-  if(this._dead || this._probe) return;
+  if(this._dead || document.hidden || this._probe) return;
   var b = this._saucerBottom();
-  var p = document.createElement('div'); p.className='al-probe'; p.textContent='🛸';
+  var p = document.createElement('div'); p.className='al-probe'; p.setAttribute('data-pet','alien'); p.textContent='🛸';
   p.style.left = (b.x - 8) + 'px'; p.style.top = b.y + 'px';
   document.body.appendChild(p);
   this._probe = p;
@@ -424,13 +428,13 @@ Alien.prototype.probe = function(){
 };
 
 Alien.prototype.snooze = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var n = 3, self=this;
   for(var i=0;i<n;i++){
     (function(idx){
       self._after(idx*420, function(){
         if(self._dead) return;
-        var z = document.createElement('div'); z.className='al-zzz'; z.textContent='z';
+        var z = document.createElement('div'); z.className='al-zzz'; z.setAttribute('data-pet','alien'); z.textContent='z';
         z.style.left = (self.x + self.W*0.62) + 'px';
         z.style.top  = (self.y + self._floatY + 4) + 'px';
         document.body.appendChild(z);
@@ -469,8 +473,8 @@ Alien.prototype.wormhole = function(){
   });
 };
 Alien.prototype._portalAt = function(cx, cy){
-  if(this._dead) return;
-  var p = document.createElement('div'); p.className='al-portal';
+  if(this._dead || document.hidden) return;
+  var p = document.createElement('div'); p.className='al-portal'; p.setAttribute('data-pet','alien');
   var sz = 60; p.style.width=sz+'px'; p.style.height=sz+'px';
   p.style.left=(cx-sz/2)+'px'; p.style.top=(cy-sz/2)+'px';
   document.body.appendChild(p);
@@ -496,8 +500,8 @@ Alien.prototype._buddyTick = function(k){
   if(this._buddyT <= 0){ this._despawnBuddy(); }
 };
 Alien.prototype._spawnBuddy = function(){
-  if(this._dead || this._buddy) return;
-  var f = document.createElement('div'); f.className='al-buddy';
+  if(this._dead || document.hidden || this._buddy) return;
+  var f = document.createElement('div'); f.className='al-buddy'; f.setAttribute('data-pet','alien');
   var fw = Math.round(this.W*0.6), fh = Math.round(this.H*0.6);
   f.style.width=fw+'px'; f.style.height=fh+'px';
   f.innerHTML = saucerSVG(true);

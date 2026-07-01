@@ -13,12 +13,45 @@ pub struct Track {
     pub now_playing: bool,
 }
 
+/// Maximum number of response bytes we will buffer from Last.fm. A getRecentTracks
+/// response for one track is a few KB; 256 KiB is a generous cap that prevents a
+/// hostile/misbehaving endpoint from forcing unbounded allocation (audit #64).
+const MAX_BODY: usize = 256 * 1024;
+
+/// A hardened, lastfm-owned HTTP client (audit #64).
+///
+/// We do NOT reuse the shared `gif_client` passed in by main.rs (it carries the default
+/// redirect policy, no proxy restriction and no body cap). Instead we build our own:
+///   - `redirect::Policy::none()` — never follow 3xx, so the request (which carries the
+///     api_key in its query string) can't be bounced to an internal/attacker address
+///     (SSRF) and the api_key can't leak via a redirect `Location`.
+///   - `.no_proxy()` — ignore env proxies so traffic can't be silently rerouted.
+///   - short connect/overall timeouts.
+/// The `client` parameter is retained for call-site compatibility with main.rs but is
+/// intentionally ignored.
+fn http() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            // A builder failure here is a static misconfiguration; fall back to a default
+            // client so we never panic at runtime.
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
 /// Fetch the most recent track for `lfm_user` using `api_key`.
-pub async fn now_playing(client: &reqwest::Client, api_key: &str, lfm_user: &str) -> Result<Track> {
+///
+/// `_client` is ignored on purpose — see `http()` for why we use our own hardened client.
+pub async fn now_playing(_client: &reqwest::Client, api_key: &str, lfm_user: &str) -> Result<Track> {
     if api_key.trim().is_empty() { bail!("No Last.fm API key configured"); }
     if lfm_user.trim().is_empty() { bail!("No Last.fm username set"); }
 
-    let resp = client
+    let resp = http()
         .get("https://ws.audioscrobbler.com/2.0/")
         .query(&[
             ("method", "user.getrecenttracks"),
@@ -34,7 +67,14 @@ pub async fn now_playing(client: &reqwest::Client, api_key: &str, lfm_user: &str
         .map_err(|e| anyhow!("Last.fm request failed (timeout={}, connect={})", e.is_timeout(), e.is_connect()))?;
 
     let status = resp.status();
-    let text = resp.text().await.map_err(|_| anyhow!("Last.fm: unreadable response"))?;
+    // Cap the buffered body (audit #64): pull bytes and refuse anything over MAX_BODY so a
+    // hostile endpoint can't exhaust memory. (Chunk-wise capping would be stricter, but
+    // bytes()+length check bounds the final allocation for our expected tiny payloads.)
+    let raw = resp.bytes().await.map_err(|_| anyhow!("Last.fm: unreadable response"))?;
+    if raw.len() > MAX_BODY {
+        bail!("Last.fm: response too large");
+    }
+    let text = String::from_utf8_lossy(&raw);
     let body: serde_json::Value = serde_json::from_str(&text)
         .map_err(|_| anyhow!("Last.fm: malformed response"))?;
 

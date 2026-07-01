@@ -2,7 +2,18 @@
 // Handles: offline caching, push notifications, notification click actions
 
 const CACHE = 'cryptirc-v208';
+// notif-intent cache: a fallback bridge that stores a single notification-click
+// intent so the client can read it on startup if postMessage is lost. It stores
+// only minimal opaque IDs (conn_id/target/from/ts) — no auth material (audit #75).
+const NOTIF_INTENT_CACHE = 'cryptirc-notif-intent';
 const STATIC = ['/cryptirc/manifest.json', '/cryptirc/icon.svg', '/cryptirc/icon-192.png', '/cryptirc/icon-512.png'];
+
+// Only cache first-party, non-redirected, 200 responses. This rejects opaque
+// (cross-origin/no-cors) and proxy-injected responses that could poison the
+// cache (audit #74).
+function isCacheable(res) {
+  return res && res.ok && res.type === 'basic' && !res.redirected && res.status === 200;
+}
 // App scripts: needed for an offline launch to actually boot (audit #95). Served
 // network-first with a cache fallback so online deploys always take effect immediately
 // while a cached copy remains available offline.
@@ -24,13 +35,24 @@ self.addEventListener('install', e => {
 
 // ─── Activate ─────────────────────────────────────────────────────────────────
 self.addEventListener('activate', e => {
+  // Whitelist of caches that survive a version bump. The notif-intent cache is
+  // explicitly managed here so it is no longer an orphan that survives forever
+  // outside version control (audit #75).
+  const KEEP = [CACHE, NOTIF_INTENT_CACHE];
   e.waitUntil(
     caches.keys()
       .then(keys => Promise.all(
-        keys.filter(k => k !== CACHE).map(k => caches.delete(k))
+        keys.filter(k => !KEEP.includes(k)).map(k => caches.delete(k))
       ))
       .then(() => self.clients.claim())
   );
+});
+
+// Allow the app to clear the notif-intent bridge on logout (audit #75).
+self.addEventListener('message', e => {
+  if (e.data && e.data.type === 'clear_notif_intent') {
+    e.waitUntil(caches.delete(NOTIF_INTENT_CACHE));
+  }
 });
 
 // ─── Fetch (network-first for HTML, cache-first for static assets) ───────────
@@ -40,43 +62,59 @@ self.addEventListener('fetch', e => {
   if (['/cryptirc/ws', '/cryptirc/auth', '/cryptirc/upload', '/cryptirc/files', '/cryptirc/push', '/cryptirc/pub'].some(p =>
       url.pathname.startsWith(p))) return;
 
-  // Main HTML page — always network-first so deploys take effect immediately
+  // Main HTML page — always network-first so deploys take effect immediately.
+  // On failure fall back to cache, and if nothing is cached synthesize an offline
+  // Response so we never resolve to undefined / a blank document (audit #136).
   if (url.pathname === '/cryptirc/' || url.pathname === '/cryptirc') {
     e.respondWith(
       fetch(e.request).then(res => {
-        if (res.ok) { const c = res.clone(); caches.open(CACHE).then(cache => cache.put(e.request, c)); }
+        if (isCacheable(res)) { const c = res.clone(); caches.open(CACHE).then(cache => cache.put(e.request, c)); }
         return res;
-      }).catch(() => caches.match(e.request))
+      }).catch(async () => (await caches.match(e.request)) || offlineResponse())
     );
     return;
   }
 
   // App scripts — network-first so deploys take effect immediately, but fall back
-  // to the cached copy when offline so the PWA can still boot (audit #95).
+  // to the cached copy when offline so the PWA can still boot (audit #95). If
+  // neither is available, synthesize an offline Response (audit #136).
   if (APP_SCRIPTS.includes(url.pathname)) {
     e.respondWith(
       fetch(e.request).then(res => {
-        if (res.ok) { const c = res.clone(); caches.open(CACHE).then(cache => cache.put(e.request, c)); }
+        if (isCacheable(res)) { const c = res.clone(); caches.open(CACHE).then(cache => cache.put(e.request, c)); }
         return res;
-      }).catch(() => caches.match(e.request))
+      }).catch(async () => (await caches.match(e.request)) || offlineResponse())
     );
     return;
   }
 
-  // Other static assets — cache-first
+  // Other static assets — stale-while-revalidate: serve the cached copy
+  // immediately (fast, offline-capable) but always kick off a background fetch
+  // to refresh the cache, so a bad/stale cache fill self-heals on the next load
+  // instead of being pinned forever (audit #73).
   e.respondWith(
-    caches.match(e.request).then(r => {
-      if (r) return r;
-      return fetch(e.request).then(res => {
-        if (res.ok && STATIC.includes(url.pathname)) {
+    caches.match(e.request).then(cached => {
+      const network = fetch(e.request).then(res => {
+        if (isCacheable(res) && STATIC.includes(url.pathname)) {
           const clone = res.clone();
           caches.open(CACHE).then(c => c.put(e.request, clone));
         }
         return res;
-      });
+      }).catch(() => cached || offlineResponse());
+      return cached || network;
     })
   );
 });
+
+// Synthesized response for the network-first paths when there is nothing cached,
+// so respondWith never resolves to undefined (which renders a blank doc offline).
+function offlineResponse() {
+  return new Response('Offline', {
+    status: 503,
+    statusText: 'Service Unavailable',
+    headers: { 'Content-Type': 'text/plain' },
+  });
+}
 
 // ─── Push notification received ───────────────────────────────────────────────
 self.addEventListener('push', e => {
@@ -89,20 +127,34 @@ self.addEventListener('push', e => {
     payload = { title: 'CryptIRC', body: e.data.text() };
   }
 
-  const title   = payload.title  || 'CryptIRC';
+  // The push payload is attacker-influenceable, so clamp the visible strings and
+  // do NOT honour an attacker-chosen tag. Clamp title<=100 / body<=300 chars and
+  // derive a stable, deterministic tag from conn_id+target so a flood of messages
+  // for the same conversation coalesces into one notification instead of stacking
+  // up an unbounded pile (audit #76).
+  const clamp = (v, n) => String(v == null ? '' : v).slice(0, n);
+
+  const conn_id = clamp(payload.conn_id, 200);
+  const target  = clamp(payload.target,  200);
+
+  const title   = clamp(payload.title || 'CryptIRC', 100);
+  const tag     = 'cryptirc:' + conn_id + ':' + target;
   const options = {
-    body:              payload.body  || '',
+    body:              clamp(payload.body, 300),
     icon:              '/cryptirc/icon-192.png',
     badge:             '/cryptirc/icon-192.png',
-    tag:               payload.tag   || 'cryptirc-default',
+    tag:               tag,
+    // renotify so a new message in an already-notified conversation still alerts,
+    // but requireInteraction is off so coalesced floods auto-dismiss and don't
+    // pin a permanent banner (audit #76).
     renotify:          true,
     vibrate:           [150, 50, 150],
     silent:            false,
-    requireInteraction: true,
+    requireInteraction: false,
     data: {
-      conn_id: payload.conn_id || '',
-      target:  payload.target  || '',
-      from:    payload.from    || '',
+      conn_id: conn_id,
+      target:  target,
+      from:    clamp(payload.from, 200),
       ts:      payload.ts      || 0,
       url:     self.location.origin + '/cryptirc/',
     },
@@ -130,9 +182,17 @@ self.addEventListener('notificationclick', e => {
   if (e.action === 'dismiss') return;
 
   const data    = e.notification.data || {};
-  const target  = encodeURIComponent(data.conn_id + '/' + data.target);
+  // Build the open URL by passing conn_id and target as SEPARATE, individually
+  // URL-encoded query params instead of '/'-joining them. Joining was unsafe: a
+  // '/' inside conn_id or target could shift the boundary between the two fields
+  // (audit #77). app.js must read these distinct params.
+  //
+  // notificationclick query-param format (app.js must match):
+  //   ?conn=<encodeURIComponent(conn_id)>&target=<encodeURIComponent(target)>
+  //    [&ts=<ts>][&from=<encodeURIComponent(from)>]
   const qs      = [];
-  if (data.conn_id) qs.push(`open=${target}`);
+  if (data.conn_id) qs.push(`conn=${encodeURIComponent(data.conn_id)}`);
+  if (data.target)  qs.push(`target=${encodeURIComponent(data.target)}`);
   if (data.ts)      qs.push(`ts=${encodeURIComponent(data.ts)}`);
   if (data.from)    qs.push(`from=${encodeURIComponent(data.from)}`);
   const openUrl = data.url + (qs.length ? `?${qs.join('&')}` : '');
@@ -149,7 +209,7 @@ self.addEventListener('notificationclick', e => {
     // Write intent to Cache API as a fallback bridge — client reads this on
     // startup in case postMessage is lost (iOS PWA wake races, etc.)
     try {
-      const cache = await caches.open('cryptirc-notif-intent');
+      const cache = await caches.open(NOTIF_INTENT_CACHE);
       const body = JSON.stringify({ ...payload, t: Date.now() });
       await cache.put('/__notif_click__', new Response(body, {
         headers: { 'Content-Type': 'application/json' },
@@ -158,9 +218,13 @@ self.addEventListener('notificationclick', e => {
 
     const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
 
-    // Try to focus an existing same-origin client
+    // Try to focus an existing same-origin client. Compare parsed origins rather
+    // than startsWith(origin), which could match a malicious lookalike origin
+    // (e.g. https://evil.example.com.attacker.test) (audit #135).
     for (const client of clientsList) {
-      if (client.url.startsWith(self.location.origin)) {
+      let sameOrigin = false;
+      try { sameOrigin = new URL(client.url).origin === self.location.origin; } catch (err) {}
+      if (sameOrigin) {
         try { client.postMessage(payload); } catch (err) {}
         if ('focus' in client) {
           try { return await client.focus(); } catch (err) {}
@@ -191,6 +255,16 @@ self.addEventListener('pushsubscriptionchange', e => {
           subscription: sub.toJSON(),
         }));
       });
-    }).catch(() => {})
+    }).catch(err => {
+      // Re-subscribe failed (e.g. permission revoked). Don't swallow it silently —
+      // tell the clients so the app can surface the lost-push state and prompt the
+      // user to re-enable notifications (audit #136).
+      return self.clients.matchAll().then(clients => {
+        clients.forEach(c => c.postMessage({
+          type: 'push_resubscribe_failed',
+          error: String(err && err.message ? err.message : err),
+        }));
+      }).catch(() => {});
+    })
   );
 });

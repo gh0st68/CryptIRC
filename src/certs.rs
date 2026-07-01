@@ -14,6 +14,7 @@ use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType, PKCS_ECDS
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::sync::Arc;
+use zeroize::Zeroize;
 
 use crate::crypto::CryptoManager;
 
@@ -47,12 +48,27 @@ impl CertStore {
 
         let dir = self.cert_dir(cert_id);
         tokio::fs::create_dir_all(&dir).await?;
+        // Restrict the cert dir (and its parent) to owner-only (audit #142): the
+        // world-traversable data dir must not let other local users enumerate or read
+        // per-network cert material.
+        set_dir_mode(&dir).await;
+        if let Some(parent) = dir.parent() { set_dir_mode(parent).await; }
 
-        // Build certificate parameters
+        // Build certificate parameters. Validity is computed from "now" (audit #142):
+        // valid from ~1 day ago (clock-skew tolerance) to ~10 years out, rather than a
+        // hardcoded 2024..2034 window. rcgen 0.12 takes `time::OffsetDateTime`; we derive
+        // the current civil date via chrono (already a dependency) so we don't add a new
+        // direct `time` dependency, then use rcgen's `date_time_ymd` constructor.
         let mut params = CertificateParams::default();
         params.alg = &PKCS_ECDSA_P256_SHA256;
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after  = rcgen::date_time_ymd(2034, 1, 1);
+        let (ny, nm, nd) = current_ymd();
+        params.not_before = rcgen::date_time_ymd(ny, nm, nd) - std::time::Duration::from_secs(24 * 60 * 60);
+        // P3 fix (#142): clamp Feb-29 for the +10y not_after. ny+10 is never a leap
+        // year (10 ∤ 4), so rcgen's date_time_ymd would internally .expect() a
+        // from_calendar_date(non-leap, Feb, 29) → Err → panic. not_before is safe
+        // (the current year IS a leap year on Feb 29).
+        let end_day = if nm == 2 && nd == 29 { 28 } else { nd };
+        params.not_after  = rcgen::date_time_ymd(ny + 10, nm, end_day);
 
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, nick);
@@ -62,7 +78,7 @@ impl CertStore {
         let cert = Certificate::from_params(params)?;
 
         let cert_pem = cert.serialize_pem()?;
-        let key_pem  = cert.get_key_pair().serialize_pem();
+        let mut key_pem = cert.get_key_pair().serialize_pem();
 
         // Write public cert plaintext (0600 anyway — only the service reads it; #7)
         let cert_path = dir.join("cert.pem");
@@ -76,6 +92,8 @@ impl CertStore {
         let key_path = dir.join("key.enc");
         tokio::fs::write(&key_path, key_enc).await?;
         set_secret_mode(&key_path).await;
+        // Scrub the plaintext private-key PEM from memory once encrypted (audit #142).
+        key_pem.zeroize();
 
         let fingerprint = compute_fingerprint(&cert.serialize_der()?)?;
 
@@ -103,17 +121,20 @@ impl CertStore {
         let key_enc  = tokio::fs::read_to_string(dir.join("key.enc")).await
             .map_err(|_| anyhow::anyhow!("Encrypted key not found"))?;
         let key_pem_bytes = self.crypto.decrypt(username, key_enc.trim()).await?;
-        let key_pem = String::from_utf8(key_pem_bytes)?;
+        let mut key_pem = String::from_utf8(key_pem_bytes)?;
 
         // native-tls needs PKCS#12; we build it via openssl
         let identity = build_identity(&cert_pem, &key_pem)?;
+        // Scrub the decrypted plaintext private-key PEM from memory (audit #142).
+        key_pem.zeroize();
         Ok(identity)
     }
 
     /// Delete a stored certificate.
     pub async fn delete(&self, cert_id: &str) -> Result<()> {
         let dir = self.cert_dir(cert_id);
-        if dir.exists() {
+        // Use the async non-blocking existence check (audit #142).
+        if tokio::fs::try_exists(&dir).await.unwrap_or(false) {
             tokio::fs::remove_dir_all(&dir).await?;
         }
         Ok(())
@@ -121,7 +142,10 @@ impl CertStore {
 
     /// Check whether a cert exists for a given id.
     pub async fn exists(&self, cert_id: &str) -> bool {
-        self.cert_dir(cert_id).join("cert.pem").exists()
+        // Use the async non-blocking existence check (audit #142).
+        tokio::fs::try_exists(self.cert_dir(cert_id).join("cert.pem"))
+            .await
+            .unwrap_or(false)
     }
 
     /// List all stored certificate IDs.
@@ -140,13 +164,30 @@ impl CertStore {
         ids
     }
 
-    fn cert_dir(&self, cert_id: &str) -> PathBuf {
-        // Sanitize cert_id — only alphanumeric + dash/underscore
-        let safe: String = cert_id.chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+    /// Compute the on-disk directory for a cert id, with the id sanitized.
+    ///
+    /// Sanitization (audit #48/#142): keep only ASCII-alphanumeric plus `-`/`_`, capped
+    /// at 64 chars. This intentionally drops `.`, `/`, `\`, NUL and any non-ASCII so a
+    /// crafted cert_id cannot escape the `certs/` base via path traversal. If the result
+    /// is empty (id was all-illegal), fall back to a fixed `_invalid` segment so we never
+    /// return the bare base dir.
+    pub(crate) fn cert_dir(&self, cert_id: &str) -> PathBuf {
+        let mut safe: String = cert_id.chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
             .take(64)
             .collect();
+        if safe.is_empty() {
+            safe.push_str("_invalid");
+        }
         PathBuf::from(&self.data_dir).join("certs").join(safe)
+    }
+
+    /// Public, sanitized cert-directory resolver (audit #48). Callers outside this module
+    /// (e.g. irc.rs building a cert path) MUST route through this instead of joining
+    /// `cert_id` onto a base path themselves, so the same traversal sanitization always
+    /// applies.
+    pub fn cert_path_for(&self, cert_id: &str) -> PathBuf {
+        self.cert_dir(cert_id)
     }
 }
 
@@ -163,6 +204,28 @@ async fn set_secret_mode(path: &std::path::Path) {
     }
     #[cfg(not(unix))]
     { let _ = path; }
+}
+
+/// Best-effort chmod 0700 on a cert directory (audit #142) so other local users on the
+/// world-traversable data dir cannot list or traverse stored cert material. No-op on
+/// non-unix targets.
+async fn set_dir_mode(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await;
+    }
+    #[cfg(not(unix))]
+    { let _ = path; }
+}
+
+/// Current UTC civil date as (year, month, day), from the system clock via `chrono`
+/// (already a project dependency) — used to build the cert validity window from "now"
+/// rather than a hardcoded date (audit #142).
+fn current_ymd() -> (i32, u8, u8) {
+    use chrono::Datelike;
+    let now = chrono::Utc::now();
+    (now.year(), now.month() as u8, now.day() as u8)
 }
 
 /// Compute SHA-256 fingerprint of a DER-encoded certificate.
@@ -187,9 +250,20 @@ fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
 }
 
 /// Build a native_tls::Identity from PEM cert + PEM private key.
-/// Uses openssl to create a PKCS#12 bundle.
+/// Uses openssl to create an in-memory PKCS#12 bundle.
+///
+/// The PKCS#12 round-trip uses an ephemeral random passphrase (audit #49) rather than
+/// an empty one, so the private key is never wrapped unencrypted in the DER blob that
+/// briefly lives in memory. The same random pass is used for both build and parse, then
+/// the DER buffer is zeroized once the Identity has been constructed.
 fn build_identity(cert_pem: &str, key_pem: &str) -> Result<native_tls::Identity> {
-    use openssl::{pkcs12::Pkcs12, pkey::PKey, x509::X509};
+    use openssl::{pkcs12::Pkcs12, pkey::PKey, rand::rand_bytes, x509::X509};
+
+    // 32 random bytes -> hex passphrase, used only for this in-memory round-trip.
+    let mut raw = [0u8; 32];
+    rand_bytes(&mut raw).map_err(|e| anyhow::anyhow!("RNG failure: {}", e))?;
+    let mut pass: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
+    raw.zeroize();
 
     let cert  = X509::from_pem(cert_pem.as_bytes())?;
     let pkey  = PKey::private_key_from_pem(key_pem.as_bytes())?;
@@ -197,10 +271,13 @@ fn build_identity(cert_pem: &str, key_pem: &str) -> Result<native_tls::Identity>
         .name("cryptirc-client")
         .pkey(&pkey)
         .cert(&cert)
-        .build2("")?;
-    let der   = p12.to_der()?;
-    let ident = native_tls::Identity::from_pkcs12(&der, "")
+        .build2(&pass)?;
+    let mut der = p12.to_der()?;
+    let ident = native_tls::Identity::from_pkcs12(&der, &pass)
         .map_err(|e| anyhow::anyhow!("Identity build failed: {}", e))?;
+    // Scrub the encrypted DER and the ephemeral passphrase from memory.
+    der.zeroize();
+    pass.zeroize();
     Ok(ident)
 }
 

@@ -647,6 +647,36 @@ fn kdf_sem() -> &'static Semaphore {
     KDF_SEM.get_or_init(|| Semaphore::new(KDF_MAX_CONCURRENT))
 }
 
+// #14: cap concurrent WebSocket connections globally and per real client IP so a
+// connection flood from a few IPs can't exhaust tokio tasks / file descriptors. The
+// permit + per-IP slot are released by `WsConnGuard` on disconnect.
+const WS_MAX_GLOBAL_CONNS: usize = 4000;
+const WS_MAX_PER_IP_CONNS: usize = 64;
+static WS_SEM: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
+fn ws_sem() -> &'static Semaphore {
+    WS_SEM.get_or_init(|| Semaphore::new(WS_MAX_GLOBAL_CONNS))
+}
+fn ws_ip_counts() -> &'static dashmap::DashMap<String, usize> {
+    static M: std::sync::OnceLock<dashmap::DashMap<String, usize>> = std::sync::OnceLock::new();
+    M.get_or_init(dashmap::DashMap::new)
+}
+/// Holds a global WS permit for the connection's lifetime and decrements the per-IP
+/// counter on drop (disconnect), so both caps self-heal.
+struct WsConnGuard {
+    _permit: tokio::sync::SemaphorePermit<'static>,
+    ip: Option<String>,
+}
+impl Drop for WsConnGuard {
+    fn drop(&mut self) {
+        if let Some(ip) = &self.ip {
+            if let Some(mut c) = ws_ip_counts().get_mut(ip) {
+                *c = c.saturating_sub(1);
+            }
+            ws_ip_counts().remove_if(ip, |_, &v| v == 0);
+        }
+    }
+}
+
 
 async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
     let mut response = next.run(req).await;
@@ -675,7 +705,7 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
     h.insert(HeaderName::from_static("content-security-policy"),  HeaderValue::from_static(
         "default-src 'self'; object-src 'none'; base-uri 'self'; script-src 'self' 'unsafe-inline'; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-         font-src https://fonts.gstatic.com; img-src 'self' data: https:; \
+         font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; \
          connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com https://api.urbandictionary.com https://api.giphy.com https://tenor.googleapis.com; \
          frame-src https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';"
     ));
@@ -693,53 +723,80 @@ async fn main() -> Result<()> {
     let from_email  = std::env::var("CRYPTIRC_FROM_EMAIL").unwrap_or_else(|_| "noreply@cryptirc.local".into());
     // Load admin settings from disk (persisted), fall back to env vars
     let admin_settings_path = std::path::PathBuf::from(&data_dir).join("admin_settings.json");
-    let (registration_open, reg_code, max_upload_mb) = if admin_settings_path.exists() {
-        let json = std::fs::read_to_string(&admin_settings_path).unwrap_or_default();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
+    // #112 / P6: parse admin_settings.json EXACTLY ONCE here and derive every
+    // field below from this single parsed value. A corrupt/torn file must NOT
+    // silently fall back to permissive defaults for ANY field (that would quietly
+    // undo an admin lockdown), and the corruption must be logged loudly once.
+    //   • admin_settings_val = Some(v)  → file present and parsed OK.
+    //   • admin_settings_val = None + admin_settings_corrupt=true → present but
+    //     UNPARSEABLE: every security-relevant field fails CLOSED.
+    //   • admin_settings_val = None + admin_settings_corrupt=false → file absent:
+    //     fall back to env vars / today's defaults.
+    let (admin_settings_val, admin_settings_corrupt): (Option<serde_json::Value>, bool) =
+        if admin_settings_path.exists() {
+            let json = std::fs::read_to_string(&admin_settings_path).unwrap_or_default();
+            match serde_json::from_str::<serde_json::Value>(&json) {
+                Ok(v) => (Some(v), false),
+                Err(e) => {
+                    tracing::error!("admin_settings.json is CORRUPT ({}). Failing CLOSED: registration disabled, email required, captcha on, GIF/Last.fm keys blank until fixed.", e);
+                    (None, true)
+                }
+            }
+        } else {
+            (None, false)
+        };
+
+    let (registration_open, reg_code, max_upload_mb) = if let Some(v) = &admin_settings_val {
         let open = v.get("registration_open").and_then(|v| v.as_bool()).unwrap_or(true);
         let code = v.get("registration_code").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let upload_mb = v.get("max_upload_mb").and_then(|v| v.as_u64()).unwrap_or(25) as usize;
         info!("Loaded admin settings from disk (registration_open={}, has_code={}, max_upload_mb={})", open, !code.is_empty(), upload_mb);
         (open, code, upload_mb)
+    } else if admin_settings_corrupt {
+        // Fail CLOSED: registration disabled until the operator fixes the file.
+        (false, String::new(), 25)
     } else {
         let open = std::env::var("CRYPTIRC_REGISTRATION").unwrap_or_else(|_| "open".into()) != "closed";
         let code = std::env::var("CRYPTIRC_REG_CODE").unwrap_or_default();
         (open, code, 25)
     };
     // GIF picker policy (admin-controlled). Defaults preserve today's behavior
-    // exactly: provider=giphy, mode=user (everyone uses their own key). Loaded
-    // from the same admin_settings.json so it survives restarts.
+    // exactly: provider=giphy, mode=user (everyone uses their own key). On a corrupt
+    // file the keys stay blank (server-key proxying disabled) — no silent re-enable.
     let (gif_provider, gif_mode, giphy_server_key, tenor_server_key) = {
-        let v: serde_json::Value = if admin_settings_path.exists() {
-            serde_json::from_str(&std::fs::read_to_string(&admin_settings_path).unwrap_or_default()).unwrap_or_default()
-        } else { serde_json::json!({}) };
-        let provider = v.get("gif_provider").and_then(|x| x.as_str()).unwrap_or("giphy").to_string();
-        let mode = v.get("gif_mode").and_then(|x| x.as_str()).unwrap_or("user").to_string();
-        let gk = v.get("giphy_server_key").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let tk = v.get("tenor_server_key").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let v = admin_settings_val.as_ref();
+        let provider = v.and_then(|v| v.get("gif_provider")).and_then(|x| x.as_str()).unwrap_or("giphy").to_string();
+        let mode = v.and_then(|v| v.get("gif_mode")).and_then(|x| x.as_str()).unwrap_or("user").to_string();
+        let gk = v.and_then(|v| v.get("giphy_server_key")).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let tk = v.and_then(|v| v.get("tenor_server_key")).and_then(|x| x.as_str()).unwrap_or("").to_string();
         (provider, mode, gk, tk)
     };
     // Email-required + signup-captcha policy (admin-controlled). Defaults: email OPTIONAL
-    // (email_required=false) and captcha ON. Persisted in the same admin_settings.json.
-    let (email_required, captcha_enabled) = {
-        let v: serde_json::Value = if admin_settings_path.exists() {
-            serde_json::from_str(&std::fs::read_to_string(&admin_settings_path).unwrap_or_default()).unwrap_or_default()
-        } else { serde_json::json!({}) };
-        let er = v.get("email_required").and_then(|x| x.as_bool()).unwrap_or(false);
-        let ce = v.get("captcha_enabled").and_then(|x| x.as_bool()).unwrap_or(true);
+    // (email_required=false) and captcha ON. On a CORRUPT file, fail CLOSED — require
+    // email and keep captcha on — rather than reverting to the permissive default.
+    let (email_required, captcha_enabled) = if admin_settings_corrupt {
+        (true, true)
+    } else {
+        let v = admin_settings_val.as_ref();
+        let er = v.and_then(|v| v.get("email_required")).and_then(|x| x.as_bool()).unwrap_or(false);
+        let ce = v.and_then(|v| v.get("captcha_enabled")).and_then(|x| x.as_bool()).unwrap_or(true);
         (er, ce)
     };
     // Last.fm now-playing (admin-controlled). Default OFF; shared API key blank.
     let (lastfm_enabled, lastfm_api_key) = {
-        let v: serde_json::Value = if admin_settings_path.exists() {
-            serde_json::from_str(&std::fs::read_to_string(&admin_settings_path).unwrap_or_default()).unwrap_or_default()
-        } else { serde_json::json!({}) };
-        let en = v.get("lastfm_enabled").and_then(|x| x.as_bool()).unwrap_or(false);
-        let key = v.get("lastfm_api_key").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let v = admin_settings_val.as_ref();
+        let en = v.and_then(|v| v.get("lastfm_enabled")).and_then(|x| x.as_bool()).unwrap_or(false);
+        let key = v.and_then(|v| v.get("lastfm_api_key")).and_then(|x| x.as_str()).unwrap_or("").to_string();
         (en, key)
     };
+    // #99: harden the shared upstream client used for Giphy/Tenor proxying. Disable
+    // redirect-following (a 3xx Location could carry the ?key= secret to an attacker
+    // host or chain to an internal address) and disable system-proxy auto-detection.
+    // Response bodies are additionally byte-capped at each call site.
     let gif_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build().unwrap_or_else(|_| reqwest::Client::new());
     // #7: create the data dir and all subtrees with mode 0700 so at-rest secrets
     // (vault salts, Argon2 hashes, VAPID key, client TLS keys, encrypted configs)
@@ -1025,6 +1082,12 @@ async fn serve_font(Path(name): Path<String>) -> impl IntoResponse {
 async fn serve_file_public(Path(name): Path<String>, State(state): State<AppState>) -> impl IntoResponse {
     let name: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.').collect();
     if name.contains("..") || name.starts_with('.') { return StatusCode::BAD_REQUEST.into_response(); }
+    // #2: the unauthenticated /pub route shares the upload dir with the authenticated
+    // /files route. Restrict /pub to IMAGE content only — non-image uploads (documents,
+    // archives, audio/video attachments) must stay behind the /files auth gate so a
+    // leaked UUID filename can't be fetched anonymously. Images are intentionally public
+    // (link previews / inline embeds rely on it).
+    if !upload::is_image(&name) { return StatusCode::NOT_FOUND.into_response(); }
     let path = std::path::PathBuf::from(&state.upload_dir).join(&name);
     match tokio::fs::read(&path).await {
         Ok(data) => Response::builder()
@@ -1086,13 +1149,15 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 fn client_ip(headers: &HeaderMap) -> Option<String> {
     if let Some(ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
         let ip = ip.trim();
-        if !ip.is_empty() { return Some(ip.to_string()); }
+        // #114: only accept a value that actually parses as an IpAddr, so a spoofed/garbage
+        // header can't inject an arbitrary rate-limit bucket key.
+        if ip.parse::<std::net::IpAddr>().is_ok() { return Some(ip.to_string()); }
     }
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         // XFF is a comma-separated list; the left-most entry is the original client.
         if let Some(first) = xff.split(',').next() {
             let first = first.trim();
-            if !first.is_empty() { return Some(first.to_string()); }
+            if first.parse::<std::net::IpAddr>().is_ok() { return Some(first.to_string()); }
         }
     }
     None
@@ -1345,7 +1410,11 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     existing["tenor_server_key"] = serde_json::json!(*state.tenor_server_key.read().await);
     existing["lastfm_enabled"] = serde_json::json!(*state.lastfm_enabled.read().await);
     existing["lastfm_api_key"] = serde_json::json!(*state.lastfm_api_key.read().await);
-    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
+    if let Err(e) = write_secret_json_atomic(&path, &existing).await { // #30/#112
+        drop(_guard);
+        tracing::error!("failed to persist admin_settings.json: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(Msg { message: "Failed to save settings.".into() })).into_response();
+    }
     drop(_guard);
     (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
 }
@@ -1548,14 +1617,18 @@ async fn route_lastfm_np(State(state): State<AppState>, headers: HeaderMap, Quer
 
 async fn route_login(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<LoginBody>) -> impl IntoResponse {
     let ip = client_ip(&headers);
+    // #7: resolve username-OR-email to the canonical account username and key the captcha
+    // gate + fail-counter on THAT, so an account reachable by both username and email
+    // doesn't get two independent captcha/fail buckets (double the brute-force budget).
+    let acct = state.auth.canonical_login_id(&body.username).await;
     // Throttle every login POST per IP up front — bounds brute force AND the wrong-captcha
     // early-return path below (which would otherwise never reach login()'s own rate limit).
     if state.auth.check_ip_rate_limit("login_attempt", ip.as_deref()).is_err() {
-        return (StatusCode::TOO_MANY_REQUESTS, Json(LoginErr { message: "Too many attempts — try again later.".into(), captcha_required: state.auth.login_captcha_required(ip.as_deref(), &body.username) })).into_response();
+        return (StatusCode::TOO_MANY_REQUESTS, Json(LoginErr { message: "Too many attempts — try again later.".into(), captcha_required: state.auth.login_captcha_required(ip.as_deref(), &acct) })).into_response();
     }
     // After enough recent failures from this IP, require a captcha BEFORE checking the
     // password, so password-guessing is captcha-gated. Normal logins are unaffected.
-    if state.auth.login_captcha_required(ip.as_deref(), &body.username) {
+    if state.auth.login_captcha_required(ip.as_deref(), &acct) {
         if !verify_captcha(&state, &body.captcha_id, &body.captcha_answer) {
             return (StatusCode::UNAUTHORIZED, Json(LoginErr { message: "Please complete the captcha to continue.".into(), captcha_required: true })).into_response();
         }
@@ -1564,18 +1637,18 @@ async fn route_login(State(state): State<AppState>, headers: HeaderMap, Json(bod
         // login() resolves the identifier (username OR email) to the real account
         // username — return THAT so the client's identity isn't set to an email.
         Ok((token, username)) => {
-            state.auth.reset_login_fails(ip.as_deref(), &body.username);
+            state.auth.reset_login_fails(ip.as_deref(), &acct);
             (StatusCode::OK, Json(AuthOkBody { token, username })).into_response()
         }
         Err(e) => {
-            state.auth.record_login_fail(ip.as_deref(), &body.username);
+            state.auth.record_login_fail(ip.as_deref(), &acct);
             let msg = e.to_string();
             // #56: login now returns one generic "Invalid username or password" for
             // nonexistent/unverified/wrong-password — "verified" is no longer emitted,
             // so drop it from the whitelist to avoid ever reflecting that oracle.
             let safe = if ["Invalid","attempts"].iter().any(|w| msg.contains(w)) { msg } else { "Login failed".into() };
             // Tell the client whether the NEXT attempt will need a captcha (>= threshold fails).
-            (StatusCode::UNAUTHORIZED, Json(LoginErr { message: safe, captcha_required: state.auth.login_captcha_required(ip.as_deref(), &body.username) })).into_response()
+            (StatusCode::UNAUTHORIZED, Json(LoginErr { message: safe, captcha_required: state.auth.login_captcha_required(ip.as_deref(), &acct) })).into_response()
         }
     }
 }
@@ -2020,6 +2093,12 @@ async fn route_paste_view_post(
 }
 
 async fn render_paste(state: &AppState, id: &str, headers: &HeaderMap, pw: &str) -> axum::response::Response {
+    // #19/#45: the paste id is an unguessable full-UUID capability; still rate-limit
+    // view/raw per client IP so unknown-id probing can't be done at full speed, and so
+    // a missing id (404) and a present one are not distinguishable by request rate.
+    if state.auth.check_ip_rate_limit("paste_view", client_ip(headers).as_deref()).is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Html("Too many requests — try again later.".to_string())).into_response();
+    }
     match state.paste_store.get(id).await {
         Ok(Some(paste)) => {
             if paste.password_hash.is_some() {
@@ -2082,6 +2161,10 @@ async fn route_paste_raw(
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    // #19/#45: rate-limit raw view per IP (see render_paste).
+    if state.auth.check_ip_rate_limit("paste_view", client_ip(&headers).as_deref()).is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, "Too many requests").into_response();
+    }
     match state.paste_store.get(&id).await {
         Ok(Some(paste)) => {
             if paste.password_hash.is_some() {
@@ -2134,7 +2217,15 @@ async fn route_short_create(
     let dir = format!("{}/shorts", state.data_dir);
     let _ = tokio::fs::create_dir_all(&dir).await;
     let data = serde_json::json!({"url": url, "created_at": chrono::Utc::now().timestamp(), "creator": user});
-    let _ = tokio::fs::write(format!("{}/{}.json", dir, id), serde_json::to_string(&data).unwrap_or_default()).await;
+    // #44: propagate serialization/write failures with a 500 instead of returning a
+    // success id that later 404s (the file may never have been written).
+    let body = match serde_json::to_string(&data) {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"Failed to create short link"}))).into_response(),
+    };
+    if tokio::fs::write(format!("{}/{}.json", dir, id), body).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"Failed to create short link"}))).into_response();
+    }
     let short_url = format!("{}/s/{}", state.base_url, id);
     Json(serde_json::json!({"id": id, "url": short_url, "original": url})).into_response()
 }
@@ -2149,6 +2240,12 @@ async fn route_short_redirect(
         Ok(json) => {
             if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json) {
                 if let Some(url) = data.get("url").and_then(|v| v.as_str()) {
+                    // #44: re-validate the scheme at redirect time (defense in depth) — a
+                    // stored `javascript:`/`data:` URL must never reach an href even if a
+                    // future write path failed to validate at creation.
+                    if !url.starts_with("http://") && !url.starts_with("https://") {
+                        return (StatusCode::NOT_FOUND, Html("Not found".to_string())).into_response();
+                    }
                     let escaped = html_escape(url);
                     // Interstitial warning page instead of raw redirect to prevent open redirect abuse
                     return Html(format!(
@@ -2247,7 +2344,11 @@ async fn route_admin_put_preview_settings(
     } else { serde_json::json!({}) };
     existing["link_preview_mode"] = serde_json::json!(body.mode);
     existing["link_preview_whitelist"] = serde_json::json!(body.whitelist);
-    let _ = tokio::fs::write(&path, serde_json::to_string_pretty(&existing).unwrap_or_default()).await;
+    if let Err(e) = write_secret_json_atomic(&path, &existing).await { // #30/#112
+        drop(_guard);
+        tracing::error!("failed to persist admin_settings.json: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message":"Failed to save settings"}))).into_response();
+    }
     drop(_guard);
     Json(serde_json::json!({"message":"Settings saved"})).into_response()
 }
@@ -2331,14 +2432,16 @@ async fn route_gif_search(
     if *state.gif_mode.read().await != "server" {
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"Shared GIF key is not enabled"}))).into_response();
     }
-    if !state.gif_rate_ok(&user) {
-        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error":"Too many GIF requests — slow down"}))).into_response();
-    }
+    // #54: validate params BEFORE spending the per-user rate budget, so a malformed/empty
+    // query (which we reject anyway) doesn't burn the user's GIF allowance.
     let q = params.get("q").map(|s| s.trim()).unwrap_or("");
     if q.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Missing q"}))).into_response();
     }
     let q: String = q.chars().take(100).collect();
+    if !state.gif_rate_ok(&user) {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error":"Too many GIF requests — slow down"}))).into_response();
+    }
     let limit: u32 = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(12).clamp(1, 50);
     let limit_s = limit.to_string();
     let rating = match params.get("rating").map(|s| s.as_str()).unwrap_or("pg-13") {
@@ -2373,11 +2476,17 @@ async fn route_gif_search(
         Err(e) => { info!("[gif] {} fetch error: timeout={} connect={}", provider, e.is_timeout(), e.is_connect());
             return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"GIF search failed"}))).into_response(); }
     };
-    let body: serde_json::Value = match resp.text().await {
-        // reqwest's `json` feature isn't enabled in this build, so parse the text ourselves.
-        Ok(t) => serde_json::from_str(&t).unwrap_or_else(|_| serde_json::json!({})),
+    // #99: cap the upstream body (a hostile/buggy provider must not stream unbounded
+    // bytes into RAM). 4 MiB is generous for a GIF-search JSON response.
+    const MAX_GIF_BODY: usize = 4 * 1024 * 1024;
+    let bytes = match resp.bytes().await {
+        Ok(b) if b.len() <= MAX_GIF_BODY => b,
+        Ok(_) => { info!("[gif] {} response exceeded {} bytes", provider, MAX_GIF_BODY);
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"GIF search failed"}))).into_response(); }
         Err(_) => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"GIF search failed"}))).into_response(),
     };
+    // reqwest's `json` feature isn't enabled in this build, so parse the text ourselves.
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({}));
     Json(serde_json::json!({ "results": normalize_gif_results(&provider, &body) })).into_response()
 }
 
@@ -2449,18 +2558,34 @@ async fn route_push_test(State(state): State<AppState>, headers: HeaderMap) -> i
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+async fn ws_handler(State(state): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> impl IntoResponse {
+    // #14: enforce the global + per-IP connection caps BEFORE upgrading, so a flood is
+    // shed cheaply (503) without parking a task/FD on the unauth handshake.
+    let Ok(permit) = ws_sem().try_acquire() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Server at capacity").into_response();
+    };
+    let ip = client_ip(&headers);
+    if let Some(ipk) = &ip {
+        let mut c = ws_ip_counts().entry(ipk.clone()).or_insert(0);
+        if *c >= WS_MAX_PER_IP_CONNS {
+            return (StatusCode::SERVICE_UNAVAILABLE, "Too many connections").into_response();
+        }
+        *c += 1;
+    }
+    let guard = WsConnGuard { _permit: permit, ip };
+    ws.on_upgrade(move |socket| handle_ws(socket, state, guard))
 }
 
-async fn handle_ws(socket: WebSocket, state: AppState) {
+async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard) {
     let (mut sender, mut receiver) = socket.split();
 
     // Demand auth as first message
     let _ = sender.send(Message::Text(serde_json::to_string(&ServerEvent::AuthRequired {}).unwrap())).await;
 
+    // #14: shorter unauth handshake window (was 10s) — bound how long an anonymous
+    // upgrade can hold the task/FD/permit before proving a valid session.
     let auth_msg = tokio::time::timeout(
-        tokio::time::Duration::from_secs(10),
+        tokio::time::Duration::from_secs(5),
         receiver.next()
     ).await;
 
@@ -3017,7 +3142,7 @@ async fn handle_command(
                     if is_privmsg || is_notice_out {
                         let parts: Vec<&str> = safe.splitn(3, ' ').collect();
                         if parts.len() >= 3 {
-                            let target = parts[1].to_string();
+                            let targets = parts[1].to_string();
                             let mut text = parts[2].to_string();
                             if text.starts_with(':') { text = text[1..].to_string(); }
                             let ts = chrono::Utc::now().timestamp();
@@ -3028,26 +3153,27 @@ async fn handle_command(
                             } else {
                                 (MessageKind::Privmsg, text)
                             };
-                            let display_target = if target.starts_with('#') || target.starts_with('&') {
-                                target.clone()
-                            } else {
-                                target.clone()  // PM: target is the recipient nick
-                            };
-                            // Log our own sent messages so they appear in history
-                            let msg_id = state.logger.append(username, &conn_id, &display_target, ts, &nick, &clean, match &kind {
-                                MessageKind::Privmsg => "privmsg",
-                                MessageKind::Notice => "notice",
-                                MessageKind::Action => "action",
-                            }).await;
-                            state.send_to_user(username, ServerEvent::IrcEcho {
-                                conn_id: conn_id.clone(),
-                                from: nick.clone(),
-                                target: display_target,
-                                text: clean,
-                                ts,
-                                kind,
-                                msg_id,
-                            });
+                            // #55: PRIVMSG/NOTICE may carry a comma-separated target list
+                            // (`#a,#b`); echo + log to EACH target, not the whole list as one.
+                            // (Removed the dead channel-vs-PM if/else whose branches were identical
+                            // — the display target is simply the recipient string in both cases.)
+                            for display_target in targets.split(',').filter(|t| !t.is_empty()) {
+                                let display_target = display_target.to_string();
+                                let msg_id = state.logger.append(username, &conn_id, &display_target, ts, &nick, &clean, match &kind {
+                                    MessageKind::Privmsg => "privmsg",
+                                    MessageKind::Notice => "notice",
+                                    MessageKind::Action => "action",
+                                }).await;
+                                state.send_to_user(username, ServerEvent::IrcEcho {
+                                    conn_id: conn_id.clone(),
+                                    from: nick.clone(),
+                                    target: display_target,
+                                    text: clean.clone(),
+                                    ts,
+                                    kind: kind.clone(),
+                                    msg_id,
+                                });
+                            }
                         }
                     }
                 }
@@ -3185,8 +3311,10 @@ async fn handle_command(
         }
         ClientMessage::SearchLogs { conn_id, target, query, limit } => {
             if !state.owns_network(username, &conn_id).await { return; }
-            // 0 = no limit: search and return EVERY match across the full history.
-            let lim = limit.unwrap_or(0);
+            // #13: default to a sane cap and clamp the client value (was 0 = unbounded,
+            // which let a 1-char query stream the whole history through the broadcast).
+            // search_logs additionally enforces a min query length + scan ceiling.
+            let lim = limit.unwrap_or(500).clamp(1, 1000);
             let lines = state.logger.search_logs(username, &conn_id, &target, &query, lim).await.unwrap_or_default();
             send(ServerEvent::SearchResults { conn_id, target, query, lines });
         }
@@ -3310,9 +3438,9 @@ async fn handle_command(
                 send(ServerEvent::Error { message: "Too many key-bundle requests — slow down".into() });
                 return;
             }
-            // Sanitize target username/nick
+            // Sanitize target username/nick (#22: ASCII-only, matching the on-disk sanitizer)
             let safe: String = target_user.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
                 .take(64).collect();
             // Try direct username lookup first, then resolve IRC nick to username
             info!("[E2E] fetch_bundle request for '{}' from {}", safe, username);
@@ -3329,9 +3457,10 @@ async fn handle_command(
             match state.e2e_store.fetch_bundle(&resolved).await {
                 Some(bundle) => {
                     send(ServerEvent::E2EBundle { username: safe.clone(), bundle });
-                    // Check if the target user's prekeys are running low and notify them
+                    // Check if the target user's prekeys are running low and notify them.
+                    // #58: debounce so a fetch flood can't spam the victim's channel.
                     let remaining = state.e2e_store.otpk_count(&resolved).await;
-                    if remaining < 10 {
+                    if remaining < 10 && otpk_low_should_notify(&resolved) {
                         state.send_to_user(&resolved, ServerEvent::E2EOTPKLow { remaining });
                     }
                 }
@@ -4019,6 +4148,41 @@ fn create_dir_secure(path: &str) -> std::io::Result<()> {
 fn harden_dir_perms(path: &str) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+}
+
+/// #58: debounce unsolicited `E2EOTPKLow` pushes to a target. A third party fetching a
+/// victim's bundle drains an OTPK and would otherwise fire one E2EOTPKLow per fetch into
+/// the victim's broadcast channel; rate-limit those to at most one per minute per target.
+/// Returns true if the caller should send the event now.
+fn otpk_low_should_notify(target: &str) -> bool {
+    use std::time::Instant;
+    static LAST: std::sync::OnceLock<dashmap::DashMap<String, Instant>> = std::sync::OnceLock::new();
+    let map = LAST.get_or_init(dashmap::DashMap::new);
+    if map.len() > 8192 { map.retain(|_, t: &mut Instant| t.elapsed() < std::time::Duration::from_secs(120)); }
+    let now = Instant::now();
+    match map.get(target).map(|t| t.elapsed()) {
+        Some(elapsed) if elapsed < std::time::Duration::from_secs(60) => false,
+        _ => { map.insert(target.to_string(), now); true }
+    }
+}
+
+/// #30/#112: atomically persist a secret JSON file (admin_settings.json holds plaintext
+/// API keys + the registration_code) via tmp+rename, chmod 0600 so the data dir being
+/// world-readable can't leak the secrets. Returns Err on serialize/write/rename failure
+/// so callers can surface a real error instead of silently writing an empty/partial file.
+async fn write_secret_json_atomic(path: &std::path::Path, value: &serde_json::Value) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let body = serde_json::to_string_pretty(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+    tokio::fs::write(&tmp, body.as_bytes()).await?;
+    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
+    Ok(())
 }
 
 /// #5/#74: Produce a log-safe rendering of an outgoing raw IRC command.

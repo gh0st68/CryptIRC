@@ -1,6 +1,6 @@
 [package]
 name = "cryptirc"
-version = "0.3.8"
+version = "0.3.9"
 edition = "2021"
 
 [dependencies]
@@ -11,6 +11,8 @@ serde_json = "1"
 aes-gcm = "0.10"
 argon2 = "0.5"
 rand = "0.8"
+subtle = "2"
+zeroize = "1"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }

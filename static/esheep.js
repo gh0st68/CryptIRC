@@ -1668,6 +1668,8 @@ var SPRITE_SRC=null;            // data:image/png;base64,… built from <png>
 var TILES_X=1, TILES_Y=1;       // sprite-sheet grid (16x11 for eSheep)
 var _parsedDoc=null;            // cached parsed pet Document
 var _instances=new Set();       // every live sheep (root + children) for teardown
+var ES_MAX_INSTANCES=8;         // hard cap on live sheep (root + all descendants)
+var ES_MAX_DEPTH=2;             // child generations: root=0, child=1, grandchild=2 (capped)
 var _enabled=false;
 var Z_INDEX=90;                 // above chat content (≤60) + sidebar (50); below every panel/picker/menu/overlay/modal (≥100)
 var COLLISION_SELECTOR='.esheep-perch'; // curated ledges only — never scans the chat DOM
@@ -1683,9 +1685,37 @@ function _esFloorH(fallbackH){
   return fallbackH;
 }
 
+// Clamp a window dimension to a sane upper bound so derived per-step/per-column
+// math can never explode on an absurd (or spoofed) window size.
+var ES_MAX_DIM=4096;
+function _esClampDim(v){ v=parseInt(v,10); if(!isFinite(v)||v<1) v=1; return Math.min(v,ES_MAX_DIM); }
+
+// Topmost element at (x,y) that is NOT a desktop-pet node (any of the pets), so a
+// forwarded click resolves to the real UI underneath instead of another pet.
+var PET_SELECTOR='.cryptirc-esheep, .cryptirc-crab, .cryptirc-ghost, .gh-friend, .cryptirc-alien, .al-buddy, .cryptirc-fish';
+function _esTopUnderPets(x,y){
+  var stack=(document.elementsFromPoint?document.elementsFromPoint(x,y):null);
+  if(stack){
+    for(var i=0;i<stack.length;i++){
+      var el=stack[i];
+      if(el && el.closest && el.closest(PET_SELECTOR)) continue;
+      return el;
+    }
+    return null;
+  }
+  // Fallback (no elementsFromPoint): hide pets, hit-test once, restore.
+  var pets=document.querySelectorAll(PET_SELECTOR), saved=[];
+  for(var j=0;j<pets.length;j++){ saved.push([pets[j],pets[j].style.pointerEvents]); pets[j].style.pointerEvents='none'; }
+  var under=document.elementFromPoint(x,y);
+  for(var m=0;m<saved.length;m++){ saved[m][0].style.pointerEvents=saved[m][1]; }
+  if(under && under.closest && under.closest(PET_SELECTOR)) return null;
+  return under;
+}
+
 // ── eSheep instance ──────────────────────────────────────────────────────────
-function ESheep(isChild){
+function ESheep(isChild,depth){
   this.isChild=!!isChild;
+  this.depth=depth|0;           // generation depth (root 0); bounds child spawning
   this.DOMdiv=document.createElement('div');
   this.DOMimg=document.createElement('img');
   this.prepareToDie=false;
@@ -1698,8 +1728,8 @@ function ESheep(isChild){
   this.randS=Math.random()*100;
   this._timer=null;             // pending setTimeout for _nextESheepStep
   this._listeners=[];           // {t,e,fn,opts} removed on destroy
-  this.screenW=window.innerWidth||document.documentElement.clientWidth||document.body.clientWidth;
-  this.screenH=_esFloorH(window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight);
+  this.screenW=_esClampDim(window.innerWidth||document.documentElement.clientWidth||document.body.clientWidth);
+  this.screenH=_esClampDim(_esFloorH(window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight));
   _instances.add(this);
 }
 
@@ -1824,22 +1854,23 @@ ESheep.prototype._wire=function(){
     // Don't let the meaningless click-on-the-pet also reach the app's delegated
     // document handlers; only the forwarded click (real target) should.
     e.stopPropagation();
-    // Hide EVERY live sheep (root + children) from the hit-test so elementFromPoint
-    // resolves to the real UI underneath and can NEVER return another sheep -- which
-    // would re-enter this handler and recurse without bound when two sheep overlap.
-    var saved=[];
-    _instances.forEach(function(s){ if(s.DOMdiv){ saved.push([s.DOMdiv,s.DOMdiv.style.pointerEvents]); s.DOMdiv.style.pointerEvents='none'; } });
-    var under=document.elementFromPoint(e.clientX,e.clientY);
-    for(var i=0;i<saved.length;i++){ saved[i][0].style.pointerEvents=saved[i][1]; }
-    if(under && !(under.closest && under.closest('.cryptirc-esheep'))){
-      under.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:e.clientX,clientY:e.clientY,view:window}));
+    // Resolve the real UI underneath via elementsFromPoint and skip ANY pet node
+    // (sheep/crab/ghost/alien/fish) in the stack, so a click can never resolve to
+    // another pet (which would re-enter this handler and recurse when pets overlap).
+    var under=_esTopUnderPets(e.clientX,e.clientY);
+    if(under){
+      // Forward full pointer fidelity (button/detail/modifiers/coords) so the
+      // underlying UI sees the same click the user actually made.
+      under.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window,
+        clientX:e.clientX,clientY:e.clientY,button:e.button,detail:e.detail,
+        ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey}));
     }
   });
   this._on(this.DOMdiv,'contextmenu',function(e){ e.preventDefault(); return false; });
   this._on(window,'resize',function(){
     if(!self.DOMdiv) return;
-    self.screenW=window.innerWidth||document.documentElement.clientWidth||document.body.clientWidth;
-    self.screenH=_esFloorH(window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight);
+    self.screenW=_esClampDim(window.innerWidth||document.documentElement.clientWidth||document.body.clientWidth);
+    self.screenH=_esClampDim(_esFloorH(window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight));
     // Pull the sprite in only from the right/bottom as the window shrinks; do NOT
     // floor at 0 here so a sprite that is legitimately off-screen mid-animation
     // (e.g. the UFO abduction) isn't snapped back into view by a stray resize.
@@ -1852,7 +1883,7 @@ ESheep.prototype._wire=function(){
   if(window.ResizeObserver){
     this._ro = new ResizeObserver(function(){
       if(!self.DOMdiv) return;
-      self.screenH=_esFloorH(window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight);
+      self.screenH=_esClampDim(_esFloorH(window.innerHeight||document.documentElement.clientHeight||document.body.clientHeight));
       if(self.imageY+self.imageH>self.screenH){ self.imageY=self.screenH-self.imageH; self.DOMdiv.style.top=self.imageY+'px'; }
     });
     var _col=document.getElementById('main')||document.querySelector(COLLISION_SELECTOR)||document.getElementById('input-wrap');
@@ -1950,10 +1981,14 @@ ESheep.prototype._spawnChild=function(){
 ESheep.prototype._maybeSpawnChild=function(animationId){
   var childsRoot=_parsedDoc.getElementsByTagName('childs')[0];
   if(!childsRoot) return;
+  // Bound population: never exceed the global live-sheep cap, and never let a
+  // child spawn beyond the generation-depth limit (children → grandchildren …).
+  if(_instances.size>=ES_MAX_INSTANCES) return;
+  if(this.depth>=ES_MAX_DEPTH) return;
   var childs=childsRoot.getElementsByTagName('child');
   for(var j=0;j<childs.length;j++){
     if(childs[j].getAttribute('animationid')==animationId){
-      var c=new ESheep(true);
+      var c=new ESheep(true,this.depth+1);
       c.animationId=childs[j].getElementsByTagName('next')[0].textContent;
       var x=childs[j].getElementsByTagName('x')[0].textContent;
       var y=childs[j].getElementsByTagName('y')[0].textContent;
@@ -2026,7 +2061,23 @@ ESheep.prototype._getNodeValue=function(nodeName,valueName,defaultValue){
 // One animation frame/step. Faithful port of the upstream stepper: advances the
 // tile, moves the sheep, handles flip, sequence end, border (window-edge +
 // perch) transitions and gravity, then schedules the next step on this._timer.
+// Public stepper: wraps the real step body in try/catch so a single per-step
+// throw (e.g. a malformed animation node) can't permanently freeze a sheep — it
+// reschedules the next step instead of silently dying.
 ESheep.prototype._nextESheepStep=function(){
+  if(this.prepareToDie || !this.DOMdiv) return;
+  try{
+    this._nextESheepStepImpl();
+  }catch(e){
+    try{ console.warn('[esheep] step error, recovering',e); }catch(_){}
+    if(this.prepareToDie || !this.DOMdiv) return;
+    this.animationStep++;                       // advance past the bad step
+    if(this._timer) clearTimeout(this._timer);
+    this._timer=setTimeout(this._nextESheepStep.bind(this),200);
+  }
+};
+
+ESheep.prototype._nextESheepStepImpl=function(){
   if(this.prepareToDie || !this.DOMdiv) return;
 
   var x1=this._getNodeValue('start','x',0);
@@ -2037,20 +2088,27 @@ ESheep.prototype._nextESheepStep=function(){
   var del2=this._getNodeValue('end','interval',1000);
 
   var seq=this.animationNode.getElementsByTagName('sequence')[0];
-  var repeat=this._parseKeyWords(seq.getAttribute('repeat'));
-  var repeatfrom=seq.getAttribute('repeatfrom');
   var gravity=this.animationNode.getElementsByTagName('gravity');
   var border=this.animationNode.getElementsByTagName('border');
   var frames=this.animationNode.getElementsByTagName('frame');
+  // Clamp the C#-derived sequence math: a fractional/negative `repeat` (or a
+  // `repeatfrom` past the end of the frame list) used to yield a negative/NaN
+  // `steps`, producing negative setTimeout delays (busy-loop) and out-of-range
+  // frame indexes (undefined.textContent throws). Floor & clamp everything.
+  var repeat=Math.max(0,Math.floor(this._parseKeyWords(seq.getAttribute('repeat'))||0));
+  var repeatfrom=parseInt(seq.getAttribute('repeatfrom'),10);
+  if(!isFinite(repeatfrom) || repeatfrom<0) repeatfrom=0;
+  if(repeatfrom>=frames.length) repeatfrom=0;          // never index past the frame list
   var steps=frames.length+(frames.length-repeatfrom)*repeat;
+  if(!isFinite(steps) || steps<1) steps=Math.max(1,frames.length);
 
   var index;
   if(this.animationStep<frames.length)
     index=frames[this.animationStep].textContent;
-  else if(repeatfrom==0)
+  else if(repeatfrom===0)
     index=frames[this.animationStep%frames.length].textContent;
   else
-    index=frames[parseInt(repeatfrom,10)+parseInt((this.animationStep-repeatfrom)%(frames.length-repeatfrom),10)].textContent;
+    index=frames[repeatfrom+((this.animationStep-repeatfrom)%(frames.length-repeatfrom))].textContent;
 
   this.DOMimg.style.left=(-this.imageW*(index%this.tilesX))+'px';
   this.DOMimg.style.top=(-this.imageH*parseInt(index/this.tilesX,10))+'px';
@@ -2131,8 +2189,11 @@ ESheep.prototype._nextESheepStep=function(){
     }
   }
 
-  this._timer=setTimeout(this._nextESheepStep.bind(this),
-    parseInt(del1,10)+parseInt((del2-del1)*this.animationStep/steps,10));
+  // Enforce a minimum scheduled delay so a degenerate del1/del2/steps combination
+  // can never schedule a negative (busy-loop) or 0ms step.
+  var _delay=parseInt(del1,10)+parseInt((del2-del1)*this.animationStep/steps,10);
+  if(!isFinite(_delay)) _delay=1000;
+  this._timer=setTimeout(this._nextESheepStep.bind(this),Math.max(_delay,16));
 };
 
 // ── Parse the embedded pet once (sprite + grid + behaviours) ─────────────────
@@ -2230,7 +2291,7 @@ function spawn(node, ttl){
   }, ttl);
   _fxTimers.push(id);
 }
-function mk(cls, ch){ var e=document.createElement('div'); e.className='es-fx '+cls; if(ch!=null) e.textContent=ch; return e; }
+function mk(cls, ch){ var e=document.createElement('div'); e.className='es-fx '+cls; e.setAttribute('data-pet','esheep'); if(ch!=null) e.textContent=ch; return e; }
 
 // each fx receives the sheep's live position p = {x,y,w,h,cx,cy}
 var THOUGHTS = ['🌱','🍎','⭐','🐑','🌙','💤','🎵','🍀'];
@@ -2263,7 +2324,7 @@ function stop(){
   if(_timer){ clearInterval(_timer); _timer = 0; }
   for(var i=0;i<_fxTimers.length;i++){ clearTimeout(_fxTimers[i]); }
   _fxTimers.length = 0;
-  var stray = document.querySelectorAll('.es-fx');
+  var stray = document.querySelectorAll('.es-fx, [data-pet="esheep"]');
   for(var j=0;j<stray.length;j++){ if(stray[j].parentNode) stray[j].parentNode.removeChild(stray[j]); }
 }
 

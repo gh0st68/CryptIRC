@@ -38,11 +38,18 @@
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const E2E_DM_PREFIX     = '[e2edm1]';   // ASCII-only — safe through all IRC servers
+// E2E protocol v2 marker (audit #26/#81/#3/#24/#25/#29). v2 changes the message-key
+// KDF to the Signal-spec KDF_CK (HMAC(CK,0x01)/HMAC(CK,0x02)) and prepends the X3DH F
+// constant, so v1 ([e2edm1]) sessions cannot continue and peers transparently
+// re-establish a fresh session on first contact (a one-time re-encrypt).
+const E2E_DM_PREFIX     = '[e2edm2]';   // ASCII-only — safe through all IRC servers
 const E2E_CHAN_PREFIX    = 'sd8~';       // ASCII-only
 const E2E_MAX_SKIP      = 100;   // max buffered out-of-order message keys per session
 const OTPK_REFILL_BELOW = 10;   // replenish when server reports fewer than this (L5)
 const OTPK_BATCH_SIZE   = 20;   // keys generated per replenishment batch
+// #81: X3DH "F" domain-separation constant — 32 bytes of 0xFF prepended to the IKM
+// before the X3DH KDF, per the Signal X3DH spec. Applied at both X3DH call sites.
+const X3DH_F_CONSTANT   = new Uint8Array(32).fill(0xFF);
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -146,12 +153,24 @@ async function e2ePublishBundle() {
     { name: 'ECDSA', hash: 'SHA-256' }, signKeyPair.privateKey, spkPubBytes
   );
 
-  // Store SPK private key encrypted (needed for X3DH respond)
+  // #25/#84: persist the SPK private key keyed by a stable spk_id, and select it by
+  // the header's spk_id on respond (instead of blindly using "the current SPK"). The
+  // id-keyed blob (`__spk__<id>`) lets us retain a short window of prior SPKs so an
+  // initiator that fetched a slightly-stale bundle still resolves the right private
+  // half. We also keep the legacy `__spk__` alias as the current SPK for the load path.
+  // (Scheduled rotation would generate a new keypair under spk_id+1 and expire old ids;
+  // the id-keyed storage + header selection here is the mechanism that makes that safe.)
+  let spkId = 1;
+  if (E2E._spkBlob) {
+    try { const o = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(E2E._spkBlob))); if (Number.isInteger(o.spk_id)) spkId = o.spk_id; } catch(_) {}
+  }
   const spkPrivJwk = await crypto.subtle.exportKey('jwk', spkPair.privateKey);
   const spkBlob    = await aesEncryptBlob(
-    new TextEncoder().encode(JSON.stringify({ spk_priv: spkPrivJwk, spk_pub: spkPub, spk_id: 1 }))
+    new TextEncoder().encode(JSON.stringify({ spk_priv: spkPrivJwk, spk_pub: spkPub, spk_id: spkId }))
   );
   wsend({ type: 'e2e_store_session', partner: '__spk__', blob: spkBlob });
+  wsend({ type: 'e2e_store_session', partner: `__spk__${spkId}`, blob: spkBlob });
+  E2E._spkBlob = spkBlob;
 
   // One-time prekeys — generate and store private halves (C7)
   const otpks = [];
@@ -178,13 +197,14 @@ async function e2ePublishBundle() {
       identity_dh_key:   dhPub,
       identity_sign_key: signPub,
       signed_prekey: {
-        key_id:     1,
+        key_id:     spkId,
         public_key: spkPub,
         signature:  bytesToBase64(new Uint8Array(spkSig)),
       },
       one_time_prekeys: otpks,
     },
   });
+  E2E._spkId = spkId;
 }
 
 // L7: Fix — query OTPK count directly via a dedicated message type instead
@@ -239,8 +259,10 @@ async function x3dhInitiate(bundle) {
     bundle.identity_dh_key, bundle.identity_sign_key      // responder (them)
   );
 
-  const ikm          = concat(dh1, dh2, dh3, dh4);
-  const sharedSecret = await hkdf(ikm, concat(new TextEncoder().encode('X3DH-CryptIRC-v1'), identAD), 64);
+  // #81: prepend the X3DH F constant (32 bytes of 0xFF) to the IKM as the spec
+  // mandates for the Curve25519/P-256 X3DH KDF. #26 version marker: info is now v2.
+  const ikm          = concat(X3DH_F_CONSTANT, dh1, dh2, dh3, dh4);
+  const sharedSecret = await hkdf(ikm, concat(new TextEncoder().encode('X3DH-CryptIRC-v2'), identAD), 64);
   const ephPub       = await exportPub(ephPair.publicKey, 'ECDH');
   return { sharedSecret, ephemeralPub: ephPub, usedOTPKId, identityAD: bytesToBase64(identAD) };
 }
@@ -250,17 +272,26 @@ async function x3dhInitiate(bundle) {
 async function x3dhRespond(x3dhHeader) {
   const { dhKeyPair, signKeyPair } = E2E.identityKeys;
 
-  // C2: read from E2E._spkBlob (set by event handler)
-  // If not loaded yet, request it and wait
-  if (!E2E._spkBlob) {
-    console.warn('[E2E] SPK blob not in memory, requesting...');
-    wsend({ type: 'e2e_load_session', partner: '__spk__' });
-    for (let i = 0; i < 30 && !E2E._spkBlob; i++) {
-      await new Promise(r => setTimeout(r, 100));
-    }
-    if (!E2E._spkBlob) throw new Error('SPK blob not loaded — cannot respond to X3DH');
+  // #25: select the SPK private half named by the header's spk_id, not "whatever the
+  // current SPK is". Try the id-keyed blob first (so a rotated/retained prior SPK still
+  // resolves); fall back to the current __spk__ blob (covers the single-SPK case and
+  // headers that omit spk_id). Refuse if neither resolves rather than guessing.
+  let spkRaw = null;
+  if (x3dhHeader.spk_id != null) {
+    spkRaw = await loadSessionBlobFromCache(`__spk__${x3dhHeader.spk_id}`);
   }
-  const spkObj  = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(E2E._spkBlob)));
+  if (!spkRaw) {
+    if (!E2E._spkBlob) {
+      console.warn('[E2E] SPK blob not in memory, requesting...');
+      wsend({ type: 'e2e_load_session', partner: '__spk__' });
+      for (let i = 0; i < 30 && !E2E._spkBlob; i++) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+    spkRaw = E2E._spkBlob;
+  }
+  if (!spkRaw) throw new Error('SPK blob not loaded — cannot respond to X3DH');
+  const spkObj  = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(spkRaw)));
   const spkPriv = await crypto.subtle.importKey(
     'jwk', spkObj.spk_priv, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']
   );
@@ -272,20 +303,26 @@ async function x3dhRespond(x3dhHeader) {
   const dh2 = await ecdh(dhKeyPair.privateKey, theirEph);
   const dh3 = await ecdh(spkPriv,              theirEph);
 
-  // C7: load OTPK private key from server if one was used
+  // C7/#29: load OTPK private key from server if one was used. If the initiator
+  // committed to a DH4 (used_otpk_id present) but we CANNOT load that OTPK blob, the
+  // root keys would diverge → a generic "[decryption failed]" indistinguishable from
+  // tampering. Instead ABORT with a distinct error. Crucially, we do NOT delete the
+  // OTPK here — deletion happens only after the first message authenticates (the
+  // caller marks it consumed), so a transient load miss / multi-device race doesn't
+  // permanently destroy a still-needed OTPK.
   let dh4 = new Uint8Array(0);
+  let consumedOtpkId = null;
   if (x3dhHeader.used_otpk_id != null) {
     const otpkBlob = await loadSessionBlobFromCache(`__otpk__${x3dhHeader.used_otpk_id}`);  // now async
-    if (otpkBlob) {
-      const otpkObj  = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(otpkBlob)));
-      const otpkPriv = await crypto.subtle.importKey(
-        'jwk', otpkObj.opk_priv, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']
-      );
-      dh4 = await ecdh(otpkPriv, theirEph);
-      // Delete consumed OTPK
-      wsend({ type: 'e2e_delete_session', partner: `__otpk__${x3dhHeader.used_otpk_id}` });
-      delete E2E._sessionCache[`__otpk__${x3dhHeader.used_otpk_id}`];
+    if (!otpkBlob) {
+      throw new Error('E2E_OTPK_MISSING: consumed one-time prekey blob unavailable — cannot complete X3DH (try re-establishing)');
     }
+    const otpkObj  = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(otpkBlob)));
+    const otpkPriv = await crypto.subtle.importKey(
+      'jwk', otpkObj.opk_priv, { name: 'ECDH', namedCurve: 'P-256' }, false, ['deriveBits']
+    );
+    dh4 = await ecdh(otpkPriv, theirEph);
+    consumedOtpkId = x3dhHeader.used_otpk_id;
   }
 
   // #12: reconstruct the byte-identical identity AD the initiator used. We are
@@ -296,16 +333,35 @@ async function x3dhRespond(x3dhHeader) {
   // four keys (regardless of which we call "ours") yields the same bytes the
   // initiator computed. This folds into the HKDF info so both peers derive the
   // same root key, and is pinned on the session for the per-message AEAD AD.
+  // #25: a non-empty signing identity key is mandatory (the establishment helper
+  // already enforces this; guard here too so no responder path can derive an AD
+  // over a dh-only identity).
+  if (!x3dhHeader.sender_sign_ik) throw new Error('X3DH header missing sender_sign_ik');
   const myDhPub   = await exportPub(dhKeyPair.publicKey,   'ECDH');
   const mySignPub = await exportPub(signKeyPair.publicKey, 'ECDSA');
   const identAD   = e2eIdentityAD(
-    x3dhHeader.sender_ik, x3dhHeader.sender_sign_ik || '',  // initiator (them)
+    x3dhHeader.sender_ik, x3dhHeader.sender_sign_ik,        // initiator (them)
     myDhPub, mySignPub                                      // responder (us)
   );
 
-  const ikm = concat(dh1, dh2, dh3, dh4);
-  const ss = await hkdf(ikm, concat(new TextEncoder().encode('X3DH-CryptIRC-v1'), identAD), 64);
-  return { sharedSecret: ss, identityAD: bytesToBase64(identAD) };
+  // #81/#26: F constant + v2 info, byte-identical to x3dhInitiate so both peers
+  // derive the same root key.
+  const ikm = concat(X3DH_F_CONSTANT, dh1, dh2, dh3, dh4);
+  const ss = await hkdf(ikm, concat(new TextEncoder().encode('X3DH-CryptIRC-v2'), identAD), 64);
+  // #29: report which OTPK we consumed; the caller deletes it only AFTER the session
+  // is successfully established (not mid-derivation), so a transient failure can't
+  // destroy a still-needed OTPK and leave the root keys diverged.
+  // P4 (#25/#84): return the SPK material we actually selected by spk_id so the
+  // ratchet seeds its initial DHs from THIS SPK (the one the initiator pinned as
+  // DHr), not whatever the current _spkBlob happens to be. With SPK rotation
+  // disabled these coincide; once #84 is enabled a non-current SPK would otherwise
+  // make the responder's first reply undecryptable.
+  return {
+    sharedSecret: ss,
+    identityAD: bytesToBase64(identAD),
+    consumedOtpkId,
+    selectedSpk: { pub: spkObj.spk_pub, priv: spkObj.spk_priv },
+  };
 }
 
 // ─── Responder establishment (shared by all 3 X3DH responder paths) ──────────
@@ -373,11 +429,16 @@ async function e2eEstablishResponderSession(from, header) {
     console.warn('[E2E] ignoring replayed X3DH header (known ephemeral) for established session:', from);
     return true;
   }
-  // #11: pin BOTH identity keys. sender_sign_ik may be absent from an old
-  // initiator; computeIdentityFingerprint tolerates an empty sign key (the
-  // fingerprint then covers dh only, and will mismatch once a real sign key
-  // appears — surfacing a key change rather than silently accepting).
-  const fp    = await computeIdentityFingerprint(header.sender_ik, header.sender_sign_ik || '');
+  // #25: REQUIRE a non-empty signing identity key. v1 tolerated an empty
+  // sender_sign_ik (a relay could strip it and make the victim pin a dh-only
+  // fingerprint); v2 refuses to establish without it, so the pin always covers
+  // BOTH identity keys.
+  if (!header.sender_sign_ik || !header.sender_ik) {
+    console.warn('[E2E] refusing X3DH from', from, '— missing identity key(s)');
+    return false;
+  }
+  // #11/#25: pin BOTH identity keys (dh + sign).
+  const fp    = await computeIdentityFingerprint(header.sender_ik, header.sender_sign_ik);
   const trust = await e2eCheckTrust(from, fp);
 
   // #1: a changed identity must NOT silently re-establish. Warn and refuse.
@@ -388,11 +449,19 @@ async function e2eEstablishResponderSession(from, header) {
   // status 'tofu' already recorded the pin inside e2eCheckTrust (first contact),
   // mirroring the initiator side; 'trusted'/'verified' mean the pin matches.
 
-  const { sharedSecret, identityAD } = await x3dhRespond(header);
+  const { sharedSecret, identityAD, consumedOtpkId, selectedSpk } = await x3dhRespond(header);
   // #2: pin the initiator's long-term identity DH pub (header.sender_ik).
   // Pin the establishing ephemeral so the replay guard above can recognise a
   // resend of this exact header on the next call.
-  await ratchetInitRecv(from, sharedSecret, header.sender_ik, identityAD, header.ephemeral_pub);
+  // P4: seed the ratchet's initial DHs from the spk_id-selected SPK (returned by
+  // x3dhRespond), so the initiator's pinned DHr matches.
+  await ratchetInitRecv(from, sharedSecret, header.sender_ik, identityAD, header.ephemeral_pub, selectedSpk);
+  // #29: now that the session is established (and x3dhRespond didn't abort on a
+  // missing OTPK), it's safe to consume the one-time prekey.
+  if (consumedOtpkId != null) {
+    wsend({ type: 'e2e_delete_session', partner: `__otpk__${consumedOtpkId}` });
+    delete E2E._sessionCache[`__otpk__${consumedOtpkId}`];
+  }
   return true;
 }
 
@@ -446,7 +515,7 @@ async function ratchetInitSend(nick, sharedSecret, theirSPKPub, theirIdentityPub
   return session;
 }
 
-async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD, establishEph) {
+async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD, establishEph, selectedSpk) {
   const RK  = sharedSecret.slice(0, 32);
   const CKr = sharedSecret.slice(32, 64);
 
@@ -464,10 +533,19 @@ async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD,
   }
   const _priorDedup = [...new Set(_prior.filter(e => e && e !== establishEph))].slice(-32);
 
-  // Use SPK keypair as initial DHs so initiator can match the first ratchet step
-  const spkObj = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(E2E._spkBlob)));
-  const dhRatchetPub = spkObj.spk_pub;
-  const dhRatchetPriv = JSON.stringify(spkObj.spk_priv);
+  // Use SPK keypair as initial DHs so initiator can match the first ratchet step.
+  // P4 (#25/#84): prefer the spk_id-selected SPK the caller resolved in x3dhRespond
+  // (the SPK the initiator pinned as DHr); only fall back to the current _spkBlob
+  // when no selected SPK was threaded through (e.g. legacy callers).
+  let dhRatchetPub, dhRatchetPriv;
+  if (selectedSpk && selectedSpk.pub && selectedSpk.priv) {
+    dhRatchetPub = selectedSpk.pub;
+    dhRatchetPriv = JSON.stringify(selectedSpk.priv);
+  } else {
+    const spkObj = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(E2E._spkBlob)));
+    dhRatchetPub = spkObj.spk_pub;
+    dhRatchetPriv = JSON.stringify(spkObj.spk_priv);
+  }
 
   const session = {
     nick,
@@ -687,9 +765,14 @@ async function skipMessageKeys(session, nick, until) {
   }
 }
 
+// #26: spec-compliant Double Ratchet KDF_CK. The message key is HMAC-SHA256(CK, 0x01)
+// and the next chain key is HMAC-SHA256(CK, 0x02) — the chain key keys an HMAC over a
+// single constant byte, exactly as the Signal spec defines (not a re-extract-then-expand
+// approximation). Both peers run this identical derivation.
 async function chainKeyStep(ck) {
-  const mk  = await hkdfExpand(ck, new TextEncoder().encode('DR-MK-v1'), 32);
-  const nck = await hkdfExpand(ck, new TextEncoder().encode('DR-CK-v1'), 32);
+  const key = await crypto.subtle.importKey('raw', ck, { name:'HMAC', hash:'SHA-256' }, false, ['sign']);
+  const mk  = new Uint8Array(await crypto.subtle.sign('HMAC', key, new Uint8Array([0x01])));
+  const nck = new Uint8Array(await crypto.subtle.sign('HMAC', key, new Uint8Array([0x02])));
   return [mk, nck];
 }
 
@@ -715,8 +798,11 @@ async function messageEncrypt(keyBytes, plaintext, header, identAD) {
   const key   = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['encrypt']);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   // Include header (anti-tamper) AND the bound identity AD (#12) as Associated Data.
+  // #24: identity AD is MANDATORY for v2 sessions — refuse to encrypt without it rather
+  // than silently degrading to header-only AD (which would drop the identity binding).
+  if (!identAD) throw new Error('E2E identity AD missing — refusing to encrypt without identity binding');
   const headerAD = header ? new TextEncoder().encode(JSON.stringify(header)) : new Uint8Array(0);
-  const ad = identAD ? concat(headerAD, identAD) : headerAD;
+  const ad = concat(headerAD, identAD);
   const ct    = await crypto.subtle.encrypt({ name:'AES-GCM', iv:nonce, additionalData:ad }, key, plaintext);
   return concat(nonce, new Uint8Array(ct));
 }
@@ -725,8 +811,12 @@ async function messageDecrypt(keyBytes, ctWithNonce, header, identAD) {
   const key   = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
   const nonce = ctWithNonce.slice(0, 12);
   const ct    = ctWithNonce.slice(12);
+  // #24: identity AD is MANDATORY for v2 — never authenticate under the weaker
+  // header-only AD. A v2 session always pins identityAD; its absence is a setup/
+  // downgrade error, not a fallback.
+  if (!identAD) throw new Error('E2E identity AD missing — refusing to decrypt without identity binding');
   const headerAD = header ? new TextEncoder().encode(JSON.stringify(header)) : new Uint8Array(0);
-  const ad = identAD ? concat(headerAD, identAD) : headerAD;
+  const ad = concat(headerAD, identAD);
   return new Uint8Array(await crypto.subtle.decrypt({ name:'AES-GCM', iv:nonce, additionalData:ad }, key, ct));
 }
 
@@ -847,12 +937,20 @@ async function e2eCheckTrust(nick, fingerprint) {
     wsend({ type:'e2e_update_trust', nick, fingerprint, verified:false });
     return { status:'changed', keyChanged:true };
   }
+  // P1 fix (#27/#3): the fingerprint matches the pinned one, so the pin has
+  // re-stabilised. Clear any stuck keyChanged flag set during a prior rotation,
+  // otherwise continuing header-less ratchet messages stay wedged behind the
+  // line-1385 guard forever after a verified re-establishment.
+  if (existing.keyChanged) existing.keyChanged = false;
   return { status: existing.verified ? 'verified' : 'trusted', keyChanged:false };
 }
 
 function e2eMarkVerified(nick) {
   if (!E2E.trustStore[nick]) return;
   E2E.trustStore[nick].verified = true;
+  // P1 fix: a manual verification re-establishes trust in the new key — clear
+  // the key-change wedge so continuing messages can be read again.
+  E2E.trustStore[nick].keyChanged = false;
   wsend({ type:'e2e_update_trust', nick, fingerprint:E2E.trustStore[nick].fingerprint, verified:true });
 }
 
@@ -1070,15 +1168,32 @@ async function e2eHandleEvent(ev) {
       for (const ch of ev.channels) wsend({ type:'e2e_load_channel_key', channel:ch });
       break;
 
-    case 'e2e_trust':
-      E2E.trustStore[ev.nick] = {
-        fingerprint: ev.fingerprint,
-        verified:    ev.verified,
-        keyChanged:  ev.key_changed,
-      };
-      if (ev.key_changed) e2eShowKeyChangeWarning(ev.nick, ev.fingerprint);
+    case 'e2e_trust': {
+      // #3: the local TOFU pin is AUTHORITATIVE. The server distributes bundles and
+      // relays this event, so it must not be able to silently re-pin an already-pinned
+      // peer to an attacker fingerprint (which would defeat the only guarantee TOFU
+      // adds). Rules:
+      //   • Never accept verified:true FROM the server — verification is a local act
+      //     (e2eMarkVerified) only. Server-sourced records are always verified:false.
+      //   • If we already hold a pin and the server sends a DIFFERENT fingerprint,
+      //     treat it as a key change: surface the warning and DO NOT overwrite the
+      //     existing pin (reject the silent overwrite), regardless of ev.key_changed.
+      //   • First contact (no local pin) records the pin as unverified.
+      const existing = E2E.trustStore[ev.nick];
+      if (existing && existing.fingerprint && existing.fingerprint !== ev.fingerprint) {
+        existing.keyChanged = true;
+        e2eShowKeyChangeWarning(ev.nick, ev.fingerprint);
+        // keep the original pin; refuse the server's overwrite
+      } else if (!existing) {
+        E2E.trustStore[ev.nick] = {
+          fingerprint: ev.fingerprint,
+          verified:    false,        // never trust a server-supplied verified flag
+          keyChanged:  false,
+        };
+      }
       updateE2EIndicator(ev.nick);
       break;
+    }
 
     case 'e2e_otpk_low':
       console.warn('[E2E] OTPKs low:', ev.remaining, '— replenishing');
@@ -1268,13 +1383,18 @@ async function e2eDecryptIncoming(from, target, text) {
         const pt = await ratchetDecrypt(from, envelope);
         console.log('[E2E] Decrypt OK');
 
+        // #28: glare handling. Previously, if we were ALSO an initiator
+        // (savedSession.CKs present), the old send chain (CKs/DHs/Ns) was grafted onto
+        // the fresh responder session and isInitiator forced true. That send chain came
+        // from a DIFFERENT root key, so its DH-ratchet outputs can't be matched by the
+        // peer, and re-emitting under a reset Ns/CKs risks reusing an (mk,nonce). The
+        // correct behavior is to DISCARD the loser's send chain entirely: the new X3DH
+        // root replaces both directions, and our next outbound message rebuilds a fresh
+        // send chain via a DH-ratchet step from the new root (deterministic — no forked
+        // chain, no key reuse). We simply do not carry CKs/DHs/Ns across the
+        // re-establishment.
         if (savedSession && savedSession.CKs) {
-          const newSession = E2E.dmSessions[from];
-          newSession.CKs = savedSession.CKs;
-          newSession.DHs = savedSession.DHs;
-          newSession.Ns  = savedSession.Ns;
-          newSession.isInitiator = true;
-          await saveSession(from, newSession);
+          console.warn('[E2E] glare detected for', from, '— discarding stale send chain; new X3DH root is authoritative');
         }
 
         updateE2EIndicator(from);
@@ -1283,6 +1403,16 @@ async function e2eDecryptIncoming(from, target, text) {
 
       if (!E2E.dmSessions[from]) {
         return { plaintext:'🔐 [no session — ask sender to re-initiate]', encrypted:true };
+      }
+      // #27: defense-in-depth re-verification. A continuing ratchet message (no X3DH
+      // header) skips the establishment-time TOFU check, so re-confirm the live
+      // session's pinned identity still matches the current trust pin before
+      // decrypting. If a key change was flagged for this peer (see the #3
+      // client-authoritative e2e_trust handler), refuse rather than decrypt under a
+      // pin that diverged. (The mandatory identity AD #24 would also fail the AEAD on a
+      // substituted identity; this surfaces a clear message instead of a generic error.)
+      if (E2E.trustStore[from]?.keyChanged) {
+        return { plaintext:'🔐 [identity key changed — verify before reading]', encrypted:true };
       }
       const pt = await ratchetDecrypt(from, envelope);
       return { plaintext:pt, encrypted:true };
@@ -1514,30 +1644,18 @@ async function ecdh(privateKey, publicKey) {
   ));
 }
 
+// Standard HKDF (extract-then-expand) with a zero salt. The X3DH F constant (#81) is
+// prepended to `ikm` by the callers, not here, so this stays a plain HKDF usable by
+// both the X3DH root derivation and the Double Ratchet root step.
 async function hkdf(ikm, info, length) {
   const infoBytes = typeof info === 'string' ? new TextEncoder().encode(info) : info;
-  // S5: Signal X3DH spec prepends 32 bytes of 0xFF as domain separator
-  // before the actual IKM when used for X3DH (the F constant).
-  // We include this in the IKM for spec-compliance.
   const base = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
   return new Uint8Array(await crypto.subtle.deriveBits(
     { name:'HKDF', hash:'SHA-256', salt:new Uint8Array(32), info:infoBytes }, base, length*8
   ));
 }
-
-// C3: True HKDF-Expand: use the PRK as the key material with a non-zero
-// label-derived salt. WebCrypto only exposes the full HKDF (extract+expand),
-// so we pass the info string as the sole differentiator and use a fixed
-// non-zero salt derived from the info label to approximate Expand-only.
-async function hkdfExpand(prk, info, length) {
-  // Use SHA-256 of info bytes as salt — ensures each label produces
-  // an independent pseudo-random function, closer to HKDF-Expand intent.
-  const infoHash = new Uint8Array(await crypto.subtle.digest('SHA-256', info));
-  const base     = await crypto.subtle.importKey('raw', prk, 'HKDF', false, ['deriveBits']);
-  return new Uint8Array(await crypto.subtle.deriveBits(
-    { name:'HKDF', hash:'SHA-256', salt:infoHash, info }, base, length*8
-  ));
-}
+// (#26: the former hkdfExpand approximation was replaced by the spec KDF_CK in
+// chainKeyStep — HMAC(CK,0x01)/HMAC(CK,0x02) — and removed.)
 
 async function exportPub(key, usage) {
   return bytesToBase64(new Uint8Array(await crypto.subtle.exportKey('raw', key)));

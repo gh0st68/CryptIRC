@@ -20,6 +20,27 @@ var Z = 89;                  // above chat (≤60), below panels/menus/modals (�
 var _enabled = false;
 var _crab = null;
 
+// Topmost element at (x,y) that is NOT a desktop-pet node, so a forwarded click
+// resolves to the real UI beneath instead of another pet.
+var PET_SELECTOR = '.cryptirc-crab, .cryptirc-esheep, .cryptirc-ghost, .gh-friend, .cryptirc-alien, .al-buddy, .cryptirc-fish';
+function topUnderPets(x, y){
+  var stack = (document.elementsFromPoint ? document.elementsFromPoint(x, y) : null);
+  if(stack){
+    for(var i=0;i<stack.length;i++){
+      var el = stack[i];
+      if(el && el.closest && el.closest(PET_SELECTOR)) continue;
+      return el;
+    }
+    return null;
+  }
+  var pets = document.querySelectorAll(PET_SELECTOR), saved=[];
+  for(var j=0;j<pets.length;j++){ saved.push([pets[j], pets[j].style.pointerEvents]); pets[j].style.pointerEvents='none'; }
+  var under = document.elementFromPoint(x, y);
+  for(var m=0;m<saved.length;m++){ saved[m][0].style.pointerEvents = saved[m][1]; }
+  if(under && under.closest && under.closest(PET_SELECTOR)) return null;
+  return under;
+}
+
 var SAYINGS = [
   'GRRR', 'SNIP SNIP', 'PINCH!', 'MINE!', 'back OFF', 'skrrt skrrt',
   'no thoughts only pinch', 'i will nip you', 'sideways gang', '🦀💢',
@@ -113,7 +134,7 @@ function injectStyle(){
     '@keyframes ccDuck{0%,100%{transform:scaleY(1)}40%,70%{transform:scaleY(.7) translateY(8px)}}',
     '.cryptirc-crab.hop{animation:ccHop .5s ease-out}',
     '@keyframes ccHop{0%,100%{transform:translateY(0)}40%{transform:translateY(-14px)}}',
-    '.cryptirc-crab.burrow{opacity:0}',
+    '.cryptirc-crab.burrow{opacity:0;pointer-events:none;cursor:default}',
     /* ── 10 new grumpy-crab behaviors ── */
     /* 1. shuffle: snappy sidestep shuffle-dance */
     '.cryptirc-crab.shuffle .ccb{animation:ccBob .2s ease-in-out infinite}',
@@ -170,7 +191,9 @@ function injectStyle(){
     '@keyframes ccCheer{0%,100%{transform:rotate(0)}50%{transform:rotate(-22deg)}}',
     '.cc-confetti{position:fixed;z-index:'+(Z+1)+';pointer-events:none;width:5px;height:5px;border-radius:1px;animation:ccConfetti 1s ease-out forwards}',
     '@keyframes ccConfetti{0%{opacity:1;transform:translate(0,0) rotate(0)}100%{opacity:0;transform:translate(var(--cx,0),var(--cy,-22px)) rotate(220deg)}}',
-    '@media(prefers-reduced-motion:reduce){.cryptirc-crab *,.cryptirc-crab{animation:none!important}}'
+    '@media(prefers-reduced-motion:reduce){.cryptirc-crab *,.cryptirc-crab{animation:none!important}',
+      // also silence every spawned FX node (cc-*) and hide the purely-decorative ones
+      '.cc-bub,.cc-anger,.cc-shrimp,.cc-zzz,.cc-sand,.cc-dizzy,.cc-castle,.cc-treasure,.cc-fish,.cc-gull,.cc-shell,.cc-tide,.cc-hole,.cc-jet,.cc-sun,.cc-note,.cc-flag,.cc-jolt,.cc-confetti{animation:none!important;opacity:0!important}}'
   ].join('');
   document.head.appendChild(s);
 }
@@ -331,16 +354,14 @@ Crab.prototype._wire = function(){
     if(self._didDrag){ self._didDrag=false; return; }   // it was a drag, not a click
     self.poke();
     e.stopPropagation();
-    // Forward the click to the real UI underneath: hide the crab AND the other pets
-    // from the hit-test, resolve elementFromPoint, then re-dispatch the click.
-    var prev=self.el.style.pointerEvents; self.el.style.pointerEvents='none';
-    var sheep=document.querySelectorAll('.cryptirc-esheep, .cryptirc-ghost, .gh-friend'), saved=[];
-    for(var i=0;i<sheep.length;i++){ saved.push([sheep[i],sheep[i].style.pointerEvents]); sheep[i].style.pointerEvents='none'; }
-    var under=document.elementFromPoint(e.clientX,e.clientY);
-    self.el.style.pointerEvents=prev;
-    for(var j=0;j<saved.length;j++){ saved[j][0].style.pointerEvents=saved[j][1]; }
-    if(under && !(under.closest && under.closest('.cryptirc-crab'))){
-      under.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,clientX:e.clientX,clientY:e.clientY,view:window}));
+    // Forward the click to the real UI underneath. Resolve via elementsFromPoint
+    // skipping ANY pet node in the stack (crab/sheep/ghost/alien/fish), then
+    // re-dispatch with full pointer fidelity (button/detail/modifiers/coords).
+    var under=topUnderPets(e.clientX,e.clientY);
+    if(under){
+      under.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window,
+        clientX:e.clientX,clientY:e.clientY,button:e.button,detail:e.detail,
+        ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey}));
     }
   });
   this._on(this.el, 'contextmenu', function(e){ e.preventDefault(); return false; });
@@ -593,19 +614,19 @@ function pick(){ return SAYINGS[Math.random()*SAYINGS.length|0]; }
 // call sites stay harmless; it expresses itself purely through visual fx instead.
 Crab.prototype.speak = function(){ /* no text */ };
 Crab.prototype.anger = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var a = document.createElement('div');
-  a.className = 'cc-anger'; a.textContent = '💢';
+  a.className = 'cc-anger'; a.setAttribute('data-pet','crab'); a.textContent = '💢';
   a.style.left = (this.x + (Math.random()<0.5? 4 : this.W-18)) + 'px';
   a.style.top  = (this.y - 6) + 'px';
   document.body.appendChild(a);
   var self=this; this._after(750, function(){ if(a.parentNode) a.parentNode.removeChild(a); });
 };
 Crab.prototype.bubbles = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
   for(var i=0;i<5;i++){ (function(n){ self._after(n*120, function(){
-    var b = document.createElement('div'); b.className='cc-bub';
+    var b = document.createElement('div'); b.className='cc-bub'; b.setAttribute('data-pet','crab');
     var sz = 5 + (Math.random()*7|0);
     b.style.width=sz+'px'; b.style.height=sz+'px';
     b.style.left = (self.x + 20 + Math.random()*44) + 'px';
@@ -620,7 +641,7 @@ Crab.prototype.bubbles = function(){
 Crab.prototype.spawnShrimp = function(){
   if(this._dead || this._shrimp) return;
   var sh = document.createElement('div');
-  sh.className = 'cc-shrimp pop'; sh.textContent = '🦐';
+  sh.className = 'cc-shrimp pop'; sh.setAttribute('data-pet','crab'); sh.textContent = '🦐';
   // a random spot along the floor (kept a little off the edges)
   var sx = 24 + Math.random()*Math.max(40, this.screenW - this.W - 48);
   this._shrimpX = sx + 9;                                   // ~center of the emoji
@@ -648,10 +669,10 @@ Crab.prototype.chompShrimp = function(){
 };
 // little ✦/💫 stars spin off the crab's head when it bonks a wall or flips over.
 Crab.prototype.dizzy = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
   for(var i=0;i<3;i++){ (function(n){ self._after(n*130, function(){
-    var d=document.createElement('div'); d.className='cc-dizzy'; d.textContent=(n%2?'✦':'💫');
+    var d=document.createElement('div'); d.className='cc-dizzy'; d.setAttribute('data-pet','crab'); d.textContent=(n%2?'✦':'💫');
     d.style.left=(self.x + self.W*0.3 + n*10)+'px'; d.style.top=(self.y - 8)+'px';
     document.body.appendChild(d);
     self._after(900, function(){ if(d.parentNode) d.parentNode.removeChild(d); });
@@ -659,10 +680,10 @@ Crab.prototype.dizzy = function(){
 };
 // drowsy Zzz drift up while the crab naps.
 Crab.prototype.naptime = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
   for(var i=0;i<3;i++){ (function(n){ self._after(n*700, function(){
-    var z=document.createElement('div'); z.className='cc-zzz'; z.textContent='z';
+    var z=document.createElement('div'); z.className='cc-zzz'; z.setAttribute('data-pet','crab'); z.textContent='z';
     z.style.fontSize=(11+n*3)+'px';
     z.style.left=(self.x + self.W*0.66)+'px'; z.style.top=(self.y - 4)+'px';
     document.body.appendChild(z);
@@ -671,10 +692,10 @@ Crab.prototype.naptime = function(){
 };
 // kicks up little sand grains while digging.
 Crab.prototype.digSand = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
   for(var i=0;i<6;i++){ (function(){ self._after(i*90, function(){
-    var d=document.createElement('div'); d.className='cc-sand';
+    var d=document.createElement('div'); d.className='cc-sand'; d.setAttribute('data-pet','crab');
     var sz=3+(Math.random()*3|0); d.style.width=sz+'px'; d.style.height=sz+'px';
     d.style.left=(self.x + self.W*0.5 + (Math.random()*30-15))+'px';
     d.style.top =(self.y + self.H - 6)+'px';
@@ -684,9 +705,9 @@ Crab.prototype.digSand = function(){
 };
 // 🏰 builds a tiny sandcastle, admires it, then smashes it in a fit.
 Crab.prototype.sandcastle = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
-  var c=document.createElement('div'); c.className='cc-castle'; c.textContent='🏰';
+  var c=document.createElement('div'); c.className='cc-castle'; c.setAttribute('data-pet','crab'); c.textContent='🏰';
   c.style.left=(this.x + (this.dir>0?this.W-8:-14))+'px'; c.style.top=(this.y + this.H - 24)+'px';
   c.style.transform='scale(0)'; document.body.appendChild(c);
   this._after(40,  function(){ c.style.transform='scale(1)'; });
@@ -695,17 +716,17 @@ Crab.prototype.sandcastle = function(){
 };
 // 💎 proudly holds up a shiny it found.
 Crab.prototype.treasure = function(){
-  if(this._dead) return;
-  var t=document.createElement('div'); t.className='cc-treasure'; t.textContent=Math.random()<0.5?'💎':'🪙';
+  if(this._dead || document.hidden) return;
+  var t=document.createElement('div'); t.className='cc-treasure'; t.setAttribute('data-pet','crab'); t.textContent=Math.random()<0.5?'💎':'🪙';
   t.style.left=(this.x + this.W*0.5 - 8)+'px'; t.style.top=(this.y - 14)+'px';
   document.body.appendChild(t);
   this._after(1500, function(){ if(t.parentNode) t.parentNode.removeChild(t); });
 };
 // 🐟 a fish drifts past; the crab snaps at it.
 Crab.prototype.fishBy = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this, d=this.dir;
-  var f=document.createElement('div'); f.className='cc-fish'; f.textContent='🐟';
+  var f=document.createElement('div'); f.className='cc-fish'; f.setAttribute('data-pet','crab'); f.textContent='🐟';
   f.style.left=(this.x + (d>0 ? this.W+34 : -42))+'px'; f.style.top=(this.y + this.H*0.28)+'px';
   if(d>0) f.style.transform='scaleX(-1)';
   document.body.appendChild(f);
@@ -715,9 +736,9 @@ Crab.prototype.fishBy = function(){
 };
 // 🦅 a gull shadow sweeps over; the crab ducks (handled by the .duck class).
 Crab.prototype.gullShadow = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this, fromLeft=Math.random()<0.5;
-  var g=document.createElement('div'); g.className='cc-gull';
+  var g=document.createElement('div'); g.className='cc-gull'; g.setAttribute('data-pet','crab');
   g.style.top=(this.y + this.H - 7)+'px'; g.style.left=(fromLeft ? this.x-50 : this.x+this.W+50)+'px';
   document.body.appendChild(g);
   this._after(30,  function(){ g.style.transition='left 1.2s linear,opacity .4s'; g.style.left=(fromLeft ? self.x+self.W+50 : self.x-50)+'px'; });
@@ -725,16 +746,16 @@ Crab.prototype.gullShadow = function(){
 };
 // 🐚 tries on a different shell for a moment.
 Crab.prototype.hermitShell = function(){
-  if(this._dead) return;
-  var s=document.createElement('div'); s.className='cc-shell'; s.textContent='🐚';
+  if(this._dead || document.hidden) return;
+  var s=document.createElement('div'); s.className='cc-shell'; s.setAttribute('data-pet','crab'); s.textContent='🐚';
   s.style.left=(this.x + this.W*0.5 - 9)+'px'; s.style.top=(this.y - 4)+'px';
   document.body.appendChild(s);
   this._after(1600, function(){ if(s.parentNode) s.parentNode.removeChild(s); });
 };
 // 🫧 chases a drifting bubble (excited shuffle via the .dance class).
 Crab.prototype.chaseBubble = function(){
-  if(this._dead) return;
-  var b=document.createElement('div'); b.className='cc-bub';
+  if(this._dead || document.hidden) return;
+  var b=document.createElement('div'); b.className='cc-bub'; b.setAttribute('data-pet','crab');
   b.style.width='9px'; b.style.height='9px';
   b.style.left=(this.x + this.W*0.55)+'px'; b.style.top=(this.y - 4)+'px';
   b.style.animationDuration='1.4s';
@@ -743,9 +764,9 @@ Crab.prototype.chaseBubble = function(){
 };
 // 🌊 a tide ripple sweeps the floor; the crab hops it (via the .hop class).
 Crab.prototype.tideWave = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this, fromLeft=Math.random()<0.5;
-  var w=document.createElement('div'); w.className='cc-tide';
+  var w=document.createElement('div'); w.className='cc-tide'; w.setAttribute('data-pet','crab');
   w.style.top=(this._floorY() + this.H - 7)+'px'; w.style.left=(fromLeft ? -70 : this.screenW)+'px';
   document.body.appendChild(w);
   this._after(30,  function(){ w.style.transition='left 1.6s ease-in-out,opacity .5s'; w.style.left=(fromLeft ? self.screenW : -70)+'px'; });
@@ -753,7 +774,7 @@ Crab.prototype.tideWave = function(){
 };
 // 🕳️ digs straight under, vanishes, and pops up somewhere else on the floor.
 Crab.prototype.burrow = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
   this.digSand();
   this.el.classList.add('burrow');                       // CSS fades it out
@@ -767,10 +788,10 @@ Crab.prototype.burrow = function(){
 
 // 1. 🕳️ a little hole the crab is peeking out of (kicks sand up, then watches).
 Crab.prototype.peekHole = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
   this.digSand();
-  var h=document.createElement('div'); h.className='cc-hole';
+  var h=document.createElement('div'); h.className='cc-hole'; h.setAttribute('data-pet','crab');
   h.style.left=(this.x + this.W*0.5 - 23)+'px'; h.style.top=(this.y + this.H - 7)+'px';
   document.body.appendChild(h);
   this._after(900, function(){ self.anger(); });          // grumpy peek
@@ -778,10 +799,10 @@ Crab.prototype.peekHole = function(){
 };
 // 2. 🫧 an angry sideways stream of bubbles jetting out the front.
 Crab.prototype.bubbleJet = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this, d=this.dir;
   for(var i=0;i<7;i++){ (function(n){ self._after(n*70, function(){
-    var b=document.createElement('div'); b.className='cc-jet';
+    var b=document.createElement('div'); b.className='cc-jet'; b.setAttribute('data-pet','crab');
     var sz=4+(Math.random()*6|0); b.style.width=sz+'px'; b.style.height=sz+'px';
     b.style.left=(self.x + (d>0?self.W-10:6))+'px'; b.style.top=(self.y + self.H*0.4 + (Math.random()*8-4))+'px';
     b.style.setProperty('--jx', (d * (32+Math.random()*28))+'px');
@@ -792,18 +813,18 @@ Crab.prototype.bubbleJet = function(){
 };
 // 3. ☀️ sunbathes (leans back, claws behind head) while a sun beats down.
 Crab.prototype.sunbathe = function(){
-  if(this._dead) return;
-  var su=document.createElement('div'); su.className='cc-sun'; su.textContent='☀️';
+  if(this._dead || document.hidden) return;
+  var su=document.createElement('div'); su.className='cc-sun'; su.setAttribute('data-pet','crab'); su.textContent='☀️';
   su.style.left=(this.x + this.W*0.5 - 8)+'px'; su.style.top=(this.y - 22)+'px';
   document.body.appendChild(su);
   this._after(2400, function(){ if(su.parentNode) su.parentNode.removeChild(su); });
 };
 // 4. 🎵 drums a rhythm with its claws, musical notes popping off.
 Crab.prototype.clawDrum = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this;
   for(var i=0;i<5;i++){ (function(n){ self._after(n*170, function(){
-    var m=document.createElement('div'); m.className='cc-note'; m.textContent=(n%2?'♪':'♫');
+    var m=document.createElement('div'); m.className='cc-note'; m.setAttribute('data-pet','crab'); m.textContent=(n%2?'♪':'♫');
     m.style.left=(self.x + self.W*0.5 + (Math.random()*24-12))+'px'; m.style.top=(self.y - 6)+'px';
     document.body.appendChild(m);
     self._after(1000, function(){ if(m.parentNode) m.parentNode.removeChild(m); });
@@ -811,9 +832,9 @@ Crab.prototype.clawDrum = function(){
 };
 // 5. 🫧 a single bubble drifts up past the crab, which snips at it.
 Crab.prototype.snipBubble = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this, d=this.dir;
-  var b=document.createElement('div'); b.className='cc-bub';
+  var b=document.createElement('div'); b.className='cc-bub'; b.setAttribute('data-pet','crab');
   b.style.width='11px'; b.style.height='11px';
   b.style.left=(this.x + (d>0?this.W-6:-4))+'px'; b.style.top=(this.y + 4)+'px';
   b.style.animationDuration='1.1s';
@@ -823,26 +844,26 @@ Crab.prototype.snipBubble = function(){
 };
 // 6. 🚩 hoists a tiny defiant flag and waves it.
 Crab.prototype.tinyFlag = function(){
-  if(this._dead) return;
-  var f=document.createElement('div'); f.className='cc-flag'; f.textContent='🚩';
+  if(this._dead || document.hidden) return;
+  var f=document.createElement('div'); f.className='cc-flag'; f.setAttribute('data-pet','crab'); f.textContent='🚩';
   f.style.left=(this.x + (this.dir>0?this.W-10:0))+'px'; f.style.top=(this.y - 8)+'px';
   document.body.appendChild(f);
   this._after(1700, function(){ if(f.parentNode) f.parentNode.removeChild(f); });
 };
 // 7. ❗ jolts in alarm with an exclamation, then bolts (handled in frame()).
 Crab.prototype.joltStartle = function(){
-  if(this._dead) return;
-  var j=document.createElement('div'); j.className='cc-jolt'; j.textContent='!';
+  if(this._dead || document.hidden) return;
+  var j=document.createElement('div'); j.className='cc-jolt'; j.setAttribute('data-pet','crab'); j.textContent='!';
   j.style.left=(this.x + this.W*0.5 - 4)+'px'; j.style.top=(this.y - 16)+'px';
   document.body.appendChild(j);
   this._after(600, function(){ if(j.parentNode) j.parentNode.removeChild(j); });
 };
 // 8. 🎉 flings a burst of confetti for a defiant little victory dance.
 Crab.prototype.confetti = function(){
-  if(this._dead) return;
+  if(this._dead || document.hidden) return;
   var self=this, cols=['#ff2b1f','#ffce1f','#3fb0ff','#6bff8f','#ff6bd0'];
   for(var i=0;i<10;i++){ (function(n){ self._after(20 + (n*30), function(){
-    var c=document.createElement('div'); c.className='cc-confetti';
+    var c=document.createElement('div'); c.className='cc-confetti'; c.setAttribute('data-pet','crab');
     c.style.background=cols[n%cols.length];
     c.style.left=(self.x + self.W*0.5 - 2)+'px'; c.style.top=(self.y + 4)+'px';
     c.style.setProperty('--cx', (Math.random()*44-22)+'px');
@@ -861,8 +882,9 @@ Crab.prototype.destroy = function(){
   this._listeners.length = 0;
   if(this.el && this.el.parentNode) this.el.parentNode.removeChild(this.el);
   this._shrimp = null;
-  // sweep any stray fx
-  var stray = document.querySelectorAll('.cc-bub, .cc-anger, .cc-shrimp, .cc-zzz, .cc-sand, .cc-dizzy, .cc-castle, .cc-treasure, .cc-fish, .cc-gull, .cc-shell, .cc-tide, .cc-hole, .cc-jet, .cc-sun, .cc-note, .cc-flag, .cc-jolt, .cc-confetti');
+  // sweep any stray fx — by the shared marker attribute (catches any future cc-*
+  // node even if it isn't in the hand-maintained class list) plus the classes.
+  var stray = document.querySelectorAll('[data-pet="crab"], .cc-bub, .cc-anger, .cc-shrimp, .cc-zzz, .cc-sand, .cc-dizzy, .cc-castle, .cc-treasure, .cc-fish, .cc-gull, .cc-shell, .cc-tide, .cc-hole, .cc-jet, .cc-sun, .cc-note, .cc-flag, .cc-jolt, .cc-confetti');
   for(var k=0;k<stray.length;k++){ if(stray[k].parentNode) stray[k].parentNode.removeChild(stray[k]); }
 };
 

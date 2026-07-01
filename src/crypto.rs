@@ -12,6 +12,8 @@ use argon2::{Argon2, Params, Version};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use rand::RngCore;
+use rand::rngs::OsRng;
+use subtle::ConstantTimeEq;
 use std::path::{Path, PathBuf};
 use dashmap::DashMap;
 
@@ -19,6 +21,14 @@ const NONCE_LEN: usize = 12;
 const KEY_LEN:   usize = 32;
 const SALT_LEN:  usize = 16;
 const CANARY_PT: &[u8] = b"cryptirc-vault-canary-v1";
+
+// Argon2id KDF parameters used to derive the passphrase wrapping key. They are
+// persisted inside each vault.mkey bundle (audit #106) so the cost can be raised
+// in a future release without bricking existing vaults: unwrap reads the stored
+// params, while new/re-wrapped bundles always use the current defaults below.
+const ARGON2_M: u32 = 65536; // 64 MiB
+const ARGON2_T: u32 = 3;
+const ARGON2_P: u32 = 1;
 
 /// Write a secret file with 0600 (owner-only) permissions so the data dir
 /// being world-traversable (audit #7) cannot leak salts/canary/master-key
@@ -121,7 +131,9 @@ impl CryptoManager {
             let enc = tokio::fs::read_to_string(&canary).await?;
             let plaintext = decrypt_with_key(&kdf_key, &enc)
                 .map_err(|_| anyhow::anyhow!("Incorrect passphrase"))?;
-            if plaintext != CANARY_PT {
+            // Constant-time compare (audit #87) — GCM auth already gates this, but
+            // keep secret-equality checks constant-time as a matter of hygiene.
+            if plaintext.ct_eq(CANARY_PT).unwrap_u8() == 0 {
                 bail!("Incorrect passphrase");
             }
         } else {
@@ -152,10 +164,14 @@ impl CryptoManager {
         let dir = self.vault_dir(username);
         tokio::fs::create_dir_all(&dir).await?;
         let wrapped = encrypt_with_key(kdf_key, master)?;
+        // Persist the Argon2 params used (audit #106) so cost can be raised later
+        // without invalidating existing vaults. v:2 carries m/t/p; v:1 readers
+        // (none remain) assumed the legacy defaults.
         let bundle = serde_json::json!({
-            "v": 1,
+            "v": 2,
             "salt": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, salt),
             "wrapped": wrapped,
+            "m": ARGON2_M, "t": ARGON2_T, "p": ARGON2_P,
         });
         let mkey_path = self.mkey_path(username);
         // Unique temp (not a fixed vault.mkey.tmp) + cleanup on rename failure, mirroring
@@ -236,7 +252,7 @@ impl CryptoManager {
             let enc = tokio::fs::read_to_string(&canary).await?;
             let pt  = decrypt_with_key(&old_key, &enc)
                 .map_err(|_| anyhow::anyhow!("Old passphrase incorrect"))?;
-            if pt != CANARY_PT { bail!("Old passphrase incorrect"); }
+            if pt.ct_eq(CANARY_PT).unwrap_u8() == 0 { bail!("Old passphrase incorrect"); } // #87
             old_key
         };
 
@@ -244,7 +260,8 @@ impl CryptoManager {
         // master under it. The atomic rename of vault.mkey (which embeds the new
         // salt) is the single commit point — no blob re-encryption needed.
         let mut new_salt = [0u8; SALT_LEN];
-        rand::thread_rng().fill_bytes(&mut new_salt);
+        // Explicit OS CSPRNG for nonce/salt material (audit #21).
+        OsRng.fill_bytes(&mut new_salt);
         let new_kdf = derive_key(new, &new_salt)?;
         self.write_master_bundle(username, &new_salt, &new_kdf, &master).await?;
 
@@ -277,7 +294,7 @@ impl CryptoManager {
     pub async fn derive_e2e_enc_key(&self, username: &str) -> Result<[u8; KEY_LEN]> {
         let entry = self.keys.get(username)
             .ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
-        Ok(derive_subkey(entry.value(), b"cryptirc-e2e-enc-v1"))
+        derive_subkey(entry.value(), b"cryptirc-e2e-enc-v1")
     }
 
     async fn get_or_create_salt(&self, username: &str) -> Result<[u8; SALT_LEN]> {
@@ -292,7 +309,7 @@ impl CryptoManager {
             let dir = self.vault_dir(username);
             tokio::fs::create_dir_all(&dir).await?;
             let mut salt = [0u8; SALT_LEN];
-            rand::thread_rng().fill_bytes(&mut salt);
+            OsRng.fill_bytes(&mut salt);
             // Salt is sensitive (enables offline KDF attacks) — write 0600 (#7).
             write_secret(&path, &salt).await?;
             Ok(salt)
@@ -346,8 +363,14 @@ impl CryptoManager {
 
 pub fn encrypt_with_key(key_bytes: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<String> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
+    // Random 96-bit nonce from the OS CSPRNG (audit #21). AES-GCM with random
+    // nonces has a 2^32-message birthday bound per key; the per-user master key
+    // is far below that in practice. A future hardening step is to migrate
+    // long-lived blob encryption to a nonce-misuse-resistant AEAD (AES-GCM-SIV /
+    // XChaCha20-Poly1305) — deferred here because it would require re-encrypting
+    // every existing at-rest blob.
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    OsRng.fill_bytes(&mut nonce_bytes);
     let nonce      = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher.encrypt(nonce, plaintext)
         .map_err(|_| anyhow::anyhow!("Encryption failed"))?;
@@ -379,7 +402,12 @@ fn unwrap_master_bundle(bundle: &str, passphrase: &str) -> Result<[u8; KEY_LEN]>
     let salt = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, salt_b64)?;
     if salt.len() != SALT_LEN { bail!("Corrupt master key bundle"); }
 
-    let kdf_key = derive_key(passphrase, &salt)?;
+    // Use the params stored in the bundle (audit #106); fall back to the
+    // historical defaults for older v:1 bundles that omitted them.
+    let m = val.get("m").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(ARGON2_M);
+    let t = val.get("t").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(ARGON2_T);
+    let p = val.get("p").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(ARGON2_P);
+    let kdf_key = derive_key_params(passphrase, &salt, m, t, p)?;
     let raw = decrypt_with_key(&kdf_key, wrapped)?;
     if raw.len() != KEY_LEN { bail!("Corrupt master key bundle"); }
     let mut master = [0u8; KEY_LEN];
@@ -388,7 +416,11 @@ fn unwrap_master_bundle(bundle: &str, passphrase: &str) -> Result<[u8; KEY_LEN]>
 }
 
 fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
-    let params  = Params::new(65536, 3, 1, Some(KEY_LEN))
+    derive_key_params(passphrase, salt, ARGON2_M, ARGON2_T, ARGON2_P)
+}
+
+fn derive_key_params(passphrase: &str, salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8; KEY_LEN]> {
+    let params  = Params::new(m, t, p, Some(KEY_LEN))
         .map_err(|e| anyhow::anyhow!("Argon2 params: {:?}", e))?;
     let argon2  = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; KEY_LEN];
@@ -397,13 +429,20 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
     Ok(key)
 }
 
-pub fn derive_subkey(master: &[u8; KEY_LEN], info: &[u8]) -> [u8; KEY_LEN] {
+pub fn derive_subkey(master: &[u8; KEY_LEN], info: &[u8]) -> Result<[u8; KEY_LEN]> {
     let hk = Hkdf::<Sha256>::new(None, master);
     let mut out = [0u8; KEY_LEN];
-    hk.expand(info, &mut out).expect("HKDF expand");
-    out
+    // Propagate instead of panicking (audit #86) — safe today (fixed 32-byte
+    // output) but a future variable-length call must not crash the crypto core.
+    hk.expand(info, &mut out)
+        .map_err(|e| anyhow::anyhow!("HKDF expand: {:?}", e))?;
+    Ok(out)
 }
 
+/// Canonical username→path sanitizer. ASCII-alphanumeric plus `_`/`-` only
+/// (audit #22): registration enforces an ASCII charset, so this never silently
+/// drops bytes for a valid account; Unicode chars are rejected here too, making
+/// homograph/NFC path collisions impossible on case-insensitive filesystems.
 fn sanitize_username(s: &str) -> String {
-    s.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect()
+    s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect()
 }

@@ -7,7 +7,7 @@
 use anyhow::{bail, Result};
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
+    Algorithm, Argon2, Params, Version,
 };
 use chrono::Utc;
 use dashmap::DashMap;
@@ -35,16 +35,27 @@ const RATE_LIMIT_MAX_BUCKETS:  usize = 4096;
 const LOGIN_FAIL_CAPTCHA_THRESHOLD: u32 = 3;
 const LOGIN_FAIL_WINDOW_SECS:       u64 = 900; // 15-minute sliding window
 
+/// #6: one shared, tuned Argon2id used for EVERY password hash (register / reset /
+/// change) AND the login-timing dummy, so the credential hashes that gate account
+/// access are as expensive to crack offline as the vault KDF (m=64 MiB, t=3, p=1),
+/// and the dummy stays parameter-matched to the real hashes for timing equalization.
+fn tuned_argon2() -> Argon2<'static> {
+    // None output-len → PHC default (32-byte tag); constants are valid, so the
+    // params build can never fail in practice.
+    let params = Params::new(65536, 3, 1, None).expect("valid Argon2id params");
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
+
 /// #56: A valid Argon2 hash (over a random throwaway password) used to equalize
 /// login timing for nonexistent / unverified accounts. Computed once with the
-/// crate's own default params so verify_password does equivalent work whether
-/// or not the account exists. Lazily initialized to guarantee a parseable PHC
-/// string with matching parameters.
+/// SAME tuned params as real hashes (#6) so verify_password does equivalent work
+/// whether or not the account exists. Lazily initialized to guarantee a parseable
+/// PHC string with matching parameters.
 fn dummy_argon2_hash() -> &'static str {
     static DUMMY: OnceLock<String> = OnceLock::new();
     DUMMY.get_or_init(|| {
         let salt = SaltString::generate(&mut OsRng);
-        Argon2::default()
+        tuned_argon2()
             .hash_password(b"cryptirc-login-timing-equalizer", &salt)
             .map(|h| h.to_string())
             // Fallback should never happen; if it does, an unparseable string makes
@@ -129,10 +140,38 @@ pub struct AuthManager {
     login_fails:  Arc<DashMap<String, (u32, Instant)>>,
 }
 
+/// #31/#32: best-effort chmod 0600 on a secret file (user records hold the
+/// password hash + plaintext Last.fm key; pending/reset files hold bearer tokens).
+async fn set_secret_mode(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await {
+            tracing::warn!("could not chmod 0600 {}: {}", path.display(), e);
+        }
+    }
+    #[cfg(not(unix))]
+    { let _ = path; }
+}
+
+/// #32: create a secret-bearing directory with mode 0700 (owner-only), so the
+/// data dir being world-traversable cannot expose user records / tokens.
+fn create_dir_secure(path: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    { std::fs::create_dir_all(path) }
+}
+
 impl AuthManager {
     pub fn new(data_dir: &str) -> Result<Self> {
-        std::fs::create_dir_all(format!("{}/users",   data_dir))?;
-        std::fs::create_dir_all(format!("{}/pending", data_dir))?;
+        // #32: secret-bearing dirs are created 0700 (not the umask default 0755).
+        create_dir_secure(&format!("{}/users",   data_dir))?;
+        create_dir_secure(&format!("{}/pending", data_dir))?;
+        create_dir_secure(&format!("{}/resets",  data_dir))?;
         Ok(Self {
             data_dir:    data_dir.to_string(),
             sessions:    Arc::new(DashMap::new()),
@@ -168,11 +207,13 @@ impl AuthManager {
         let tmp_path   = dir.join(format!("{}.json.tmp.{}", uname, Uuid::new_v4()));
         let json = serde_json::to_string_pretty(user)?;
         tokio::fs::write(&tmp_path, json.as_bytes()).await?;
+        set_secret_mode(&tmp_path).await; // #31: 0600 before it becomes the live record
         // rename is atomic on the same filesystem
         if let Err(e) = tokio::fs::rename(&tmp_path, &final_path).await {
             let _ = tokio::fs::remove_file(&tmp_path).await;
             return Err(e.into());
         }
+        set_secret_mode(&final_path).await; // #31: also chmod the live path (idempotent)
         Ok(())
     }
 
@@ -195,7 +236,7 @@ impl AuthManager {
             entry.attempts    = 0;
             entry.window_start = now;
         }
-        entry.attempts += 1;
+        entry.attempts = entry.attempts.saturating_add(1); // #142: no wrap
         if entry.attempts > RATE_LIMIT_MAX_ATTEMPTS {
             bail!("Too many attempts — try again later");
         }
@@ -240,7 +281,8 @@ impl AuthManager {
         self.check_rate_limit(&format!("create:{}:{}", action, uname))
     }
 
-    /// Remove rate-limit buckets whose window has fully expired.
+    /// Remove rate-limit buckets whose window has fully expired, and prune the
+    /// otherwise-unbounded per-key lock maps (#38) + stale login-fail counters.
     pub fn sweep_rate_buckets(&self) {
         let threshold = Duration::from_secs(RATE_LIMIT_WINDOW_SECS * 2);
         let stale: Vec<String> = self.rate_limits.iter()
@@ -248,6 +290,15 @@ impl AuthManager {
             .map(|b| b.key().clone())
             .collect();
         for k in stale { self.rate_limits.remove(&k); }
+
+        // #38: user_locks / email_locks grow one entry per distinct username/email and
+        // were never evicted (an attacker varying the email could grow them slowly).
+        // Drop any entry not currently held (strong_count == 1 → only the map holds it).
+        // retain() races are benign: a lock acquired between the count and the remove is
+        // simply re-created on next use.
+        self.user_locks.retain(|_, v| Arc::strong_count(v) > 1);
+        self.email_locks.retain(|_, v| Arc::strong_count(v) > 1);
+        self.login_fails.retain(|_, v| v.1.elapsed() <= Duration::from_secs(LOGIN_FAIL_WINDOW_SECS));
     }
 
     /// True if (this IP, this login identifier) has failed enough times recently that the
@@ -282,6 +333,22 @@ impl AuthManager {
         self.login_fails.remove(&Self::login_fail_key(ip, identifier));
     }
 
+    /// #7: Resolve a login identifier (username OR email) to its canonical account
+    /// username, so the captcha gate and fail-counter are keyed on the ACCOUNT, not the
+    /// raw identifier. Without this an account reachable by both username and email gets
+    /// two independent captcha/fail buckets (double the brute-force budget). Returns the
+    /// lowercased raw identifier when no account matches (consistent, non-enumerating:
+    /// the bucket key is identical whether or not the username exists).
+    pub async fn canonical_login_id(&self, identifier: &str) -> String {
+        let ident = identifier.trim().to_lowercase();
+        if ident.contains('@') {
+            if let Some(u) = self.find_user_by_email(&ident).await {
+                return u.username;
+            }
+        }
+        ident
+    }
+
     /// Composite (capped) key for the per-(IP, account) login-fail counter.
     fn login_fail_key(ip: Option<&str>, identifier: &str) -> String {
         let ip: String = ip.unwrap_or("noip").chars().take(64).collect();
@@ -296,11 +363,18 @@ impl AuthManager {
         if uname.len() < 3 || uname.len() > 32 {
             bail!("Username must be 3–32 characters");
         }
-        if !uname.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        // #22/#34: ASCII-only charset. Unicode alphanumerics would let two distinct
+        // registered names normalize/compose to the same on-disk path (or be confusable
+        // homographs), serving E2E/vault material for the wrong account. The whole app
+        // uses one ASCII sanitizer, so registration must be the ASCII gate.
+        if !uname.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
             bail!("Username may only contain letters, numbers, _ and -");
         }
         if password.len() < 10 {
             bail!("Password must be at least 10 characters");
+        }
+        if password.len() > 1024 {
+            bail!("Password is too long (max 1024 characters)"); // #110
         }
         let has_upper = password.chars().any(|c| c.is_uppercase());
         let has_lower = password.chars().any(|c| c.is_lowercase());
@@ -317,7 +391,9 @@ impl AuthManager {
         if !has_email && email_required {
             bail!("Email is required to sign up");
         }
-        if has_email && (!email_lower.contains('@') || email_lower.len() > 254) {
+        // #67: validate up front (reject control chars / CRLF / multiple addresses)
+        // rather than deferring entirely to lettre at send time.
+        if has_email && (!email_lower.contains('@') || email_lower.len() > 254 || !crate::email::validate_email(&email_lower)) {
             bail!("Invalid email address");
         }
         // #15: IP dimension FIRST (before the per-key inserts below) so an over-budget IP
@@ -338,7 +414,7 @@ impl AuthManager {
         // taken" message into an email-enumeration timing oracle. Mirrors the #56
         // dummy-hash mitigation on the login path.
         let salt = SaltString::generate(&mut OsRng);
-        let hash = Argon2::default()
+        let hash = tuned_argon2()
             .hash_password(password.as_bytes(), &salt)
             .map_err(|_| anyhow::anyhow!("Password hashing failed"))?
             .to_string();
@@ -383,6 +459,7 @@ impl AuthManager {
                 file.write_all(json.as_bytes()).await?;
                 file.flush().await?;
             }
+            set_secret_mode(&user_path).await; // #31: 0600 on the user record
             if verified {
                 // Email provided but verification not required → active immediately; the
                 // address is just stored for password resets. No verification email.
@@ -396,7 +473,13 @@ impl AuthManager {
                 };
                 let pending_path = PathBuf::from(&self.data_dir)
                     .join("pending").join(format!("{}.json", token));
-                tokio::fs::write(pending_path, serde_json::to_string_pretty(&pending)?).await?;
+                // #107: if the pending record can't be written, roll back the user file
+                // so the username isn't wedged (created-but-unverifiable, un-reregisterable).
+                if let Err(e) = tokio::fs::write(&pending_path, serde_json::to_string_pretty(&pending)?).await {
+                    let _ = tokio::fs::remove_file(&user_path).await;
+                    return Err(e.into());
+                }
+                set_secret_mode(&pending_path).await; // #31: 0600 on the bearer token
                 Ok(RegisterOutcome { verify_token: Some(token) })
             }
         } else {
@@ -409,6 +492,7 @@ impl AuthManager {
                 file.write_all(json.as_bytes()).await?;
                 file.flush().await?;
             }
+            set_secret_mode(&user_path).await; // #31: 0600 on the user record
             Ok(RegisterOutcome { verify_token: None })
         }
     }
@@ -506,16 +590,19 @@ impl AuthManager {
         // find_user_by_email / email_in_use, which also treat blank email as "not present").
         if email_lower.is_empty() { return Ok(None); }
 
-        // Find user by email
+        // Find user by email. #37: swallow read_dir/next_entry I/O errors (return the
+        // same generic Ok(None) as "unknown email") so a transient FS error can't make
+        // the unknown-email path observably differ (Err) from the success path.
         let users_dir = PathBuf::from(&self.data_dir).join("users");
-        let mut entries = tokio::fs::read_dir(&users_dir).await?;
         let mut found_user: Option<User> = None;
-        while let Some(entry) = entries.next_entry().await? {
-            if let Ok(json) = tokio::fs::read_to_string(entry.path()).await {
-                if let Ok(user) = serde_json::from_str::<User>(&json) {
-                    if user.email == email_lower && user.verified {
-                        found_user = Some(user);
-                        break;
+        if let Ok(mut entries) = tokio::fs::read_dir(&users_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if let Ok(json) = tokio::fs::read_to_string(entry.path()).await {
+                    if let Ok(user) = serde_json::from_str::<User>(&json) {
+                        if user.email == email_lower && user.verified {
+                            found_user = Some(user);
+                            break;
+                        }
                     }
                 }
             }
@@ -528,7 +615,7 @@ impl AuthManager {
 
         let token = Uuid::new_v4().to_string();
         let reset_dir = PathBuf::from(&self.data_dir).join("resets");
-        tokio::fs::create_dir_all(&reset_dir).await?;
+        let _ = create_dir_secure(reset_dir.to_str().unwrap_or_default()); // #32: 0700
 
         let reset = PendingReset {
             username: user.username.clone(),
@@ -536,7 +623,8 @@ impl AuthManager {
             expires_at: Utc::now().timestamp() + 3600, // 1 hour
         };
         let reset_path = reset_dir.join(format!("{}.json", token));
-        tokio::fs::write(reset_path, serde_json::to_string_pretty(&reset)?).await?;
+        tokio::fs::write(&reset_path, serde_json::to_string_pretty(&reset)?).await?;
+        set_secret_mode(&reset_path).await; // #31: 0600 on the bearer token
 
         Ok(Some((token, user.username)))
     }
@@ -550,6 +638,9 @@ impl AuthManager {
 
         if new_password.len() < 10 {
             bail!("Password must be at least 10 characters");
+        }
+        if new_password.len() > 1024 {
+            bail!("Password is too long (max 1024 characters)"); // #110
         }
         let has_upper = new_password.chars().any(|c| c.is_uppercase());
         let has_lower = new_password.chars().any(|c| c.is_lowercase());
@@ -583,7 +674,7 @@ impl AuthManager {
         let mut user: User = serde_json::from_str(&user_json)?;
 
         let salt = SaltString::generate(&mut OsRng);
-        user.password_hash = Argon2::default()
+        user.password_hash = tuned_argon2()
             .hash_password(new_password.as_bytes(), &salt)
             .map_err(|_| anyhow::anyhow!("Password hashing failed"))?
             .to_string();
@@ -745,9 +836,23 @@ impl AuthManager {
     /// change_password() purges all sessions, so the caller who changed their OWN password
     /// isn't logged out (other devices stay purged — that's the security intent).
     pub fn issue_session(&self, username: &str) -> String {
+        let uname = username.to_lowercase();
+        // #102: enforce the per-user session cap here too (it was previously bypassed),
+        // so this post-change_password mint can't push a user above MAX_SESSIONS_PER_USER.
+        loop {
+            let user_sessions: Vec<String> = self.sessions.iter()
+                .filter(|s| s.username == uname)
+                .map(|s| s.key().clone())
+                .collect();
+            if user_sessions.len() < MAX_SESSIONS_PER_USER { break; }
+            let oldest = user_sessions.iter()
+                .min_by_key(|k| self.sessions.get(*k).map(|s| s.created_at).unwrap_or(i64::MAX))
+                .cloned();
+            match oldest { Some(k) => { self.sessions.remove(&k); } None => break }
+        }
         let token = Uuid::new_v4().to_string();
         self.sessions.insert(token.clone(), Session {
-            username: username.to_lowercase(),
+            username: uname,
             created_at: Utc::now().timestamp(),
             last_used: Utc::now().timestamp(),
         });
@@ -1184,6 +1289,9 @@ impl AuthManager {
         if new_password.len() < 10 {
             bail!("New password must be at least 10 characters");
         }
+        if new_password.len() > 1024 {
+            bail!("New password is too long (max 1024 characters)"); // #110
+        }
         let has_upper = new_password.chars().any(|c| c.is_uppercase());
         let has_lower = new_password.chars().any(|c| c.is_lowercase());
         let has_digit = new_password.chars().any(|c| c.is_ascii_digit());
@@ -1194,7 +1302,7 @@ impl AuthManager {
 
         // Hash new password
         let salt = SaltString::generate(&mut OsRng);
-        user.password_hash = Argon2::default()
+        user.password_hash = tuned_argon2()
             .hash_password(new_password.as_bytes(), &salt)
             .map_err(|_| anyhow::anyhow!("Password hashing failed"))?
             .to_string();
@@ -1234,17 +1342,15 @@ impl AuthManager {
     }
 }
 
-/// #58: Validate a username for safe filesystem-path use. MUST match the exact charset
-/// and length registration enforces — register() allows `c.is_alphanumeric()` (Unicode)
-/// plus '_'/'-', 3–32 bytes — otherwise a legitimately-registered (Unicode) username
-/// would be rejected here and become unmanageable/undeletable. This charset is still
-/// path-safe: Unicode alphanumerics contain no path separators ('/','\\') or '.', and
-/// '.'/'..'/empty are rejected explicitly. Used before any path join in
-/// delete_account / disable_user / set_admin / set_can_upload.
+/// #22/#34/#58: Validate a username for safe filesystem-path use. Matches the exact
+/// ASCII charset and length registration now enforces — `[A-Za-z0-9_-]`, 3–32 bytes.
+/// ASCII-only means no two distinct names can collide to one on-disk path via NFC
+/// normalization or case-folding on a case-insensitive FS. '.'/'..'/empty rejected.
+/// Used before any path join in delete_account / disable_user / set_admin / etc.
 pub fn is_safe_username(s: &str) -> bool {
     if s.len() < 3 || s.len() > 32 { return false; }
     if s == "." || s == ".." { return false; }
-    s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Validate that a string is a canonical UUID.

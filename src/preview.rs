@@ -102,12 +102,12 @@ impl PreviewService {
             anyhow::bail!("Link previews disabled");
         }
 
-        // The host that owns the resulting preview is the ORIGINAL request host,
-        // even though we may follow redirects.
-        let original_domain = reqwest::Url::parse(url)
-            .ok()
-            .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
-            .unwrap_or_default();
+        // #10: the host that owns the resulting preview is the FINAL hop's host (the
+        // host actually fetched after following redirects), NOT the original request
+        // host — otherwise a trusted/whitelisted URL could redirect to attacker content
+        // while still reporting the original domain (content spoofing). We track the
+        // validated final host as we walk the redirect chain.
+        let mut final_domain = String::new();
 
         // Manual redirect loop. Each hop is fully re-validated (scheme + private-IP
         // with pinned resolution + whitelist) before we connect, and the connection
@@ -131,6 +131,11 @@ impl PreviewService {
             // cannot re-resolve to a private IP afterwards.
             let addrs = resolve_and_validate_host(&domain, parsed.port_or_known_default()).await?;
 
+            // Record the host we are actually about to fetch; the last value to survive
+            // validation is the FINAL hop's host used for the reported domain (#10) and
+            // the og:image same-host check (#98).
+            final_domain = domain.clone();
+
             // (3) Whitelist check on THIS hop's host.
             if settings.mode == "whitelist" {
                 let allowed = settings.whitelist.iter().any(|w| {
@@ -139,7 +144,13 @@ impl PreviewService {
                 if !allowed {
                     anyhow::bail!("Domain not in whitelist");
                 }
-            } else if settings.mode != "all" {
+            } else if settings.mode == "all" {
+                // #20: "all" mode lets an admin preview ANY host, turning the fetcher
+                // into a general SSRF surface. The 443-only port pin (#9) and the
+                // private-IP block (resolve_and_validate_host) still apply here, so it
+                // cannot reach internal/private hosts or scan non-443 ports — but admins
+                // should understand it can still fetch arbitrary public https endpoints.
+            } else {
                 anyhow::bail!("Unknown preview mode");
             }
 
@@ -199,13 +210,29 @@ impl PreviewService {
         // privacy beacon / read-only GET to an attacker-chosen host). The server
         // does not proxy it, so at minimum only return absolute https:// images and
         // drop http/data/javascript/relative values that could beacon or break out.
-        let image = extract_meta(&body, "og:image")
-            .filter(|img| img.to_ascii_lowercase().starts_with("https://"));
+        // #98: additionally require the image host to match the validated final
+        // preview host (same-host). An off-host https image is still an unvalidated
+        // beacon to a private/internal host we never vetted, so drop it. We do a
+        // string host comparison against the already-validated final host rather than
+        // performing a fresh DNS lookup.
+        let image = extract_meta(&body, "og:image").filter(|img| {
+            let lower = img.to_ascii_lowercase();
+            if !lower.starts_with("https://") {
+                return false;
+            }
+            match reqwest::Url::parse(img) {
+                Ok(u) => u
+                    .host_str()
+                    .map(|h| h.to_lowercase() == final_domain)
+                    .unwrap_or(false),
+                Err(_) => false,
+            }
+        });
         let site_name = extract_meta(&body, "og:site_name");
 
         Ok(LinkPreview {
             url: url.to_string(),
-            domain: original_domain,
+            domain: final_domain,
             title,
             description: description.map(|d| if d.chars().count() > 200 { format!("{}…", d.chars().take(197).collect::<String>()) } else { d }),
             image,
@@ -241,16 +268,28 @@ fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Clie
 /// or decompression-bomb body cannot exhaust memory. (#32)
 async fn read_capped_body(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
     let mut buf: Vec<u8> = Vec::new();
+    let mut truncated = false;
     while let Some(chunk) = resp.chunk().await? {
         let remaining = max.saturating_sub(buf.len());
         if remaining == 0 {
+            // More body remained but we already hit the cap.
+            truncated = true;
             break;
         }
         let take = remaining.min(chunk.len());
         buf.extend_from_slice(&chunk[..take]);
         if buf.len() >= max {
+            // If this chunk had more bytes than we took, the body is being truncated.
+            if take < chunk.len() {
+                truncated = true;
+            }
             break;
         }
+    }
+    // #97: the cap is intentional, but record when a body is truncated so operators
+    // can tell that a preview was generated from a partial document.
+    if truncated {
+        tracing::warn!("read_capped_body: response exceeded {} byte cap; body truncated", max);
     }
     Ok(buf)
 }
@@ -260,11 +299,24 @@ async fn read_capped_body(mut resp: reqwest::Response, max: usize) -> Result<Vec
 /// resolution yields zero addresses or when ANY address is private/internal.
 /// (#17: validate all A/AAAA records and pin the exact set we validated.)
 async fn resolve_and_validate_host(host: &str, port: Option<u16>) -> Result<Vec<SocketAddr>> {
+    // #119: strip a trailing '.' (fully-qualified form, e.g. "localhost.") and also
+    // reject ".localhost" so the name-prefilter matches the IP-check backstop below.
+    let host = host.strip_suffix('.').unwrap_or(host);
     // Reject obvious internal names before resolving.
-    if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
+    if host == "localhost"
+        || host.ends_with(".localhost")
+        || host.ends_with(".local")
+        || host.ends_with(".internal")
+    {
         anyhow::bail!("Private/internal URLs not allowed");
     }
+    // #9/#20: pin the port to 443 (https only) for the initial URL AND every redirect
+    // hop. Any explicit non-443 port is rejected so the preview fetcher cannot be used
+    // as a port scanner / general SSRF engine — this applies regardless of preview mode.
     let port = port.unwrap_or(443);
+    if port != 443 {
+        anyhow::bail!("Only HTTPS port 443 is allowed");
+    }
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
         .await
         .map_err(|_| anyhow::anyhow!("DNS resolution failed"))?
@@ -328,13 +380,83 @@ fn extract_tag(html: &str, tag: &str) -> Option<String> {
 }
 
 fn html_decode(s: &str) -> String {
-    s.replace("&amp;", "&")
-     .replace("&lt;", "<")
-     .replace("&gt;", ">")
-     .replace("&quot;", "\"")
-     .replace("&#39;", "'")
-     .replace("&#x27;", "'")
-     .replace("&apos;", "'")
+    // L9 (#120): decode in a SINGLE left-to-right pass so an already-encoded
+    // ampersand isn't decoded twice. The old two-stage version replaced "&amp;"→"&"
+    // FIRST and then ran the numeric pass, so "&amp;#39;" became "&#39;" and then
+    // wrongly decoded to "'". A single pass consumes each entity once: "&amp;#39;"
+    // yields "&#39;" (the literal text the source author wrote), not "'".
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    // Named entities recognised at the start of an "&...;" run. Order doesn't
+    // matter — each is matched as a complete token before advancing past it.
+    const NAMED: &[(&str, char)] = &[
+        ("&amp;", '&'),
+        ("&lt;", '<'),
+        ("&gt;", '>'),
+        ("&quot;", '"'),
+        ("&#39;", '\''),
+        ("&#x27;", '\''),
+        ("&#X27;", '\''),
+        ("&apos;", '\''),
+    ];
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    'scan: while i < bytes.len() {
+        if bytes[i] == b'&' {
+            // Try a fixed named entity first.
+            for (ent, ch) in NAMED {
+                if s[i..].starts_with(ent) {
+                    out.push(*ch);
+                    i += ent.len();
+                    continue 'scan;
+                }
+            }
+            // Then a generic numeric "&#NN;" (decimal) or "&#xNN;"/"&#XNN;" (hex).
+            if i + 2 < bytes.len() && bytes[i + 1] == b'#' {
+                let (radix, mut j) = if bytes[i + 2] == b'x' || bytes[i + 2] == b'X' {
+                    (16, i + 3)
+                } else {
+                    (10, i + 2)
+                };
+                let digits_start = j;
+                while j < bytes.len() && bytes[j] != b';' {
+                    j += 1;
+                }
+                if j < bytes.len() && j > digits_start {
+                    if let Ok(code) = u32::from_str_radix(&s[digits_start..j], radix) {
+                        if let Some(ch) = char::from_u32(code) {
+                            out.push(ch);
+                            i = j + 1; // skip past the ';'
+                            continue 'scan;
+                        }
+                    }
+                }
+            }
+        }
+        // Not the start of a recognised entity; copy this char verbatim.
+        let ch_len = utf8_char_len(bytes[i]);
+        out.push_str(&s[i..(i + ch_len).min(s.len())]);
+        i += ch_len;
+    }
+    out
+}
+
+/// Byte length of a UTF-8 sequence given its leading byte (defaults to 1 for
+/// continuation/invalid bytes, which keeps the byte-wise walk in bounds).
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else if b >> 3 == 0b11110 {
+        4
+    } else {
+        1
+    }
 }
 
 /// Reject any address that is not a globally-routable public IP. This is the single

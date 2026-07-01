@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 use web_push::*;
@@ -23,6 +25,62 @@ use web_push::*;
 /// Cap stored push subscriptions per user (#83). Each subscription is an
 /// outbound POST target on every notification, so the list must be bounded.
 const MAX_SUBSCRIPTIONS_PER_USER: usize = 20;
+
+/// Aggregate deadline for the whole push fan-out in `maybe_notify` (#11). The
+/// up-to-20 endpoints are sent CONCURRENTLY and the entire batch is bounded by
+/// this timeout so a hung/black-holing endpoint cannot park the spawned task
+/// (and thus delay dead-endpoint pruning) indefinitely. Each individual send
+/// already has its own per-request timeout in `send_push`.
+const FANOUT_DEADLINE: Duration = Duration::from_secs(12);
+
+/// Per-user push rate limit (#11): at most this many pushes per user within
+/// `RATE_WINDOW`. Bounds the outbound-POST amplification a chatty channel (or a
+/// malicious peer flooding mentions) can drive through the server.
+const RATE_MAX_PER_WINDOW: usize = 30;
+const RATE_WINDOW: Duration = Duration::from_secs(60);
+
+/// In-module per-user rate-limit state. Keyed by username; value is the list of
+/// recent send timestamps within the sliding window. DashMap is concurrency-safe
+/// and `'static`, so this needs no plumbing through other files.
+fn rate_state() -> &'static DashMap<String, Vec<Instant>> {
+    static STATE: OnceLock<DashMap<String, Vec<Instant>>> = OnceLock::new();
+    STATE.get_or_init(DashMap::new)
+}
+
+/// Returns true if a push is allowed for `username` right now, recording the
+/// send. Sliding-window: prunes timestamps older than `RATE_WINDOW`, then admits
+/// only if under `RATE_MAX_PER_WINDOW`.
+fn rate_limit_allow(username: &str) -> bool {
+    let now = Instant::now();
+    let mut entry = rate_state().entry(username.to_string()).or_default();
+    entry.retain(|t| now.duration_since(*t) < RATE_WINDOW);
+    if entry.len() >= RATE_MAX_PER_WINDOW {
+        return false;
+    }
+    entry.push(now);
+    true
+}
+
+/// Outcome of an individual push send. Pruning decisions (#116) are made on the
+/// HTTP status code, NOT on a substring of the error string (the endpoint URL is
+/// attacker-controlled and could itself contain "410"/"404"/"Gone").
+enum PushSendError {
+    /// The push service reported the subscription is gone (410) or not found
+    /// (404). The endpoint should be pruned from the user's subscription list.
+    Gone,
+    /// Any other failure (network error, build error, other HTTP status). The
+    /// endpoint is kept; only logged.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for PushSendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PushSendError::Gone     => write!(f, "subscription gone (410/404)"),
+            PushSendError::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
 
 // ─── VAPID key storage ────────────────────────────────────────────────────────
 
@@ -61,11 +119,15 @@ pub fn load_or_generate_vapid(data_dir: &str) -> Result<VapidKeys> {
         pub_bytes.as_bytes(),
     );
     let keys = VapidKeys { public_key: pub_b64, private_key: priv_b64 };
-    std::fs::write(&path, serde_json::to_string_pretty(&keys)?)?;
-    // vapid.json holds the VAPID EC PRIVATE key in cleartext; restrict it to
-    // owner-only so the world-traversable data dir cannot leak it to other
-    // local users (which would let them forge web-push to all users) — #7/#71.
-    set_secret_mode_sync(&path);
+    // vapid.json holds the VAPID EC PRIVATE key in cleartext; create it 0600
+    // ATOMICALLY so the world-traversable data dir cannot leak it to other local
+    // users in the create→chmod window (which would let them forge web-push to
+    // all users) — #7/#71/#101. L8: write_secret_file_sync uses
+    // .create(true).truncate(true) (NOT create_new), so it does NOT guard against
+    // clobbering a pre-existing file; that race is irrelevant here because this is
+    // a single-process, startup-once generator. The security-relevant property —
+    // the 0600 mode delivered atomically — is what matters.
+    write_secret_file_sync(&path, serde_json::to_string_pretty(&keys)?.as_bytes())?;
     info!("Generated new VAPID keys");
     Ok(keys)
 }
@@ -138,17 +200,19 @@ impl NotificationManager {
     async fn write_json_atomic<T: Serialize>(path: &std::path::Path, value: &T) -> Result<()> {
         let json = serde_json::to_string_pretty(value)?;
         let tmp = path.with_extension("json.tmp");
-        if tokio::fs::write(&tmp, &json).await.is_ok() {
+        // Create the temp file 0600 atomically (#101): the staged file holds the
+        // same privacy-sensitive data (push endpoints / muted lists, #7), so it
+        // must never be world-readable even for the instant before the rename.
+        if write_secret_file_async(&tmp, json.as_bytes()).await.is_ok() {
             if tokio::fs::rename(&tmp, path).await.is_err() {
                 // Rename can fail across some filesystems; fall back to direct write.
-                tokio::fs::write(path, &json).await?;
+                write_secret_file_async(path, json.as_bytes()).await?;
                 let _ = tokio::fs::remove_file(&tmp).await;
             }
         } else {
             // Could not stage the temp file; write directly so we still persist.
-            tokio::fs::write(path, &json).await?;
+            write_secret_file_async(path, json.as_bytes()).await?;
         }
-        set_secret_mode(path).await;
         Ok(())
     }
 
@@ -198,7 +262,16 @@ impl NotificationManager {
     pub async fn load_subscriptions(&self, username: &str) -> Vec<PushSubscription> {
         let path = self.subs_path(username);
         let Ok(json) = tokio::fs::read_to_string(&path).await else { return vec![]; };
-        serde_json::from_str(&json).unwrap_or_default()
+        match serde_json::from_str(&json) {
+            Ok(subs) => subs,
+            Err(e) => {
+                // Do NOT silently default to empty (#116): a corrupt/forward-incompatible
+                // file would otherwise look like "no subscriptions" and the cause would be
+                // invisible. Surface it so it can be diagnosed, then degrade to empty.
+                warn!("Failed to parse push subscriptions for {}: {}", username, e);
+                vec![]
+            }
+        }
     }
 
     // ── Preferences ───────────────────────────────────────────────────────────
@@ -213,7 +286,16 @@ impl NotificationManager {
                 muted_channels: vec![],
             };
         };
-        serde_json::from_str(&json).unwrap_or_default()
+        match serde_json::from_str(&json) {
+            Ok(prefs) => prefs,
+            Err(e) => {
+                // Surface parse failures rather than silently defaulting (#116). A
+                // default NotifPrefs has enabled=false, so a corrupt file safely
+                // disables notifications — but the operator gets told why.
+                warn!("Failed to parse notification prefs for {}: {}", username, e);
+                NotifPrefs::default()
+            }
+        }
     }
 
     pub async fn save_prefs(&self, username: &str, prefs: &NotifPrefs) -> Result<()> {
@@ -238,6 +320,12 @@ impl NotificationManager {
         text:      &str,
         ts:        i64,
     ) {
+        // #117/#11: `prefs.enabled` is the cheapest gate, but it lives on disk.
+        // We still must read prefs to know it; what we MUST avoid is the SECOND
+        // disk read (subscriptions) plus the whole payload build + fan-out when
+        // nothing is enabled. The early returns below short-circuit before the
+        // subscription read for every disabled/muted/non-matching message (the
+        // overwhelmingly common case on a busy channel).
         let prefs = self.load_prefs(username).await;
         if !prefs.enabled { return; }
 
@@ -263,6 +351,13 @@ impl NotificationManager {
 
         if !should_notify { return; }
 
+        // #11: per-user rate limit BEFORE any subscription read / fan-out, so a
+        // flood of matching messages cannot drive unbounded outbound POSTs.
+        if !rate_limit_allow(username) {
+            warn!("Push rate limit hit for {} — dropping notification", username);
+            return;
+        }
+
         // Build notification payload
         let title = if is_dm {
             format!("CryptIRC — DM from {}", from)
@@ -282,19 +377,54 @@ impl NotificationManager {
         });
 
         let subs = self.load_subscriptions(username).await;
-        let mut stale = vec![];
-        for sub in &subs {
-            if let Err(e) = self.send_push(sub, &payload.to_string()).await {
-                let msg = e.to_string();
-                warn!("Push send failed for {}: {}", username, msg);
-                // Remove expired/unsubscribed endpoints
-                if msg.contains("410") || msg.contains("404") || msg.contains("Gone") {
-                    stale.push(sub.endpoint.clone());
-                }
-            }
-        }
+        if subs.is_empty() { return; }
+        let payload = payload.to_string();
+
+        // #11: send to all (up to MAX_SUBSCRIPTIONS_PER_USER) endpoints
+        // CONCURRENTLY under a single aggregate deadline, instead of sequential
+        // awaits. A slow endpoint no longer serializes behind the others, and the
+        // whole batch can never outlive FANOUT_DEADLINE.
+        let stale = self.fan_out(username, &subs, &payload).await;
+
+        // Prune endpoints the push service reported as gone (410/404). Status-code
+        // driven (#116), collected by the concurrent send above.
         for endpoint in &stale {
             let _ = self.remove_subscription(username, endpoint).await;
+        }
+    }
+
+    /// Send `payload` to every subscription concurrently under an aggregate
+    /// deadline (#11). Returns the endpoints the push service reported as gone
+    /// (410/404) so the caller can prune them (#116). Shared by maybe_notify /
+    /// monitor / test sends so all three fan out identically.
+    async fn fan_out(
+        &self,
+        username: &str,
+        subs: &[PushSubscription],
+        payload: &str,
+    ) -> Vec<String> {
+        let sends = subs.iter().map(|sub| async move {
+            match self.send_push(sub, payload).await {
+                Ok(()) => None,
+                Err(PushSendError::Gone) => {
+                    warn!("Push endpoint gone for {}, pruning", username);
+                    Some(sub.endpoint.clone())
+                }
+                Err(PushSendError::Other(e)) => {
+                    warn!("Push send failed for {}: {}", username, e);
+                    None
+                }
+            }
+        });
+
+        match tokio::time::timeout(FANOUT_DEADLINE, futures_util::future::join_all(sends)).await {
+            Ok(results) => results.into_iter().flatten().collect(),
+            Err(_) => {
+                // Aggregate deadline hit: some endpoints were black-holing. Do NOT
+                // prune anything (a timeout is not proof the subscription is gone).
+                warn!("Push fan-out for {} exceeded {:?}; some sends abandoned", username, FANOUT_DEADLINE);
+                vec![]
+            }
         }
     }
 
@@ -307,15 +437,7 @@ impl NotificationManager {
             "body": format!("{} {} is {}", icon, nick, status),
             "tag": format!("monitor-{}", nick.to_lowercase()),
         }).to_string();
-        let mut stale = vec![];
-        for sub in &subs {
-            if let Err(e) = self.send_push(sub, &payload).await {
-                let msg = e.to_string();
-                if msg.contains("410") || msg.contains("404") || msg.contains("Gone") {
-                    stale.push(sub.endpoint.clone());
-                }
-            }
-        }
+        let stale = self.fan_out(username, &subs, &payload).await;
         for endpoint in &stale {
             let _ = self.remove_subscription(username, endpoint).await;
         }
@@ -323,19 +445,47 @@ impl NotificationManager {
 
     pub async fn send_test_notification(&self, username: &str) {
         let subs = self.load_subscriptions(username).await;
+        if subs.is_empty() { return; }
         let payload = serde_json::json!({
             "title": "CryptIRC",
             "body": "Test notification — push is working!",
             "tag": "cryptirc-test",
         }).to_string();
-        for sub in &subs {
-            if let Err(e) = self.send_push(sub, &payload).await {
-                warn!("Test push failed for {}: {}", username, e);
-            }
+        // #100: the test send must also prune 410/404 stale endpoints, mirroring
+        // maybe_notify — otherwise a dead device lingers until a real message.
+        let stale = self.fan_out(username, &subs, &payload).await;
+        for endpoint in &stale {
+            let _ = self.remove_subscription(username, endpoint).await;
         }
     }
 
-    async fn send_push(&self, sub: &PushSubscription, payload: &str) -> Result<()> {
+    /// Send one push. Classifies a 410/404 response as `PushSendError::Gone` so
+    /// the caller prunes on the HTTP STATUS CODE (#116), never on an error
+    /// substring (the endpoint URL is attacker-controlled).
+    async fn send_push(&self, sub: &PushSubscription, payload: &str) -> std::result::Result<(), PushSendError> {
+        match self.send_push_raw(sub, payload).await {
+            Ok(status) if status.is_success() => Ok(()),
+            Ok(status)
+                if status == reqwest::StatusCode::GONE
+                    || status == reqwest::StatusCode::NOT_FOUND =>
+            {
+                Err(PushSendError::Gone)
+            }
+            Ok(status) => {
+                let endpoint: String = sub.endpoint.chars().take(60).collect();
+                Err(PushSendError::Other(anyhow::anyhow!(
+                    "Push to {} failed: {}",
+                    endpoint,
+                    status
+                )))
+            }
+            Err(e) => Err(PushSendError::Other(e)),
+        }
+    }
+
+    /// Perform the actual signed/encrypted POST, returning the HTTP status (or a
+    /// transport/build error). Status classification is the caller's job.
+    async fn send_push_raw(&self, sub: &PushSubscription, payload: &str) -> Result<reqwest::StatusCode> {
         // #83: re-validate the endpoint at SEND time, not just at registration,
         // AND pin the connection to the exact public IPs we validated. The
         // registration-time check is a TOCTOU window: a DNS name validated as
@@ -404,6 +554,25 @@ impl NotificationManager {
             .build()
             .map_err(|e| anyhow::anyhow!("Push client build failed: {}", e))?;
 
+        // #118: the pin (resolve_to_addrs) is keyed on `pinned.host`. reqwest
+        // derives the connect host from the request URL it parses out of
+        // `sub.endpoint`. If those two host strings diverge (e.g. different
+        // normalization), reqwest would NOT match the pin entry and would fall
+        // back to a live DNS lookup — silently disabling the SSRF pin. Re-derive
+        // the host the same way reqwest will and require it to equal the pinned
+        // host before sending; bail if divergent rather than send unpinned.
+        // (resolve_and_validate_push_endpoint already rejected userinfo, so the
+        // authority here is host[:port] only.)
+        let req_host = reqwest::Url::parse(sub.endpoint.as_str())
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()));
+        match req_host {
+            Some(h) if h == pinned.host => {}
+            _ => {
+                bail!("Push endpoint host diverged from pinned host; refusing to send unpinned");
+            }
+        }
+
         let resp = client
             .post(sub.endpoint.as_str())
             .headers(parts.headers)
@@ -417,16 +586,9 @@ impl NotificationManager {
                 anyhow::anyhow!("Push to {} failed: {:?}", endpoint, e)
             })?;
 
-        let status = resp.status();
-        if status.is_success() {
-            Ok(())
-        } else {
-            // Surface the numeric status so the caller's dead-endpoint prune
-            // (checks for "410"/"404"/"Gone") still fires for 410 Gone / 404
-            // Not Found push subscriptions, matching the prior behavior.
-            let endpoint: String = sub.endpoint.chars().take(60).collect();
-            anyhow::bail!("Push to {} failed: {}", endpoint, status)
-        }
+        // Return the status; the caller (send_push) classifies success vs. the
+        // 410/404 "gone" prune case (#116) from the code, not an error string.
+        Ok(resp.status())
     }
 
     fn subs_path(&self, username: &str) -> PathBuf {
@@ -465,26 +627,85 @@ fn truncate(s: &str, max: usize) -> &str {
 }
 
 /// Best-effort chmod 0600 on a secret file written via the sync std::fs API
-/// (audit #7). No-op on non-unix targets.
+/// (audit #7). No-op on non-unix targets. Warns (does not silently ignore, #101)
+/// on permission failure: a secret file left world-readable is a real leak.
 fn set_secret_mode_sync(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            warn!("Failed to chmod 0600 secret file {}: {}", path.display(), e);
+        }
     }
     #[cfg(not(unix))]
     { let _ = path; }
 }
 
-/// Best-effort chmod 0600 on a secret file written via tokio::fs (audit #7).
-async fn set_secret_mode(path: &std::path::Path) {
+/// Write `data` to `path` as an owner-only (0600) secret file, creating it
+/// atomically with the restrictive mode (#101). On unix, `OpenOptions::mode`
+/// sets the creation mode so the file is NEVER world-readable for any window
+/// (no create-then-chmod race); on non-unix it falls back to a plain write.
+/// Truncates if the file already exists (we always rewrite the full content).
+fn write_secret_file_sync(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(data)?;
+        // Re-tighten in case the file pre-existed with looser perms (mode on
+        // OpenOptions only applies to newly created files). Warn on failure.
+        set_secret_mode_sync(path);
+        Ok(())
     }
     #[cfg(not(unix))]
-    { let _ = path; }
+    {
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(data)?;
+        Ok(())
+    }
+}
+
+/// Async sibling of `write_secret_file_sync` (#101): create `path` 0600
+/// atomically via tokio's OpenOptions and write `data`. Used for the push
+/// subscription / prefs files (privacy-sensitive, #7).
+async fn write_secret_file_async(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    #[cfg(unix)]
+    {
+        let mut f = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .await?;
+        f.write_all(data).await?;
+        f.flush().await?;
+        // Re-tighten if the file pre-existed with looser perms; warn on failure.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) =
+                tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await
+            {
+                warn!("Failed to chmod 0600 secret file {}: {}", path.display(), e);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = tokio::fs::File::create(path).await?;
+        f.write_all(data).await?;
+        f.flush().await?;
+        Ok(())
+    }
 }
 
 /// A push endpoint that has passed SSRF validation, along with the exact set of
@@ -519,6 +740,14 @@ async fn resolve_and_validate_push_endpoint(endpoint: &str) -> Result<PinnedEndp
         .map_err(|_| anyhow::anyhow!("Invalid push endpoint URL"))?;
     if parsed.scheme() != "https" {
         bail!("Push endpoint must use https");
+    }
+    // #118: reject userinfo/credentials in the authority. A URL like
+    // https://evil.com@fcm.googleapis.com/... has host_str()=fcm.googleapis.com
+    // but the leading userinfo is a classic SSRF/parser-confusion vector and
+    // serves no purpose for a push endpoint. Refuse outright so the host we
+    // validate and pin is unambiguous.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        bail!("Push endpoint must not contain credentials");
     }
     let host = parsed.host_str().ok_or_else(|| anyhow::anyhow!("Push endpoint has no host"))?;
 

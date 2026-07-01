@@ -57,6 +57,33 @@ fn truncate_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
+/// #93: replace `token` (an ASCII `$me`/`$nick`) with `val` only when it occurs as a
+/// whole token — i.e. bounded by a non-word character (or string edge) on both sides —
+/// so a literal `$me`/`$nick` embedded in a larger word (e.g. a NickServ password) is
+/// left untouched instead of being silently rewritten to the nick.
+fn expand_perform_token(s: &str, token: &str, val: &str) -> String {
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i..].starts_with(token) {
+            let before_ok = i == 0 || !is_word(bytes[i - 1]);
+            let after = i + token.len();
+            let after_ok = after >= s.len() || !is_word(bytes[after]);
+            if before_ok && after_ok {
+                out.push_str(val);
+                i = after;
+                continue;
+            }
+        }
+        let ch = s[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// #19: join the tail of params starting at index `n` without panicking when
 /// there are fewer than `n` params. `parse_irc` can legitimately return 0 params,
 /// so any `p.params[N..]` is a panic waiting to happen on malformed server input.
@@ -239,6 +266,12 @@ impl Drop for ConnCleanup {
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 pub struct ChannelState {
+    /// #92: display name as the server first announced it. `IrcConnection.channels` is
+    /// keyed by `irc_lower(name)` so a PART/KICK/MODE echoed in a different case than the
+    /// JOIN still resolves (previously a case mismatch left a stale channel that the WHO
+    /// ticker kept polling — the "one channel spamming /who" symptom). This preserves the
+    /// original casing for everything user-facing.
+    pub name:  String,
     pub topic: String,
     pub names: Vec<String>,
 }
@@ -512,9 +545,12 @@ async fn do_connect(
                     let _ = ssl_builder.set_default_verify_paths();
                 }
             }
-            // Load client cert + key from PEM
-            let cert_id = cfg.client_cert_id.as_ref().unwrap();
-            let dir = std::path::PathBuf::from(&state.data_dir).join("certs").join(cert_id);
+            // Load client cert + key from PEM. #48: route the cert_id through the
+            // CertStore's shared sanitizer (no raw join), and don't .unwrap() — a
+            // missing id is a graceful error, not a panic.
+            let cert_id = cfg.client_cert_id.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Client cert id missing"))?;
+            let dir = CertStore::new(&state.data_dir, state.crypto.clone()).cert_path_for(cert_id);
             let cert_pem = tokio::fs::read(dir.join("cert.pem")).await?;
             let key_enc = tokio::fs::read_to_string(dir.join("key.enc")).await?;
             let key_pem = state.crypto.decrypt(username, key_enc.trim()).await?;
@@ -675,12 +711,18 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
             // away (grayed-out) state on servers without away-notify.
             _ = who_ticker.tick() => {
                 if registered {
-                    let chans: Vec<String> = { conn.lock().await.channels.keys().cloned().collect() };
+                    // #92: iterate the display names (channels is keyed by irc_lower now).
+                    let chans: Vec<String> = { conn.lock().await.channels.values().map(|ch| ch.name.clone()).collect() };
                     for ch in chans {
                         // Key who_pending by the case-folded name so the 352/315
                         // replies match even when the server/ZNC echoes the channel
                         // in a different case than the JOIN-echo we stored.
-                        who_pending.insert(irc_lower(&ch));
+                        // #91: cap the pending set (it's already bounded by the per-conn
+                        // channel cap, but keep the guard symmetric with the JOIN path).
+                        let ck = irc_lower(&ch);
+                        if who_pending.len() < NAMES_BUF_MAX_CHANNELS || who_pending.contains(&ck) {
+                            who_pending.insert(ck);
+                        }
                         // A send failure here just means the connection is going down;
                         // the read side will surface the real error and reconnect.
                         // strip_crlf: channel keys originate from server-supplied JOIN names;
@@ -722,7 +764,9 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                 let _in_sasl_handshake = matches!(sasl_state, SaslState::CapLsSent | SaslState::CapReqSent | SaslState::AuthenticateSent);
                 let _is_sasl_resp = matches!(p.command.as_str(), "900" | "902" | "903" | "904" | "905" | "906" | "907" | "AUTHENTICATE");
                 if _in_sasl_handshake || _is_sasl_resp {
-                    info!("[{}] RAW(sasl): {}", conn_id, line);
+                    // #142: gate raw SASL-handshake lines behind debug (off by default) — an
+                    // AUTHENTICATE payload can carry credential material; don't log at info.
+                    tracing::debug!("[{}] RAW(sasl): {}", conn_id, line);
                 }
                 // Prefer IRCv3 server-time tag when available
                 let ts = p.tags.get("time")
@@ -967,7 +1011,12 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         // /cs, /chanserv, /identify, /id, /ghost, /quote, /raw. Anything else with a
                         // leading slash is stripped and sent raw (so `/MODE me +ix` works). `$me` and
                         // `$nick` expand to the current nickname.
-                        for line in &cfg.perform_commands {
+                        // #93: split each perform entry on embedded newlines FIRST so a
+                        // multi-line entry runs as multiple commands instead of being
+                        // collapsed by strip_crlf into one corrupt line. Each sub-line then
+                        // has any stray CR/LF stripped (CRLF-injection defense).
+                        for entry in &cfg.perform_commands {
+                        for line in entry.split(['\n', '\r']) {
                             let raw = strip_crlf(line.trim());
                             if raw.is_empty() { continue; }
                             let to_send_opt: Option<String> = if let Some(rest) = raw.strip_prefix('/') {
@@ -998,12 +1047,13 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                 Some(raw.to_string())
                             };
                             let Some(mut to_send) = to_send_opt else { continue; };
-                            // Expand $me / $nick tokens to the current nickname. Word-boundary via
-                            // a trailing space-or-EOL isn't worth the complexity; literal replace is
-                            // fine for the common cases (MODE $me +ix, /msg NickServ GHOST $me …).
-                            if to_send.contains("$me")   { to_send = to_send.replace("$me",   &actual_nick); }
-                            if to_send.contains("$nick") { to_send = to_send.replace("$nick", &actual_nick); }
+                            // #93: expand $me / $nick only as WHOLE tokens (word-boundary), so a
+                            // literal "$me"/"$nick" inside a larger word — e.g. a NickServ password —
+                            // is left intact rather than silently rewritten to the nick.
+                            to_send = expand_perform_token(&to_send, "$nick", &actual_nick);
+                            to_send = expand_perform_token(&to_send, "$me",   &actual_nick);
                             conn.lock().await.send_raw(&format!("{}\r\n", to_send)).await?;
+                        }
                         }
                         for ch in &cfg.auto_join {
                             let safe = strip_crlf(ch);
@@ -1109,15 +1159,23 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             (MessageKind::Action, text[8..text.len()-1].to_string())
                         } else { (MessageKind::Privmsg, text) };
                         // Route PMs to sender's nick, not our own nick
-                        let display_target = if target.starts_with(['#','&']) { target.clone() } else { from.clone() };
+                        let display_target = if target.starts_with(['#','&','+','!']) { target.clone() } else { from.clone() };
                         let msg_id = state.logger.append(username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
                         send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind, msg_id, prefix: p.prefix.clone() });
                         // Push notification for DMs and mentions — only if no active (non-idle) sessions
                         // Fires when: no WS connected at all, OR all connected sessions are idle (20m timeout)
                         if from != user_nick && (state.user_events.get(username).map_or(true, |tx| tx.receiver_count() == 0) || state.user_is_idle(username)) {
-                            state.notifier.maybe_notify(
-                                username, &user_nick, conn_id, &cfg.label, &display_target, &from, &clean, ts
-                            ).await;
+                            // #11: spawn the push fan-out DETACHED so it can never block the IRC
+                            // read loop (which must keep answering PINGs). maybe_notify is now
+                            // internally concurrent + deadline-bounded + rate-limited.
+                            let notifier = state.notifier.clone();
+                            let (u, un, cid, lbl, tgt, frm, txt) = (
+                                username.to_string(), user_nick.clone(), conn_id.to_string(),
+                                cfg.label.clone(), display_target.clone(), from.clone(), clean.clone(),
+                            );
+                            tokio::spawn(async move {
+                                notifier.maybe_notify(&u, &un, &cid, &lbl, &tgt, &frm, &txt, ts).await;
+                            });
                         }
                     }
                     "NOTICE" => {
@@ -1137,7 +1195,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         }
                         // Route notices: channel → channel, server → status,
                         // our own outgoing → keep target (recipient), incoming → sender's nick
-                        let display_target = if target.starts_with(['#','&']) {
+                        let display_target = if target.starts_with(['#','&','+','!']) {
                             target.clone()
                         } else if from == "*" || from.contains('.') || p.prefix.is_none() {
                             "status".to_string()
@@ -1169,22 +1227,23 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         // `is_self_join` = it was our own JOIN and we should issue NAMES.
                         let (accepted, is_self_join) = {
                             let mut c = conn.lock().await;
+                            let chan_key = irc_lower(&channel); // #92
                             if nick == c.nick {
-                                if c.channels.contains_key(&channel) {
+                                if c.channels.contains_key(&chan_key) {
                                     // #43: a server can repeat ":<ournick> JOIN #chan" to force
                                     // unbounded outbound NAMES/WHO. Only issue NAMES/WHO when the
                                     // channel is newly inserted; a re-JOIN of an already-tracked
                                     // channel is still echoed/logged but skips the amplification.
                                     (true, false)
                                 } else if c.channels.len() < MAX_CHANNELS_PER_CONN {
-                                    c.channels.insert(channel.clone(), ChannelState { topic: String::new(), names: vec![] });
+                                    c.channels.insert(chan_key.clone(), ChannelState { name: channel.clone(), topic: String::new(), names: vec![] });
                                     (true, true)
                                 } else {
                                     warn!("[{}] Ignoring self-JOIN {} — channel cap ({}) reached", conn_id, channel, MAX_CHANNELS_PER_CONN);
                                     (false, false)
                                 }
                             } else {
-                                if let Some(ch) = c.channels.get_mut(&channel) {
+                                if let Some(ch) = c.channels.get_mut(&chan_key) {
                                     if ch.names.len() < NAMES_BUF_MAX_PER_CHAN { ch.names.push(nick.clone()); }
                                 }
                                 (true, false)
@@ -1231,7 +1290,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let nick    = nick_from_prefix(&p.prefix);
                         let channel = p.params.get(0).cloned().unwrap_or_default();
                         let reason  = p.params.get(1).cloned().unwrap_or_default();
-                        { let mut c = conn.lock().await; if nick == c.nick { c.channels.remove(&channel); } else if let Some(ch) = c.channels.get_mut(&channel) { ch.names.retain(|n| strip_pfx(n) != nick); } }
+                        { let mut c = conn.lock().await; let k = irc_lower(&channel); if nick == c.nick { c.channels.remove(&k); } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| strip_pfx(n) != nick); } }
                         let part_text = if reason.is_empty() { format!("← {} left", nick) } else { format!("← {} left ({})", nick, reason) };
                         let _ = state.logger.append(&username, &conn_id, &channel, ts, &nick, &part_text, "part").await;
                         send(ServerEvent::IrcPart { conn_id: conn_id.to_string(), nick, channel, reason, ts });
@@ -1241,7 +1300,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let reason = p.params.get(0).cloned().unwrap_or_default();
                         let affected: Vec<String> = {
                             let mut c = conn.lock().await;
-                            let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == nick)).map(|(n, _)| n.clone()).collect();
+                            let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == nick)).map(|(_, ch)| ch.name.clone()).collect();
                             for ch in c.channels.values_mut() { ch.names.retain(|n| strip_pfx(n) != nick); }
                             chans
                         };
@@ -1260,7 +1319,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let new = p.params.get(0).cloned().unwrap_or_default();
                         let affected: Vec<String> = {
                             let mut c = conn.lock().await;
-                            let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == old)).map(|(n, _)| n.clone()).collect();
+                            let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == old)).map(|(_, ch)| ch.name.clone()).collect();
                             if old == c.nick { c.nick = strip_crlf(&new); }
                             for ch in c.channels.values_mut() {
                                 for n in ch.names.iter_mut() {
@@ -1288,7 +1347,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let c = conn.lock().await;
                         let chans: Vec<String> = c.channels.iter()
                             .filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == nick))
-                            .map(|(name, _)| name.clone())
+                            .map(|(_, ch)| ch.name.clone())
                             .collect();
                         drop(c);
                         for ch in &chans {
@@ -1361,7 +1420,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         if let Some(typing_state) = p.tags.get("+typing").or_else(|| p.tags.get("+draft/typing")) {
                             let our_nick = conn.lock().await.nick.clone();
                             if from != our_nick {
-                                let display_target = if target.starts_with(['#','&']) { target } else { from.clone() };
+                                let display_target = if target.starts_with(['#','&','+','!']) { target } else { from.clone() };
                                 send(ServerEvent::IrcTyping {
                                     conn_id: conn_id.to_string(), nick: from,
                                     target: display_target,
@@ -1448,7 +1507,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let channel = p.params.get(0).cloned().unwrap_or_default();
                         let kicked  = p.params.get(1).cloned().unwrap_or_default();
                         let reason  = p.params.get(2).cloned().unwrap_or_default();
-                        { let mut c = conn.lock().await; if kicked == c.nick { c.channels.remove(&channel); } else if let Some(ch) = c.channels.get_mut(&channel) { ch.names.retain(|n| strip_pfx(n) != kicked); } }
+                        { let mut c = conn.lock().await; let k = irc_lower(&channel); if kicked == c.nick { c.channels.remove(&k); } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| strip_pfx(n) != kicked); } }
                         let kick_text = if reason.is_empty() { format!("✗ {} kicked by {}", kicked, by) } else { format!("✗ {} kicked by {} ({})", kicked, by, reason) };
                         let _ = state.logger.append(&username, &conn_id, &channel, ts, &kicked, &kick_text, "kick").await;
                         send(ServerEvent::IrcKick { conn_id: conn_id.to_string(), channel, kicked, by, reason, ts });
@@ -1457,13 +1516,13 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let set_by  = nick_from_prefix(&p.prefix);
                         let channel = p.params.get(0).cloned().unwrap_or_default();
                         let topic   = p.params.get(1).cloned().unwrap_or_default();
-                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&channel) { ch.topic = topic.clone(); } }
+                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.topic = topic.clone(); } }
                         send(ServerEvent::IrcTopic { conn_id: conn_id.to_string(), channel, topic, set_by, ts });
                     }
                     "332" => {
                         let channel = p.params.get(1).cloned().unwrap_or_default();
                         let topic   = p.params.get(2).cloned().unwrap_or_default();
-                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&channel) { ch.topic = topic.clone(); } }
+                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.topic = topic.clone(); } }
                         send(ServerEvent::IrcTopic { conn_id: conn_id.to_string(), channel, topic, set_by: String::new(), ts });
                     }
 
@@ -1488,7 +1547,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "366" => {
                         let channel = p.params.get(1).cloned().unwrap_or_default();
                         let names   = names_buf.remove(&channel).unwrap_or_default();
-                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&channel) { ch.names = names.clone(); } }
+                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.names = names.clone(); } }
                         send(ServerEvent::IrcNames { conn_id: conn_id.to_string(), channel, names });
                     }
                     "MODE" => {
@@ -1508,7 +1567,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             let mut arg_idx = 1usize;
                             let mut adding = true;
                             let mut c = conn.lock().await;
-                            if let Some(ch) = c.channels.get_mut(&target) {
+                            if let Some(ch) = c.channels.get_mut(&irc_lower(&target)) {
                                 for mc in mode_str.chars() {
                                     if mc == '+' { adding = true; continue; }
                                     if mc == '-' { adding = false; continue; }
@@ -1809,7 +1868,8 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             // emitting it verbatim would silently miss the away graying.
                             let display_chan = {
                                 let c = conn.lock().await;
-                                c.channels.keys().find(|k| irc_lower(k.as_str()) == chan_key).cloned().unwrap_or(channel)
+                                // #92: channels is keyed by irc_lower; return the stored display name.
+                                c.channels.get(&chan_key).map(|ch| ch.name.clone()).unwrap_or(channel)
                             };
                             send(ServerEvent::IrcAwaySnapshot {
                                 conn_id: conn_id.to_string(), channel: display_chan, away_nicks,
@@ -1894,7 +1954,10 @@ fn parse_irc(line: &str) -> IrcLine {
     let mut tags = HashMap::new();
     if rest.starts_with('@') {
         let (tag_str, r) = rest[1..].split_once(' ').unwrap_or((&rest[1..], ""));
-        for pair in tag_str.split(';') {
+        // #91: cap the number of parsed tags. The IRCv3 spec limits a tag section to
+        // 8191 bytes; a malicious server could still pack thousands of tiny tags per
+        // line to churn allocations. Real servers send a handful.
+        for pair in tag_str.split(';').take(64) {
             if let Some((k, v)) = pair.split_once('=') {
                 // #85: unescape IRCv3 tag values in a single left-to-right pass as the
                 // message-tags spec requires. The previous chained `.replace()` applied
