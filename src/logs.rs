@@ -35,11 +35,23 @@ pub struct EncryptedLogger {
     /// way one user's slow disk can't wedge id issuance for every other user
     /// (which a single global lock held across `.await` would do — see #53).
     seq_locks: Mutex<HashMap<String, Arc<Mutex<u64>>>>,
+    /// De-dupe set for undecryptable-line warnings (#F22). A permanently-corrupt
+    /// line (e.g. a NUL-filled tail after an unclean shutdown → "Invalid symbol
+    /// 0") would otherwise log a warning on EVERY read of that target. We key by
+    /// a hash of the ciphertext so each distinct bad line warns at most once; the
+    /// line is still skipped regardless. Capped so a flood of distinct corrupt
+    /// lines can't grow it without bound.
+    warned_bad_lines: Mutex<std::collections::HashSet<u64>>,
 }
 
 impl EncryptedLogger {
     pub fn new(data_dir: &str, crypto: Arc<CryptoManager>) -> Self {
-        Self { data_dir: data_dir.to_string(), crypto, seq_locks: Mutex::new(HashMap::new()) }
+        Self {
+            data_dir: data_dir.to_string(),
+            crypto,
+            seq_locks: Mutex::new(HashMap::new()),
+            warned_bad_lines: Mutex::new(std::collections::HashSet::new()),
+        }
     }
 
     pub fn data_dir(&self) -> &str { &self.data_dir }
@@ -104,25 +116,53 @@ impl EncryptedLogger {
         id
     }
 
-    /// Scan all of a user's existing logs and return the maximum msg_id seen
+    /// Scan the caller's OWN existing logs and return the maximum msg_id seen
     /// (0 if there are none). Used to recover the sequence counter when the
     /// `.seq` file is missing or corrupt (#50). L10: this recovers the max *logged*
     /// id — an id that was issued (via next_id) but whose append FAILED before any
     /// line was written leaves no on-disk record, so it can be re-issued. That is
     /// harmless (no on-disk row exists to collide with); the guarantee is only that
     /// we never re-issue an id that actually made it to disk.
+    ///
+    /// #10: the logs tree is namespaced only by conn_id (a UUID), never by
+    /// username, so a blind walk of `logs/` would read and attempt to AES-GCM
+    /// decrypt EVERY tenant's history — an unbounded cross-tenant decrypt sweep
+    /// (DoS) and a timing oracle for the whole corpus size. Recovery is therefore
+    /// scoped to THIS user's own conn_ids (their saved networks live at
+    /// `networks/<user>/<conn_id>.json`) and capped at MAX_DECRYPT_LINES decrypt
+    /// attempts, scanning newest-first so the highest (most recent) id is seen
+    /// before the cap can cut the scan short. Reachable history all lives under a
+    /// current network, so scoping never lowers the recovered max for data the
+    /// client can still request; only unreachable logs of deleted networks are
+    /// skipped, and re-issuing their ids is harmless (nothing reachable collides).
     async fn recover_max_id(&self, username: &str) -> u64 {
-        let logs_root = PathBuf::from(&self.data_dir).join("logs");
-        let mut max_id: u64 = 0;
-        // logs/<conn>/<target>/<date>.log
-        let mut conns = match tokio::fs::read_dir(&logs_root).await {
+        let logs_root    = PathBuf::from(&self.data_dir).join("logs");
+        // Raw username matches how networks/<user>/ is created in main.rs; it is
+        // validated (is_safe_username) at the auth boundary before reaching here.
+        let networks_dir = PathBuf::from(&self.data_dir).join("networks").join(username);
+
+        // Gather the day files of ONLY this user's own conn_ids.
+        let mut day_files: Vec<PathBuf> = Vec::new();
+        let mut nets = match tokio::fs::read_dir(&networks_dir).await {
             Ok(rd) => rd,
             Err(_) => return 0,
         };
-        while let Ok(Some(conn_entry)) = conns.next_entry().await {
-            let conn_path = conn_entry.path();
-            if !conn_path.is_dir() { continue; }
-            let mut targets = match tokio::fs::read_dir(&conn_path).await {
+        while let Ok(Some(net_entry)) = nets.next_entry().await {
+            let net_path = net_entry.path();
+            // Only "<conn_id>.json" config files name a conn_id (skip .tmp etc).
+            if !net_path.extension().map(|x| x == "json").unwrap_or(false) { continue; }
+            let conn_id = match net_path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            // Resolve the exact dir append() writes to for this conn_id. For a UUID
+            // this is an identity mapping; a non-UUID stem simply encodes to a dir
+            // that doesn't exist, so it can never escape logs/.
+            let conn_dir = match encode_path_component(&conn_id) {
+                Ok(enc) => logs_root.join(enc),
+                Err(_) => continue,
+            };
+            let mut targets = match tokio::fs::read_dir(&conn_dir).await {
                 Ok(rd) => rd,
                 Err(_) => continue,
             };
@@ -136,17 +176,43 @@ impl EncryptedLogger {
                 while let Ok(Some(day_entry)) = days.next_entry().await {
                     let p = day_entry.path();
                     if p.extension().map(|x| x == "log").unwrap_or(false) {
-                        if let Ok(content) = tokio::fs::read_to_string(&p).await {
-                            for enc_line in content.lines() {
-                                if enc_line.is_empty() { continue; }
-                                if let Ok(plain) = self.crypto.decrypt(username, enc_line).await {
-                                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&plain) {
-                                        let id = v["id"].as_u64().unwrap_or(0);
-                                        if id > max_id { max_id = id; }
-                                    }
-                                }
-                            }
-                        }
+                        day_files.push(p);
+                    }
+                }
+            }
+        }
+
+        // Newest date first: file names are "YYYY-MM-DD.log", so lexicographic
+        // order == chronological order. ids are monotonic per user, so the newest
+        // file holds the highest id — scanning newest-first guarantees the max is
+        // seen before the MAX_DECRYPT_LINES cap can stop the scan short.
+        day_files.sort_by(|a, b| {
+            let an = a.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+            let bn = b.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+            an.cmp(&bn)
+        });
+
+        let mut max_id: u64 = 0;
+        let mut scanned: usize = 0;
+        'outer: for p in day_files.iter().rev() {
+            // #11: reconstruct the AAD from the on-disk directory names (the
+            // encoded conn/target that append() bound the line to) plus the
+            // date-named file, so AAD-bound lines decrypt and count toward
+            // max_id; pre-#11 lines fall back to a plain decrypt.
+            let date       = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let enc_target = p.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+            let enc_conn   = p.parent().and_then(|d| d.parent()).and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+            let aad        = log_aad(enc_conn, enc_target, date);
+            // #F21: bounded streaming read of the newest lines instead of
+            // read_to_string materializing the whole day file.
+            let enc_lines = read_recent_lines(p, MAX_DECRYPT_LINES).await;
+            for enc_line in enc_lines.iter().rev() {
+                if scanned >= MAX_DECRYPT_LINES { break 'outer; }
+                scanned += 1;
+                if let Ok(plain) = self.decrypt_log_line(username, enc_line, &aad).await {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&plain) {
+                        let id = v["id"].as_u64().unwrap_or(0);
+                        if id > max_id { max_id = id; }
                     }
                 }
             }
@@ -183,14 +249,21 @@ impl EncryptedLogger {
         let id = self.next_id(username).await;
         let record    = serde_json::json!({ "id": id, "ts": ts, "from": from, "text": text, "kind": kind });
         let plaintext = record.to_string();
-        let enc = match self.crypto.encrypt(username, plaintext.as_bytes()).await {
+        let path = self.log_path(conn_id, target, ts);
+        // Bind the ciphertext to conn/target/date so it can't be relocated
+        // between log files and still decrypt (#11). Encoded components + the
+        // date-named file match exactly what the reader reconstructs.
+        let enc_conn   = encode_path_component(conn_id).unwrap_or_else(|_| "_".to_string());
+        let enc_target = encode_path_component(target).unwrap_or_else(|_| "_".to_string());
+        let date       = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let aad        = log_aad(&enc_conn, &enc_target, date);
+        let enc = match self.crypto.encrypt_aad(username, plaintext.as_bytes(), &aad).await {
             Ok(enc) => enc,
             Err(e) => {
                 tracing::error!("Log encrypt failed for {}: {}", username, e);
                 return 0;
             }
         };
-        let path = self.log_path(conn_id, target, ts);
         if let Some(parent) = path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 tracing::error!("Log dir create failed ({:?}): {}", parent, e);
@@ -226,17 +299,93 @@ impl EncryptedLogger {
         self.read_tail(username, conn_id, target, safe_limit, MAX_DECRYPT_LINES, None).await
     }
 
-    /// Return all messages with id > after_id for a given target (for sync).
+    /// Return un-synced messages (id > after_id) for a target, OLDEST-first in
+    /// the result, bounded to MAX_DECRYPT_LINES decrypt/parse ops per call (for
+    /// sync).
+    ///
+    /// #F3: the prior version iterated EVERY day file and decrypted+JSON-parsed
+    /// EVERY line on each Sync — only the heap SIZE was capped (bounding memory,
+    /// not the decrypt/parse/read work). A client sending after_id=0 skipped
+    /// nothing, forcing an unbounded per-request decrypt sweep (CPU/disk DoS).
+    /// We now scan NEWEST-first and stop after MAX_DECRYPT_LINES scanned lines,
+    /// returning the most-recent bounded window of un-synced (id > after_id)
+    /// lines regardless of after_id, sorted oldest→newest — the ordering main.rs
+    /// Sync (~3432) and the frontend appendSyncLines expect.
+    ///
+    /// For a normal sync (the client advances after_id to the largest id it has,
+    /// so the gap is small) the newest-first scan reaches the file(s) holding the
+    /// un-synced tail and skips fully-synced older files via a one-line probe,
+    /// so the ENTIRE gap is returned with no hole. A backlog exceeding
+    /// MAX_DECRYPT_LINES un-synced lines returns the newest cap-sized window; the
+    /// remaining older tail is not delivered in that single response (the price
+    /// of bounding per-request work — see caveat in #F3).
     pub async fn read_logs_since(&self, username: &str, conn_id: &str, target: &str, after_id: u64) -> Result<Vec<LogLine>> {
         if !self.crypto.is_unlocked(username).await { anyhow::bail!("Vault locked"); }
 
-        // This is an inherently "scan everything newer than X" query; bound the
-        // total lines decrypted with the hard ceiling (#12). We read the most
-        // recent MAX_DECRYPT_LINES and filter — older-than-ceiling history won't
-        // be re-synced, which is acceptable vs. unbounded memory use.
-        let lines = self.read_tail(username, conn_id, target, MAX_DECRYPT_LINES, MAX_DECRYPT_LINES, None).await?;
-        let filtered: Vec<LogLine> = lines.into_iter().filter(|l| l.id > after_id).collect();
-        Ok(filtered)
+        let day_files = self.day_files(conn_id, target).await?;
+
+        let mut collected: Vec<LogLine> = Vec::new();
+        let mut scanned: usize = 0;
+        // Iterate day files newest-first so the bounded window is the most-recent
+        // un-synced tail.
+        'outer: for path in day_files.iter().rev() {
+            // #11/#F7: derive the AAD from the file's ACTUAL parent (target) and
+            // grandparent (conn) directory names — NOT the re-encoded target — so
+            // lines under BOTH the new-scheme dir (encode_path_component) and the
+            // legacy dir (sanitize_lossy) decrypt. Re-encoding here builds the
+            // wrong AAD for legacy-dir files and silently drops them; recover_max_id
+            // already derives AAD this way.
+            let date       = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let enc_target = path.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+            let enc_conn   = path.parent().and_then(|d| d.parent()).and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+            let aad        = log_aad(enc_conn, enc_target, date);
+
+            // #F21: stream the file's most-recent lines with a bounded buffer
+            // instead of read_to_string materializing a whole (possibly huge)
+            // day file in RAM.
+            let enc_lines = read_recent_lines(path, MAX_DECRYPT_LINES).await;
+
+            // Skip a fully-synced file (max id <= after_id) after a cheap probe. NOTE: append()
+            // serializes id issuance but NOT the encrypt+write, so under concurrent same-target
+            // appends the highest id can be written a few lines before the physical end — the
+            // last line is NOT reliably the file's max id. Trusting only the last line could skip
+            // a file that still holds an un-synced higher id, permanently dropping it. So take the
+            // max id over the last few lines (well above realistic reorder depth, which is bounded
+            // by same-target append concurrency) and skip only if THAT max is <= after_id. On
+            // decrypt/parse failure fall through to a full scan (correctness over speed). #F3-regression.
+            let probe_n = enc_lines.len().min(32);
+            let mut probe_max: Option<u64> = None;
+            for enc in enc_lines.iter().rev().take(probe_n) {
+                if let Ok(plain) = self.decrypt_log_line(username, enc, &aad).await {
+                    if let Some(line) = Self::parse_line(&plain) {
+                        probe_max = Some(probe_max.map_or(line.id, |m| m.max(line.id)));
+                    }
+                }
+            }
+            if let Some(m) = probe_max {
+                if m <= after_id { continue; }
+            }
+
+            // Scan this file newest-first; stop at the global scan cap (#F3).
+            for enc_line in enc_lines.iter().rev() {
+                if scanned >= MAX_DECRYPT_LINES { break 'outer; }
+                scanned += 1;
+                match self.decrypt_log_line(username, enc_line, &aad).await {
+                    Ok(plain) => {
+                        if let Some(line) = Self::parse_line(&plain) {
+                            if line.id > after_id {
+                                collected.push(line);
+                            }
+                        }
+                    }
+                    Err(e) => self.warn_decrypt_failure(enc_line, &e).await,
+                }
+            }
+        }
+
+        // collected is newest-first; emit chronologically (ascending id).
+        collected.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(collected)
     }
 
     /// Search ALL logs for a target, returning matching lines in chronological
@@ -349,6 +498,38 @@ impl EncryptedLogger {
         })
     }
 
+    /// Decrypt a stored log line. Lines written since #11 are AAD-bound to
+    /// conn/target/date; pre-#11 lines had no AAD, so fall back to a plain
+    /// decrypt to keep existing history readable.
+    async fn decrypt_log_line(&self, username: &str, enc_line: &str, aad: &[u8]) -> Result<Vec<u8>> {
+        match self.crypto.decrypt_aad(username, enc_line, aad).await {
+            Ok(pt) => Ok(pt),
+            Err(_) => self.crypto.decrypt(username, enc_line).await,
+        }
+    }
+
+    /// Warn about an undecryptable log line AT MOST ONCE per distinct line (#F22).
+    /// A permanently-corrupt line (e.g. a NUL-filled tail after an unclean
+    /// shutdown → "Invalid symbol 0") would otherwise emit a `warn` on every
+    /// subsequent read of that target. Keyed by a hash of the ciphertext so the
+    /// first occurrence is still surfaced for diagnosis; repeats are suppressed.
+    /// The line is skipped either way — only the log volume changes.
+    async fn warn_decrypt_failure(&self, enc_line: &str, err: &anyhow::Error) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        enc_line.hash(&mut h);
+        let key = h.finish();
+        {
+            let mut seen = self.warned_bad_lines.lock().await;
+            if seen.contains(&key) { return; }
+            // Bound the set so a flood of distinct corrupt lines can't grow it
+            // without limit; once full we simply stop emitting (line still skipped).
+            if seen.len() >= 4096 { return; }
+            seen.insert(key);
+        }
+        tracing::warn!("Log decrypt failed (repeats for this line suppressed): {}", err);
+    }
+
     /// Read the most-recent `limit` log lines for a target, newest-first, and
     /// return them in chronological order. Stops decrypting once `limit` lines
     /// are collected, so a tail read never touches the whole history (#12).
@@ -367,26 +548,34 @@ impl EncryptedLogger {
         let mut scanned: usize = 0;
         // Iterate day files newest-first.
         'outer: for path in day_files.iter().rev() {
-            if let Ok(content) = tokio::fs::read_to_string(path).await {
-                // Within a file, iterate lines newest-first too.
-                for enc_line in content.lines().rev() {
-                    if enc_line.is_empty() { continue; }
-                    if scanned >= max_scan { break 'outer; }
-                    scanned += 1;
-                    match self.crypto.decrypt(username, enc_line).await {
-                        Ok(plain) => {
-                            if let Some(line) = Self::parse_line(&plain) {
-                                if let Some(q) = filter_query {
-                                    if line.from == "*" || !line.text.to_lowercase().contains(q) {
-                                        continue;
-                                    }
+            // #11/#F7: derive the AAD from the file's ACTUAL parent/grandparent
+            // dir names (as recover_max_id does) so both new-scheme and legacy-dir
+            // lines decrypt; re-encoding the target would mis-derive the AAD for
+            // legacy files and silently drop them.
+            let date       = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let enc_target = path.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+            let enc_conn   = path.parent().and_then(|d| d.parent()).and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+            let aad        = log_aad(enc_conn, enc_target, date);
+            // #F21: stream the newest lines with a bounded buffer instead of
+            // read_to_string materializing the whole day file.
+            let enc_lines = read_recent_lines(path, max_scan).await;
+            // Within a file, iterate lines newest-first too.
+            for enc_line in enc_lines.iter().rev() {
+                if scanned >= max_scan { break 'outer; }
+                scanned += 1;
+                match self.decrypt_log_line(username, enc_line, &aad).await {
+                    Ok(plain) => {
+                        if let Some(line) = Self::parse_line(&plain) {
+                            if let Some(q) = filter_query {
+                                if line.from == "*" || !line.text.to_lowercase().contains(q) {
+                                    continue;
                                 }
-                                collected.push(line);
-                                if collected.len() >= limit { break 'outer; }
                             }
+                            collected.push(line);
+                            if collected.len() >= limit { break 'outer; }
                         }
-                        Err(e) => tracing::warn!("Log decrypt failed: {}", e),
                     }
+                    Err(e) => self.warn_decrypt_failure(enc_line, &e).await,
                 }
             }
         }
@@ -407,22 +596,28 @@ impl EncryptedLogger {
         let mut collected: Vec<LogLine> = Vec::new();
         let mut scanned: usize = 0;
         'outer: for path in day_files.iter().rev() {
-            if let Ok(content) = tokio::fs::read_to_string(path).await {
-                for enc_line in content.lines().rev() {
-                    if enc_line.is_empty() { continue; }
-                    if scanned >= MAX_DECRYPT_LINES { break 'outer; }
-                    scanned += 1;
-                    match self.crypto.decrypt(username, enc_line).await {
-                        Ok(plain) => {
-                            if let Some(line) = Self::parse_line(&plain) {
-                                if line.ts < before {
-                                    collected.push(line);
-                                    if collected.len() >= limit { break 'outer; }
-                                }
+            // #11/#F7: per-file AAD from the file's ACTUAL parent/grandparent dir
+            // names (as recover_max_id does) so both new-scheme and legacy-dir
+            // lines decrypt.
+            let date       = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let enc_target = path.parent().and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+            let enc_conn   = path.parent().and_then(|d| d.parent()).and_then(|d| d.file_name()).and_then(|s| s.to_str()).unwrap_or("");
+            let aad        = log_aad(enc_conn, enc_target, date);
+            // #F21: bounded streaming read instead of read_to_string.
+            let enc_lines = read_recent_lines(path, MAX_DECRYPT_LINES).await;
+            for enc_line in enc_lines.iter().rev() {
+                if scanned >= MAX_DECRYPT_LINES { break 'outer; }
+                scanned += 1;
+                match self.decrypt_log_line(username, enc_line, &aad).await {
+                    Ok(plain) => {
+                        if let Some(line) = Self::parse_line(&plain) {
+                            if line.ts < before {
+                                collected.push(line);
+                                if collected.len() >= limit { break 'outer; }
                             }
                         }
-                        Err(e) => tracing::warn!("Log decrypt failed: {}", e),
                     }
+                    Err(e) => self.warn_decrypt_failure(enc_line, &e).await,
                 }
             }
         }
@@ -480,6 +675,43 @@ impl EncryptedLogger {
     }
 }
 
+/// Stream a day file forward with a buffered reader, retaining at most `cap` of
+/// the most-recent NON-EMPTY lines (#F21). read_to_string materialized the whole
+/// (possibly huge) day file before `.lines()`, so peak memory per read equaled
+/// the largest day-file size. This bounds peak memory to `cap` encrypted lines
+/// while streaming the file line-by-line. Returned in file order (oldest→newest);
+/// callers iterate `.rev()` for the newest-first scans. The read paths only ever
+/// consume the newest `cap` lines of any file, so dropping older lines here is
+/// behavior-preserving.
+async fn read_recent_lines(path: &std::path::Path, cap: usize) -> Vec<String> {
+    use tokio::io::AsyncBufReadExt;
+    let file = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut buf: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    let mut raw: Vec<u8> = Vec::new();
+    loop {
+        raw.clear();
+        // Byte-oriented read + lossy decode instead of .lines(): .lines() returns Err on the
+        // FIRST invalid-UTF-8 line and `while let Ok(..)` would then truncate the scan, silently
+        // dropping every NEWER line after a corrupt one (exactly the lines the tail/sync paths
+        // want). read_until never errors on bad bytes, so a corrupt line just becomes a
+        // decrypt-failure (skipped + warned later) without hiding the lines past it. #F21-regression.
+        match reader.read_until(b'\n', &mut raw).await {
+            Ok(0) => break,   // EOF
+            Ok(_) => {}
+            Err(_) => break,  // genuine I/O error — stop
+        }
+        while matches!(raw.last(), Some(b'\n') | Some(b'\r')) { raw.pop(); }
+        if raw.is_empty() { continue; }
+        buf.push_back(String::from_utf8_lossy(&raw).into_owned());
+        if cap > 0 && buf.len() > cap { buf.pop_front(); }
+    }
+    buf.into()
+}
+
 /// Atomically write `bytes` to `path` (write to a sibling tmp file, then
 /// rename over the target). Prevents a torn/partial `.seq` file if the process
 /// dies mid-write — a partial write is exactly what produces the corrupt-counter
@@ -501,6 +733,20 @@ async fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
     }
     tokio::fs::rename(&tmp, path).await?;
     Ok(())
+}
+
+/// Build the AEAD additional-authenticated-data that binds a log line to its
+/// logical location (#11): length-prefixed (encoded conn_id, encoded target,
+/// date "YYYY-MM-DD"). Prevents relocating/pasting a ciphertext line between
+/// conn/target/date files and having it still decrypt. Length prefixes make the
+/// concatenation unambiguous.
+fn log_aad(enc_conn: &str, enc_target: &str, date: &str) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(12 + enc_conn.len() + enc_target.len() + date.len());
+    for part in [enc_conn, enc_target, date] {
+        aad.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        aad.extend_from_slice(part.as_bytes());
+    }
+    aad
 }
 
 fn sanitize_path_component(s: &str) -> Result<String> {

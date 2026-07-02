@@ -34,6 +34,11 @@
 let ws=null, sessionToken=null, currentUser=null;
 let networks=[], active=null;
 let buffers={}, unread=new Map(), mentionUnread=new Map(), queryBufs={};
+// Timestamp of the newest message that contributed to each `unread` entry —
+// lets cross-device sync tell a genuinely-new unread signal from a stale
+// device re-uploading a count for a conversation that's since been read
+// elsewhere (see unreadInc/unreadClear + the `unread` merge in restorePreferences).
+let unreadAsOf=new Map();
 // PM/query windows the user explicitly CLOSED, keyed "conn_id|targetLower" → close
 // timestamp (unix seconds). Used so a closed query isn't re-opened by old/replayed
 // messages on reconnect — only a genuinely newer message reopens it. Synced + local.
@@ -41,7 +46,52 @@ let closedQueries={};
 let _historyView=null; // history-view state: {bk,conn_id,target} when the active buffer is a past window (see jumpToMessage)
 // Restore unread counts
 try{const ur=JSON.parse(localStorage.getItem('cryptirc_unread')||'{}');for(const[k,v] of Object.entries(ur))unread.set(k,v);}catch(e){}
-function saveUnread(){try{const o={};for(const[k,v] of unread)o[k]=v;localStorage.setItem('cryptirc_unread',JSON.stringify(o));}catch(e){} savePrefsToServer();}
+try{const ua=JSON.parse(localStorage.getItem('cryptirc_unread_asof')||'{}');for(const[k,v] of Object.entries(ua))unreadAsOf.set(k,v);}catch(e){}
+// One-time upgrade migration: every `unread` entry from before this device had
+// an `unreadAsOf` map is otherwise permanently untagged (no freshness info),
+// which would make it fall into the legacy/unknown-freshness path on every
+// future sync FOREVER — reproducing the resurrection bug for exactly the
+// already-unread backlog this fix exists to protect. Seed a "now" timestamp so
+// it's paired going forward; syncing it as "unread as of now" is always safe
+// (never resurrects something already read, since a real past read-horizon on
+// any device is necessarily older than "now") and self-corrects the moment the
+// conversation is actually opened (unreadClear) or gets a real new message
+// (unreadInc overwrites it with the genuine timestamp).
+{
+  let _migrated=false;
+  const _now=Math.floor(Date.now()/1000);
+  for(const k of unread.keys()){
+    if(!unreadAsOf.has(k)){ unreadAsOf.set(k,_now); _migrated=true; }
+  }
+  if(_migrated){
+    try{const oa={};for(const[k,v] of unreadAsOf)oa[k]=v;localStorage.setItem('cryptirc_unread_asof',JSON.stringify(oa));}catch(e){}
+  }
+}
+function saveUnread(){
+  try{
+    const o={};for(const[k,v] of unread)o[k]=v;localStorage.setItem('cryptirc_unread',JSON.stringify(o));
+    const oa={};for(const[k,v] of unreadAsOf)oa[k]=v;localStorage.setItem('cryptirc_unread_asof',JSON.stringify(oa));
+  }catch(e){} savePrefsToServer();
+}
+// The two mutation sites every unread change must go through, so `unread` and
+// `unreadAsOf` (its freshness timestamp) never drift apart.
+function unreadInc(key,ts){ unread.set(key,(unread.get(key)||0)+1); unreadAsOf.set(key,Math.max(unreadAsOf.get(key)||0,ts||Math.floor(Date.now()/1000))); }
+function unreadClear(key){ unread.delete(key); unreadAsOf.delete(key); }
+// All `cryptirc_lastread_<key>` timestamps currently known on this device —
+// the per-conversation "read up through" horizon, gathered for sync.
+function _allLastReadTs(){
+  const o={};
+  try{
+    for(let i=0;i<localStorage.length;i++){
+      const lk=localStorage.key(i);
+      if(lk&&lk.indexOf('cryptirc_lastread_')===0){
+        const v=parseFloat(localStorage.getItem(lk)||'0');
+        if(v>0) o[lk.slice('cryptirc_lastread_'.length)]=v;
+      }
+    }
+  }catch(e){}
+  return o;
+}
 // Persist open DM windows across refresh
 function saveQueryBufs(){
   try{
@@ -189,8 +239,13 @@ function redactSensitive(line){
   // L7 fix (#5): require a channel token AND a key token before masking, so the
   // key-CLEARING form `/key #chan` (no secret present) keeps its channel name in
   // history instead of being cosmetically masked to `/key •••`.
+  // #21: mask the channel-key argument of /join (`/join #chan <key>` → `/join #chan •••`).
+  // Require a channel token AND a key token before masking so the keyless form `/join #chan`
+  // keeps its channel name in history (mirrors the /key rule above). Only the persisted/
+  // uploaded history copy is affected — the dispatched JOIN uses the raw line.
   line=line.replace(/^(\/(?:key|chankey)\s+\S+)\s+\S[\s\S]*$/i,'$1 •••')
-           .replace(/^(\/gif\s+key)\s+\S[\s\S]*$/i,'$1 •••');
+           .replace(/^(\/gif\s+key)\s+\S[\s\S]*$/i,'$1 •••')
+           .replace(/^(\/join\s+\S+)\s+\S[\s\S]*$/i,'$1 •••');
   // Mask credentials before a line is stored in input history / uploaded to the server.
   // We do NOT enumerate per-service auth subcommands (identify/setpass/sidentify/confirm/
   // set/login/...): that blocklist can never be complete — every services package adds its
@@ -271,8 +326,10 @@ function initViewportFix() {
         window.scrollTo(0, 0);
         // If the user was near the bottom before the viewport resized,
         // re-anchor so they don't lose the latest message when the
-        // keyboard opens/closes or browser chrome hides.
-        if(!_userScrolledAway){
+        // keyboard opens/closes or browser chrome hides. Never do this while
+        // anchored on a jumped-to message (mobile keyboard open/close must not
+        // yank the user off it).
+        if(!_userScrolledAway && !_jumpAnchor){
           const area = document.getElementById('chat-area');
           if(area) area.scrollTop = area.scrollHeight;
         }
@@ -289,7 +346,7 @@ function initViewportFix() {
       // Remove safe-area bottom padding when keyboard is open (home bar is hidden)
       if(iw) iw.style.paddingBottom = '0';
       [200, 500, 1000].forEach(ms => setTimeout(() => {
-        if(!_userScrolledAway){
+        if(!_userScrolledAway && !_jumpAnchor){
           const area = document.getElementById('chat-area');
           if (area) area.scrollTop = area.scrollHeight;
         }
@@ -474,6 +531,14 @@ async function loadLoginCaptcha(){
 }
 async function doLogout() {
   if(!(await customConfirm('Sign out?','Sign out'))) return;
+  // #6/F25: unsubscribe push BEFORE the logout POST (and before dropping the token).
+  // DELETE /cryptirc/push/subscribe needs the Bearer token to remove the server
+  // record (data/push/<user>.json), and the logout POST invalidates that token — if
+  // logout raced ahead (it was fire-and-forget but used to be dispatched FIRST) the
+  // DELETE could 401, leaving the server fanning this user's DMs/mentions to the
+  // still-registered endpoint (push gate opens once the WS closes) and the SW
+  // showing them on this shared device for the next user to read.
+  try{ await unsubscribePush(); }catch(_){}
   if(sessionToken) fetch('/cryptirc/auth/logout',{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}}).catch(()=>{});
   // #75: clear the SW notif-intent cache (last notification's conn_id/from/ts) so it
   // doesn't persist on disk across logout / to the next user.
@@ -859,6 +924,17 @@ function updateStarfieldTitle(){
 // response was dropped (must be abandoned, not waited on forever).
 const _pendingLogs=new Map();
 const _pendingSyncs=new Set();
+// Set true by prependLogs around its "load older" renderChat so the read-horizon
+// advance in renderChat is skipped for that off-bottom render (F30-followup).
+let _suppressLastReadAdvance=false;
+// ── F4: e2eEncryptOutgoing() BLOCKED-sentinel guard ─────────────────────────
+// e2eEncryptOutgoing() may return the frozen sentinel E2E_ENCRYPT_BLOCKED
+// ({e2eBlocked:true}) when an established DM session is transiently NOT send-ready
+// (e.g. a responder awaiting the initiator's first ratchet message). It is a truthy
+// OBJECT, so a naive `wire ? sendEnc : sendPlain` would leak "[object Object]" to IRC.
+// Every call site must intercept it: drop the send and warn — never send plaintext.
+function _e2eBlocked(w){ return !!(w && w.e2eBlocked===true); }
+function _e2eBlockedWarn(w){ if(!_e2eBlocked(w)) return false; try{ showToast('🔒 Encrypted session not ready yet — message not sent. Try again in a moment.'); }catch(_){} return true; }
 function wsend(obj){
   if(ws&&ws.readyState===1){
     const s=JSON.stringify(obj);_txBytes+=s.length;_txCount++;ws.send(s);flashLed('tx');updateStarfieldTitle();
@@ -1304,7 +1380,7 @@ function handleEvent(ev) {
       if(ev.nick===getNick(ev.conn_id)){
         if(pNet) pNet.channels=pNet.channels.filter(c=>c.name!==ev.channel);
         // Keep buffer so history loads when rejoined
-        unread.delete(bk(ev.conn_id,ev.channel));
+        unreadClear(bk(ev.conn_id,ev.channel));
         mentionUnread.delete(bk(ev.conn_id,ev.channel));
         // Remove from favorites if favorited
         const favs=loadFavorites();
@@ -1643,7 +1719,14 @@ function handleEvent(ev) {
     }
     case 'sync_lines': {
       const _sk=ev.conn_id+'/'+ev.target;
-      if(!_pendingSyncs.has(_sk)) break; // Response from another session — ignore
+      // Every SyncLines is broadcast to ALL of the account's sessions, and the
+      // pending marker is keyed only by conn/target (no per-request id). The old
+      // "ignore if not our pending" drop meant a sibling device's response could be
+      // consumed in place of ours (clearing the pending), stranding a hole when our
+      // own narrower/wider response then arrived and was dropped. appendSyncLines
+      // dedups by id (and fuzzy for id===0) and merges into the target's buffer, so
+      // it is safe & correct to always merge any SyncLines for the target; just
+      // clear our own pending marker when present. (sync-audit fix)
       _pendingSyncs.delete(_sk);
       appendSyncLines(ev.conn_id,ev.target,ev.lines);
       break;
@@ -1695,7 +1778,7 @@ function handleEvent(ev) {
       buffers[k]=[];
       if(_historyView && _historyView.bk===k) _historyView=null;
       delete _lastMsgId[k];
-      unread.delete(k);
+      unreadClear(k);
       mentionUnread.delete(k);
       saveUnread();
       clearNoticesForTarget(ev.conn_id,ev.target);
@@ -1982,7 +2065,7 @@ function addMessage(conn_id,target,msg){
     const _muted=isMuted(conn_id+'/'+target)||isMuted('net:'+conn_id);
     if(!msg.noUnread && !_ownMsg && !_isStatus && !_isStatusBuf){
       const uk=bk(conn_id,target);
-      unread.set(uk,(unread.get(uk)||0)+1);
+      unreadInc(uk,msg.ts);
       if((msg.mentioned||isDM) && !_isStatusBuf && !_muted) mentionUnread.set(uk,(mentionUnread.get(uk)||0)+1);
       // Update just this row's badge in place; only fall back to a full sidebar
       // render if the row doesn't exist yet (brand-new conversation). Avoids the
@@ -2162,7 +2245,13 @@ async function prependLogs(conn_id,target,lines){
   if(isActive(conn_id,target)){
     const area=document.getElementById('chat-area');
     const oldHeight=area?.scrollHeight||0;
+    // "Load older" (!wasEmpty) keeps the user's off-bottom position below, so this
+    // render must NOT advance the read horizon to the newest (off-screen) message
+    // (F30-followup). The initial load (wasEmpty) scrollForce()s to the bottom, so
+    // advancing there is correct.
+    _suppressLastReadAdvance = !wasEmpty;
     renderChat();
+    _suppressLastReadAdvance = false;
     if(wasEmpty){
       // Initial load — scroll to bottom to show latest messages
       scrollForce();
@@ -2179,10 +2268,37 @@ async function prependLogs(conn_id,target,lines){
         area.scrollTop=newHeight-oldHeight;
       });
     }
+  } else if(isMessagesActive() && _isDMTarget(target)){
+    // A preview-only fetch (see renderMessagesView) landed while the inbox is
+    // open — redraw so the new preview text/time appear without needing to
+    // open the conversation.
+    renderMessagesView();
   }
 }
 async function appendSyncLines(conn_id,target,lines){
+  // Don't graft live tail lines into a HISTORY WINDOW for this target: the
+  // buffer is a frozen window from the past and the merge would corrupt it.
+  // Dropping is safe ONLY here, because _exitHistoryView / setActive-away both
+  // zero _lastMsgId and reload fresh, so the dropped ids are re-fetched.
+  // The _jumpAnchor-only case (jump target was already in the LIVE buffer, no
+  // history window) must NOT drop: it has no reload-on-release path, so dropped
+  // lines would either leave a permanent hole (a live message advances
+  // _lastMsgId past them) or ambush-yank on the refetch right after release.
+  // Instead we merge normally — the buffer merge itself never moves the DOM,
+  // and the render below preserves the anchored position (see renderChat).
+  // NB: no isActive() term — a target can be in a frozen history window while a
+  // pseudo-view (Uploads/Messages) is active (setActive's pseudo branches
+  // early-return before the _historyView teardown), and grafting the live tail
+  // into that frozen buffer corrupts it just the same. Safe to drop unconditionally
+  // for any frozen target: _exitHistoryView / setActive-away both zero _lastMsgId
+  // and reload fresh, so the skipped ids are re-fetched. Mirrors addMessage's guard.
+  const _histFrozen=()=>_historyView && _historyView.bk===bk(conn_id,target);
+  if(_histFrozen()) return;
   lines=await _decryptLogLines(target,lines);
+  // Re-check after the await: decrypt can take seconds, and the user may have
+  // jumped into a history window for this target meanwhile — the stale entry
+  // check alone would then graft the live tail into the frozen window.
+  if(_histFrozen()) return;
   const buf=getBuf(conn_id,target);
   const _selfNick=getNick(conn_id);
   const existingIds=new Set(buf.filter(m=>m.id>0).map(m=>m.id));
@@ -2194,7 +2310,12 @@ async function appendSyncLines(conn_id,target,lines){
     if(id>0&&existingIds.has(id)) continue;
     // Exact fuzzy key — catches the common case where ts/from/text match.
     const fk=l.ts+'|'+l.from+'|'+(l.text||'').slice(0,50);
-    if(existingKeys.has(fk)) continue;
+    // Only fuzzy-dedup UNSTAMPED lines (id===0). An id>0 line is already deduped
+    // by id above; running the ts|from|text(50) fuzzy check on it too would drop a
+    // genuinely-distinct NEW-id message whose first-50 chars collide with an
+    // existing row (e.g. two "gg" in the same second). Mirrors prependLogs, which
+    // short-circuits the fuzzy path for any id>0 line ('if(m.id>0) return true').
+    if(id===0 && existingKeys.has(fk)) continue;
     // Clock-skew + E2E fuzzy match: an optimistic self-sent entry in the
     // buffer has m.ts = client clock (Date.now()/1000) while l.ts is the
     // server clock — they diverge by 1-2s commonly, breaking the strict
@@ -2232,7 +2353,14 @@ async function appendSyncLines(conn_id,target,lines){
   if(added>0){
     buf.sort((a,b)=>a.ts-b.ts);
     if(buf.length>2000) buf.splice(0,buf.length-2000);
-    if(isActive(conn_id,target)){renderChat();scrollForce();}
+    if(isActive(conn_id,target)){
+      renderChat();
+      // renderChat preserved the anchored position; the explicit follow-up
+      // scrollForce must honor the anchor too or it would undo that and
+      // clear the anchor (checked at call time — anchor state can change
+      // across the decrypt await above).
+      if(!(_jumpAnchor && _jumpAnchorBk===bk(conn_id,target))) scrollForce();
+    }
   }
 }
 function isActive(c,t){return !!active&&active.conn_id===c&&typeof t==='string'&&active.target.toLowerCase()===t.toLowerCase();}
@@ -2470,7 +2598,7 @@ function setActive(conn_id,target){
     _lastMsgId[_historyView.bk]=0;
     _historyView=null;
   }
-  unread.delete(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
+  unreadClear(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
   clearNoticesForTarget(conn_id,target);
   // Persist active view and open queries — skipped in detached mode so the
   // popup's target doesn't overwrite the main window's last-active on reload.
@@ -2504,6 +2632,18 @@ function renderChat(){
   if(isUploadsActive()){ welcome.style.display='none'; renderUploadsView(); updateTopbar(); updateInputPlaceholder(); return; }
   // Messages inbox pseudo-view — its own renderer.
   if(isMessagesActive()){ welcome.style.display='none'; renderMessagesView(); updateTopbar(); updateInputPlaceholder(); return; }
+  // Background re-render of the buffer the user is anchored on (a jumped-to
+  // message): E2E key arrival → redecryptChannelHistory, a sync merge, prefs —
+  // none of these are user navigation, so they must NOT scrollForce (which
+  // would clear the anchor, snap to bottom and re-arm the yank timers —
+  // recreating the exact bug the anchor exists to fix). Capture the position
+  // now (before the innerHTML wipe) and restore it at the tail instead.
+  // A render of any OTHER buffer is navigation and releases the anchor as before.
+  // Only hold position for an anchored background re-render if there is still
+  // content to hold onto — a wipe (CLEARALL / data_cleared / target_cleared)
+  // rebuilds an empty buffer, where holding scrollTop would strand the anchor
+  // with no release path; fall through to scrollForce (which releases) instead.
+  const _anchorKeepPos=(_jumpAnchor && _jumpAnchorBk===bk(active.conn_id,active.target) && getBuf(active.conn_id,active.target).length>0)?area.scrollTop:null;
   area.style.display='block'; welcome.style.display='none'; area.innerHTML='';
   const buf=getBuf(active.conn_id,active.target);
   // History-view banner — buffer is a window from the past; tap to return to live.
@@ -2565,9 +2705,30 @@ function renderChat(){
     }
     i++;
   }
-  // Update last-read timestamp
-  if(buf.length>0) localStorage.setItem('cryptirc_lastread_'+rmKey,String(buf[buf.length-1].ts));
-  scrollForce();
+  // Update last-read timestamp — but ONLY when this render lands at the bottom
+  // (newest row visible). The non-anchor branch below always scrollForce()s to the
+  // bottom, so advancing there is correct; an anchored background re-render
+  // (_anchorKeepPos!=null) deliberately holds an OFF-bottom position, so marking
+  // those newest lines read — and syncing that read-horizon cross-device — would
+  // silently bury messages the user never saw. Skip it there (F30). Also skip when
+  // _suppressLastReadAdvance is set: prependLogs' "load older" path is a NON-anchored
+  // render that likewise keeps an off-bottom position (it prepends history above the
+  // current view), so advancing to the newest (off-screen) ts there would bury a
+  // live message that arrived while scrolled up AND clear its badge on other devices.
+  if(_anchorKeepPos==null && !_suppressLastReadAdvance && buf.length>0) localStorage.setItem('cryptirc_lastread_'+rmKey,String(buf[buf.length-1].ts));
+  if(_anchorKeepPos!=null){
+    // Anchored background re-render: hold the user's place (approximate if
+    // lines merged above the viewport — acceptable; never a bottom-yank).
+    // Re-arm the anchor grace: this programmatic scrollTop can CLAMP to a
+    // shrunken max (e.g. sd8~ rows redecrypt to shorter plaintext) and land
+    // within the bottom-arrival threshold, whose async 'scroll' event would
+    // otherwise self-release the anchor with no user gesture (see _onChatScroll).
+    _jumpAnchorTs=Date.now();
+    area.scrollTop=_anchorKeepPos;
+    updateScrollBtn();
+  } else {
+    scrollForce();
+  }
   // iOS PWA: images/videos often finish loading AFTER scrollForce's 3s window
   // closes, leaving the user stranded above the true bottom. For 8 seconds
   // after render, any media that hasn't loaded yet re-scrolls to bottom on
@@ -2575,7 +2736,7 @@ function renderChat(){
   const _activeAtRender=active&&active.conn_id+'|'+active.target;
   const _mediaScrollDeadline=Date.now()+8000;
   const _mediaScrollFn=()=>{
-    if(_userScrolledAway)return;
+    if(_userScrolledAway||_jumpAnchor)return;
     if(!active||active.conn_id+'|'+active.target!==_activeAtRender)return;
     if(Date.now()>_mediaScrollDeadline)return;
     scrollBottom();
@@ -3090,107 +3251,154 @@ function updateTopbar(){
 // ─── Media ────────────────────────────────────────────────────────────────────
 function extractMediaUrls(text){const urls=[];const re=/(https?:\/\/[^\s<>"]+)/g;let m;while((m=re.exec(text))!==null)urls.push(m[1]);return urls;}
 function appendFileToken(url){
-  // SECURITY: only ever attach the session token to SAME-ORIGIN /files/ URLs.
-  // Message bodies are attacker-controlled, and media (img/audio/video) auto-loads,
-  // so without this gate a message like `https://evil/files/x.png` would make the
-  // victim's client GET it with ?token=<session token> — a zero-click token leak /
-  // account takeover. Foreign-origin URLs are returned untouched.
-  if(sessionToken && url.includes('/files/')){
-    try{
-      const u=new URL(url, location.href);
-      if(u.origin===location.origin && u.pathname.includes('/files/')){
-        const sep=url.includes('?')?'&':'?';
-        return url+sep+'token='+encodeURIComponent(sessionToken);
-      }
-    }catch(_){ /* unparseable URL → no token */ }
-  }
+  // SECURITY (F8): media requests now authenticate via the SameSite=Strict
+  // `cryptirc_token` cookie set at login (see the login handler), so we no longer
+  // append ?token=<session token> to same-origin /files/ URLs — that leaked the
+  // bearer token into proxy/CDN access logs. Foreign-origin URLs were never
+  // tokened anyway. Kept as a pass-through so existing call sites (linkify, media
+  // render) stay stable; the server still tolerates a legacy ?token for back-compat.
   return url;
+}
+function isSameOriginUrl(url){
+  // Absolute http(s) URLs only reach here (extractMediaUrls), so new URL() has an
+  // explicit origin. Same-origin media is our own server (e.g. /files/ uploads) and
+  // is safe to auto-load; foreign media is not (see mediaPlaceholder).
+  try{ return new URL(url, location.href).origin===location.origin; }catch(_){ return false; }
+}
+function mediaPlaceholder(kind,url,buildReal){
+  // SECURITY: do NOT auto-load foreign-origin media. Setting img/audio/video.src to
+  // an attacker-chosen URL from an incoming message issues a zero-click GET that
+  // leaks the reader's IP / User-Agent / Accept-Language / online status to that
+  // host (a deanonymization beacon). Show a click-to-load placeholder instead so the
+  // request only fires on an explicit user action.
+  const wrap=document.createElement('div');wrap.className='msg-media';
+  const btn=document.createElement('button');btn.type='button';btn.className='msg-media-load';
+  let host=url;try{host=new URL(url,location.href).hostname;}catch(_){}
+  btn.textContent=`Load external ${kind} — ${host}`;
+  btn.title=url;
+  btn.style.cssText='max-width:100%;padding:8px 12px;border:1px dashed var(--border,#555);border-radius:8px;background:var(--surface2,rgba(127,127,127,.12));color:var(--text2,inherit);font-size:12px;cursor:pointer;text-align:left;white-space:normal;word-break:break-all;';
+  btn.onclick=e=>{e.stopPropagation();const real=buildReal();wrap.replaceWith(real);if(!_userScrolledAway)scrollBottom();};
+  wrap.appendChild(btn);
+  return wrap;
 }
 function buildMediaEl(url){
   const authedUrl=appendFileToken(url);
   // Images
   if(IMG_EXTS.test(url)||url.includes('/files/')){
-    const wrap=document.createElement('div');wrap.className='msg-media';
-    // Chat images load eagerly: they're appended at the bottom of the chat
-    // (always in viewport), and `loading="lazy"` combined with the default
-    // `aspect-ratio: auto` left them at 0×0 — IntersectionObserver never
-    // fired in older Chromium (Electron lags stable Chrome), so giphy/etc
-    // never decoded. Click-to-lightbox worked because that path didn't use
-    // lazy. Eager load is fine here; perf cost is negligible on a chat tail.
-    const img=document.createElement('img');img.className='msg-img';img.src=authedUrl;img.alt='image';img.decoding='async';
-    img.onclick=e=>{e.stopPropagation();openLightbox(authedUrl);};
-    img.onload=()=>{if(!_userScrolledAway)scrollBottom();};
-    img.onerror=()=>wrap.style.display='none';
-    wrap.appendChild(img);
-    return wrap;
+    const buildImg=()=>{
+      const wrap=document.createElement('div');wrap.className='msg-media';
+      // Chat images load eagerly: they're appended at the bottom of the chat
+      // (always in viewport), and `loading="lazy"` combined with the default
+      // `aspect-ratio: auto` left them at 0×0 — IntersectionObserver never
+      // fired in older Chromium (Electron lags stable Chrome), so giphy/etc
+      // never decoded. Click-to-lightbox worked because that path didn't use
+      // lazy. Eager load is fine here; perf cost is negligible on a chat tail.
+      const img=document.createElement('img');img.className='msg-img';img.referrerPolicy='no-referrer';img.src=authedUrl;img.alt='image';img.decoding='async';
+      img.onclick=e=>{e.stopPropagation();openLightbox(authedUrl);};
+      img.onload=()=>{if(!_userScrolledAway)scrollBottom();};
+      img.onerror=()=>wrap.style.display='none';
+      wrap.appendChild(img);
+      return wrap;
+    };
+    return isSameOriginUrl(url)?buildImg():mediaPlaceholder('image',url,buildImg);
   }
   // Audio
   if(AUDIO_EXTS.test(url)){
-    const wrap=document.createElement('div');wrap.className='msg-audio';
-    const aud=document.createElement('audio');aud.src=authedUrl;aud.controls=true;aud.preload='metadata';
-    wrap.appendChild(aud);
-    return wrap;
+    const buildAudio=()=>{
+      const wrap=document.createElement('div');wrap.className='msg-audio';
+      const aud=document.createElement('audio');aud.referrerPolicy='no-referrer';aud.src=authedUrl;aud.controls=true;aud.preload='metadata';
+      wrap.appendChild(aud);
+      return wrap;
+    };
+    return isSameOriginUrl(url)?buildAudio():mediaPlaceholder('audio',url,buildAudio);
   }
   // Videos
   if(VID_EXTS.test(url)){
-    const wrap=document.createElement('div');wrap.className='msg-media';
-    const vid=document.createElement('video');vid.src=authedUrl;vid.controls=true;vid.preload='metadata';vid.onloadedmetadata=()=>{if(!_userScrolledAway)scrollBottom();};
-    wrap.appendChild(vid);
-    return wrap;
+    const buildVideo=()=>{
+      const wrap=document.createElement('div');wrap.className='msg-media';
+      const vid=document.createElement('video');vid.referrerPolicy='no-referrer';vid.src=authedUrl;vid.controls=true;vid.preload='metadata';vid.onloadedmetadata=()=>{if(!_userScrolledAway)scrollBottom();};
+      wrap.appendChild(vid);
+      return wrap;
+    };
+    return isSameOriginUrl(url)?buildVideo():mediaPlaceholder('video',url,buildVideo);
   }
-  // YouTube — rich card with thumbnail + info
+  // YouTube — rich card with thumbnail + info. CLICK-TO-LOAD: the card starts
+  // dormant and contacts NO third party (img.youtube.com / noembed /
+  // returnyoutubedislike) until the viewer clicks it — otherwise a sender could
+  // drop a per-target videoId link and use the auto thumbnail+metadata fetches
+  // as a zero-click read-receipt beacon (IP/UA correlation). Also gated behind
+  // the same linkPreviews opt-out as the server-side preview path below, which
+  // this card used to bypass.
   const ytId=extractYouTubeId(url);
-  if(ytId){
+  if(ytId && loadAppearance().linkPreviews!==false){
     const _ytUid=ytId+'_'+(Date.now()%1000000);
     const wrap=document.createElement('div');
     wrap.className='msg-yt';
-    wrap.innerHTML=`<div class="msg-yt-thumb"><img src="https://img.youtube.com/vi/${ytId}/hqdefault.jpg" alt="YouTube" loading="lazy"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${_ytUid}">Loading...</div><div class="msg-yt-desc" id="yt-d-${_ytUid}"></div><div class="msg-yt-meta" id="yt-m-${_ytUid}"><span>YouTube</span></div></div>`;
-    wrap.querySelector('img').onload=()=>{if(!_userScrolledAway)scrollBottom();};
-    wrap.querySelector('img').onerror=()=>wrap.style.display='none';
-    // Click thumbnail to play inline — click title/info to open in browser
+    wrap.innerHTML=`<div class="msg-yt-thumb" style="aspect-ratio:var(--yt-aspect,16/9);background:#000"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${_ytUid}">YouTube</div><div class="msg-yt-desc" id="yt-d-${_ytUid}"></div><div class="msg-yt-meta" id="yt-m-${_ytUid}"><span>Click to load</span></div></div>`;
+    let _ytLoaded=false;
+    // Reveal = the (now user-initiated) equivalent of the old auto-render:
+    // pull the thumbnail from img.youtube.com and fetch title/author/stats.
+    const _ytReveal=()=>{
+      if(_ytLoaded) return; _ytLoaded=true;
+      const thumb=wrap.querySelector('.msg-yt-thumb');
+      const img=document.createElement('img');
+      img.src=`https://img.youtube.com/vi/${ytId}/hqdefault.jpg`;img.alt='YouTube';img.loading='lazy';
+      img.onload=()=>{if(!_userScrolledAway)scrollBottom();};
+      img.onerror=()=>wrap.style.display='none';
+      thumb.insertBefore(img,thumb.firstChild);
+      const titleEl0=document.getElementById('yt-t-'+_ytUid);if(titleEl0)titleEl0.textContent='Loading...';
+      const metaEl0=document.getElementById('yt-m-'+_ytUid);if(metaEl0)metaEl0.innerHTML='<span>YouTube</span>';
+      // Fetch video info via noembed (no API key needed, privacy-friendly)
+      const _ac=new AbortController();const _to=setTimeout(()=>_ac.abort(),10000);
+      fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${ytId}`,{signal:_ac.signal}).then(r=>{clearTimeout(_to);return r.json();}).then(d=>{
+        const titleEl=document.getElementById('yt-t-'+_ytUid);
+        const metaEl=document.getElementById('yt-m-'+_ytUid);
+        if(titleEl&&d.title) titleEl.textContent=d.title;
+        if(metaEl){
+          const parts=[];
+          if(d.author_name) parts.push(esc(d.author_name));
+          parts.push('YouTube');
+          metaEl.innerHTML=parts.map(p=>`<span>${p}</span>`).join('');
+        }
+        if(d.title) wrap.title=d.title+(d.author_name?' — '+d.author_name:'');
+      }).catch(()=>{
+        const titleEl=document.getElementById('yt-t-'+_ytUid);
+        if(titleEl) titleEl.textContent='YouTube Video';
+      });
+      // Fetch views/likes via Return YouTube Dislike API (no API key needed)
+      fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${ytId}`).then(r=>r.ok?r.json():null).then(d=>{
+        if(!d) return;
+        const metaEl=document.getElementById('yt-m-'+_ytUid);
+        if(metaEl){
+          const parts=[];
+          const existing=metaEl.textContent;
+          if(existing&&!existing.includes('views')) {
+            // Preserve author + YouTube label, append stats
+            const author=metaEl.querySelector('span')?.textContent;
+            if(author&&author!=='YouTube') parts.push(esc(author));
+            parts.push('YouTube');
+            if(d.viewCount) parts.push(esc(d.viewCount.toLocaleString())+' views');
+            if(d.likes) parts.push(esc(d.likes.toLocaleString())+' likes');
+            metaEl.innerHTML=parts.map(p=>`<span>${p}</span>`).join('');
+            if(!_userScrolledAway)scrollBottom();
+          }
+        }
+      }).catch(()=>{});
+    };
+    // First click reveals the (now user-initiated) preview; the next click on
+    // the thumb plays inline and the next click on the info opens in browser —
+    // so every third-party request stays behind an explicit click.
     wrap.querySelector('.msg-yt-thumb').addEventListener('click',(e)=>{
       e.preventDefault();e.stopPropagation();
+      if(!_ytLoaded){ _ytReveal(); return; }
       const thumb=wrap.querySelector('.msg-yt-thumb');
       thumb.innerHTML=`<iframe src="https://www.youtube.com/embed/${ytId}?autoplay=1&rel=0&modestbranding=1" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen referrerpolicy="no-referrer-when-downgrade"></iframe>`;
       if(!_userScrolledAway)scrollBottom();
     });
-    wrap.querySelector('.msg-yt-info').addEventListener('click',()=>window.open(url,'_blank','noopener,noreferrer'));
-    // Fetch video info via noembed (no API key needed, privacy-friendly)
-    const _ac=new AbortController();const _to=setTimeout(()=>_ac.abort(),10000);
-    fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${ytId}`,{signal:_ac.signal}).then(r=>{clearTimeout(_to);return r.json();}).then(d=>{
-      const titleEl=document.getElementById('yt-t-'+_ytUid);
-      const metaEl=document.getElementById('yt-m-'+_ytUid);
-      if(titleEl&&d.title) titleEl.textContent=d.title;
-      if(metaEl){
-        const parts=[];
-        if(d.author_name) parts.push(esc(d.author_name));
-        parts.push('YouTube');
-        metaEl.innerHTML=parts.map(p=>`<span>${p}</span>`).join('');
-      }
-      if(d.title) wrap.title=d.title+(d.author_name?' — '+d.author_name:'');
-    }).catch(()=>{
-      const titleEl=document.getElementById('yt-t-'+_ytUid);
-      if(titleEl) titleEl.textContent='YouTube Video';
+    wrap.querySelector('.msg-yt-info').addEventListener('click',()=>{
+      if(!_ytLoaded){ _ytReveal(); return; }
+      window.open(url,'_blank','noopener,noreferrer');
     });
-    // Fetch views/likes via Return YouTube Dislike API (no API key needed)
-    fetch(`https://returnyoutubedislikeapi.com/votes?videoId=${ytId}`).then(r=>r.ok?r.json():null).then(d=>{
-      if(!d) return;
-      const metaEl=document.getElementById('yt-m-'+_ytUid);
-      if(metaEl){
-        const parts=[];
-        const existing=metaEl.textContent;
-        if(existing&&!existing.includes('views')) {
-          // Preserve author + YouTube label, append stats
-          const author=metaEl.querySelector('span')?.textContent;
-          if(author&&author!=='YouTube') parts.push(esc(author));
-          parts.push('YouTube');
-          if(d.viewCount) parts.push(esc(d.viewCount.toLocaleString())+' views');
-          if(d.likes) parts.push(esc(d.likes.toLocaleString())+' likes');
-          metaEl.innerHTML=parts.map(p=>`<span>${p}</span>`).join('');
-          if(!_userScrolledAway)scrollBottom();
-        }
-      }
-    }).catch(()=>{});
     return wrap;
   }
   // Link preview — fetch metadata from server for non-media HTTPS links
@@ -3462,6 +3670,7 @@ async function handleInput(raw){
           const qtext = toMircChars(args.slice(1).join(' '));
           // L2: route through E2E if session exists
           const qwire = (window.E2E?.ready || window.E2E?.channelKeys?.[qnick]) ? await e2eEncryptOutgoing(qnick, qtext) : null;
+          if (_e2eBlockedWarn(qwire)) break;
           if (qwire) {
             wsend({type:'send',conn_id,raw:`PRIVMSG ${qnick} :${qwire}`});
             addMessage(conn_id,qnick,{ts:Date.now()/1000|0,from:getNick(conn_id),text:qtext,kind:'privmsg',encrypted:true});
@@ -3514,6 +3723,7 @@ async function handleInput(raw){
         const t=toMircChars(args.join(' '));
         // L3: /me goes through E2E if session is active for this target
         const meWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target]) ? await e2eEncryptOutgoing(target, `\x01ACTION ${t}\x01`) : null;
+        if (_e2eBlockedWarn(meWire)) break;
         if (meWire) {
           wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${meWire}`});
         } else {
@@ -3526,6 +3736,7 @@ async function handleInput(raw){
         const t=toMircChars(args.join(' '));
         // L3: /say goes through E2E if active
         const sayWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target]) ? await e2eEncryptOutgoing(target, t) : null;
+        if (_e2eBlockedWarn(sayWire)) break;
         if (sayWire) {
           wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${sayWire}`});
           addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg',encrypted:true});
@@ -3547,6 +3758,7 @@ async function handleInput(raw){
         }
         // L4: encrypt if E2E session exists for the destination
         const msgWire = (window.E2E?.ready || window.E2E?.channelKeys?.[to]) ? await e2eEncryptOutgoing(to, t) : null;
+        if (_e2eBlockedWarn(msgWire)) break;
         wsend({type:'send',conn_id,raw:`PRIVMSG ${to} :${msgWire||t}`});
         addMessage(conn_id,to,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg',encrypted:!!msgWire});
         setActive(conn_id,to);
@@ -3887,6 +4099,7 @@ async function handleInput(raw){
       case 'SLAP': {
         const t=`slaps ${args[0]||'themselves'} around a bit with a large trout`;
         const slapWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,`\x01ACTION ${t}\x01`):null;
+        if(_e2eBlockedWarn(slapWire)) break;
         if(slapWire){wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${slapWire}`});}
         else{wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :\x01ACTION ${t}\x01`});}
         addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'action'}); break;
@@ -3967,6 +4180,7 @@ async function handleInput(raw){
         const url=await giphyFetchTop(q);
         if(!url){ sysMsg(conn_id,target,'GIF search failed — invalid key, no result, or rate-limited.','error'); break; }
         const gifWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,url):null;
+        if(_e2eBlockedWarn(gifWire)) break;
         if(gifWire)wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${gifWire}`});
         else wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${url}`});
         addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:url,kind:'privmsg',encrypted:!!gifWire});
@@ -4010,6 +4224,7 @@ async function handleInput(raw){
         }
         colored+='\x0F'; // reset at end
         const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,colored):null;
+        if(_e2eBlockedWarn(wire)) break;
         wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||colored}`});
         addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:colored,kind:'privmsg',encrypted:!!wire});
         break;
@@ -4025,6 +4240,7 @@ async function handleInput(raw){
         for(const rawline of _lines){
           const line=ircSafe(rawline).slice(0,400);
           const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,line):null;
+          if(_e2eBlockedWarn(wire)) break; // blocked DM: warn once, drop the whole multi-line batch
           wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||line}`});
           addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:line,kind:'privmsg',encrypted:!!wire});
         }
@@ -4044,6 +4260,7 @@ async function handleInput(raw){
             // chars from the assembled line so a definition can't inject an IRC command.
             const msg=ircSafe(`📖 ${term}: ${clean}${def.definition.length>300?'...':''} (👍${def.thumbs_up} 👎${def.thumbs_down})`);
             const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,msg):null;
+            if(_e2eBlockedWarn(wire)) break;
             wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||msg}`});
             addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:msg,kind:'privmsg',encrypted:!!wire});
           } else sysMsg(conn_id,target,`No definition found for "${term}"`,'error');
@@ -4183,12 +4400,14 @@ async function handleInput(raw){
     if(replyPrefix){
       const quoteLine=replyPrefix.trim();
       const quoteWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,quoteLine):null;
+      if(_e2eBlockedWarn(quoteWire)) return; // blocked DM: drop reply quote + the message below
       wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${quoteWire||quoteLine}`});
       addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:quoteLine,kind:'privmsg',encrypted:!!quoteWire});
     }
     const e2eWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target])
       ? await e2eEncryptOutgoing(target, raw2)
       : null;
+    if (_e2eBlockedWarn(e2eWire)) return;
     if (e2eWire) {
       rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${e2eWire}`});
       addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw2,kind:'privmsg',encrypted:true});
@@ -5170,7 +5389,7 @@ function closeAllMessages(){
     const id=net.config.id, m=queryBufs[id]; if(!m) continue;
     for(const [lc] of m){
       markQueryClosed(id,lc);
-      unread.delete(bk(id,lc));
+      unreadClear(bk(id,lc));
       mentionUnread.delete(bk(id,lc));
       n++;
     }
@@ -5193,6 +5412,16 @@ function renderMessagesView(){
   const wrap=document.createElement('div');
   wrap.className='msgs-inbox';
   const convs=_msgsConversations();
+  // DM buffers are RAM-only (never persisted across a reload), so a conversation
+  // not yet opened this session has no message to preview — request just its
+  // newest line so the inbox shows real previews without a full history load.
+  // _pendingLogs (set by wsend) dedupes so this only fires once per conversation;
+  // the 'log_lines' handler (prependLogs) re-renders this view when it lands.
+  for(const c of convs){
+    if(c.last) continue;
+    if(_pendingLogs.has(bk(c.conn_id,c.lc))) continue;
+    wsend({type:'get_logs',conn_id:c.conn_id,target:c.lc,limit:1});
+  }
   const totalUnread=convs.reduce((a,c)=>a+(c.unread||0),0);
   const header=document.createElement('div');
   header.className='msgs-inbox-header';
@@ -5861,6 +6090,18 @@ function saveNetwork(){
   // ZNC mode: compose PASS as <user>/<network>:<password> and stuff into the
   // server password field. Force SASL off — ZNC handles auth to the real network.
   let passValue=document.getElementById('f-pass').value||null;
+  // On EDIT the secret inputs (server pass / NickServ / SASL) are intentionally
+  // never pre-filled (see editNetwork), so a blank field means "unchanged", not
+  // "cleared" — the current UI has no explicit clear affordance. Preserve the
+  // saved value in that case instead of wiping it. On ADD there is no prior value,
+  // so blank genuinely means empty. (Mirrors the ZNC branch below, which already
+  // keeps the old password when its field is blank.) The client already holds the
+  // decrypted secrets in networks[].config (the server sends them), so this is a
+  // pure client-side re-send — no server-side "keep existing" sentinel needed.
+  const _editNet=editingNetworkId?networks.find(n=>n.config.id===editingNetworkId):null;
+  if(!isZnc && editingNetworkId && !document.getElementById('f-pass').value && _editNet){
+    passValue=_editNet.config.password||null;
+  }
   if(isZnc){
     const zu=document.getElementById('f-znc-user').value.trim();
     const zn=document.getElementById('f-znc-network').value.trim();
@@ -5883,19 +6124,26 @@ function saveNetwork(){
     }
     saslMethod='none';
   }
+  // Same blank-means-unchanged rule for the NickServ and SASL PLAIN secrets on EDIT.
+  let nickservPass=document.getElementById('f-nickserv-pass').value||null;
+  let saslPassword=document.getElementById('f-sasl-password').value;
+  if(editingNetworkId && _editNet){
+    if(!document.getElementById('f-nickserv-pass').value) nickservPass=_editNet.config.nickserv_pass||null;
+    if(!document.getElementById('f-sasl-password').value && _editNet.config.sasl_plain) saslPassword=_editNet.config.sasl_plain.password||'';
+  }
   const cfg={id:editingNetworkId||'',label:document.getElementById('f-label').value||srv,
     server:srv,port:parseInt(document.getElementById('f-port').value)||6697,
     tls:document.getElementById('f-tls').value==='true',tls_accept_invalid_certs:document.getElementById('f-tls-invalid').value==='true',
     nick:document.getElementById('f-nick').value||'CryptIRC',username:document.getElementById('f-user').value||'cryptirc',
     realname:document.getElementById('f-real').value||'CryptIRC User',password:passValue,
-    sasl_plain:saslMethod==='plain'&&document.getElementById('f-sasl-account').value?{account:document.getElementById('f-sasl-account').value,password:document.getElementById('f-sasl-password').value}:null,
+    sasl_plain:saslMethod==='plain'&&document.getElementById('f-sasl-account').value?{account:document.getElementById('f-sasl-account').value,password:saslPassword}:null,
     sasl_external:saslMethod==='external',client_cert_id:null,
     auto_join:aj.split(/\s+/).filter(Boolean),
     auto_reconnect:document.getElementById('f-reconnect').value==='true',
     oper_login:document.getElementById('f-oper-login').value||null,
     oper_pass:document.getElementById('f-oper-pass').value||null,
     auto_identify:document.getElementById('f-auto-identify').value==='true',
-    nickserv_pass:document.getElementById('f-nickserv-pass').value||null,
+    nickserv_pass:nickservPass,
     disabled_caps:[...document.querySelectorAll('#f-caps-grid input[data-cap]:not(:checked)')].map(el=>el.dataset.cap),
     perform_commands:(document.getElementById('f-perform')?.value||'').split('\n').map(l=>l.trim()).filter(Boolean),
     quit_message:((document.getElementById('f-quit')?.value||'').trim())||null};
@@ -6347,6 +6595,20 @@ function _safeBgCss(v){
   if(!/^https:\/\//i.test(s) && !/^data:image\//i.test(s)) return 'none';
   return 'url("'+s.replace(/["\\\n\r]/g,'')+'")';
 }
+// Validate a CSS color before writing it into a --custom-property. A synced/hostile
+// theme value like "url(https://evil/beacon?id=alice)" would otherwise turn a
+// background:var(--accent) rule into a persistent tracking beacon (img-src https:
+// permits any host). Accept only hex (3/4/6/8-digit), rgb()/rgba()/hsl()/hsla() with
+// numeric args, and bare CSS named colors; anything else falls back to a safe value.
+function _safeColor(v,fallback){
+  if(typeof v==='string'){
+    const s=v.trim();
+    if(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s)) return s;
+    if(/^(?:rgb|rgba|hsl|hsla)\(\s*[0-9a-zA-Z.,%\s\/]+\)$/i.test(s)) return s;
+    if(/^[a-zA-Z]+$/.test(s)) return s;
+  }
+  return fallback;
+}
 const APPEAR_DEFAULTS={
   theme:'arctic', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
@@ -6536,23 +6798,23 @@ function applyThemeCSS(cfg){
   // Keep the iOS PWA status-bar tint in sync with the active theme background,
   // otherwise a light theme shows a black status-bar seam above the app.
   const _tc=document.querySelector('meta[name="theme-color"]'); if(_tc&&t.bg0) _tc.setAttribute('content',t.bg0);
-  r.setProperty('--bg0',t.bg0); r.setProperty('--bg1',t.bg1); r.setProperty('--bg2',t.bg2);
-  r.setProperty('--bg3',t.bg3); r.setProperty('--bg4',t.bg4);
-  r.setProperty('--border',t.border); r.setProperty('--border2',t.border2);
-  r.setProperty('--text',t.text); r.setProperty('--text2',t.text2); r.setProperty('--text3',t.text3);
+  r.setProperty('--bg0',_safeColor(t.bg0,'#0b0d0f')); r.setProperty('--bg1',_safeColor(t.bg1,'#111418')); r.setProperty('--bg2',_safeColor(t.bg2,'#181d24'));
+  r.setProperty('--bg3',_safeColor(t.bg3,'#1e242e')); r.setProperty('--bg4',_safeColor(t.bg4,'#252c38'));
+  r.setProperty('--border',_safeColor(t.border,'#2a3444')); r.setProperty('--border2',_safeColor(t.border2,'#3a4a60'));
+  r.setProperty('--text',_safeColor(t.text,'#c8d8e8')); r.setProperty('--text2',_safeColor(t.text2,'#7a9ab8')); r.setProperty('--text3',_safeColor(t.text3,'#82a0b8'));
   // Pick accents: mobile override wins; otherwise a theme that carries its OWN
   // accent (custom themes, plus the built-in mIRC) uses it, else the global pref.
   // (Only the mIRC built-in defines accent keys, so this is a no-op for the rest.)
   const accent=(mob&&cfg.mobileAccent)?cfg.mobileAccent:(t.accent||cfg.accent);
   const accent2=(mob&&cfg.mobileAccent2)?cfg.mobileAccent2:(t.accent2||cfg.accent2);
-  r.setProperty('--accent',accent); r.setProperty('--accent2',accent2);
+  r.setProperty('--accent',_safeColor(accent,'#00d4aa')); r.setProperty('--accent2',_safeColor(accent2,'#0099ff'));
   // Hyperlink color: mobile override → theme link → custom accent2 / global linkColor → accent2.
   const link=(mob&&cfg.mobileLink)?cfg.mobileLink:(t.link||(isCustom?(t.accent2||accent2):(cfg.linkColor||accent2)));
-  r.setProperty('--link',link||accent2);
+  r.setProperty('--link',_safeColor(link||accent2,'#0099ff'));
   // Semantic message colors: custom themes may override them; built-ins keep the
   // :root defaults, so always reset to default first then apply any custom value.
   ['warn','error','join','part','notice','action'].forEach(k=>{
-    if(isCustom && t[k]) r.setProperty('--'+k,t[k]);
+    if(isCustom && t[k]) r.setProperty('--'+k,_safeColor(t[k],SEMANTIC_DEFAULTS[k]));
     else r.setProperty('--'+k,SEMANTIC_DEFAULTS[k]);
   });
   r.setProperty('--sidebar-w',cfg.sidebarW+'px');
@@ -7483,7 +7745,7 @@ function _downscaleImage(file,maxDim){
 function _teApplyPreview(){
   const pv=document.getElementById('te-preview'); if(!pv||!_teState) return;
   const st=pv.style;
-  for(const k of CT_COLOR_KEYS) st.setProperty('--'+k, _teState[k]||'#000');
+  for(const k of CT_COLOR_KEYS) st.setProperty('--'+k, _safeColor(_teState[k],'#000'));
   const bg=_teBgData||_teState.bgUrl||'';
   st.setProperty('--te-bg', bg?_safeBgCss(bg):'none');
   st.setProperty('--te-bg-op', (_teState.bgOpacity!=null?_teState.bgOpacity:25)/100);
@@ -8309,6 +8571,7 @@ async function giphyFetchTop(query){
     const url=sel.url;
     inp.value=''; close();
     const gifWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,url):null;
+    if(_e2eBlockedWarn(gifWire)) return;
     if(gifWire) wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${gifWire}`});
     else wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${url}`});
     addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:url,kind:'privmsg',encrypted:!!gifWire});
@@ -9111,11 +9374,14 @@ function isDndActive(){
 
 // ─── User notes ──────────────────────────────────────────────────────────────
 function loadUserNotes(){try{return JSON.parse(localStorage.getItem('cryptirc_user_notes')||'{}');}catch{return{};}}
-function saveUserNotes(n){localStorage.setItem('cryptirc_user_notes',JSON.stringify(n));savePrefsToServer();}
+function saveUserNotes(n){localStorage.setItem('cryptirc_user_notes',JSON.stringify(n));localStorage.setItem('cryptirc_user_notes_ts',String(Date.now()));savePrefsToServer();}
 
 // ─── Channel key manager ─────────────────────────────────────────────────────
 function loadChanKeys(){try{return JSON.parse(localStorage.getItem('cryptirc_chankeys')||'{}');}catch{return{};}}
-function saveChanKeys(k){localStorage.setItem('cryptirc_chankeys',JSON.stringify(k));}
+// F29: stamp a change timestamp and flush immediately so a channel key (which
+// drives auto-rejoin) syncs across devices on change and a stale device's snapshot
+// can't clobber it — timestamp-gated in restorePreferences like favorites/muted.
+function saveChanKeys(k){localStorage.setItem('cryptirc_chankeys',JSON.stringify(k));localStorage.setItem('cryptirc_chankeys_ts',String(Date.now()));savePrefsToServer();}
 
 // ─── Channel stats (persistent, encrypted in vault) ─────────────────────────
 let _chanStats={};        // {channelKey: {nick: count}}
@@ -9382,7 +9648,7 @@ function smartPasteNo(){
 // Storage: { conn_id: { nick, active } }
 const _keepnickTimers={},_keepnickIsonPending={};
 function loadKeepNicks(){try{return JSON.parse(localStorage.getItem('cryptirc_keepnicks')||'{}');}catch{return{};}}
-function saveKeepNicks(kn){localStorage.setItem('cryptirc_keepnicks',JSON.stringify(kn));savePrefsToServer();}
+function saveKeepNicks(kn){localStorage.setItem('cryptirc_keepnicks',JSON.stringify(kn));localStorage.setItem('cryptirc_keepnicks_ts',String(Date.now()));savePrefsToServer();}
 function keepnickSet(conn_id,nick){
   const kn=loadKeepNicks();
   kn[conn_id]={nick:nick,active:true};
@@ -9492,7 +9758,14 @@ function gatherPreferences(){
     monitor: loadMonitor(),
     monitorNotifs: localStorage.getItem('cryptirc_monitor_notifs')||'on',
     monitorPush: localStorage.getItem('cryptirc_monitor_push')||'on',
+    _monitorTs: parseInt(localStorage.getItem('cryptirc_monitor_ts')||'0'),
     unread: (()=>{const o={};for(const[k,v] of unread)o[k]=v;return o;})(),
+    // Freshness data for the unread merge (see restorePreferences): the newest
+    // message ts behind each unread count, and this device's full per-conversation
+    // read horizon — both synced so another device can tell a stale unread
+    // re-upload from a genuinely new one instead of guessing from a boolean.
+    unreadAsOf: (()=>{const o={};for(const[k,v] of unreadAsOf)o[k]=v;return o;})(),
+    lastRead: _allLastReadTs(),
     mentions: mentionsList.slice(0,100),
     _mentionsTs: parseInt(localStorage.getItem('cryptirc_mentions_ts')||'0'),
     inputHistory: inputHistory.slice(-100),
@@ -9503,28 +9776,35 @@ function gatherPreferences(){
     lastActive: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_active'));}catch{return null;}})(),
     stats: {tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount},
     ignoreList: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_ignore')||'[]');}catch{return[];}})(),
+    _ignoreListTs: parseInt(localStorage.getItem('cryptirc_ignore_ts')||'0'),
     pmAllow: [...pmAllowList],
     _pmAllowTs: parseInt(localStorage.getItem('cryptirc_pm_allow_ts')||'0'),
     pmBlock: localStorage.getItem('cryptirc_block_pms')==='true',
     pmCooldown: parseInt(localStorage.getItem('cryptirc_pm_cooldown')||'24'),
     pmNotify: localStorage.getItem('cryptirc_pm_notify')!=='false',
     pmDeliverFirst: localStorage.getItem('cryptirc_pm_deliver_first')!=='false',
+    _pmSettingsTs: parseInt(localStorage.getItem('cryptirc_pm_settings_ts')||'0'),
     pmNet: loadPmNet(),
     _pmNetTs: parseInt(localStorage.getItem('cryptirc_pm_net_ts')||'0'),
     pmBlocked: loadPmBlocked(),
     highlightWords: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}})(),
+    _highlightWordsTs: parseInt(localStorage.getItem('cryptirc_highlight_words_ts')||'0'),
     favsOnly: localStorage.getItem('cryptirc_favs_only')==='true',
     _favsOnlyTs: parseInt(localStorage.getItem('cryptirc_favs_only_ts')||'0'),
     sidebarCollapsed: localStorage.getItem('cryptirc_sidebar_collapsed')==='1',
     nickCollapsed: localStorage.getItem('cryptirc_nick_collapsed')==='1',
     userNotes: loadUserNotes(),
+    _userNotesTs: parseInt(localStorage.getItem('cryptirc_user_notes_ts')||'0'),
     channelKeys: loadChanKeys(),
+    _channelKeysTs: parseInt(localStorage.getItem('cryptirc_chankeys_ts')||'0'),
     autoRejoin: localStorage.getItem('cryptirc_autorejoin')!=='false',
     dnd: localStorage.getItem('cryptirc_dnd')==='1',
     dndStart: localStorage.getItem('cryptirc_dnd_start')||'',
     dndEnd: localStorage.getItem('cryptirc_dnd_end')||'',
     keepnicks: loadKeepNicks(),
+    _keepnicksTs: parseInt(localStorage.getItem('cryptirc_keepnicks_ts')||'0'),
     networkOrder: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_net_order')||'[]');}catch{return[];}})(),
+    _networkOrderTs: parseInt(localStorage.getItem('cryptirc_net_order_ts')||'0'),
     // Giphy: per-user API key + content rating, synced across devices via
     // the user's encrypted prefs blob so they only have to set it once.
     giphyKey: localStorage.getItem('cryptirc_giphy_key')||'',
@@ -9540,7 +9820,11 @@ let _lastFlushTs=0;
 function flushPrefsToServer(){
   clearTimeout(_prefsSaveTimer);
   try{
-    _lastFlushTs=Date.now();
+    // Session-unique token (not a bare Date.now() ms): the echo-suppression guard
+    // in restorePreferences compares p._saveTs===_lastFlushTs, so two devices
+    // flushing in the same wall-clock millisecond would otherwise collide and a
+    // receiver would discard the sibling's genuine update as its own echo. (sync-audit fix)
+    _lastFlushTs=Date.now()+'-'+Math.random().toString(36).slice(2,10);
     const gathered=gatherPreferences();
     gathered._saveTs=_lastFlushTs;
     wsend({type:'save_preferences',prefs:JSON.stringify(gathered)});
@@ -9570,20 +9854,85 @@ function restorePreferences(p){
       const merged={...p.muted,...localMuted};
       localStorage.setItem('cryptirc_muted',JSON.stringify(merged));
     }
-    if(p.monitor) localStorage.setItem('cryptirc_monitor',JSON.stringify(p.monitor));
-    if(p.monitorNotifs) localStorage.setItem('cryptirc_monitor_notifs',p.monitorNotifs);
-    if(p.monitorPush) localStorage.setItem('cryptirc_monitor_push',p.monitorPush);
-    if(p.unread){
-      // Merge server unread — but NEVER resurrect counts for channels the user has already read locally
-      // Check: if we have a lastRead timestamp locally that's newer than the server sync, skip that channel
-      for(const[k,v] of Object.entries(p.unread)){
-        const lastReadKey='cryptirc_lastread_'+k;
-        const localLastRead=parseFloat(localStorage.getItem(lastReadKey)||'0');
-        const local=unread.get(k)||0;
-        // Only accept server's count if local has no read marker AND server count is higher
-        if(localLastRead===0&&+v>local) unread.set(k,+v);
+    {
+      // F29: timestamp-gate the monitor group (list + notif/push toggles) as one
+      // cohesive unit — a stale device's snapshot must not clobber a just-changed
+      // monitor set. Missing _monitorTs (older client) → 0, so a fresh device
+      // (localTs 0) still accepts and the server wins on a tie.
+      const localTs=parseInt(localStorage.getItem('cryptirc_monitor_ts')||'0');
+      const serverTs=p._monitorTs||0;
+      if(localTs<=serverTs){
+        if(p.monitor) localStorage.setItem('cryptirc_monitor',JSON.stringify(p.monitor));
+        if(p.monitorNotifs) localStorage.setItem('cryptirc_monitor_notifs',p.monitorNotifs);
+        if(p.monitorPush) localStorage.setItem('cryptirc_monitor_push',p.monitorPush);
+        localStorage.setItem('cryptirc_monitor_ts',String(serverTs));
       }
     }
+    // Read-horizon + unread merge. The old version gated purely on "have I EVER
+    // opened this conversation on this device" (a boolean), which meant a stale
+    // device — one that hasn't caught up to a read that happened elsewhere —
+    // could re-upload its old unread count on an unrelated save (any debounced
+    // preferences flush re-sends the WHOLE snapshot) and resurrect an
+    // already-read badge everywhere, including back on the device that read it.
+    // Fix: sync the actual read-horizon timestamp per conversation (monotonic —
+    // it only ever moves forward, so merging is safe regardless of arrival
+    // order) and tag each unread count with the newest message that produced
+    // it, so a receiver can tell "stale re-upload" from "genuinely new" by
+    // comparing real timestamps instead of guessing from a flag.
+    if(p.lastRead){
+      for(const[k,v] of Object.entries(p.lastRead)){
+        const lk='cryptirc_lastread_'+k;
+        const local=parseFloat(localStorage.getItem(lk)||'0');
+        if(+v>local) localStorage.setItem(lk,String(v));
+      }
+    }
+    if(p.unread){
+      const asOf=p.unreadAsOf||{};
+      for(const[k,v] of Object.entries(p.unread)){
+        const localLastRead=parseFloat(localStorage.getItem('cryptirc_lastread_'+k)||'0');
+        const msgTs=asOf[k];
+        if(typeof msgTs==='number'){
+          // We know exactly how fresh this signal is (as of the just-applied
+          // monotonic read-horizon merge above): only trust it if it's about a
+          // message this device hasn't read yet. This is what stops a stale
+          // re-upload from reviving an already-read badge.
+          if(msgTs>localLastRead){
+            unread.set(k,Math.max(unread.get(k)||0,+v));
+            unreadAsOf.set(k,Math.max(unreadAsOf.get(k)||0,msgTs));
+          } else {
+            unreadClear(k); // provably already read past this, on some device
+          }
+        } else {
+          // Backward-compat: sender predates unreadAsOf (older client build) and
+          // gave no freshness info for this key. Fall back to the previous
+          // conservative behavior for accept/reject, but still seed a "now"
+          // unreadAsOf when accepting — same reasoning as the boot migration
+          // above — so this key is paired going forward instead of becoming a
+          // permanent gap that every future receiver falls into as well.
+          const local=unread.get(k)||0;
+          if(localLastRead===0&&+v>local){ unread.set(k,+v); unreadAsOf.set(k,Math.floor(Date.now()/1000)); }
+        }
+      }
+    }
+    // Self-heal: a local unread entry whose known contributing message is now
+    // provably read (per the just-merged horizon, from THIS or another device)
+    // is stale — drop it even if `p.unread` didn't happen to mention this key
+    // (e.g. the sender itself had already cleared it and so never sent it).
+    for(const k of [...unread.keys()]){
+      const asOf=unreadAsOf.get(k);
+      if(typeof asOf!=='number') continue;
+      const lr=parseFloat(localStorage.getItem('cryptirc_lastread_'+k)||'0');
+      if(asOf<=lr) unreadClear(k);
+    }
+    // Persist the merged/healed state for this device (reload-safe) WITHOUT
+    // triggering a new outgoing sync — re-broadcasting here on every incoming
+    // 'preferences' event (which fires for every unrelated pref save on every
+    // device) risks a needless echo storm; the next legitimate local save
+    // (opening a chat, any other pref change) carries the healed state onward.
+    try{
+      const ou={};for(const[k,v] of unread)ou[k]=v;localStorage.setItem('cryptirc_unread',JSON.stringify(ou));
+      const oa={};for(const[k,v] of unreadAsOf)oa[k]=v;localStorage.setItem('cryptirc_unread_asof',JSON.stringify(oa));
+    }catch(e){}
     if(p.mentions){
       // Timestamp-guard like queries/favs: a read/clear on another device (the most
       // recent write) must win so it doesn't resurrect here as still-unread. Only
@@ -9622,30 +9971,85 @@ function restorePreferences(p){
     }
     if(p.lastActive) localStorage.setItem('cryptirc_active',JSON.stringify(p.lastActive));
     if(p.stats){_txBytes=p.stats.tx||0;_rxBytes=p.stats.rx||0;_txCount=p.stats.tc||0;_rxCount=p.stats.rc||0;}
-    if(Array.isArray(p.ignoreList)) localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));
+    if(Array.isArray(p.ignoreList)){
+      // F29: timestamp-gate like pmAllow/favs so a stale device's snapshot can't
+      // clobber a just-changed list. Missing _ignoreListTs (older client) → 0, so a
+      // fresh device (localTs 0) still accepts and the server wins on a tie.
+      const localTs=parseInt(localStorage.getItem('cryptirc_ignore_ts')||'0');
+      const serverTs=p._ignoreListTs||0;
+      if(localTs<=serverTs){localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));localStorage.setItem('cryptirc_ignore_ts',String(serverTs));}
+    }
     if(Array.isArray(p.pmAllow)){
       const localTs=parseInt(localStorage.getItem('cryptirc_pm_allow_ts')||'0');
       const serverTs=p._pmAllowTs||0;
       if(localTs<=serverTs){pmAllowList=new Set(p.pmAllow.map(s=>String(s).toLowerCase()));localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));}
     }
-    if(p.pmBlock!=null) localStorage.setItem('cryptirc_block_pms',p.pmBlock?'true':'false');
-    if(p.pmCooldown!=null) localStorage.setItem('cryptirc_pm_cooldown',String(p.pmCooldown));
-    if(p.pmNotify!=null) localStorage.setItem('cryptirc_pm_notify',p.pmNotify?'true':'false');
-    if(p.pmDeliverFirst!=null) localStorage.setItem('cryptirc_pm_deliver_first',p.pmDeliverFirst?'true':'false');
+    {
+      // F29: timestamp-gate the global PM settings group (block/cooldown/notify/
+      // deliverFirst) as one cohesive unit — the UI toggles them together, so a
+      // stale device's snapshot must not clobber a just-changed setting. Missing
+      // _pmSettingsTs (older client) → 0, so a fresh device (localTs 0) still
+      // accepts and the server wins on a tie.
+      const localTs=parseInt(localStorage.getItem('cryptirc_pm_settings_ts')||'0');
+      const serverTs=p._pmSettingsTs||0;
+      if(localTs<=serverTs){
+        if(p.pmBlock!=null) localStorage.setItem('cryptirc_block_pms',p.pmBlock?'true':'false');
+        if(p.pmCooldown!=null) localStorage.setItem('cryptirc_pm_cooldown',String(p.pmCooldown));
+        if(p.pmNotify!=null) localStorage.setItem('cryptirc_pm_notify',p.pmNotify?'true':'false');
+        if(p.pmDeliverFirst!=null) localStorage.setItem('cryptirc_pm_deliver_first',p.pmDeliverFirst?'true':'false');
+        localStorage.setItem('cryptirc_pm_settings_ts',String(serverTs));
+      }
+    }
     if(p.pmNet&&typeof p.pmNet==='object'){
       const localTs=parseInt(localStorage.getItem('cryptirc_pm_net_ts')||'0');
       const serverTs=p._pmNetTs||0;
       if(localTs<=serverTs) localStorage.setItem('cryptirc_pm_net',JSON.stringify(p.pmNet));
     }
     if(Array.isArray(p.pmBlocked)) localStorage.setItem('cryptirc_pm_blocked',JSON.stringify(p.pmBlocked.slice(-PM_BLOCKED_MAX)));
-    if(p.highlightWords) localStorage.setItem('cryptirc_highlight_words',JSON.stringify(p.highlightWords));
-    if(p.userNotes) localStorage.setItem('cryptirc_user_notes',JSON.stringify(p.userNotes));
-    if(p.channelKeys) localStorage.setItem('cryptirc_chankeys',JSON.stringify(p.channelKeys));
+    if(p.highlightWords){
+      // F29: timestamp-gate (see ignoreList above) — newest writer wins instead of
+      // last-arriving snapshot, so a stale device can't resurrect deleted words.
+      const localTs=parseInt(localStorage.getItem('cryptirc_highlight_words_ts')||'0');
+      const serverTs=p._highlightWordsTs||0;
+      if(localTs<=serverTs){localStorage.setItem('cryptirc_highlight_words',JSON.stringify(p.highlightWords));localStorage.setItem('cryptirc_highlight_words_ts',String(serverTs));}
+    }
+    if(p.userNotes){
+      // F29: timestamp-gate (see ignoreList above).
+      const localTs=parseInt(localStorage.getItem('cryptirc_user_notes_ts')||'0');
+      const serverTs=p._userNotesTs||0;
+      if(localTs<=serverTs){localStorage.setItem('cryptirc_user_notes',JSON.stringify(p.userNotes));localStorage.setItem('cryptirc_user_notes_ts',String(serverTs));}
+    }
+    if(p.channelKeys){
+      // F29: timestamp-gate — a channel key drives auto-rejoin, so losing it to a
+      // stale snapshot silently breaks rejoining a keyed channel (see ignoreList above).
+      const localTs=parseInt(localStorage.getItem('cryptirc_chankeys_ts')||'0');
+      const serverTs=p._channelKeysTs||0;
+      if(localTs<=serverTs){localStorage.setItem('cryptirc_chankeys',JSON.stringify(p.channelKeys));localStorage.setItem('cryptirc_chankeys_ts',String(serverTs));}
+    }
     if(p.dnd!=null){if(p.dnd)localStorage.setItem('cryptirc_dnd','1');else localStorage.removeItem('cryptirc_dnd');}
-    if(p.dndStart) localStorage.setItem('cryptirc_dnd_start',p.dndStart);
-    if(p.dndEnd) localStorage.setItem('cryptirc_dnd_end',p.dndEnd);
-    if(p.keepnicks) localStorage.setItem('cryptirc_keepnicks',JSON.stringify(p.keepnicks));
-    if(p.networkOrder) localStorage.setItem('cryptirc_net_order',JSON.stringify(p.networkOrder));
+    // autoRejoin was gathered into the blob but never applied here, so the setting
+    // never propagated across devices (the kick handler reads cryptirc_autorejoin
+    // directly). !=null so a synced `false` (disabled) applies. (sync-audit fix)
+    if(p.autoRejoin!=null) localStorage.setItem('cryptirc_autorejoin',p.autoRejoin?'true':'false');
+    // Presence-gate (!==undefined), not truthiness: an empty string means the DND
+    // window was CLEARED on another device and must propagate; truthy-gating dropped
+    // the clear and left a stale schedule on lagging devices. (sync-audit fix)
+    if(p.dndStart!==undefined) localStorage.setItem('cryptirc_dnd_start',p.dndStart);
+    if(p.dndEnd!==undefined) localStorage.setItem('cryptirc_dnd_end',p.dndEnd);
+    if(p.keepnicks){
+      // F29: timestamp-gate (see ignoreList above) — a stale device must not
+      // resurrect a keepnick the user turned off elsewhere. Missing _keepnicksTs → 0.
+      const localTs=parseInt(localStorage.getItem('cryptirc_keepnicks_ts')||'0');
+      const serverTs=p._keepnicksTs||0;
+      if(localTs<=serverTs){localStorage.setItem('cryptirc_keepnicks',JSON.stringify(p.keepnicks));localStorage.setItem('cryptirc_keepnicks_ts',String(serverTs));}
+    }
+    if(p.networkOrder){
+      // F29: timestamp-gate (see ignoreList above) — a stale device must not clobber
+      // a reorder made elsewhere. Missing _networkOrderTs → 0.
+      const localTs=parseInt(localStorage.getItem('cryptirc_net_order_ts')||'0');
+      const serverTs=p._networkOrderTs||0;
+      if(localTs<=serverTs){localStorage.setItem('cryptirc_net_order',JSON.stringify(p.networkOrder));localStorage.setItem('cryptirc_net_order_ts',String(serverTs));}
+    }
     if(p.favsOnly!=null){
       const localTs=parseInt(localStorage.getItem('cryptirc_favs_only_ts')||'0');
       const serverTs=p._favsOnlyTs||0;
@@ -9665,11 +10069,15 @@ function restorePreferences(p){
       if(p.tenorKey) localStorage.setItem('cryptirc_tenor_key',p.tenorKey);
       else localStorage.removeItem('cryptirc_tenor_key');
     }
-    if(p.giphyRating){
-      localStorage.setItem('cryptirc_giphy_rating',p.giphyRating);
+    // Presence-gate (like giphyKey/tenorKey) so a cleared rating ('') propagates
+    // instead of being dropped by a truthy check. (sync-audit fix)
+    if(p.giphyRating!==undefined){
+      if(p.giphyRating) localStorage.setItem('cryptirc_giphy_rating',p.giphyRating);
+      else localStorage.removeItem('cryptirc_giphy_rating');
     }
     // Re-apply UI state
     renderSidebar(); updateMentionsBadge(); applyFavsOnly();
+    if(isMessagesActive()) renderMessagesView(); // reflect synced unread/read-state changes live
     // Apply panel collapse states
     if(window.innerWidth>768){
       const sb=document.getElementById('sidebar');
@@ -9703,7 +10111,7 @@ function closeAllPMs(conn_id){
   if(!queryBufs[conn_id])return;
   for(const [lc] of queryBufs[conn_id]){
     delete buffers[bk(conn_id,lc)];
-    unread.delete(bk(conn_id,lc));
+    unreadClear(bk(conn_id,lc));
   }
   queryBufs[conn_id]=new Map();
   if(active&&active.conn_id===conn_id&&!active.target.startsWith('#')&&active.target!=='status') setActive(conn_id,'status');
@@ -9713,7 +10121,7 @@ function closeQuery(conn_id,lc){
   lc=String(lc).toLowerCase();
   if(queryBufs[conn_id])queryBufs[conn_id].delete(lc);
   // Keep buffer so history reloads when reopened, just clear unread
-  unread.delete(bk(conn_id,lc));
+  unreadClear(bk(conn_id,lc));
   mentionUnread.delete(bk(conn_id,lc));
   markQueryClosed(conn_id,lc);          // remember it's closed so replays don't reopen it
   saveQueryBufs();
@@ -9750,6 +10158,7 @@ function initSortable(){
       const groups=[...netList.querySelectorAll('.net-group')];
       const order=groups.map(g=>g.dataset.netId);
       localStorage.setItem('cryptirc_net_order',JSON.stringify(order));
+      localStorage.setItem('cryptirc_net_order_ts',String(Date.now()));
       const netMap=Object.create(null);for(const n of networks)netMap[n.config.id]=n;
       networks.length=0;for(const id of order){if(netMap[id])networks.push(netMap[id]);}
       for(const n of Object.values(netMap)){if(!order.includes(n.config.id))networks.push(n);}
@@ -10423,9 +10832,9 @@ async function removeNetwork(id,label){
   // Clean up buffers for this network
   for(const k of Object.keys(buffers)){if(k.startsWith(id+'/'))delete buffers[k];}
   // Clean up unread counts
-  for(const [k] of unread){if(k.startsWith(id+'/'))unread.delete(k);}
+  for(const k of [...unread.keys()]){if(k.startsWith(id+'/'))unreadClear(k);}
   // Clean up stale network order entry
-  try{const no=JSON.parse(localStorage.getItem('cryptirc_net_order')||'[]').filter(x=>x!==id);localStorage.setItem('cryptirc_net_order',JSON.stringify(no));}catch(e){}
+  try{const no=JSON.parse(localStorage.getItem('cryptirc_net_order')||'[]').filter(x=>x!==id);localStorage.setItem('cryptirc_net_order',JSON.stringify(no));localStorage.setItem('cryptirc_net_order_ts',String(Date.now()));}catch(e){}
 }
 
 // ─── Nick context menu ────────────────────────────────────────────────────────
@@ -10465,7 +10874,7 @@ function showNickMenu(e,nick){
     {label:'Whois',     action:()=>{if(active){if(!window._pendingWhois)window._pendingWhois={};window._pendingWhois[active.conn_id]=nick;wsend({type:'send',conn_id:active.conn_id,raw:`WHOIS ${nick}`});closeAfter();}}},
     {label:'Query',     action:()=>{if(active){closeAfter();setActive(active.conn_id,nick);closeSidebar();}}},
     {label:'Mention',   action:()=>insertNick(nick)},
-    {label:'Slap',      action:async()=>{if(!active)return;const st=`slaps ${nick} around a bit with a large trout`;const sw=(window.E2E?.ready||window.E2E?.channelKeys?.[active.target])?await e2eEncryptOutgoing(active.target,`\x01ACTION ${st}\x01`):null;if(sw)wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :${sw}`});else wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :\x01ACTION ${st}\x01`});addMessage(active.conn_id,active.target,{ts:Date.now()/1000|0,from:getNick(active.conn_id),text:st,kind:'action'});}},
+    {label:'Slap',      action:async()=>{if(!active)return;const st=`slaps ${nick} around a bit with a large trout`;const sw=(window.E2E?.ready||window.E2E?.channelKeys?.[active.target])?await e2eEncryptOutgoing(active.target,`\x01ACTION ${st}\x01`):null;if(_e2eBlockedWarn(sw))return;if(sw)wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :${sw}`});else wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :\x01ACTION ${st}\x01`});addMessage(active.conn_id,active.target,{ts:Date.now()/1000|0,from:getNick(active.conn_id),text:st,kind:'action'});}},
     {label:loadMonitor()[nick.toLowerCase()]?'Unmonitor':'Monitor', action:()=>{const k=nick.toLowerCase();if(loadMonitor()[k]){monitorRemove(nick);showToast(`Removed ${nick} from monitor`);}else{monitorAdd(nick);showToast(`Added ${nick} to monitor`);}}},
     {label:'📝 Note', action:async()=>{const notes=loadUserNotes();const existing=notes[nick.toLowerCase()]||'';const n=await customPrompt(`Note for ${nick}:`,existing);if(n!==null){if(n.trim())notes[nick.toLowerCase()]=n.trim();else delete notes[nick.toLowerCase()];saveUserNotes(notes);showToast(n.trim()?`Note saved for ${nick}`:`Note removed for ${nick}`);}}},
     {label:isIgnored(nick)?'Unignore':'Ignore nick', action:()=>{if(isIgnored(nick)){removeIgnore(nick);showToast(`Unignored ${nick}`);}else{addIgnore(nick);showToast(`Ignoring ${nick}`);}}},
@@ -10921,6 +11330,7 @@ async function showNotifModal() {
 function saveHighlightWords(){
   const words=getHighlightWords();
   localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));
+  localStorage.setItem('cryptirc_highlight_words_ts',String(Date.now())); // F29 change stamp
   savePrefsToServer();
   renderHighlightTags();
 }
@@ -10929,12 +11339,13 @@ function addHighlightWord(){
   const word=inp.value.trim().toLowerCase();
   if(!word)return;
   const words=getHighlightWords();
-  if(!words.includes(word)){words.push(word);localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));savePrefsToServer();}
+  if(!words.includes(word)){words.push(word);localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));localStorage.setItem('cryptirc_highlight_words_ts',String(Date.now()));savePrefsToServer();}
   inp.value='';renderHighlightTags();
 }
 function removeHighlightWord(word){
   const words=getHighlightWords().filter(w=>w!==word);
   localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));
+  localStorage.setItem('cryptirc_highlight_words_ts',String(Date.now())); // F29 change stamp
   savePrefsToServer();renderHighlightTags();
 }
 function renderHighlightTags(){
@@ -11112,11 +11523,27 @@ async function unsubscribePush() {
   }
   if (!pushSubscription) return;
   try {
-    await fetch('/cryptirc/push/subscribe', {
-      method: 'DELETE',
-      headers: {'Authorization':'Bearer '+sessionToken, 'Content-Type':'application/json'},
-      body: JSON.stringify({ endpoint: pushSubscription.endpoint }),
-    });
+    // The server DELETE must authenticate (Bearer token still valid) to drop the
+    // stored endpoint — but even if it fails (network error, server down, non-ok
+    // status), we MUST still tear down the browser subscription so this shared
+    // device stops receiving this user's pushes for whoever logs in next (F25).
+    // Isolating the network call in its own try guarantees the unsubscribe() below
+    // always runs regardless of the DELETE's outcome.
+    // Bound the DELETE with a short timeout: doLogout awaits unsubscribePush(), so a
+    // connected-but-unresponsive server would otherwise stall sign-out indefinitely
+    // (token never cleared, UI never switched). On timeout we abort and fall through to
+    // the local unsubscribe() below — best-effort teardown that never blocks logout. (F25-regression)
+    const _ac = new AbortController();
+    const _to = setTimeout(() => { try{ _ac.abort(); }catch(_){} }, 4000);
+    try {
+      await fetch('/cryptirc/push/subscribe', {
+        method: 'DELETE',
+        headers: {'Authorization':'Bearer '+sessionToken, 'Content-Type':'application/json'},
+        body: JSON.stringify({ endpoint: pushSubscription.endpoint }),
+        signal: _ac.signal,
+      });
+    } catch(e) { console.warn('Push unsubscribe (server DELETE) failed:', e); }
+    finally { clearTimeout(_to); }
     await pushSubscription.unsubscribe();
     pushSubscription = null;
   } catch(e) { console.warn('Push unsubscribe failed:', e); }
@@ -11265,12 +11692,19 @@ const MODE_BATCH = 4;
 function batchMode(conn_id, channel, modeChar, nicks) {
   const sign   = modeChar[0];   // + or -
   const letter = modeChar[1];   // o v h a q etc.
-  for (let i = 0; i < nicks.length; i += MODE_BATCH) {
-    const batch  = nicks.slice(i, i + MODE_BATCH);
+  // #19: cap total staggered batches (100, like KICK_CAP) so a massive channel
+  // can't queue thousands of pending MODE timers (~minutes of flood-kill risk),
+  // and re-validate the connection inside each timer before it fires so batches
+  // don't land on whatever conn_id later reuses this slot after a disconnect /
+  // network-switch (mirrors the KICKALL/TBAN #41 hardening).
+  const BATCH_CAP = 100;
+  const capped = nicks.slice(0, BATCH_CAP * MODE_BATCH);
+  for (let i = 0; i < capped.length; i += MODE_BATCH) {
+    const batch  = capped.slice(i, i + MODE_BATCH);
     const modes  = sign + letter.repeat(batch.length);
     const cmd    = `MODE ${channel} ${modes} ${batch.join(' ')}`;
     // Stagger batches by 300ms to avoid server flood triggers
-    setTimeout(() => wsend({type:'send', conn_id, raw: cmd}), (i / MODE_BATCH) * 300);
+    setTimeout(() => { if (networks.some(nw => nw.config.id === conn_id)) wsend({type:'send', conn_id, raw: cmd}); }, (i / MODE_BATCH) * 300);
   }
 }
 
@@ -11354,9 +11788,20 @@ function jumpToMessage(conn_id, target, ts, from){
   const reveal = r => {
     const cond = r.closest('.status-condensed');
     if(cond) cond.classList.add('expanded');
+    // Anchor the jump: kill any pending auto-scroll-to-bottom (scrollForce's
+    // delayed timers + ResizeObserver, armed by the setActive/prependLogs render
+    // that just ran) and mark us anchored + scrolled-away, so nothing yanks the
+    // view back to the bottom while the user reads/scrolls around the target.
+    // Released on the next intentional scrollForce or a real user scroll gesture.
+    _cancelScrollForce();
+    _jumpAnchor = true;
+    _jumpAnchorBk = bk(conn_id, target);
+    _jumpAnchorTs = Date.now();
+    _userScrolledAway = true;
     // Instant jump (behavior:'auto'), not a slow smooth-scroll animation — the
     // user wants to land on the message immediately.
     r.scrollIntoView({behavior:'auto', block:'center'});
+    updateScrollBtn();
     flash(r);
   };
   const tryFind = ()=>{
@@ -11455,6 +11900,11 @@ function _exitHistoryView(){
   if(!_historyView) return;
   const { conn_id, target } = _historyView;
   _historyView = null;
+  _jumpAnchor = false;                       // jump-to-present is an intentional
+                                             // go-to-bottom; release the anchor so
+                                             // the fresh present load scrolls to the
+                                             // bottom (and a mid-decrypt sync merge
+                                             // can't strand us near the top).
   getBuf(conn_id, target).length = 0;       // drop the historical window
   _lastMsgId[bk(conn_id, target)] = 0;      // force a fresh present load, not a sync
   if(isActive(conn_id, target)){
@@ -11593,11 +12043,13 @@ const banListAccum    = {}; // "conn_id/channel" → [mask, ...]
 function addIgnore(mask) {
   ignoreList.add(mask.toLowerCase());
   localStorage.setItem('cryptirc_ignore', JSON.stringify([...ignoreList]));
+  localStorage.setItem('cryptirc_ignore_ts', String(Date.now())); // F29 change stamp
   savePrefsToServer();
 }
 function removeIgnore(mask) {
   ignoreList.delete(mask.toLowerCase());
   localStorage.setItem('cryptirc_ignore', JSON.stringify([...ignoreList]));
+  localStorage.setItem('cryptirc_ignore_ts', String(Date.now())); // F29 change stamp
   savePrefsToServer();
 }
 function showIgnorePanel(){
@@ -11946,6 +12398,7 @@ function showPmProtectionPanel(){
       const v=enBtn.classList.contains('on');
       if(isGlobal){
         localStorage.setItem('cryptirc_block_pms',v?'true':'false');
+        localStorage.setItem('cryptirc_pm_settings_ts',String(Date.now()));
         savePrefsToServer();
         const sb=document.getElementById('sec-block-pms');
         if(sb){v?sb.classList.add('on'):sb.classList.remove('on');}
@@ -11956,7 +12409,7 @@ function showPmProtectionPanel(){
 
     // ── Wire up cooldown select ──
     if(cd) cd.addEventListener('change',()=>{
-      if(isGlobal){localStorage.setItem('cryptirc_pm_cooldown',cd.value);savePrefsToServer();}
+      if(isGlobal){localStorage.setItem('cryptirc_pm_cooldown',cd.value);localStorage.setItem('cryptirc_pm_settings_ts',String(Date.now()));savePrefsToServer();}
       else pmNetPatch(_pmPanelScope,{cooldown:parseInt(cd.value)});
     });
 
@@ -11965,7 +12418,7 @@ function showPmProtectionPanel(){
     if(ntBtn) ntBtn.addEventListener('click',()=>{
       ntBtn.classList.toggle('on');
       const v=ntBtn.classList.contains('on');
-      if(isGlobal){localStorage.setItem('cryptirc_pm_notify',v?'true':'false');savePrefsToServer();}
+      if(isGlobal){localStorage.setItem('cryptirc_pm_notify',v?'true':'false');localStorage.setItem('cryptirc_pm_settings_ts',String(Date.now()));savePrefsToServer();}
       else pmNetPatch(_pmPanelScope,{notify:v});
     });
 
@@ -11974,7 +12427,7 @@ function showPmProtectionPanel(){
     if(dvBtn) dvBtn.addEventListener('click',()=>{
       dvBtn.classList.toggle('on');
       const v=dvBtn.classList.contains('on');
-      if(isGlobal){localStorage.setItem('cryptirc_pm_deliver_first',v?'true':'false');savePrefsToServer();}
+      if(isGlobal){localStorage.setItem('cryptirc_pm_deliver_first',v?'true':'false');localStorage.setItem('cryptirc_pm_settings_ts',String(Date.now()));savePrefsToServer();}
       else pmNetPatch(_pmPanelScope,{deliverFirst:v});
     });
 
@@ -12412,7 +12865,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.9';
+const CRYPTIRC_VERSION='0.3.11';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -12420,6 +12873,13 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.11', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed a bug where a network could fail to connect forever: a single non-UTF-8 byte in a server’s MOTD/topic (e.g. HybridIRC) dropped the whole connection right after login, looping reconnect endlessly. Server text is now decoded leniently so the connection stays up.'},
+  ]},
+  {version:'0.3.10', date:'July 2026', items:[
+    {tag:'fix', text:'Multi-device sync fixes: read/unread state and “load older” no longer bury unseen messages or wrongly clear badges on your other devices; sync no longer drops messages when several devices catch up at once; auto-rejoin and more preferences now propagate correctly across devices instead of being clobbered by a stale device.'},
+    {tag:'sec', text:'Follow-up hardening from a full security re-audit: closed enumeration/timing oracles, invalidate old password-reset links, purge push subscriptions on password change/reset, bound log-sync work, and fix credential-at-rest edge cases. Encrypted-DM correctness fixes (ratchet + never fall back to plaintext when a session isn’t ready).'},
+  ]},
   {version:'0.3.9', date:'June 2026', items:[
     {tag:'sec', text:'Hardened security throughout: end-to-end DM encryption now enforces client-authoritative key pinning (rejecting silent server key overwrites), real Signal-spec ratchet KDFs, mandatory identity binding and per-prekey selection. NOTE: this is a one-time protocol upgrade — existing DM sessions are re-established (re-encrypted) on first contact.'},
     {tag:'sec', text:'Began migrating away from inline scripts/handlers (font-src, favicon and partial source delegation done; full ‘unsafe-inline’ removal still pending). Tightened image/connect sources, file permissions (0600/0700) on all secret files, link-preview SSRF (HTTPS:443 only), push-notification fan-out, and login rate-limiting.'},
@@ -12875,6 +13335,34 @@ function showHelp(conn_id, target, specific) {
 let _userScrolledAway=false;
 let _scrollForceTimers=[];
 let _scrollForceRO=null;
+// Set true when jumpToMessage centers a specific past message (via a notification
+// click / mentions panel / search). A jumped-to message is the NEWEST row in the
+// window loaded with `before:ts+1`, so it lands near the bottom and position-based
+// `_userScrolledAway` computes false — which would let scrollForce's delayed
+// re-anchor timers, its ResizeObserver, and the media-load re-scroll all yank the
+// view back to the bottom every time the user tries to scroll away from the
+// anchored message ("stuck in one spot"). While anchored, every auto-scroll-to-
+// bottom path bails, so the user can freely scroll up/down from the jump target.
+// Released on the next intentional scrollForce() (new render / exit-history /
+// jump-to-present), on any genuine user scroll gesture (wheel/touch/scrollbar/
+// scroll keys — which a programmatic scrollIntoView does NOT emit), or on
+// reaching the true bottom by any means (auto-follow at the bottom is always
+// what the user wants, and no programmatic path scrolls to bottom while anchored
+// — they all bail on the anchor — so bottom-arrival implies user intent).
+let _jumpAnchor=false;
+// Buffer key the anchor belongs to: background re-renders of THIS buffer must
+// preserve scroll position instead of scrollForce'ing (see renderChat tail);
+// renders of any OTHER buffer are navigation and release the anchor as before.
+let _jumpAnchorBk=null;
+// Set at reveal() time: the reveal's own scrollIntoView can land AT the bottom
+// (target = newest row), which must not instantly self-release via the
+// bottom-arrival rule — ignore bottom-arrival for a short grace period.
+let _jumpAnchorTs=0;
+function _cancelScrollForce(){
+  _scrollForceTimers.forEach(t=>clearTimeout(t));
+  _scrollForceTimers=[];
+  if(_scrollForceRO){_scrollForceRO.disconnect();_scrollForceRO=null;}
+}
 function _isNearBottom(a,thresh){return a.scrollHeight-a.scrollTop-a.clientHeight<thresh;}
 // iPhone/iPad (incl. iPadOS reporting as Mac). Desktop Mac (no touch) is NOT iOS.
 const _IS_IOS=(function(){try{const ua=navigator.userAgent||'';return /iP(hone|ad|od)/.test(ua)||(/Mac/.test(navigator.platform||'')&&(navigator.maxTouchPoints||0)>1);}catch(e){return false;}})();
@@ -12890,7 +13378,7 @@ function _iosFlushScroll(a){
 }
 function scrollBottom(){
   const a=document.getElementById('chat-area');
-  if(!a||_userScrolledAway)return;
+  if(!a||_userScrolledAway||_jumpAnchor)return;
   // `_userScrolledAway` (kept current by _onChatScroll) is the source of truth for
   // "user is reading history, don't yank them down." DON'T re-measure distance here:
   // scrollBottom runs AFTER the new row is in the DOM, so a tall message (several
@@ -12903,21 +13391,20 @@ function scrollForce(){
   const a=document.getElementById('chat-area');
   if(!a)return;
   _userScrolledAway=false;
+  _jumpAnchor=false; // an intentional go-to-bottom supersedes any jump anchor
   _iosFlushScroll(a);
   // Cancel any previous delayed scrolls
-  _scrollForceTimers.forEach(t=>clearTimeout(t));
-  _scrollForceTimers=[];
-  if(_scrollForceRO){_scrollForceRO.disconnect();_scrollForceRO=null;}
-  // Delayed re-anchors — but bail if user scrolls away in the meantime
+  _cancelScrollForce();
+  // Delayed re-anchors — but bail if user scrolls away (or jumped to a message)
   [50,150,300,600,1200,2000].forEach(ms=>{
     _scrollForceTimers.push(setTimeout(()=>{
-      if(_userScrolledAway)return;
+      if(_userScrolledAway||_jumpAnchor)return;
       a.scrollTop=a.scrollHeight;updateScrollBtn();
     },ms));
   });
   if(typeof ResizeObserver!=='undefined'){
     _scrollForceRO=new ResizeObserver(()=>{
-      if(_userScrolledAway)return;
+      if(_userScrolledAway||_jumpAnchor)return;
       if(_isNearBottom(a,150)){a.scrollTop=a.scrollHeight;updateScrollBtn();}
     });
     _scrollForceRO.observe(a);
@@ -12929,10 +13416,44 @@ function _onChatScroll(){
   const a=document.getElementById('chat-area');
   if(!a)return;
   _userScrolledAway=!_isNearBottom(a,200);
+  // Bottom-arrival releases the anchor regardless of HOW the user got there —
+  // this is what covers scroll-only inputs the gesture listeners below can't
+  // see (scrollbar drag, middle-click autoscroll, find-in-page): while anchored
+  // every programmatic scroll-to-bottom path bails, so if we ARE at the true
+  // bottom, the user drove us here and auto-follow should resume. The grace
+  // period keeps reveal()'s own scrollIntoView (which can land at the bottom
+  // when the target is the newest row) from self-releasing.
+  if(_jumpAnchor && Date.now()-_jumpAnchorTs>400 && _isNearBottom(a,8)) _jumpAnchor=false;
   updateScrollBtn();
 }
+// A genuine user scroll gesture releases the jump anchor so normal auto-follow
+// resumes from wherever they land. A programmatic scrollIntoView emits only
+// 'scroll' (never wheel/touch/key/mousedown), so these fire ONLY for real user
+// input — that's what lets us distinguish the two and never fight a real scroll.
+function _releaseJumpAnchor(){ _jumpAnchor=false; }
 // Attach scroll listener once DOM ready
-document.addEventListener('DOMContentLoaded',()=>{document.getElementById('chat-area')?.addEventListener('scroll',_onChatScroll);});
+document.addEventListener('DOMContentLoaded',()=>{
+  const ca=document.getElementById('chat-area');
+  if(!ca)return;
+  ca.addEventListener('scroll',_onChatScroll);
+  ca.addEventListener('wheel',_releaseJumpAnchor,{passive:true});
+  ca.addEventListener('touchstart',_releaseJumpAnchor,{passive:true});
+  ca.addEventListener('touchmove',_releaseJumpAnchor,{passive:true});
+  // Classic-scrollbar drag/track-click: the mousedown lands on the element but
+  // in the gutter past the content box (offsetX >= clientWidth). Content clicks
+  // deliberately do NOT release — a click to select/copy text isn't a scroll.
+  ca.addEventListener('mousedown',e=>{ if(e.target===ca && e.offsetX>=ca.clientWidth) _releaseJumpAnchor(); });
+  // Keyboard scrolling: #chat-area is a non-focusable div, so a keydown listener
+  // on it never fires (events go to the focused element / <body>). Listen at the
+  // document level for keys that scroll, ignoring them while the user is typing
+  // in an input/textarea/contenteditable (there they edit text, not scroll chat).
+  document.addEventListener('keydown',e=>{
+    if(!_jumpAnchor) return;
+    const t=e.target;
+    if(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable)) return;
+    if(['PageUp','PageDown','Home','End',' ','ArrowUp','ArrowDown'].includes(e.key)) _releaseJumpAnchor();
+  });
+});
 
 // ─── Mentions system ──────────────────────────────────────────────────────────
 let mentionsList=[];
@@ -13240,8 +13761,14 @@ function highlightNicks(html){
   });
 }
 function linkify(s){return s.replace(/(https?:\/\/[^\s<>"]+)/g,(m,url)=>{
+  // `url` arrived ALREADY HTML-escaped (parseMircColors ran first), and the match
+  // class [^\s<>"]+ can't contain a raw <, > or " — so it is already safe to drop
+  // straight into href="". Re-esc()'ing it here (the old F28 bug) turned its
+  // '&amp;' into '&amp;amp;', corrupting multi-param query strings (e.g. a YouTube
+  // ?v=..&t=.. link). appendFileToken is now a pass-through (F8), so no raw
+  // fragment is appended that would still need escaping.
   const href=url.includes('/files/')?appendFileToken(url):url;
-  return `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${url}</a>`;
+  return `<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>`;
 });}
 function nickHash(n){let h=0;for(const c of(n||''))h=(h*31+c.charCodeAt(0))&0xffffffff;return Math.abs(h)%10;}
 function nickPri(n){const i='~&@%+'.indexOf(n[0]);return i>=0?i:5;}
@@ -13250,16 +13777,25 @@ function getNick(conn_id){return networks.find(n=>n.config.id===conn_id)?.nick||
 
 // ─── Nick Monitor ─────────────────────────────────────────────────────────────
 function loadMonitor(){try{return JSON.parse(localStorage.getItem('cryptirc_monitor')||'{}');}catch{return {};}}
+// NB: saveMonitor does NOT stamp cryptirc_monitor_ts — it is called by the
+// high-frequency event-driven status updaters (monitorUpdate/monitorOffline/
+// monitorRefreshOnline) too, and bumping the sync timestamp on every monitored-
+// nick message would pollute the list-intent horizon and let status churn on one
+// device reject a genuine add/remove on another (clocks skew, flushes debounce).
+// Only the user LIST-INTENT changes below (add/remove/toggle) stamp the ts.
 function saveMonitor(m){try{localStorage.setItem('cryptirc_monitor',JSON.stringify(m));}catch(e){} savePrefsToServer();}
+function _stampMonitorTs(){try{localStorage.setItem('cryptirc_monitor_ts',String(Date.now()));}catch(e){}}
 function monitorAdd(nick){
   const m=loadMonitor();
   const k=nick.toLowerCase();
   if(!m[k]) m[k]={nick,lastSeen:null,network:null,channel:null,lastMsg:null,online:false};
+  _stampMonitorTs();
   saveMonitor(m);
 }
 function monitorRemove(nick){
   const m=loadMonitor();
   delete m[nick.toLowerCase()];
+  _stampMonitorTs();
   saveMonitor(m);
 }
 // Check if a nick is in any channel's names list
@@ -13305,7 +13841,7 @@ function isMonitorNotifsOn(){
 function toggleMonitorNotifs(){
   const btn=document.getElementById('monitor-notif-toggle');
   const on=btn.classList.toggle('on');
-  try{localStorage.setItem('cryptirc_monitor_notifs',on?'on':'off');}catch(e){}
+  try{localStorage.setItem('cryptirc_monitor_notifs',on?'on':'off');localStorage.setItem('cryptirc_monitor_ts',String(Date.now()));}catch(e){}
   savePrefsToServer();
 }
 function isMonitorPushOn(){
@@ -13314,7 +13850,7 @@ function isMonitorPushOn(){
 function toggleMonitorPush(){
   const btn=document.getElementById('monitor-push-toggle');
   const on=btn.classList.toggle('on');
-  try{localStorage.setItem('cryptirc_monitor_push',on?'on':'off');}catch(e){}
+  try{localStorage.setItem('cryptirc_monitor_push',on?'on':'off');localStorage.setItem('cryptirc_monitor_ts',String(Date.now()));}catch(e){}
   savePrefsToServer();
 }
 function monitorAlert(nick,status){

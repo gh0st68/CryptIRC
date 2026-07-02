@@ -316,6 +316,27 @@ impl AppState {
         // concurrent unlock()/change_passphrase() can't re-insert the key after teardown.
         self.crypto.purge_vault(&uname).await;
     }
+
+    /// #F9: Remove a user's push subscriptions + notification prefs from disk. Called on
+    /// password reset / password change / admin disable — all of which purge sessions but,
+    /// without this, leave push subscriptions intact. An attacker who subscribed one of THEIR
+    /// devices to the victim's account would keep receiving the victim's DMs/mentions
+    /// (plaintext body) even after the victim recovers the account. Removing the push records
+    /// on recovery cuts that channel; the legitimate user re-subscribes on their next opt-in.
+    /// Mirrors purge_account's / notifications.rs's sanitization + path scheme
+    /// ({data_dir}/push/{safe}.json, {data_dir}/notif_prefs/{safe}.json).
+    pub async fn purge_push_subscriptions(&self, username: &str) {
+        let safe_name: String = username.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        if safe_name.is_empty() { return; }
+        let push_file = std::path::PathBuf::from(&self.data_dir)
+            .join("push").join(format!("{}.json", safe_name));
+        let prefs_file = std::path::PathBuf::from(&self.data_dir)
+            .join("notif_prefs").join(format!("{}.json", safe_name));
+        let _ = tokio::fs::remove_file(&push_file).await;
+        let _ = tokio::fs::remove_file(&prefs_file).await;
+    }
 }
 
 // ─── Protocol types ───────────────────────────────────────────────────────────
@@ -647,6 +668,21 @@ fn kdf_sem() -> &'static Semaphore {
     KDF_SEM.get_or_init(|| Semaphore::new(KDF_MAX_CONCURRENT))
 }
 
+// #33: process-wide cap on concurrently-buffered chunk uploads + per-chunk buffer
+// ceiling. Each in-flight /upload/chunk POST reads its body into RAM before the
+// disk append; PER_USER_MAX_INPROGRESS bounds distinct upload ids, not the number
+// of chunk POSTs in flight, and the old route buffered a fixed 64 MiB per chunk
+// regardless of max_upload_mb. The permit is acquired BEFORE the body is read and
+// the buffer is capped via to_bytes(), so at most UPLOAD_CHUNK_MAX_CONCURRENT
+// bodies of <= UPLOAD_CHUNK_MAX_BYTES are resident process-wide. Held only for the
+// read + append and released on drop; load is shed (503) when saturated.
+const UPLOAD_CHUNK_MAX_CONCURRENT: usize = 16;
+const UPLOAD_CHUNK_MAX_BYTES: usize = 8 * 1024 * 1024;
+static UPLOAD_CHUNK_SEM: std::sync::OnceLock<Semaphore> = std::sync::OnceLock::new();
+fn upload_chunk_sem() -> &'static Semaphore {
+    UPLOAD_CHUNK_SEM.get_or_init(|| Semaphore::new(UPLOAD_CHUNK_MAX_CONCURRENT))
+}
+
 // #14: cap concurrent WebSocket connections globally and per real client IP so a
 // connection flood from a few IPs can't exhaust tokio tasks / file descriptors. The
 // permit + per-IP slot are released by `WsConnGuard` on disconnect.
@@ -820,6 +856,11 @@ async fn main() -> Result<()> {
     let e2e_store = Arc::new(E2EStore::new(&data_dir));
     let paste_store = Arc::new(paste::PasteStore::new(&data_dir));
     let preview_service = Arc::new(preview::PreviewService::new(&data_dir));
+    // #45: re-harden pre-existing per-user vault/e2e secret dirs+files to 0700/0600
+    // (the create path is already secure; this covers dirs from before the hardening
+    // or an upgraded install). Best-effort, startup-once.
+    harden_secret_tree(std::path::Path::new(&format!("{}/vaults", data_dir)), 0);
+    harden_secret_tree(std::path::Path::new(&format!("{}/e2e", data_dir)), 0);
 
     let base_path = std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into());
     let bp_trimmed = base_path.trim_end_matches('/');
@@ -955,7 +996,12 @@ async fn main() -> Result<()> {
         .route("/auth/change-password",  post(route_change_password).layer(DefaultBodyLimit::max(8_192)))
         .route("/upload",                post(route_upload).layer(DefaultBodyLimit::max(legacy_upload_limit)))
         .route("/upload/init",           post(route_upload_init).layer(DefaultBodyLimit::max(4_096)))
-        .route("/upload/chunk/:id",      post(route_upload_chunk).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
+        // #33/#4: no DefaultBodyLimit here — route_upload_chunk extracts the raw Body
+        // and caps it via to_bytes() against max_upload_mb, gated by a semaphore. This
+        // supersedes finding #4's 64->2 MiB DefaultBodyLimit lowering: a Body extractor
+        // ignores DefaultBodyLimit entirely and the real per-request cap now lives in
+        // to_bytes(), while the semaphore bounds aggregate resident chunk memory.
+        .route("/upload/chunk/:id",      post(route_upload_chunk))
         .route("/upload/status/:id",     get(route_upload_status))
         .route("/upload/finalize/:id",   post(route_upload_finalize))
         .route("/upload/cancel/:id",     post(route_upload_cancel))
@@ -1142,7 +1188,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// #15: Extract the real client IP from the proxy headers nginx forwards
-/// (X-Real-IP, or the first hop of X-Forwarded-For). Returns None if neither
+/// (X-Real-IP, or the last trusted-proxy hop of X-Forwarded-For). Returns None if neither
 /// header is present (e.g. a direct-to-:9001 request that bypassed nginx), in
 /// which case the auth limiter falls back to a shared bucket. The value is used
 /// only as a rate-limit dimension — never logged or persisted (see audit #108).
@@ -1154,10 +1200,14 @@ fn client_ip(headers: &HeaderMap) -> Option<String> {
         if ip.parse::<std::net::IpAddr>().is_ok() { return Some(ip.to_string()); }
     }
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        // XFF is a comma-separated list; the left-most entry is the original client.
-        if let Some(first) = xff.split(',').next() {
-            let first = first.trim();
-            if first.parse::<std::net::IpAddr>().is_ok() { return Some(first.to_string()); }
+        // #16: XFF is an append-list; every entry LEFT of the last hop is client-supplied
+        // and spoofable. The shipped reverse proxy (nginx $proxy_add_x_forwarded_for /
+        // Caddy) appends the address IT observed as the RIGHT-MOST entry, so that last hop
+        // is the only trustworthy value. Take the right-most entry; ignore what the client
+        // prepended. Unparseable -> fall through to None (shared "noip" bucket, fail-closed).
+        if let Some(last) = xff.rsplit(',').next() {
+            let last = last.trim();
+            if last.parse::<std::net::IpAddr>().is_ok() { return Some(last.to_string()); }
         }
     }
     None
@@ -1220,7 +1270,14 @@ async fn route_admin_disable_user(State(state): State<AppState>, headers: Header
         return (StatusCode::BAD_REQUEST, Json(Msg { message: "Cannot disable yourself.".into() })).into_response();
     }
     match state.auth.disable_user(&target).await {
-        Ok(_) => (StatusCode::OK, Json(Msg { message: format!("User '{}' disabled.", target) })).into_response(),
+        Ok(_) => {
+            // #F9: disabling an account revokes its sessions; also drop its push
+            // subscriptions so a device previously subscribed to it stops receiving the
+            // account's DMs/mentions. Lowercase to match the on-disk (sanitized, lowercase)
+            // username filename regardless of the case the admin typed in the URL.
+            state.purge_push_subscriptions(&target.to_lowercase()).await;
+            (StatusCode::OK, Json(Msg { message: format!("User '{}' disabled.", target) })).into_response()
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(Msg { message: e.to_string() })).into_response(),
     }
 }
@@ -1332,7 +1389,16 @@ async fn route_admin_add_user(State(state): State<AppState>, headers: HeaderMap,
     // verifies; set_verified(true) below is then a belt-and-suspenders.
     let email = body.email.trim().to_string();
     match state.auth.register(&body.username, &email, &body.password, None, false).await {
-        Ok(_outcome) => {
+        Ok(outcome) => {
+            // #F12 regression guard: register() now returns a success-shaped outcome (not Err)
+            // when the email is already in use, creating NO account. The public route
+            // deliberately masks that for anti-enumeration, but the admin route must NOT — it
+            // would report "created" while set_verified silently no-ops on a nonexistent user.
+            // Admins are trusted and there is no enumeration concern here, so surface the real
+            // failure.
+            if outcome.email_in_use {
+                return (StatusCode::CONFLICT, Json(Msg { message: "That email is already in use by another account.".into() })).into_response();
+            }
             // Auto-verify (admin-created users don't need email verification). Go through
             // set_verified so the read-modify-write runs under the per-user lock + atomic
             // write like every other mutator — the old raw unlocked write here could race a
@@ -1396,9 +1462,20 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     // Persist admin settings to disk under lock to prevent concurrent read-modify-write races
     let _guard = state.admin_settings_lock.lock().await;
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
-    let mut existing: serde_json::Value = if let Ok(json) = tokio::fs::read_to_string(&path).await {
-        serde_json::from_str(&json).unwrap_or_default()
-    } else { serde_json::json!({}) };
+    let mut existing: serde_json::Value = match tokio::fs::read_to_string(&path).await {
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(v) => v,
+            // #17: file present but UNPARSEABLE — refuse to overwrite. Vivifying an
+            // empty object here would drop registration_open/captcha/etc. and silently
+            // re-open registration on next boot, defeating the fail-CLOSED boot logic.
+            Err(e) => {
+                drop(_guard);
+                tracing::error!("admin_settings.json present but unparseable; refusing to overwrite: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(Msg { message: "Failed to save settings.".into() })).into_response();
+            }
+        },
+        Err(_) => serde_json::json!({}),
+    };
     existing["registration_open"] = serde_json::json!(*state.registration_open.read().await);
     existing["registration_code"] = serde_json::json!(*state.registration_code.read().await);
     existing["max_upload_mb"] = serde_json::json!(*state.max_upload_mb.read().await);
@@ -1461,10 +1538,28 @@ async fn route_register(State(state): State<AppState>, headers: HeaderMap, Json(
     let email_required = *state.email_required.read().await;
     match state.auth.register(&body.username, &body.email, &body.password, ip.as_deref(), email_required).await {
         Ok(outcome) => {
+            // #F12: the email is already in use. auth.register() deliberately does NOT create a
+            // duplicate account, mint a token, or bail — it returns a success-shaped outcome so
+            // this route can mirror the genuine-signup response (same status + body). Bailing
+            // here produced a 400 + distinct message vs. the 200 of a free email, a clean
+            // email-existence oracle. No mail is sent (there is no token). The equalization is
+            // per-mode so the response is identical to what a real new signup would return in the
+            // same mode: verify-mode → "check your inbox"; immediate-login mode → "sign in now".
+            if outcome.email_in_use {
+                let msg = if email_required {
+                    "Registered! Check your email to verify your account."
+                } else {
+                    "Account created! You can sign in now."
+                };
+                return (StatusCode::OK, Json(Msg { message: msg.into() })).into_response();
+            }
             if let Some(token) = outcome.verify_token {
                 // Email verification required → mail the link (email is non-empty here).
                 let (email, uname, base, from) = (body.email.clone(), body.username.to_lowercase(), state.base_url.clone(), state.from_email.clone());
-                tokio::spawn(async move {
+                // #F27: email::send_* calls the blocking lettre SmtpTransport::send. Run it on
+                // the blocking pool (spawn_blocking) instead of a tokio::spawn async task so a
+                // slow/hanging SMTP server can't pin a runtime worker. Still fire-and-forget.
+                tokio::task::spawn_blocking(move || {
                     if let Err(e) = email::send_verification(&email, &uname, &token, &base, &from) { error!("Email: {}", e); }
                 });
                 (StatusCode::OK, Json(Msg { message: "Registered! Check your email to verify your account.".into() })).into_response()
@@ -1600,12 +1695,22 @@ async fn route_lastfm_np(State(state): State<AppState>, headers: HeaderMap, Quer
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"Invalid Last.fm username"}))).into_response();
     }
     // Key: the caller's own key wins, else the admin's shared key.
-    let key = {
-        let own = me.as_ref().map(|u| u.lastfm_key.clone()).unwrap_or_default();
-        if !own.is_empty() { own } else { state.lastfm_api_key.read().await.clone() }
-    };
+    // #42: couple shared-key use to identity. Split resolution so we know whether we
+    // ended up on the ADMIN's shared key; if so, the target MUST be the caller's own
+    // linked username (case-insensitive) — otherwise any authenticated account could
+    // spend the admin's quota on arbitrary ?user= lookups (quota drain / anonymizing
+    // relay). A caller with their OWN key keeps unrestricted ?user= lookups.
+    let own = me.as_ref().map(|u| u.lastfm_key.clone()).unwrap_or_default();
+    let using_shared = own.is_empty();
+    let key = if !using_shared { own } else { state.lastfm_api_key.read().await.clone() };
     if key.is_empty() {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"No Last.fm API key — set your own in Profile, or ask the admin to add a shared key."}))).into_response();
+    }
+    if using_shared {
+        let own_user = me.as_ref().map(|u| u.lastfm_user.clone()).unwrap_or_default();
+        if own_user.is_empty() || !own_user.eq_ignore_ascii_case(&target) {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"Set your own Last.fm API key in Profile to look up other users."}))).into_response();
+        }
     }
     match lastfm::now_playing(&state.gif_client, &key, &target).await {
         Ok(t) => (StatusCode::OK, Json(serde_json::json!({
@@ -1617,15 +1722,21 @@ async fn route_lastfm_np(State(state): State<AppState>, headers: HeaderMap, Quer
 
 async fn route_login(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<LoginBody>) -> impl IntoResponse {
     let ip = client_ip(&headers);
+    // #18: Throttle every login POST per IP up front, BEFORE canonical_login_id() below —
+    // which for an email identifier read_dir+JSON-parses every users/ file (O(N)). Gating the
+    // scan behind the per-IP limit stops a flood of email-shaped identifiers from multiplying
+    // server work by the user count ahead of any rate limit. Also bounds brute force AND the
+    // wrong-captcha early-return path below (which would otherwise never reach login()'s own
+    // rate limit). The captcha hint here is keyed on the raw identifier (identical to the
+    // account key for username logins; may under-report for an email login, harmless on an
+    // already-rejected 429) — resolving the canonical id here would re-run the scan we gate.
+    if state.auth.check_ip_rate_limit("login_attempt", ip.as_deref()).is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(LoginErr { message: "Too many attempts — try again later.".into(), captcha_required: state.auth.login_captcha_required(ip.as_deref(), &body.username) })).into_response();
+    }
     // #7: resolve username-OR-email to the canonical account username and key the captcha
     // gate + fail-counter on THAT, so an account reachable by both username and email
     // doesn't get two independent captcha/fail buckets (double the brute-force budget).
     let acct = state.auth.canonical_login_id(&body.username).await;
-    // Throttle every login POST per IP up front — bounds brute force AND the wrong-captcha
-    // early-return path below (which would otherwise never reach login()'s own rate limit).
-    if state.auth.check_ip_rate_limit("login_attempt", ip.as_deref()).is_err() {
-        return (StatusCode::TOO_MANY_REQUESTS, Json(LoginErr { message: "Too many attempts — try again later.".into(), captcha_required: state.auth.login_captcha_required(ip.as_deref(), &acct) })).into_response();
-    }
     // After enough recent failures from this IP, require a captcha BEFORE checking the
     // password, so password-guessing is captcha-gated. Normal logins are unaffected.
     if state.auth.login_captcha_required(ip.as_deref(), &acct) {
@@ -1702,7 +1813,9 @@ async fn route_forgot(State(state): State<AppState>, headers: HeaderMap, Json(bo
     let (email_addr, base, from) = (body.email.clone(), state.base_url.clone(), state.from_email.clone());
     match state.auth.request_password_reset(&body.email, ip.as_deref()).await {
         Ok(Some((token, username))) => {
-            tokio::spawn(async move {
+            // #F27: run the blocking lettre SMTP send on the blocking pool so a slow SMTP
+            // server can't pin a tokio runtime worker. Still fire-and-forget + error-logged.
+            tokio::task::spawn_blocking(move || {
                 if let Err(e) = email::send_password_reset(&email_addr, &username, &token, &base, &from) { error!("Reset email: {}", e); }
             });
         }
@@ -1774,6 +1887,10 @@ async fn route_reset_password(State(state): State<AppState>, headers: HeaderMap,
     match state.auth.reset_password(&body.token, &body.password, ip.as_deref()).await {
         Ok(username) => {
             info!("Password reset for user: {}", username);
+            // #F9: a reset means the account may have been compromised — drop any push
+            // subscriptions so an attacker's device can't keep receiving the victim's
+            // DMs/mentions post-recovery. The user re-subscribes on next opt-in.
+            state.purge_push_subscriptions(&username).await;
             (StatusCode::OK, Json(Msg { message: "Password reset successfully.".into() })).into_response()
         }
         Err(e) => {
@@ -1809,6 +1926,10 @@ async fn route_change_password(State(state): State<AppState>, headers: HeaderMap
     };
     match state.auth.change_password(&user, &body.old_password, &body.new_password, ip.as_deref()).await {
         Ok(_) => {
+            // #F9: a password change also invalidates any push subscriptions a prior
+            // (possibly hostile) session left behind — drop them so they can't keep
+            // receiving the user's DMs/mentions. `user` is the resolved session username.
+            state.purge_push_subscriptions(&user).await;
             // change_password() purges ALL sessions (incl. this caller's) for security; re-issue
             // a fresh session so the user who just changed their own password stays logged in
             // (other devices remain logged out — that's the intent). Client swaps to this token.
@@ -1829,6 +1950,13 @@ async fn route_upload(State(state): State<AppState>, headers: HeaderMap, multipa
         Some(user) => {
             if !state.auth.can_upload(&user).await {
                 return (StatusCode::FORBIDDEN, Json(Msg { message: "Upload permission not granted. Contact an admin.".into() })).into_response();
+            }
+            // #32: per-user rate limit so an at-quota/abusive account can't flood the
+            // RAM/ffmpeg metadata-strip path. Runs before handle_upload so a throttled
+            // request never pays the strip cost. Shared 10/60s budget (same "upload"
+            // bucket as /upload/init; matches paste/short creation limits).
+            if state.auth.check_user_create_rate_limit(&user, "upload").is_err() {
+                return (StatusCode::TOO_MANY_REQUESTS, Json(Msg { message: "Too many uploads — slow down".into() })).into_response();
             }
             let max_bytes = *state.max_upload_mb.read().await * 1024 * 1024;
             match upload::handle_upload(&state.upload_dir, multipart, max_bytes).await {
@@ -1906,6 +2034,13 @@ async fn route_upload_init(
     Json(body): Json<ChunkedInitBody>,
 ) -> impl IntoResponse {
     let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
+    // #32: per-user rate limit on the chunked-upload entry point. Gating init bounds
+    // how many new uploads (and thus finalize-time metadata strips) one account can
+    // start; the per-chunk route stays unlimited so large multi-chunk files still
+    // work. Shared 10/60s "upload" bucket (same as the legacy /upload route).
+    if state.auth.check_user_create_rate_limit(&user, "upload").is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error":"Too many uploads — slow down"}))).into_response();
+    }
     let max_bytes = *state.max_upload_mb.read().await * 1024 * 1024;
     if body.size > max_bytes {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
@@ -1931,11 +2066,28 @@ struct ChunkQuery { offset: usize }
 async fn route_upload_chunk(
     State(state): State<AppState>, headers: HeaderMap,
     Path(id): Path<String>, Query(q): Query<ChunkQuery>,
-    body: axum::body::Bytes,
+    body: axum::body::Body,
 ) -> impl IntoResponse {
     let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
+    // #33: bound total RAM from concurrent in-flight chunk bodies. Take a
+    // process-wide permit BEFORE buffering so at most UPLOAD_CHUNK_MAX_CONCURRENT
+    // chunk bodies are resident at once; shed (503) when saturated rather than
+    // queueing — the frontend chunk-pump retries transient 503s with backoff.
+    let _permit = match upload_chunk_sem().try_acquire() {
+        Ok(p)  => p,
+        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"Server busy — retry shortly"}))).into_response(),
+    };
     // Enforce the admin max-upload limit against the cumulative file size.
     let max_bytes = *state.max_upload_mb.read().await * 1024 * 1024;
+    // #33: cap the single-chunk buffer to the configured limit (+1 MiB for the
+    // client's ~1 MiB chunk size), never above UPLOAD_CHUNK_MAX_BYTES, instead of
+    // the old fixed 64 MiB — so a chunk POST can't force a 64 MiB allocation
+    // regardless of max_upload_mb. Oversized reads error out early.
+    let chunk_cap = std::cmp::min(UPLOAD_CHUNK_MAX_BYTES, max_bytes.saturating_add(1024 * 1024));
+    let body = match axum::body::to_bytes(body, chunk_cap).await {
+        Ok(b)  => b,
+        Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, Json(serde_json::json!({"error":"Chunk too large"}))).into_response(),
+    };
     if q.offset.saturating_add(body.len()) > max_bytes {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
             "error": format!("File too large (max {} MB)", max_bytes / (1024 * 1024))
@@ -2071,12 +2223,14 @@ async fn route_paste_view(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    Query(params): Query<std::collections::HashMap<String, String>>,
+    Query(_params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    // GET still reads ?password for an unprotected paste / direct link; the unlock FORM
-    // now POSTs (see route_paste_view_post) so a typed password never lands in the URL.
-    let pw = params.get("password").map(|s| s.as_str()).unwrap_or("");
-    render_paste(&state, &id, &headers, pw).await
+    // #F24: never honor ?password on the GET path. A protected paste is unlocked only via the
+    // POST form (route_paste_view_post) so the password can't land in the URL / proxy access
+    // log / browser history / Referer. Passing an empty password here leaves public pastes
+    // fully viewable (their password is unused) and makes a protected paste render the POST
+    // unlock form instead of accepting a query-string password.
+    render_paste(&state, &id, &headers, "").await
 }
 
 // POST unlock: the password arrives in the form body, never the query string — so it
@@ -2339,9 +2493,19 @@ async fn route_admin_put_preview_settings(
     // Load existing admin settings and merge preview settings — under lock
     let _guard = state.admin_settings_lock.lock().await;
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
-    let mut existing: serde_json::Value = if let Ok(json) = tokio::fs::read_to_string(&path).await {
-        serde_json::from_str(&json).unwrap_or_default()
-    } else { serde_json::json!({}) };
+    let mut existing: serde_json::Value = match tokio::fs::read_to_string(&path).await {
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(v) => v,
+            // #17: file present but UNPARSEABLE — refuse to overwrite, or we would drop
+            // registration_open/captcha/etc. and silently re-open registration on boot.
+            Err(e) => {
+                drop(_guard);
+                tracing::error!("admin_settings.json present but unparseable; refusing to overwrite: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message":"Failed to save settings"}))).into_response();
+            }
+        },
+        Err(_) => serde_json::json!({}),
+    };
     existing["link_preview_mode"] = serde_json::json!(body.mode);
     existing["link_preview_whitelist"] = serde_json::json!(body.whitelist);
     if let Err(e) = write_secret_json_atomic(&path, &existing).await { // #30/#112
@@ -2476,10 +2640,19 @@ async fn route_gif_search(
         Err(e) => { info!("[gif] {} fetch error: timeout={} connect={}", provider, e.is_timeout(), e.is_connect());
             return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"GIF search failed"}))).into_response(); }
     };
-    // #99: cap the upstream body (a hostile/buggy provider must not stream unbounded
-    // bytes into RAM). 4 MiB is generous for a GIF-search JSON response.
+    // #99/#44: cap the upstream body (a hostile/buggy/MITM'd provider must not stream
+    // unbounded bytes into RAM). 4 MiB is generous for a GIF-search JSON response.
+    // Reject up front on an oversized Content-Length, then read INCREMENTALLY via the
+    // shared read_capped_body helper (chunk-wise) so we never buffer more than
+    // MAX_GIF_BODY+1 bytes even when Content-Length is absent or understated.
     const MAX_GIF_BODY: usize = 4 * 1024 * 1024;
-    let bytes = match resp.bytes().await {
+    if let Some(len) = resp.content_length() {
+        if len > MAX_GIF_BODY as u64 {
+            info!("[gif] {} response exceeded {} bytes", provider, MAX_GIF_BODY);
+            return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"GIF search failed"}))).into_response();
+        }
+    }
+    let bytes = match preview::read_capped_body(resp, MAX_GIF_BODY + 1).await {
         Ok(b) if b.len() <= MAX_GIF_BODY => b,
         Ok(_) => { info!("[gif] {} response exceeded {} bytes", provider, MAX_GIF_BODY);
             return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"GIF search failed"}))).into_response(); }
@@ -2564,15 +2737,20 @@ async fn ws_handler(State(state): State<AppState>, headers: HeaderMap, ws: WebSo
     let Ok(permit) = ws_sem().try_acquire() else {
         return (StatusCode::SERVICE_UNAVAILABLE, "Server at capacity").into_response();
     };
-    let ip = client_ip(&headers);
-    if let Some(ipk) = &ip {
-        let mut c = ws_ip_counts().entry(ipk.clone()).or_insert(0);
+    // #15: previously the per-IP cap lived inside `if let Some(ip)`, so header-less
+    // connections (direct-to-:9001, or a proxy not forwarding IP headers) skipped the
+    // per-IP cap entirely and were bounded only by the 4000 global cap — one source
+    // could exhaust the pool for everyone. Collapse a missing IP into a shared "noip"
+    // bucket so WS_MAX_PER_IP_CONNS always applies.
+    let ip = client_ip(&headers).unwrap_or_else(|| "noip".to_string());
+    {
+        let mut c = ws_ip_counts().entry(ip.clone()).or_insert(0);
         if *c >= WS_MAX_PER_IP_CONNS {
             return (StatusCode::SERVICE_UNAVAILABLE, "Too many connections").into_response();
         }
         *c += 1;
     }
-    let guard = WsConnGuard { _permit: permit, ip };
+    let guard = WsConnGuard { _permit: permit, ip: Some(ip) };
     ws.on_upgrade(move |socket| handle_ws(socket, state, guard))
 }
 
@@ -3116,8 +3294,17 @@ async fn handle_command(
             if let Some(conn) = conn {
                 let safe = strip_crlf(&raw);
                 if safe.is_empty() { return; }
-                // Skip TAGMSG from logging (typing indicators etc)
-                let is_tagmsg = safe.contains("TAGMSG");
+                // Skip TAGMSG from logging (typing indicators etc). #F23: detect TAGMSG by the
+                // actual command VERB, not a substring of the whole line — a PRIVMSG whose BODY
+                // contains "TAGMSG" must not be misclassified (and then dropped / not logged).
+                // Typing indicators arrive as `@+typing=active TAGMSG <target>`, so skip an
+                // optional IRCv3 @message-tags prefix (and a source prefix) before the verb.
+                let is_tagmsg = {
+                    let mut rest = safe.trim_start();
+                    if rest.starts_with('@') { rest = rest.splitn(2, ' ').nth(1).unwrap_or("").trim_start(); }
+                    if rest.starts_with(':') { rest = rest.splitn(2, ' ').nth(1).unwrap_or("").trim_start(); }
+                    rest.split(' ').next().unwrap_or("").eq_ignore_ascii_case("TAGMSG")
+                };
                 // Silently drop TAGMSG for connections that don't support message-tags
                 if is_tagmsg {
                     let c = conn.lock().await;
@@ -3381,6 +3568,15 @@ async fn handle_command(
         // ── E2E: identity key blob (browser-encrypted private keys) ───────────
         ClientMessage::E2EStoreIdentity { blob } => {
             info!("[E2E] store_identity for {} ({} bytes)", username, blob.len());
+            // #14: E2E blobs are only producible by an UNLOCKED vault (client derives the
+            // wrapping key from the vault master key). Refuse writes while locked, and refuse
+            // an empty/oversized blob, so a locked/stale/XSS'd client can't wipe identity.enc.
+            if !state.crypto.is_unlocked(username).await {
+                send(ServerEvent::Error { message: "Vault must be unlocked to store E2E identity".into() }); return;
+            }
+            if blob.is_empty() || blob.len() > WS_MAX_MSG_BYTES {
+                send(ServerEvent::Error { message: "E2E identity blob rejected (empty or too large)".into() }); return;
+            }
             match state.e2e_store.store_identity_enc(username, &blob).await {
                 Ok(_)  => info!("[E2E] identity stored for {}", username),
                 Err(e) => { info!("[E2E] identity store FAILED for {}: {}", username, e); send(ServerEvent::Error { message: format!("E2E store identity: {}", e) }); },
@@ -3396,6 +3592,11 @@ async fn handle_command(
         // ── E2E: public key bundle + one-time prekeys ─────────────────────────
         ClientMessage::E2EPublishBundle { mut bundle } => {
             info!("[E2E] publish_bundle for {}", username);
+            // #14: only an unlocked vault can produce a valid bundle — reject while locked so
+            // a locked/stale/XSS'd client can't overwrite the live published bundle.
+            if !state.crypto.is_unlocked(username).await {
+                send(ServerEvent::Error { message: "Vault must be unlocked to publish E2E bundle".into() }); return;
+            }
             // HIGH: cap OTPKs carried in a bundle so one publish can't exhaust
             // inodes/disk (one file per key). Real clients publish a small bounded
             // batch; 256 matches the client refill batch size.
@@ -3416,6 +3617,11 @@ async fn handle_command(
             }
         }
         ClientMessage::E2EAddOTPKs { mut keys } => {
+            // #14: reject OTPK writes while the vault is locked (private halves are only
+            // producible by an unlocked vault).
+            if !state.crypto.is_unlocked(username).await {
+                send(ServerEvent::Error { message: "Vault must be unlocked to add E2E prekeys".into() }); return;
+            }
             // HIGH: cap per-call OTPK count so a single add can't exhaust
             // inodes/disk (one file per key). 256 matches the client refill batch.
             if keys.len() > 256 {
@@ -3470,59 +3676,70 @@ async fn handle_command(
 
         // ── E2E: ratchet session state ────────────────────────────────────────
         ClientMessage::E2EStoreSession { partner, blob } => {
-            let safe_partner = partner.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                .take(128).collect::<String>();
-            match state.e2e_store.store_session(username, &safe_partner, &blob).await {
+            // #14: session blobs are only producible by an unlocked vault — reject writes
+            // while locked, and reject empty/oversized blobs, to prevent self-DoS/corruption.
+            if !state.crypto.is_unlocked(username).await {
+                send(ServerEvent::Error { message: "Vault must be unlocked to store E2E session".into() }); return;
+            }
+            if blob.is_empty() || blob.len() > WS_MAX_MSG_BYTES {
+                send(ServerEvent::Error { message: "E2E session blob rejected (empty or too large)".into() }); return;
+            }
+            // #13: pass the RAW partner through; the single canonical injective sanitizer
+            // lives in e2e::safe_partner (applied inside store_session), so client cache,
+            // on-disk stem, and other devices never diverge for non-ASCII/bracket nicks.
+            match state.e2e_store.store_session(username, &partner, &blob).await {
                 Ok(_)  => {}
                 Err(e) => send(ServerEvent::Error { message: format!("E2E store session: {}", e) }),
             }
         }
         ClientMessage::E2ELoadSession { partner } => {
-            let safe_partner = partner.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                .take(128).collect::<String>();
-            match state.e2e_store.load_session(username, &safe_partner).await {
-                Some(blob) => send(ServerEvent::E2ESession { partner: safe_partner, blob }),
-                None       => send(ServerEvent::E2ESession { partner: safe_partner, blob: String::new() }),
+            // #13: pass/echo the RAW partner (client keys dmSessions by the raw nick);
+            // e2e::safe_partner does the sole, injective filename derivation.
+            match state.e2e_store.load_session(username, &partner).await {
+                Some(blob) => send(ServerEvent::E2ESession { partner, blob }),
+                None       => send(ServerEvent::E2ESession { partner, blob: String::new() }),
             }
         }
         ClientMessage::E2EDeleteSession { partner } => {
-            let safe_partner = partner.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                .take(128).collect::<String>();
-            let _ = state.e2e_store.delete_session(username, &safe_partner).await;
+            // #13: pass the RAW partner; e2e::safe_partner does the sole filename derivation.
+            let _ = state.e2e_store.delete_session(username, &partner).await;
         }
 
         // ── E2E: channel pre-shared keys ──────────────────────────────────────
         ClientMessage::E2EStoreChannelKey { channel, blob } => {
-            let safe_chan = channel.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '#' || *c == '&')
-                .take(64).collect::<String>();
-            match state.e2e_store.store_channel_key(username, &safe_chan, &blob).await {
+            // #14: channel-key blobs are only producible by an unlocked vault — reject writes
+            // while locked, and reject empty/oversized blobs (self-DoS/corruption).
+            if !state.crypto.is_unlocked(username).await {
+                send(ServerEvent::Error { message: "Vault must be unlocked to store E2E channel key".into() }); return;
+            }
+            if blob.is_empty() || blob.len() > WS_MAX_MSG_BYTES {
+                send(ServerEvent::Error { message: "E2E channel key blob rejected (empty or too large)".into() }); return;
+            }
+            // #13/#36: one canonical, injective sanitizer lives in e2e::safe_channel
+            // (applied inside store_channel_key). Pass the raw channel through and echo
+            // the same name so client, disk stem, and other devices never diverge;
+            // non-canonical names are rejected as an Err below.
+            match state.e2e_store.store_channel_key(username, &channel, &blob).await {
                 Ok(_)  => {
                     // Notify ALL sessions so other devices load the new key
                     state.send_to_user(username, ServerEvent::E2EChannelKey {
-                        channel: safe_chan.clone(), blob,
+                        channel, blob,
                     });
                 }
                 Err(e) => send(ServerEvent::Error { message: format!("E2E store channel key: {}", e) }),
             }
         }
         ClientMessage::E2ELoadChannelKey { channel } => {
-            let safe_chan = channel.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '#' || *c == '&')
-                .take(64).collect::<String>();
-            match state.e2e_store.load_channel_key(username, &safe_chan).await {
-                Some(blob) => send(ServerEvent::E2EChannelKey { channel: safe_chan, blob }),
-                None       => {} // no key — channel not encrypted
+            // #13/#36: pass/echo the RAW channel; e2e::safe_channel is the sole sanitizer.
+            match state.e2e_store.load_channel_key(username, &channel).await {
+                Some(blob) => send(ServerEvent::E2EChannelKey { channel, blob }),
+                None       => {} // no key — channel not encrypted (or non-canonical name)
             }
         }
         ClientMessage::E2EDeleteChannelKey { channel } => {
-            let safe_chan = channel.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '#' || *c == '&')
-                .take(64).collect::<String>();
-            let _ = state.e2e_store.delete_channel_key(username, &safe_chan).await;
+            // #13/#36: pass the RAW channel; e2e::safe_channel no-ops internally on a
+            // non-canonical name.
+            let _ = state.e2e_store.delete_channel_key(username, &channel).await;
             // Notify ALL sessions of this user so other devices update the lock icon
             state.send_to_user(username, ServerEvent::E2EChannelList {
                 channels: state.e2e_store.list_channel_keys(username).await,
@@ -3535,10 +3752,10 @@ async fn handle_command(
 
         // ── E2E: TOFU trust management ────────────────────────────────────────
         ClientMessage::E2EUpdateTrust { nick, fingerprint, verified } => {
-            let safe_nick = nick.chars()
-                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-                .take(64).collect::<String>();
-            match state.e2e_store.update_trust(username, &safe_nick, &fingerprint, verified).await {
+            // #13: pass the RAW nick; trust.json keys records by the nick string itself,
+            // so string identity is already injective — no filename sanitizer needed, and
+            // the client keys trustStore by the raw nick.
+            match state.e2e_store.update_trust(username, &nick, &fingerprint, verified).await {
                 Ok((rec, key_changed)) => send(ServerEvent::E2ETrust {
                     nick:        rec.nick,
                     fingerprint: rec.fingerprint,
@@ -3569,6 +3786,24 @@ async fn handle_command(
             if state.auth.check_ws_kdf_rate_limit(username, "e2e_relay").is_err() {
                 send(ServerEvent::Error { message: "Too many relay requests — slow down".into() });
                 return;
+            }
+            // #49: bind the relayed X3DH header to the sender's OWN published bundle.
+            // `from_nick` is derived from this authenticated connection, so the "named
+            // user's published bundle" IS this user's bundle. Refuse to relay a header
+            // whose advertised identity keys diverge from what this user published, so a
+            // responder can never be made to pin an identity that disagrees with the
+            // published bundle. A legitimate initiator always builds the header from the
+            // same identity keys it published, so this only rejects forged/mismatched
+            // headers. If the sender has no published bundle (nothing to cross-check), we
+            // fall through and relay as before, preserving existing behaviour.
+            if let Some((dh, sign)) = state.e2e_store.bundle_identity_keys(username).await {
+                let hdr_ik   = header.get("sender_ik").and_then(|v| v.as_str()).unwrap_or("");
+                let hdr_sign = header.get("sender_sign_ik").and_then(|v| v.as_str()).unwrap_or("");
+                if hdr_ik != dh.as_str() || hdr_sign != sign.as_str() {
+                    warn!("[E2E] refusing X3DH relay from {}: header identity != published bundle", username);
+                    send(ServerEvent::Error { message: "E2E relay refused: identity mismatch".into() });
+                    return;
+                }
             }
             // Relay X3DH header to target user via server (too large for IRC)
             let safe: String = target_nick.chars()
@@ -3607,8 +3842,17 @@ async fn handle_command(
             }
         }
         ClientMessage::SaveAppearance { settings } => {
-            // Limit to 4KB to prevent abuse; validate it's well-formed JSON
-            if settings.len() <= 4096 && serde_json::from_str::<serde_json::Value>(&settings).is_ok() {
+            // Limit to 4KB to prevent abuse; require well-formed JSON that is also an
+            // object AND passes a structural safety check (#51) before we persist it and
+            // fan it out to every one of this user's sessions — this closes the untrusted-
+            // data channel into the client theme sink without enumerating individual keys
+            // (so custom themes + future settings keep syncing).
+            let parsed = if settings.len() <= 4096 {
+                serde_json::from_str::<serde_json::Value>(&settings).ok()
+            } else {
+                None
+            };
+            if parsed.as_ref().map_or(false, |v| v.is_object() && appearance_json_is_safe(v, 0)) {
                 let dir = std::path::PathBuf::from(&state.data_dir)
                     .join("users").join(&safe_username(username));
                 let _ = tokio::fs::create_dir_all(&dir).await;
@@ -3892,6 +4136,12 @@ impl AppState {
         let conn_ids: Vec<String> = self.connections.iter()
             .map(|e| e.key().clone())
             .collect();
+        // #1: the connection map is GLOBAL and carries no proof that a nick belongs to
+        // any particular account, so a nick held by two or more DISTINCT accounts is
+        // ambiguous — an attacker who nick-grabs a peer would otherwise be arbitrarily
+        // picked and serve their own bundle/relay. Accumulate the single distinct owner;
+        // a second distinct owner must refuse (None), not be arbitrarily selected.
+        let mut owner: Option<String> = None;
         for conn_id in conn_ids {
             // Clone the Arc out and DROP the DashMap Ref before awaiting the Mutex —
             // holding a shard read-guard across .await blocks same-shard insert/remove
@@ -3903,13 +4153,20 @@ impl AppState {
                     c.nick.clone()
                 };
                 if conn_nick.to_lowercase() == nick_lower {
-                    if let Some(owner) = self.conn_owners.get(&conn_id) {
-                        return Some(owner.clone());
+                    if let Some(o) = self.conn_owners.get(&conn_id) {
+                        match &owner {
+                            None => owner = Some(o.clone()),
+                            Some(existing) if existing.as_str() == o.as_str() => {}
+                            Some(_) => {
+                                warn!("[E2E] refusing ambiguous nick resolution for '{}' — multiple accounts hold it", nick);
+                                return None;
+                            }
+                        }
                     }
                 }
             }
         }
-        None
+        owner
     }
 
     async fn owns_network(&self, username: &str, id: &str) -> bool {
@@ -3974,6 +4231,44 @@ impl AppState {
         }
     }
 
+    /// #F31: compute the at-rest value for one credential field, hardened against a vault
+    /// Lock/Unlock that races between the get_network_config (read/decrypt) and save_network
+    /// (re-encrypt) of the same read-modify-write:
+    ///   • an already-"enc:" `incoming` (e.g. a value read back while the vault was locked, so
+    ///     get_network_config never decrypted it) is persisted verbatim — never re-encrypted
+    ///     into enc:<E(enc:…)>, which would irrecoverably corrupt the credential;
+    ///   • when the vault is unlocked, plaintext is encrypted the normal way;
+    ///   • when the vault is locked we cannot encrypt, so rather than write the plaintext a
+    ///     prior unlocked read handed us (leaking the credential at rest) we keep the prior
+    ///     on-disk "enc:" blob if one exists.
+    /// The "enc:" sentinel matches how the credentials are wrapped below (crypto::encrypt
+    /// returns bare base64; this module prefixes it with "enc:").
+    async fn encrypt_cred_field(&self, username: &str, unlocked: bool, incoming: &str, on_disk: Option<&str>) -> anyhow::Result<String> {
+        if Self::is_enc_blob(incoming) {
+            return Ok(incoming.to_string()); // already an encrypted blob — persist verbatim
+        }
+        if unlocked {
+            let enc = self.crypto.encrypt(username, incoming.as_bytes()).await?;
+            return Ok(format!("enc:{}", enc));
+        }
+        match on_disk {
+            Some(d) if Self::is_enc_blob(d) => Ok(d.to_string()), // never overwrite enc: with plaintext
+            _ => Ok(incoming.to_string()),
+        }
+    }
+
+    /// True only for values that are genuinely our "enc:"-wrapped AEAD blobs: "enc:" followed by
+    /// base64 that decodes to at least NONCE(12)+TAG(16)=28 bytes (crypto::encrypt's minimum
+    /// output). #F31-regression: the bare `starts_with("enc:")` check treated a *plaintext*
+    /// credential that merely begins with the literal "enc:" (e.g. "enc:hunter2") as an already-
+    /// encrypted blob and stored it verbatim in cleartext at rest. Validating the base64 length
+    /// disambiguates a real blob from such a plaintext, while still catching a genuine blob read
+    /// back undecrypted (locked vault) so it is never double-encrypted.
+    fn is_enc_blob(s: &str) -> bool {
+        let Some(rest) = s.strip_prefix("enc:") else { return false };
+        matches!(base64::Engine::decode(&base64::engine::general_purpose::STANDARD, rest), Ok(b) if b.len() >= 28)
+    }
+
     pub async fn save_network(&self, cfg: &NetworkConfig, username: &str) -> anyhow::Result<()> {
         let safe_id = validate_uuid(&cfg.id).ok_or_else(|| anyhow::anyhow!("Invalid network id"))?;
         let dir     = format!("{}/networks/{}", self.data_dir, username);
@@ -4002,29 +4297,36 @@ impl AppState {
         }
         persisted.auto_join = persisted.auto_join.iter().map(|c| strip_crlf(c)).collect();
         persisted.perform_commands = persisted.perform_commands.iter().map(|c| strip_crlf(c)).collect();
-        if self.crypto.is_unlocked(username).await {
-            if let Some(ref p) = cfg.password {
-                let enc = self.crypto.encrypt(username, p.as_bytes()).await?;
-                persisted.password = Some(format!("enc:{}", enc));
+        // #F31: capture the vault-unlock state ONCE for this read-modify-write, and load the
+        // currently-persisted (raw, un-decrypted) config so a vault Lock/Unlock racing between
+        // the get_network_config that produced `cfg` and this save can't corrupt the at-rest
+        // credentials. encrypt_cred_field never double-encrypts an already-"enc:" blob and never
+        // overwrites an on-disk "enc:" value with plaintext while the vault is locked.
+        let unlocked  = self.crypto.is_unlocked(username).await;
+        let existing: Option<NetworkConfig> = tokio::fs::read_to_string(format!("{}/{}.json", dir, safe_id))
+            .await.ok()
+            .and_then(|j| serde_json::from_str(&j).ok());
+        if let Some(ref p) = cfg.password {
+            persisted.password = Some(self.encrypt_cred_field(username, unlocked, p,
+                existing.as_ref().and_then(|e| e.password.as_deref())).await?);
+        }
+        if let Some(ref sc) = cfg.sasl_plain {
+            persisted.sasl_plain = Some(crate::SaslConfig {
+                account:  sc.account.clone(),
+                password: self.encrypt_cred_field(username, unlocked, &sc.password,
+                    existing.as_ref().and_then(|e| e.sasl_plain.as_ref()).map(|s| s.password.as_str())).await?,
+            });
+        }
+        if let Some(ref p) = cfg.oper_pass {
+            if !p.is_empty() {
+                persisted.oper_pass = Some(self.encrypt_cred_field(username, unlocked, p,
+                    existing.as_ref().and_then(|e| e.oper_pass.as_deref())).await?);
             }
-            if let Some(ref sc) = cfg.sasl_plain {
-                let enc = self.crypto.encrypt(username, sc.password.as_bytes()).await?;
-                persisted.sasl_plain = Some(crate::SaslConfig {
-                    account:  sc.account.clone(),
-                    password: format!("enc:{}", enc),
-                });
-            }
-            if let Some(ref p) = cfg.oper_pass {
-                if !p.is_empty() {
-                    let enc = self.crypto.encrypt(username, p.as_bytes()).await?;
-                    persisted.oper_pass = Some(format!("enc:{}", enc));
-                }
-            }
-            if let Some(ref p) = cfg.nickserv_pass {
-                if !p.is_empty() {
-                    let enc = self.crypto.encrypt(username, p.as_bytes()).await?;
-                    persisted.nickserv_pass = Some(format!("enc:{}", enc));
-                }
+        }
+        if let Some(ref p) = cfg.nickserv_pass {
+            if !p.is_empty() {
+                persisted.nickserv_pass = Some(self.encrypt_cred_field(username, unlocked, p,
+                    existing.as_ref().and_then(|e| e.nickserv_pass.as_deref())).await?);
             }
         }
 
@@ -4123,6 +4425,34 @@ impl AppState {
 
 // ─── String sanitization ──────────────────────────────────────────────────────
 
+/// Structural safety gate for the synced appearance blob (#51). This blob is persisted
+/// and broadcast to every one of a user's sessions and is consumed by the client theme
+/// sink, so a hijacked session must not be able to push markup / CSS-injection
+/// metacharacters or pathological structure through it. We validate STRUCTURE (bounded
+/// nesting, bounded member counts, no '<' / '>' / control chars in any string or key)
+/// rather than enumerating individual keys, so custom themes and future appearance
+/// settings keep syncing unchanged. Numeric ranges are clamped by the client at apply time.
+fn appearance_json_is_safe(v: &serde_json::Value, depth: u32) -> bool {
+    if depth > 12 {
+        return false;
+    }
+    fn str_ok(s: &str) -> bool {
+        !s.chars().any(|c| c == '<' || c == '>' || c.is_control())
+    }
+    match v {
+        serde_json::Value::String(s) => str_ok(s),
+        serde_json::Value::Array(a) => {
+            a.len() <= 1024 && a.iter().all(|e| appearance_json_is_safe(e, depth + 1))
+        }
+        serde_json::Value::Object(m) => {
+            m.len() <= 1024
+                && m.iter().all(|(k, val)| str_ok(k) && appearance_json_is_safe(val, depth + 1))
+        }
+        // Numbers / bools / null are inert once JSON-parsed.
+        _ => true,
+    }
+}
+
 /// Sanitize a username for safe filesystem path usage (defense-in-depth)
 pub fn safe_username(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').take(64).collect()
@@ -4148,6 +4478,26 @@ fn create_dir_secure(path: &str) -> std::io::Result<()> {
 fn harden_dir_perms(path: &str) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+}
+
+/// #45: re-harden an existing secret directory TREE at startup so per-user vault/e2e
+/// subdirs (and their secret files) created before the 0700/0600 hardening — or on an
+/// upgraded install where `unlock()`/`create_dir_secure` returns early before re-chmod —
+/// are brought to 0700 dirs / 0600 files. Best-effort, bounded to startup, skips symlinks
+/// (a swapped symlink must not redirect the chmod). Depth-capped as a runaway guard.
+fn harden_secret_tree(path: &std::path::Path, depth: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    if depth > 6 { return; }
+    let meta = match std::fs::symlink_metadata(path) { Ok(m) => m, Err(_) => return };
+    if meta.file_type().is_symlink() { return; }
+    if meta.is_dir() {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        if let Ok(rd) = std::fs::read_dir(path) {
+            for ent in rd.flatten() { harden_secret_tree(&ent.path(), depth + 1); }
+        }
+    } else if meta.is_file() {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
 }
 
 /// #58: debounce unsolicited `E2EOTPKLow` pushes to a target. A third party fetching a

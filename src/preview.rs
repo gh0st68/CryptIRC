@@ -121,6 +121,15 @@ impl PreviewService {
             if parsed.scheme() != "https" {
                 anyhow::bail!("Only HTTPS URLs supported");
             }
+            // #43: reject embedded userinfo/credentials on EVERY hop, mirroring
+            // notifications.rs's push-endpoint guard. A URL like
+            // https://trusted.com@evil-public.com/ has host_str()=evil-public.com
+            // but reqwest still forwards the credentials to the final host (and
+            // re-sends them across redirects); refuse outright so the host we
+            // validate and pin is unambiguous.
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                anyhow::bail!("URLs must not contain credentials");
+            }
             let domain = parsed.host_str().unwrap_or("").to_lowercase();
             if domain.is_empty() {
                 anyhow::bail!("No host in URL");
@@ -266,7 +275,7 @@ fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Clie
 /// Read a response body incrementally, capping the buffered size at `max` bytes.
 /// Aborts (returns what was read so far) once the cap is reached so an oversized
 /// or decompression-bomb body cannot exhaust memory. (#32)
-async fn read_capped_body(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+pub(crate) async fn read_capped_body(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>> {
     let mut buf: Vec<u8> = Vec::new();
     let mut truncated = false;
     while let Some(chunk) = resp.chunk().await? {

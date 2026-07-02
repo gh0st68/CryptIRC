@@ -107,6 +107,14 @@ pub struct RegisterOutcome {
     /// Some(token) → caller should email a verification link to the address.
     /// None → the account is already active (auto-verified; no email step needed).
     pub verify_token: Option<String>,
+    /// #F12: true when register() found the email ALREADY IN USE and therefore did NOT
+    /// create an account (no token minted; verify_token is None). This is NOT an error:
+    /// the route MUST respond IDENTICALLY to a real signup in the current verification
+    /// mode — if email_required, emit the same "check your email" response; otherwise the
+    /// same "account created" response — and MUST NOT send any email. Returning a 400/
+    /// distinct message here (vs. 200 on success with a unique username) is a clean
+    /// email-enumeration oracle, which this flag lets the route close.
+    pub email_in_use: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -220,11 +228,24 @@ impl AuthManager {
     // ── Rate limiting ─────────────────────────────────────────────────────────
 
     fn check_rate_limit(&self, key: &str) -> Result<()> {
-        // S5: if at cap, sweep expired buckets first; if still at cap, hard-fail
+        // S5: if at cap, sweep expired buckets first.
         if self.rate_limits.len() >= RATE_LIMIT_MAX_BUCKETS {
             self.sweep_rate_buckets();
-            if self.rate_limits.len() >= RATE_LIMIT_MAX_BUCKETS {
-                bail!("Too many attempts — try again later");
+            // #F16: if the sweep freed nothing (table full of still-active buckets), EVICT
+            // the oldest bucket(s) to admit this key rather than failing EVERY caller with
+            // "Too many attempts" — the old hard-fail turned a full table into a global auth
+            // outage (any per-IP/account/email/create key could fill it and lock out all
+            // auth). Evicting the oldest (smallest window_start) only resets that key's
+            // window; every per-key limit below is unchanged. Bounded: each pass removes one
+            // entry, so the loop makes progress and stops once below the cap.
+            while self.rate_limits.len() >= RATE_LIMIT_MAX_BUCKETS {
+                let oldest = self.rate_limits.iter()
+                    .min_by_key(|b| b.window_start)
+                    .map(|b| b.key().clone());
+                match oldest {
+                    Some(k) => { self.rate_limits.remove(&k); }
+                    None    => break, // table emptied concurrently — nothing to evict
+                }
             }
         }
 
@@ -446,10 +467,13 @@ impl AuthManager {
             // no user_lock, so no deadlock.
             let _elock = self.email_lock(&email_lower);
             let _eguard = _elock.lock().await;
-            // #14: reject when an account with this email already exists (verified or pending).
+            // #14/#F12: an account with this email already exists (verified or pending).
+            // Do NOT create a duplicate-email account, but do NOT bail either — bailing
+            // produced a 400 + distinct message vs. the 200 success of a unique username,
+            // a clean email-enumeration oracle. Return a success-shaped outcome (no token,
+            // no account, no mail) and let the route mirror the real-signup response.
             if self.email_in_use(&email_lower).await {
-                // Generic message — do not confirm the email is registered (anti-enumeration).
-                bail!("Username already taken");
+                return Ok(RegisterOutcome { verify_token: None, email_in_use: true });
             }
             // S1: atomic create + write-through (create_new fails if the file exists; no TOCTOU).
             {
@@ -463,7 +487,7 @@ impl AuthManager {
             if verified {
                 // Email provided but verification not required → active immediately; the
                 // address is just stored for password resets. No verification email.
-                Ok(RegisterOutcome { verify_token: None })
+                Ok(RegisterOutcome { verify_token: None, email_in_use: false })
             } else {
                 // Email verification required → stage the pending record + token to email.
                 let token = Uuid::new_v4().to_string();
@@ -480,7 +504,7 @@ impl AuthManager {
                     return Err(e.into());
                 }
                 set_secret_mode(&pending_path).await; // #31: 0600 on the bearer token
-                Ok(RegisterOutcome { verify_token: Some(token) })
+                Ok(RegisterOutcome { verify_token: Some(token), email_in_use: false })
             }
         } else {
             // No email on file: username uniqueness is enforced solely by create_new (atomic),
@@ -493,7 +517,7 @@ impl AuthManager {
                 file.flush().await?;
             }
             set_secret_mode(&user_path).await; // #31: 0600 on the user record
-            Ok(RegisterOutcome { verify_token: None })
+            Ok(RegisterOutcome { verify_token: None, email_in_use: false })
         }
     }
 
@@ -507,19 +531,26 @@ impl AuthManager {
         // Never resolve a blank email (no-email accounts aren't reachable by email login).
         if email_lower.is_empty() { return None; }
         let users_dir = PathBuf::from(&self.data_dir).join("users");
+        // #F13: scan the FULL directory unconditionally — do NOT return on the first
+        // match. The old early return made a REGISTERED email resolve after reading only
+        // up to its file, while an UNKNOWN email always read every file, an email-existence
+        // timing oracle observable on both the login and reset paths that call this. Register
+        // enforces one account per email, so the single match is unambiguous; keeping it
+        // (last write wins on the impossible duplicate) is correct.
+        let mut found: Option<User> = None;
         if let Ok(mut entries) = tokio::fs::read_dir(&users_dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
                 if path.extension().map(|e| e == "json").unwrap_or(false) {
                     if let Ok(json) = tokio::fs::read_to_string(&path).await {
                         if let Ok(user) = serde_json::from_str::<User>(&json) {
-                            if user.email == email_lower { return Some(user); }
+                            if user.email == email_lower { found = Some(user); }
                         }
                     }
                 }
             }
         }
-        None
+        found
     }
 
     async fn email_in_use(&self, email_lower: &str) -> bool {
@@ -599,9 +630,11 @@ impl AuthManager {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 if let Ok(json) = tokio::fs::read_to_string(entry.path()).await {
                     if let Ok(user) = serde_json::from_str::<User>(&json) {
+                        // #F14: scan the FULL directory — do NOT break on the match. Breaking
+                        // early made a registered email finish the scan sooner than an unknown
+                        // one (which read every file), a timing oracle on top of the write below.
                         if user.email == email_lower && user.verified {
                             found_user = Some(user);
-                            break;
                         }
                     }
                 }
@@ -614,19 +647,56 @@ impl AuthManager {
         };
 
         let token = Uuid::new_v4().to_string();
-        let reset_dir = PathBuf::from(&self.data_dir).join("resets");
-        let _ = create_dir_secure(reset_dir.to_str().unwrap_or_default()); // #32: 0700
-
         let reset = PendingReset {
             username: user.username.clone(),
             token: token.clone(),
             expires_at: Utc::now().timestamp() + 3600, // 1 hour
         };
-        let reset_path = reset_dir.join(format!("{}.json", token));
-        tokio::fs::write(&reset_path, serde_json::to_string_pretty(&reset)?).await?;
-        set_secret_mode(&reset_path).await; // #31: 0600 on the bearer token
+        // #F14: do the dir-create + old-token invalidation + new-token write in a spawned
+        // task so a REGISTERED email's response isn't measurably slower than an unknown
+        // email's (which returns right after the scan) — the write/chmod/create_dir were an
+        // existence timing oracle. The verification mail is already sent by the caller off a
+        // spawn, so the token is delivered well after the (millisecond) background write lands.
+        let data_dir = self.data_dir.clone();
+        let uname = user.username.clone();
+        tokio::spawn(async move {
+            Self::persist_reset(&data_dir, &reset).await;
+        });
 
-        Ok(Some((token, user.username)))
+        Ok(Some((token, uname)))
+    }
+
+    /// #F14/#F15: (re)create a password-reset record off the request's response path.
+    /// #F15: first delete this account's prior outstanding resets/*.json so a newer reset
+    /// request invalidates older tokens (reset_password still removes the consumed one, and
+    /// sweep_expired_tokens still enforces the TTL — single-use + expiry are preserved). Then
+    /// write the fresh token 0600. Best-effort: any IO error just means no (or a stale-cleared)
+    /// reset file, which reset_password treats as an invalid link.
+    async fn persist_reset(data_dir: &str, reset: &PendingReset) {
+        let reset_dir = PathBuf::from(data_dir).join("resets");
+        let _ = create_dir_secure(reset_dir.to_str().unwrap_or_default()); // #32: 0700
+        // #F15: invalidate the account's existing outstanding reset tokens (match by username).
+        if let Ok(mut rd) = tokio::fs::read_dir(&reset_dir).await {
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    if let Ok(json) = tokio::fs::read_to_string(&path).await {
+                        if let Ok(old) = serde_json::from_str::<PendingReset>(&json) {
+                            if old.username == reset.username {
+                                let _ = tokio::fs::remove_file(&path).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Write the fresh token AFTER the purge (its UUID name can't collide with the deletions).
+        let reset_path = reset_dir.join(format!("{}.json", reset.token));
+        if let Ok(json) = serde_json::to_string_pretty(reset) {
+            if tokio::fs::write(&reset_path, json).await.is_ok() {
+                set_secret_mode(&reset_path).await; // #31: 0600 on the bearer token
+            }
+        }
     }
 
     pub async fn reset_password(&self, raw_token: &str, new_password: &str, ip: Option<&str>) -> Result<String> {
@@ -1259,7 +1329,10 @@ impl AuthManager {
         Ok(())
     }
 
-    pub async fn change_password(&self, username: &str, old_password: &str, new_password: &str, ip: Option<&str>) -> Result<()> {
+    /// #F9: returns the resolved (lowercased) username on success so the route can purge
+    /// the user's push subscription + notif-prefs stores (mirroring delete_account), which
+    /// AuthManager itself has no NotificationManager handle to touch.
+    pub async fn change_password(&self, username: &str, old_password: &str, new_password: &str, ip: Option<&str>) -> Result<String> {
         let uname = username.trim().to_lowercase();
         // #15: IP dimension FIRST (before the per-user bucket insert) so one IP can't fill
         // the global bucket table via varying usernames. See login() for the rationale.
@@ -1316,10 +1389,12 @@ impl AuthManager {
             .map(|s| s.key().clone())
             .collect();
         for k in to_remove { self.sessions.remove(&k); }
-        Ok(())
+        Ok(uname)
     }
 
-    pub async fn disable_user(&self, username: &str) -> Result<()> {
+    /// #F9: returns the resolved (lowercased) username on success so the route can purge
+    /// the user's push subscription + notif-prefs stores (mirroring delete_account).
+    pub async fn disable_user(&self, username: &str) -> Result<String> {
         let uname = username.to_lowercase();
         // #58: reject path-unsafe usernames before touching the filesystem.
         if !is_safe_username(&uname) {
@@ -1338,7 +1413,7 @@ impl AuthManager {
             .filter(|s| s.username == uname)
             .map(|s| s.key().clone()).collect();
         for k in to_remove { self.sessions.remove(&k); }
-        Ok(())
+        Ok(uname)
     }
 }
 

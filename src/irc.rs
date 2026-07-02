@@ -16,6 +16,7 @@ use tokio::{
     time::{sleep, timeout, Duration, Instant},
 };
 use tracing::{info, warn};
+use zeroize::Zeroize;
 
 use crate::{certs::CertStore, network_config_lock, strip_crlf, AppState, MessageKind, NetworkConfig, ServerEvent};
 
@@ -30,6 +31,14 @@ const READ_TIMEOUT:      Duration = Duration::from_secs(120);
 // 3.0.10 (and other old IRCds) don't advertise the IRCv3 `away-notify` cap, so the
 // only server-independent way to gray out away nicks is to poll WHO and read the G flag.
 const WHO_INTERVAL:      Duration = Duration::from_secs(45);
+/// #27: cap the number of WHO commands the away-poll fan-out emits per WHO_INTERVAL
+/// tick. Iterating every joined channel (up to MAX_CHANNELS_PER_CONN=256) and sending
+/// WHO for each back-to-back is a burst most IRCds flood-kill (excess-flood/SendQ); a
+/// hostile server can inflate the channel count with forged self-JOINs to maximise it,
+/// and the resulting kill→reconnect→rejoin→WHO-storm becomes a self-sustaining loop.
+/// Emit at most this many WHO per tick and round-robin a cursor across ticks so every
+/// channel is still polled, just spread over time.
+const WHO_MAX_PER_TICK: usize = 8;
 /// S4: maximum number of times we'll retry a nick before aborting registration
 const MAX_NICK_RETRIES:  u32 = 5;
 /// S3: maximum total channels in names_buf
@@ -42,10 +51,28 @@ const MAX_IRC_LINE_LEN: usize = 8192;
 /// server can forge unlimited `:<ournick> JOIN #chanN` lines to grow c.channels,
 /// create per-channel log dirs, and amplify outbound NAMES requests without bound.
 const MAX_CHANNELS_PER_CONN: usize = 256;
+/// F5: hard cap on persisted per-channel auto-rejoin keys. A malicious server can't be
+/// allowed to grow the on-disk channel_keys map without bound (each add re-encrypts +
+/// rewrites the whole config). Sized well above MAX_CHANNELS_PER_CONN so real users who
+/// cycle through many keyed channels over a session keep working; only pathological
+/// growth is refused.
+const MAX_CHANNEL_KEYS: usize = 1024;
 /// #45: minimum interval between automatic CTCP replies (per connection). Prevents
 /// an attacker from reflecting a NOTICE flood off the victim via rapid CTCP VERSION
 /// requests, which most IRCds penalize with SendQ/excess-flood kills.
 const CTCP_REPLY_MIN_INTERVAL: Duration = Duration::from_secs(2);
+/// #31: inbound line rate limit (token bucket, per connection). Per-line LENGTH is
+/// already bounded, but the RATE of accepted lines was not — READ_TIMEOUT only fires
+/// on 120s of silence, so a server streaming maximal-length PRIVMSG/NOTICE/JOIN/… with
+/// no idle gap drives an unbounded AES-GCM encrypt + fsync'd `.seq` write + append + WS
+/// broadcast per line on the read loop's critical path (disk/IOPS/CPU exhaustion). Pace
+/// accepted lines to a sustained ceiling (refill) with a generous burst so ordinary
+/// traffic — including ZNC/bouncer playback bursts — is never throttled, while a flood
+/// is capped and back-pressured onto the TCP socket. Set well above any legitimate
+/// sustained inbound rate; tune here if a very busy aggregate ever nears the ceiling.
+const INBOUND_RATE_BURST:  f64 = 1024.0;
+/// tokens (accepted lines) refilled per second
+const INBOUND_RATE_REFILL: f64 = 64.0;
 
 // ─── Safe-truncation / slice helpers ───────────────────────────────────────────
 
@@ -145,8 +172,9 @@ enum CappedLine {
 ///
 /// Behaviour parity with the old `next_line()` path:
 ///   (a) EOF with no pending bytes → `Eof` (caller returns `Ok(())`).
-///   (e) strict UTF-8: invalid bytes yield an `InvalidData` error, exactly like
-///       `read_line`'s validation, so the caller drops the connection (`Err`).
+///   (e) LENIENT UTF-8: invalid bytes are decoded lossily (→ U+FFFD) so a single
+///       non-UTF-8 byte in a server line (common in MOTD/topic/realname) can never
+///       drop the connection. (The old strict `from_utf8` broke HybridIRC entirely.)
 async fn read_capped_line<R>(reader: &mut R) -> std::io::Result<CappedLine>
 where
     R: AsyncBufRead + Unpin,
@@ -217,10 +245,18 @@ where
     // `buf` holds the line content only — the terminating `\n` is consumed but
     // never copied in, so there is nothing more to strip here. Any trailing `\r`
     // is left for the caller's existing `trim_end_matches` (parity with the old
-    // path, which re-trimmed too). Validate UTF-8 strictly: an error maps to the
-    // same read-error path the old `next_line()` took on invalid UTF-8.
-    let line = String::from_utf8(buf)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    // path, which re-trimmed too).
+    //
+    // Decode LENIENTLY (lossy): real IRC servers legitimately send non-UTF-8 bytes
+    // (Latin-1/CP1252 in MOTD art, topics, realnames). Strict `from_utf8` here
+    // returned InvalidData on a single bad byte, which propagated as a fatal
+    // "Connection error" and dropped the WHOLE connection — so a server whose
+    // post-SASL burst contains one such byte (HybridIRC's MOTD has one at offset
+    // 248) could NEVER finish registration: it looped SASL-success → utf-8 error →
+    // 300s reconnect forever (448+ times observed). `from_utf8_lossy` maps invalid
+    // bytes to U+FFFD so the line still parses and the connection survives; the
+    // downstream CR/LF/NUL stripping and IRC tokenizer are unaffected.
+    let line = String::from_utf8_lossy(&buf).into_owned();
     Ok(CappedLine::Line(line))
 }
 
@@ -274,6 +310,11 @@ pub struct ChannelState {
     pub name:  String,
     pub topic: String,
     pub names: Vec<String>,
+    /// Last +k key we've learned for this channel (from MODE/324), used purely as an
+    /// in-memory dedup so a server that streams identical 324/MODE echoes can't force a
+    /// disk read+decrypt (get_network_config) + re-encrypt+rewrite (save_network) per line.
+    /// `None` = key unknown/keyless; we only touch persist_channel_key when this changes.
+    pub key:   Option<String>,
 }
 
 pub struct IrcConnection {
@@ -284,6 +325,7 @@ pub struct IrcConnection {
     pub channels:  HashMap<String, ChannelState>,
     pub writer:    Box<dyn AsyncWrite + Send + Unpin>,
     pub message_tags: bool,
+    pub self_userhost: String,
 }
 
 impl IrcConnection {
@@ -349,7 +391,12 @@ async fn persist_channel_key(state: &AppState, username: &str, conn_id: &str, ch
         let mut changed = false;
         match key {
             Some(k) if !k.is_empty() && k != "*" => {
-                if cfg.channel_keys.get(&lc).map(|s| s.as_str()) != Some(k) {
+                let is_new = !cfg.channel_keys.contains_key(&lc);
+                // F5: refuse to grow the persisted map past the cap when this would add a
+                // NEW entry; updating an existing channel's key stays allowed.
+                if is_new && cfg.channel_keys.len() >= MAX_CHANNEL_KEYS {
+                    // bounded — drop silently, mirrors the c.channels cap behavior
+                } else if cfg.channel_keys.get(&lc).map(|s| s.as_str()) != Some(k) {
                     cfg.channel_keys.insert(lc, strip_crlf(k));
                     changed = true;
                 }
@@ -553,9 +600,12 @@ async fn do_connect(
             let dir = CertStore::new(&state.data_dir, state.crypto.clone()).cert_path_for(cert_id);
             let cert_pem = tokio::fs::read(dir.join("cert.pem")).await?;
             let key_enc = tokio::fs::read_to_string(dir.join("key.enc")).await?;
-            let key_pem = state.crypto.decrypt(username, key_enc.trim()).await?;
+            let mut key_pem = state.crypto.decrypt(username, key_enc.trim()).await?;
             let x509 = openssl::x509::X509::from_pem(&cert_pem)?;
             let pkey = openssl::pkey::PKey::private_key_from_pem(&key_pem)?;
+            // F26: scrub the decrypted plaintext ECDSA key PEM once PKey holds a copy
+            // (mirrors certs.rs::load_identity). PKey owns its own key material now.
+            key_pem.zeroize();
             ssl_builder.set_certificate(&x509)?;
             ssl_builder.set_private_key(&pkey)?;
             // Enable post-handshake auth for TLS 1.3 client certs
@@ -563,8 +613,7 @@ async fn do_connect(
             let connector = ssl_builder.build();
             let tcp2 = TcpStream::connect(&addr).await?;
             tcp2.set_nodelay(true)?;
-            let mut ssl = openssl::ssl::Ssl::new(connector.context())?;
-            ssl.set_hostname(&cfg.server)?;
+            let ssl = connector.configure()?.into_ssl(&cfg.server)?;
             let mut stream = tokio_openssl::SslStream::new(ssl, tcp2)?;
             std::pin::Pin::new(&mut stream).connect().await?;
             info!("[{}] TLS connected with client cert (post-handshake auth enabled)", conn_id);
@@ -600,6 +649,7 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
         connected: false, lag_ms: None,
         channels: HashMap::new(), writer: Box::new(write_half),
         message_tags: false,
+        self_userhost: String::new(),
     }));
 
     state.connections.insert(conn_id.to_string(), conn.clone());
@@ -689,6 +739,14 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
     who_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut who_pending: HashSet<String> = HashSet::new();
     let mut who_away: HashMap<String, Vec<String>> = HashMap::new();
+    // #27: round-robin cursor into the joined-channel list for the paced WHO fan-out
+    // (see WHO_MAX_PER_TICK). Persists across ticks so successive ticks poll different
+    // channels; the tick handler clamps/wraps it when the channel set changes size.
+    let mut who_rr_cursor: usize = 0;
+    // #31: per-connection inbound token bucket (see INBOUND_RATE_*). Starts full so a
+    // fresh connection's registration/backlog burst is never delayed.
+    let mut inbound_tokens: f64 = INBOUND_RATE_BURST;
+    let mut inbound_refill_at = Instant::now();
 
     loop {
         tokio::select! {
@@ -713,27 +771,61 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                 if registered {
                     // #92: iterate the display names (channels is keyed by irc_lower now).
                     let chans: Vec<String> = { conn.lock().await.channels.values().map(|ch| ch.name.clone()).collect() };
-                    for ch in chans {
-                        // Key who_pending by the case-folded name so the 352/315
-                        // replies match even when the server/ZNC echoes the channel
-                        // in a different case than the JOIN-echo we stored.
-                        // #91: cap the pending set (it's already bounded by the per-conn
-                        // channel cap, but keep the guard symmetric with the JOIN path).
-                        let ck = irc_lower(&ch);
-                        if who_pending.len() < NAMES_BUF_MAX_CHANNELS || who_pending.contains(&ck) {
-                            who_pending.insert(ck);
+                    // #27: pace the WHO fan-out. Sending WHO for every joined channel (up to
+                    // MAX_CHANNELS_PER_CONN=256) back-to-back on each 45s tick is a burst most
+                    // IRCds penalise with an excess-flood/SendQ kill, and a hostile server can
+                    // inflate the channel count via forged self-JOINs to maximise it — yielding
+                    // a self-sustaining kill/reconnect loop. Emit at most WHO_MAX_PER_TICK per
+                    // tick, advancing a round-robin cursor so every channel is still polled,
+                    // just spread across successive ticks.
+                    let n = chans.len();
+                    if n > 0 {
+                        if who_rr_cursor >= n { who_rr_cursor = 0; }
+                        let take = n.min(WHO_MAX_PER_TICK);
+                        for i in 0..take {
+                            let ch = &chans[(who_rr_cursor + i) % n];
+                            // Key who_pending by the case-folded name so the 352/315
+                            // replies match even when the server/ZNC echoes the channel
+                            // in a different case than the JOIN-echo we stored.
+                            // #91: cap the pending set (it's already bounded by the per-conn
+                            // channel cap, but keep the guard symmetric with the JOIN path).
+                            let ck = irc_lower(ch);
+                            if who_pending.len() < NAMES_BUF_MAX_CHANNELS || who_pending.contains(&ck) {
+                                who_pending.insert(ck);
+                            }
+                            // A send failure here just means the connection is going down;
+                            // the read side will surface the real error and reconnect.
+                            // strip_crlf: channel keys originate from server-supplied JOIN names;
+                            // a stored interior \r would otherwise be reflected into the WHO.
+                            if conn.lock().await.send_raw(&format!("WHO {}\r\n", strip_crlf(ch))).await.is_err() { break; }
                         }
-                        // A send failure here just means the connection is going down;
-                        // the read side will surface the real error and reconnect.
-                        // strip_crlf: channel keys originate from server-supplied JOIN names;
-                        // a stored interior \r would otherwise be reflected into the WHO.
-                        if conn.lock().await.send_raw(&format!("WHO {}\r\n", strip_crlf(&ch))).await.is_err() { break; }
+                        who_rr_cursor = (who_rr_cursor + take) % n;
                     }
                 }
             }
 
             // ── Incoming line ──────────────────────────────────────────────
-            res = timeout(READ_TIMEOUT, read_capped_line(&mut reader)) => {
+            res = timeout(READ_TIMEOUT, async {
+                // #31: token-bucket rate limit BEFORE reading the next line. Placed ahead
+                // of the read so a cancellation of this select! branch by the ping/who arms
+                // loses no buffered data — nothing has been read or consumed yet. We only
+                // ever wait for a single token, so the sleep is at most 1/INBOUND_RATE_REFILL
+                // (~16ms) and can never approach READ_TIMEOUT; the ping heartbeat still fires
+                // because this sleep is a select! branch polled alongside ping_ticker.
+                let now = Instant::now();
+                inbound_tokens = (inbound_tokens
+                    + now.duration_since(inbound_refill_at).as_secs_f64() * INBOUND_RATE_REFILL)
+                    .min(INBOUND_RATE_BURST);
+                inbound_refill_at = now;
+                if inbound_tokens < 1.0 {
+                    let wait = Duration::from_secs_f64((1.0 - inbound_tokens) / INBOUND_RATE_REFILL);
+                    sleep(wait).await;
+                    inbound_tokens = 1.0;
+                    inbound_refill_at = Instant::now();
+                }
+                inbound_tokens -= 1.0;
+                read_capped_line(&mut reader).await
+            }) => {
                 let line = match res {
                     Err(_)                       => return Err(anyhow::anyhow!("Read timeout")),
                     Ok(Ok(CappedLine::Line(l)))  => l,
@@ -968,6 +1060,12 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
 
                     // ── Welcome ──────────────────────────────────────────
                     "001" => {
+                        // #29: RPL_WELCOME must be idempotent. A hostile or broken server can
+                        // replay 001 to make us re-send the NickServ IDENTIFY and OPER
+                        // credentials and re-flood the perform-command + auto-join batch
+                        // (outbound SendQ flood → excess-flood self-kill). Once we've
+                        // registered on this connection, ignore any further 001.
+                        if registered { continue; }
                         registered = true;
                         last_pong  = Instant::now();
                         let actual_nick = {
@@ -1229,6 +1327,10 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                             let mut c = conn.lock().await;
                             let chan_key = irc_lower(&channel); // #92
                             if nick == c.nick {
+                                // #30: learn our own user@host from a self-JOIN so a later forged
+                                // `:<ournick> NICK <x>` whose prefix does not match us cannot rewrite c.nick.
+                                let uh = userhost_from_prefix(&p.prefix);
+                                if !uh.is_empty() { c.self_userhost = uh; }
                                 if c.channels.contains_key(&chan_key) {
                                     // #43: a server can repeat ":<ournick> JOIN #chan" to force
                                     // unbounded outbound NAMES/WHO. Only issue NAMES/WHO when the
@@ -1236,7 +1338,11 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                     // channel is still echoed/logged but skips the amplification.
                                     (true, false)
                                 } else if c.channels.len() < MAX_CHANNELS_PER_CONN {
-                                    c.channels.insert(chan_key.clone(), ChannelState { name: channel.clone(), topic: String::new(), names: vec![] });
+                                    // F5: seed the in-memory key from the connect-time config so a
+                                    // later -k on a favorites-keyed channel still persists its
+                                    // removal (the +k/324/-k dedup compares against ch.key).
+                                    let seed_key = cfg.channel_keys.get(&chan_key).cloned();
+                                    c.channels.insert(chan_key.clone(), ChannelState { name: channel.clone(), topic: String::new(), names: vec![], key: seed_key });
                                     (true, true)
                                 } else {
                                     warn!("[{}] Ignoring self-JOIN {} — channel cap ({}) reached", conn_id, channel, MAX_CHANNELS_PER_CONN);
@@ -1317,10 +1423,24 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "NICK" => {
                         let old = nick_from_prefix(&p.prefix);
                         let new = p.params.get(0).cloned().unwrap_or_default();
+                        // #30: source user@host, used to verify a self-NICK really identifies us.
+                        let src_userhost = userhost_from_prefix(&p.prefix);
                         let affected: Vec<String> = {
                             let mut c = conn.lock().await;
                             let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == old)).map(|(_, ch)| ch.name.clone()).collect();
-                            if old == c.nick { c.nick = strip_crlf(&new); }
+                            // #30: only adopt a self-NICK into our authoritative nick when the
+                            // source fully identifies us — its user@host matches the one we recorded
+                            // (from self-JOIN/CHGHOST). Before we have learned our own user@host
+                            // (pre-JOIN) fall back to the legacy accept so a genuine early self-NICK
+                            // still lands. This blocks a forged `:<ournick> NICK <x>` (bare or mismatched
+                            // prefix) from corrupting self-echo suppression and the nick-retry base.
+                            if old == c.nick
+                                && (c.self_userhost.is_empty()
+                                    || src_userhost.eq_ignore_ascii_case(&c.self_userhost))
+                            {
+                                c.nick = strip_crlf(&new);
+                                if !src_userhost.is_empty() { c.self_userhost = src_userhost.clone(); }
+                            }
                             for ch in c.channels.values_mut() {
                                 for n in ch.names.iter_mut() {
                                     if strip_pfx(n) == old {
@@ -1344,7 +1464,14 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "CHGHOST" => {
                         let nick = nick_from_prefix(&p.prefix);
                         let new_host = p.params.get(1).cloned().unwrap_or_else(|| p.params.get(0).cloned().unwrap_or_default());
-                        let c = conn.lock().await;
+                        let mut c = conn.lock().await;
+                        // #30: keep our recorded identity current across host cloaks so a later
+                        // genuine self-NICK (which carries the NEW user@host) still matches.
+                        if nick == c.nick {
+                            let nu = p.params.get(0).cloned().unwrap_or_default();
+                            let nh = p.params.get(1).cloned().unwrap_or_default();
+                            if !nu.is_empty() && !nh.is_empty() { c.self_userhost = format!("{}@{}", nu, nh); }
+                        }
                         let chans: Vec<String> = c.channels.iter()
                             .filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == nick))
                             .map(|(_, ch)| ch.name.clone())
@@ -1516,14 +1643,22 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         let set_by  = nick_from_prefix(&p.prefix);
                         let channel = p.params.get(0).cloned().unwrap_or_default();
                         let topic   = p.params.get(1).cloned().unwrap_or_default();
-                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.topic = topic.clone(); } }
-                        send(ServerEvent::IrcTopic { conn_id: conn_id.to_string(), channel, topic, set_by, ts });
+                        // #28: only surface a topic for a channel we actually track. A malicious
+                        // server can forge TOPIC for unlimited untracked channels to grow client
+                        // state unbounded, bypassing the #43 256-channel JOIN cap.
+                        let tracked = { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.topic = topic.clone(); true } else { false } };
+                        if tracked {
+                            send(ServerEvent::IrcTopic { conn_id: conn_id.to_string(), channel, topic, set_by, ts });
+                        }
                     }
                     "332" => {
                         let channel = p.params.get(1).cloned().unwrap_or_default();
                         let topic   = p.params.get(2).cloned().unwrap_or_default();
-                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.topic = topic.clone(); } }
-                        send(ServerEvent::IrcTopic { conn_id: conn_id.to_string(), channel, topic, set_by: String::new(), ts });
+                        // #28: gate forged 332 for untracked channels (see TOPIC arm).
+                        let tracked = { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.topic = topic.clone(); true } else { false } };
+                        if tracked {
+                            send(ServerEvent::IrcTopic { conn_id: conn_id.to_string(), channel, topic, set_by: String::new(), ts });
+                        }
                     }
 
                     // S3: bounded names accumulation
@@ -1547,8 +1682,12 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                     "366" => {
                         let channel = p.params.get(1).cloned().unwrap_or_default();
                         let names   = names_buf.remove(&channel).unwrap_or_default();
-                        { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.names = names.clone(); } }
-                        send(ServerEvent::IrcNames { conn_id: conn_id.to_string(), channel, names });
+                        // #28: gate forged 366 for untracked channels (see TOPIC arm). The names_buf
+                        // remove above still runs so buffered names for a dropped channel are freed.
+                        let tracked = { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.names = names.clone(); true } else { false } };
+                        if tracked {
+                            send(ServerEvent::IrcNames { conn_id: conn_id.to_string(), channel, names });
+                        }
                     }
                     "MODE" => {
                         let setter = nick_from_prefix(&p.prefix);
@@ -1594,12 +1733,19 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                                         }
                                     } else if mc == 'k' {
                                         // Type-B mode: always carries a param (+k <key>, -k [*]).
-                                        // Capture it for the auto-rejoin store.
+                                        // Capture it for the auto-rejoin store, but only when the
+                                        // key actually changed vs. our in-memory copy (F5) so a
+                                        // stream of identical MODE echoes can't force a per-line
+                                        // get/save on disk. ch.key mirrors the persisted value.
                                         if adding {
                                             if let Some(&kp) = parts.get(arg_idx) {
-                                                if !kp.is_empty() && kp != "*" { k_change = Some(Some(kp.to_string())); }
+                                                if !kp.is_empty() && kp != "*" && ch.key.as_deref() != Some(kp) {
+                                                    ch.key = Some(kp.to_string());
+                                                    k_change = Some(Some(kp.to_string()));
+                                                }
                                             }
-                                        } else {
+                                        } else if ch.key.is_some() {
+                                            ch.key = None;
                                             k_change = Some(None); // -k removes the saved key
                                         }
                                         arg_idx += 1;
@@ -1788,7 +1934,24 @@ where S: AsyncRead + AsyncWrite + Send + Unpin + 'static
                         // we never remove here (that would clobber a key we legitimately hold).
                         if chan.starts_with(['#','&','+','!']) {
                             if let Some(key) = channel_key_from_modes(&modes) {
-                                persist_channel_key(&state, &username, &conn_id, &chan, Some(key.as_str())).await;
+                                // F5: only persist for a channel we're actually tracking (gate
+                                // like TOPIC/332/366) and only when the key changed in memory —
+                                // this short-circuits BEFORE the expensive get/save so a server
+                                // streaming distinct/repeated 324s can't force unbounded growth
+                                // or O(n) disk I/O on the read loop's critical path.
+                                let need_persist = {
+                                    let mut c = conn.lock().await;
+                                    match c.channels.get_mut(&irc_lower(&chan)) {
+                                        Some(ch) if ch.key.as_deref() != Some(key.as_str()) => {
+                                            ch.key = Some(key.clone());
+                                            true
+                                        }
+                                        _ => false,
+                                    }
+                                };
+                                if need_persist {
+                                    persist_channel_key(&state, &username, &conn_id, &chan, Some(key.as_str())).await;
+                                }
                             }
                         }
                         // Structured event so the Channel Modes GUI can parse current
@@ -2024,6 +2187,10 @@ fn unescape_tag_value(v: &str) -> String {
 
 fn nick_from_prefix(p: &Option<String>) -> String {
     p.as_deref().and_then(|s| s.split('!').next()).unwrap_or("*").to_string()
+}
+
+fn userhost_from_prefix(p: &Option<String>) -> String {
+    p.as_deref().and_then(|s| s.split_once('!')).map(|(_, uh)| uh.to_string()).unwrap_or_default()
 }
 
 fn strip_pfx(n: &str) -> &str { let s = n.trim_start_matches(|c: char| "@+~&%".contains(c)); if s.is_empty() { n } else { s } }

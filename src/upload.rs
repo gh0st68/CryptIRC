@@ -48,24 +48,55 @@ const PER_USER_MAX_FILES: usize = 2000;
 /// Per-user cap on simultaneously in-progress (Uploading) chunked uploads.
 const PER_USER_MAX_INPROGRESS: usize = 16;
 
-/// #17: upper bound on the file size for which finalize will perform the
-/// in-RAM image (JPEG/PNG) metadata strip. The in-house strippers read the
-/// whole file plus build a second buffer, so a large finalize would transiently
-/// hold 2x the file in RAM. Above this threshold we skip the in-RAM strip and
-/// move the file as-is (still rejecting blocked/invalid extensions earlier).
-const MAX_INRAM_STRIP_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
-
 /// Global cap on concurrent ffmpeg metadata-strip jobs (CPU bound).
 const AV_STRIP_MAX_CONCURRENT: usize = 2;
 
 /// Wall-clock timeout for a single ffmpeg metadata-strip job.
 const AV_STRIP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// #26: global disk-space floor. On top of the per-user quota (which alone lets
+/// K accounts each fill PER_USER_MAX_TOTAL_BYTES of in-progress chunks and
+/// exhaust the shared data volume, failing log/DB writes server-wide), refuse
+/// new chunk writes once the data volume's free space would drop below this
+/// reserve. Only enforced when free space can actually be queried (see
+/// `available_disk_bytes`); a query failure fails OPEN so uploads are never
+/// blocked on a filesystem whose free space we cannot read.
+const MIN_FREE_DISK_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
+/// Best-effort bytes available to an unprivileged writer on the filesystem
+/// holding `path`. Returns None if the figure cannot be determined (fail open).
+#[cfg(unix)]
+fn available_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c_path` is a valid NUL-terminated C string and `stat` is a
+    // properly sized, zero-initialized statvfs buffer that statvfs fills in.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if rc != 0 { return None; }
+    // f_bavail: blocks free to a non-privileged process; f_frsize: block size.
+    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+}
+
+#[cfg(not(unix))]
+fn available_disk_bytes(_path: &std::path::Path) -> Option<u64> { None }
+
 /// Global semaphore bounding concurrent ffmpeg invocations so a burst of A/V
 /// uploads cannot spawn unbounded CPU-heavy processes.
 fn av_strip_semaphore() -> &'static Semaphore {
     static SEM: OnceLock<Semaphore> = OnceLock::new();
     SEM.get_or_init(|| Semaphore::new(AV_STRIP_MAX_CONCURRENT))
+}
+
+/// #32: bound concurrent in-RAM image metadata strips. Each strip holds the source
+/// image plus its stripped copy in RAM (up to ~2x the admin max_upload_mb), so a
+/// burst of concurrent finalize/legacy-upload requests could otherwise amplify peak
+/// RSS without bound. The per-user upload rate limit caps a single user; this caps
+/// the cross-user total. Fires only under contention — normal uploads never wait.
+const IMG_STRIP_MAX_CONCURRENT: usize = 4;
+fn img_strip_semaphore() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(IMG_STRIP_MAX_CONCURRENT))
 }
 
 // ─── Per-user records-file serialization (#21) ───────────────────────────────
@@ -84,6 +115,21 @@ fn user_record_lock(username: &str) -> Arc<Mutex<()>> {
         .entry(username.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
+}
+
+/// #F19: drop idle per-user record locks so this static map can't grow without
+/// bound. Previously every username that ever uploaded left a permanent entry
+/// (never freed on account deletion). An entry whose Arc has strong_count==1 is
+/// held only by the map — every caller of `user_record_lock` keeps a clone for
+/// the duration of its critical section (count>=2) — so removing it can neither
+/// race a live read-modify-write nor hand two callers different Mutexes for the
+/// same user: DashMap's per-shard lock serializes this check against the
+/// `entry().or_insert().clone()` in `user_record_lock` (the clone happens while
+/// that shard lock is held), so a count==1 entry provably has no live holder or
+/// waiter. Mirrors main.rs `prune_network_config_locks`; invoked from the hourly
+/// (and startup) in-progress sweep so no wiring outside this file is needed.
+fn prune_record_locks() {
+    record_locks().retain(|_, v| Arc::strong_count(v) > 1);
 }
 
 /// Set of extensions that REQUIRE metadata stripping (image EXIF/GPS or A/V
@@ -417,6 +463,11 @@ pub async fn sweep_stale_inprogress(data_dir: &str, ttl: Duration) -> usize {
             let _ = tokio::fs::remove_dir(&user_path).await;
         }
     }
+    // #F19: on the same hourly/startup cadence, drop idle per-user record locks
+    // so the static lock map can't grow without bound over the process lifetime
+    // (see prune_record_locks). Safe under concurrency — only count==1 entries,
+    // which have no live holder/waiter, are removed.
+    prune_record_locks();
     removed
 }
 
@@ -477,10 +528,21 @@ fn compute_usage(records: &[UploadRecord], exclude_id: Option<&str>) -> UserUsag
     let mut inprogress  = 0usize;
     for r in records {
         if exclude_id == Some(r.id.as_str()) { continue; }
+        // Count EVERY record (incl. Canceled/Error) toward file_count so the
+        // per-user PER_USER_MAX_FILES cap keeps bounding phantom cancel/error
+        // rows — that cap is the only teeth of the anti-flood guard in
+        // cancel_chunked_upload / error_chunked_upload. (This matches baseline.)
         file_count += 1;
-        // For completed uploads `size` is the stored size; for in-flight ones
-        // `progress_bytes` reflects bytes already written to disk.
-        total_bytes = total_bytes.saturating_add(r.size.max(r.progress_bytes));
+        // #25: charge bytes only for data actually on disk. Canceled/Error rows
+        // had their temp dir deleted and were never stored -> 0 bytes (else an
+        // attacker pins quota via init-then-cancel with 0 bytes). Uploading rows
+        // charge real progress_bytes so a large client-declared `size` cannot pin
+        // quota it has not consumed. Done rows charge the stored size.
+        total_bytes = total_bytes.saturating_add(match r.status {
+            UploadStatus::Uploading => r.progress_bytes,
+            UploadStatus::Canceled | UploadStatus::Error => 0,
+            _ => r.size.max(r.progress_bytes),
+        });
         if r.status == UploadStatus::Uploading { inprogress += 1; }
     }
     UserUsage { total_bytes, file_count, inprogress }
@@ -563,6 +625,10 @@ pub async fn init_chunked_upload(
     source_conn_id: &str, source_target: &str,
 ) -> Result<UploadRecord> {
     let id = checked_id(id)?;
+    // #25: a real upload always declares a positive size. Rejecting 0 keeps the
+    // init-time quota check meaningful and preserves the finalize size-mismatch
+    // guard (which is skipped when size == 0).
+    if size == 0 { anyhow::bail!("Invalid file size"); }
     let dir = inprogress_dir(data_dir, username, &id)
         .ok_or_else(|| anyhow::anyhow!("Invalid upload path"))?;
     let data_path = dir.join("data");
@@ -708,6 +774,16 @@ pub async fn append_chunk(
     // current row (its already-counted progress) and re-add new_total.
     check_quota(&records, Some(&id), new_total)?;
 
+    // #26: global disk-space guard. Before writing this chunk, refuse it if
+    // doing so would drop the data volume's free space below the reserve floor,
+    // so K accounts' in-progress uploads cannot fill the shared volume and
+    // starve log/DB writes. Fails OPEN when free space cannot be queried.
+    if let Some(avail) = available_disk_bytes(std::path::Path::new(data_dir)) {
+        if avail < MIN_FREE_DISK_BYTES.saturating_add(chunk.len() as u64) {
+            anyhow::bail!("Server storage full, try again later");
+        }
+    }
+
     let mut file = tokio::fs::OpenOptions::new()
         .create(true).append(true).open(&data_path).await?;
     file.write_all(chunk).await?;
@@ -740,12 +816,46 @@ pub async fn finalize_chunked_upload(
     let dir = inprogress_dir(data_dir, username, &id)
         .ok_or_else(|| anyhow::anyhow!("Invalid upload path"))?;
     let data_path = dir.join("data");
+
+    // #F6: hold the per-user records lock across the ENTIRE finalize — record
+    // load, quota rechecks, the strip/write of the final file, the Done commit,
+    // AND the temp-dir reclaim. Previously the lock was taken only briefly for
+    // the quota recheck (and again inside the upsert), while the fresh-UUID
+    // strip+write ran with NO lock: two concurrent POST /upload/finalize/<id>
+    // could each mint a distinct {uuid}.{ext}, each write a full copy, and the
+    // serialized upsert pointed the record at whichever committed last — leaving
+    // the earlier UUID file orphaned (referenced by no record, invisible to
+    // compute_usage/check_quota, never swept) → quota bypass + disk fill.
+    // Serializing the whole finalize per user closes that window; the idempotent
+    // short-circuit below makes a repeat finalize return the already-committed
+    // Done record instead of minting a second (orphaned) file.
+    let lock = user_record_lock(username);
+    let _guard = lock.lock().await;
+
+    // Records are loaded ONCE under the lock and remain authoritative for the
+    // whole finalize: every mutator of this user's records file (record_upload,
+    // upsert_record_validated, remove_record, delete/clear) takes the same lock,
+    // so nothing can change the file while we hold it.
+    let mut records = load_records(data_dir, username).await;
+
+    // Idempotent repeat: if this id already finalized, return it. This is the
+    // loser of two concurrent finalizes (the winner committed Done + removed the
+    // temp dir under the lock). Returning early avoids re-stripping a now-gone
+    // temp file and — crucially — avoids writing a second, orphaned output file.
+    match records.iter().find(|r| r.id == id) {
+        Some(r) if r.status == UploadStatus::Done => return Ok(r.clone()),
+        Some(_) => {}
+        None => anyhow::bail!("Unknown upload id"),
+    }
+
     let on_disk_len = tokio::fs::metadata(&data_path).await
         .map(|m| m.len() as usize)
         .map_err(|_| anyhow::anyhow!("No data uploaded"))?;
     if on_disk_len == 0 { anyhow::bail!("Empty file"); }
 
-    let existing = get_record(data_dir, username, &id).await
+    // Existence guaranteed by the match above (still under the lock).
+    let existing = records.iter().find(|r| r.id == id)
+        .cloned()
         .ok_or_else(|| anyhow::anyhow!("Unknown upload id"))?;
     let original_name = existing.original_name.clone();
     if existing.size > 0 && on_disk_len != existing.size {
@@ -759,12 +869,7 @@ pub async fn finalize_chunked_upload(
 
     // #16: re-validate quota at finalize time (exclude this id's in-flight row,
     // which is already counted via progress_bytes) against the real on-disk size.
-    {
-        let lock = user_record_lock(username);
-        let _guard = lock.lock().await;
-        let records = load_records(data_dir, username).await;
-        check_quota(&records, Some(&id), on_disk_len)?;
-    }
+    check_quota(&records, Some(&id), on_disk_len)?;
 
     let filename = format!("{}.{}", Uuid::new_v4(), ext);
     std::fs::create_dir_all(upload_dir)?;
@@ -772,7 +877,7 @@ pub async fn finalize_chunked_upload(
 
     // Helper: move (rename, falling back to copy) the assembled temp file into
     // the upload dir without buffering it. Used for formats we do not rewrite
-    // and for oversized images we deliberately skip the in-RAM strip on (#17/#39).
+    // (#39).
     async fn move_into_place(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
         match tokio::fs::rename(src, dst).await {
             Ok(()) => Ok(()),
@@ -780,12 +885,9 @@ pub async fn finalize_chunked_upload(
         }
     }
 
-    // #17: bound the in-RAM strip path by size and avoid staging A/V bytes
-    // through a separate temp file.
-    //   - JPEG/PNG: read + strip in RAM ONLY when the file is small enough
-    //     (<= MAX_INRAM_STRIP_BYTES). The strippers REJECT malformed input (#88).
-    //     For larger images we skip the in-RAM strip and move the file as-is to
-    //     avoid holding 2x the file in memory.
+    // Strip metadata and avoid staging A/V bytes through a separate temp file.
+    //   - JPEG/PNG: read + strip in RAM for every image (#20), bounded by the
+    //     admin max_upload_mb cap. The strippers REJECT malformed input (#88).
     //   - A/V (ffmpeg): strip directly from data_path to final_path so we never
     //     re-buffer the (often large) media through RAM or an extra temp copy.
     //     REJECTS on ffmpeg failure (#30).
@@ -797,22 +899,25 @@ pub async fn finalize_chunked_upload(
     } else {
         match ext.as_str() {
             "jpg" | "jpeg" | "png" => {
-                if on_disk_len <= MAX_INRAM_STRIP_BYTES {
-                    let raw = tokio::fs::read(&data_path).await
-                        .map_err(|_| anyhow::anyhow!("No data uploaded"))?;
-                    if raw.is_empty() { anyhow::bail!("Empty file"); }
-                    let stripped = if ext == "png" {
-                        strip_png_metadata(&raw)?
-                    } else {
-                        strip_jpeg_metadata(&raw)?
-                    };
-                    tokio::fs::write(&final_path, &stripped).await?;
-                    stripped.len()
+                // #20: strip EXIF/GPS/XMP from EVERY image regardless of size. A
+                // single upload is already bounded by the admin `max_upload_mb`
+                // cap (enforced in route_upload_init / route_upload_chunk), and the
+                // legacy /upload path strips unconditionally — so an oversized
+                // image must never be stored with metadata intact merely to save
+                // transient RAM. The strippers REJECT malformed input (#88).
+                // #32: bound concurrent in-RAM image strips (held across read+strip).
+                let _img_permit = img_strip_semaphore().acquire().await
+                    .map_err(|_| anyhow::anyhow!("image strip unavailable"))?;
+                let raw = tokio::fs::read(&data_path).await
+                    .map_err(|_| anyhow::anyhow!("No data uploaded"))?;
+                if raw.is_empty() { anyhow::bail!("Empty file"); }
+                let stripped = if ext == "png" {
+                    strip_png_metadata(&raw)?
                 } else {
-                    // Too large to strip in RAM without risking 2x memory; store as-is.
-                    move_into_place(&data_path, &final_path).await?;
-                    on_disk_len
-                }
+                    strip_jpeg_metadata(&raw)?
+                };
+                tokio::fs::write(&final_path, &stripped).await?;
+                stripped.len()
             }
             // A/V (mp4/webm/mp3/ogg/wav/flac): path-based ffmpeg strip, input is
             // data_path, output is final_path. REJECTS on failure (#30) rather
@@ -824,9 +929,6 @@ pub async fn finalize_chunked_upload(
         }
     };
 
-    // Clean up the temp directory.
-    let _ = tokio::fs::remove_dir_all(&dir).await;
-
     let content_type = safe_content_type(&ext).to_string();
     let url = format!(
         "{}/files/{}",
@@ -834,14 +936,23 @@ pub async fn finalize_chunked_upload(
         filename
     );
     let now = chrono::Utc::now().timestamp();
-    let id_for_check = id.clone();
+
     // #95: authoritative post-strip quota recheck against the FINAL stored size
-    // (size_final), under the per-user lock, before committing the Done record.
-    // The earlier checks used pre-strip/declared sizes; this is the real number.
-    let rec = upsert_record_validated(data_dir, username, &id,
-        existing.clone(),
-        |records| check_quota(records, Some(&id_for_check), size_final),
-        |r| {
+    // (size_final), still under the per-user lock, before committing the Done
+    // record. The earlier checks used pre-strip/declared sizes; this is the real
+    // number. On rejection remove the just-written final file and return Err; the
+    // caller (route_upload_finalize) then runs error_chunked_upload, which removes
+    // the temp dir and marks the record Error — so nothing is orphaned. (The client
+    // must start a new upload to retry; this is not an in-place resumable retry.)
+    if let Err(e) = check_quota(&records, Some(&id), size_final) {
+        let _ = tokio::fs::remove_file(&final_path).await;
+        return Err(e);
+    }
+
+    // Commit Done into the in-memory list loaded under this lock, then persist.
+    let rec = match records.iter().position(|r| r.id == id) {
+        Some(p) => {
+            let r = &mut records[p];
             r.status = UploadStatus::Done;
             r.filename = filename.clone();
             r.url = url.clone();
@@ -851,17 +962,26 @@ pub async fn finalize_chunked_upload(
             r.completed_at = now;
             r.uploaded_at = now;
             r.error = String::new();
-        },
-    ).await;
-    // If the post-strip recheck rejects, the stored file would be orphaned;
-    // remove it so a rejected finalize leaves no file behind.
-    match rec {
-        Ok(rec) => Ok(rec),
-        Err(e) => {
-            let _ = tokio::fs::remove_file(&final_path).await;
-            Err(e)
+            r.clone()
         }
-    }
+        None => {
+            // Record vanished despite holding the lock (should be impossible).
+            // Remove the just-written file rather than leak an uncounted orphan.
+            let _ = tokio::fs::remove_file(&final_path).await;
+            anyhow::bail!("Unknown upload id");
+        }
+    };
+    save_records(data_dir, username, &records).await;
+
+    // #5/#34: the Done record is now durably written — reclaim the temp dir. The
+    // temp `data` file was the only copy of the assembled upload until this
+    // point, so removing it earlier meant a failed commit destroyed the upload
+    // with no retry. The in-flight `Uploading` record reserved `on_disk_len`
+    // bytes toward the user's quota for the whole strip/commit window
+    // (compute_usage counts progress_bytes), so no concurrent finalize could
+    // transiently exceed PER_USER_MAX_TOTAL_BYTES.
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    Ok(rec)
 }
 
 /// Cancel an in-flight upload: removes the temp dir and marks the record
@@ -1058,8 +1178,17 @@ pub fn is_image(filename: &str) -> bool {
 /// corrupt the file). Formats that carry no metadata return their bytes as-is.
 async fn strip_metadata(data: &[u8], ext: &str) -> Result<Vec<u8>> {
     match ext {
-        "jpg" | "jpeg" => strip_jpeg_metadata(data),
-        "png" => strip_png_metadata(data),
+        "jpg" | "jpeg" => {
+            // #32: bound concurrent in-RAM image strips (see img_strip_semaphore).
+            let _permit = img_strip_semaphore().acquire().await
+                .map_err(|_| anyhow::anyhow!("image strip unavailable"))?;
+            strip_jpeg_metadata(data)
+        }
+        "png" => {
+            let _permit = img_strip_semaphore().acquire().await
+                .map_err(|_| anyhow::anyhow!("image strip unavailable"))?;
+            strip_png_metadata(data)
+        }
         "mp4" | "webm" | "mp3" | "ogg" | "wav" | "flac" =>
             strip_av_metadata(data, ext).await,
         _ => Ok(data.to_vec()),
@@ -1194,43 +1323,57 @@ fn strip_jpeg_metadata(data: &[u8]) -> Result<Vec<u8>> {
 
         let marker = data[i + 1];
 
-        // SOS (Start of Scan) — entropy-coded image data follows. A progressive
-        // JPEG contains MULTIPLE scans (each its own SOS, sometimes interleaved
-        // with DHT/DQT tables), but exactly one terminating EOI (FF D9) at the very
-        // end. Breaking at the FIRST FF D9 would only be correct for baseline
-        // single-scan images; for progressive images it could truncate at a byte
-        // pattern inside a later table/scan and discard the rest, corrupting the
-        // file (#94).
+        // SOS (Start of Scan) — a scan header (which carries a 2-byte length)
+        // followed by entropy-coded image data. A progressive JPEG contains
+        // MULTIPLE scans (each its own SOS, sometimes interleaved with DHT/DQT
+        // tables), but exactly one terminating EOI (FF D9) at the very end.
         //
-        // Fix: from the first SOS, copy through to the FINAL FF D9 in the buffer
-        // (the last EOI), preserving every intervening scan and table. Within
-        // entropy-coded data a literal 0xFF is byte-stuffed (FF 00) or an RSTn
-        // marker (FF D0-D7), so FF D9 only appears as a real EOI; taking the last
-        // one is safe and also drops any trailing EXIF/GPS/XMP appended past the
-        // image (mirrors the PNG path stopping at IEND).
+        // We copy the scan header, then walk the entropy-coded data honoring
+        // byte-stuffing (a literal 0xFF is encoded FF 00) and restart markers
+        // (FF D0-D7) — neither terminates the scan. Any OTHER FF-marker ends the
+        // scan, so we hand control back to the main loop at that marker: for a
+        // progressive JPEG it is the next scan/table (copied and re-scanned),
+        // and for the final scan it is the genuine EOI. Stopping at that FIRST
+        // real EOI drops any trailing EXIF/GPS/XMP/polyglot bytes appended past
+        // the image (#35), while still preserving every legitimate scan (#94)
+        // (mirrors the PNG path stopping at IEND).
         if marker == 0xDA {
-            // Scan forward for the LAST occurrence of FF D9.
-            let mut last_eoi = None;
-            let mut j = i + 2;
+            if i + 3 >= data.len() {
+                anyhow::bail!("Corrupt image (truncated JPEG segment)");
+            }
+            let hdr_len = ((data[i + 2] as usize) << 8) | (data[i + 3] as usize);
+            if hdr_len < 2 || i + 2 + hdr_len > data.len() {
+                anyhow::bail!("Corrupt image (invalid JPEG segment length)");
+            }
+            // Copy the scan header.
+            out.extend_from_slice(&data[i..i + 2 + hdr_len]);
+            // Walk entropy-coded data to the next real marker.
+            let scan_start = i + 2 + hdr_len;
+            let mut j = scan_start;
             while j + 1 < data.len() {
-                if data[j] == 0xFF && data[j + 1] == 0xD9 {
-                    last_eoi = Some(j + 2);
-                    j += 2;
-                    continue;
+                if data[j] == 0xFF {
+                    let m = data[j + 1];
+                    if m == 0x00 || (0xD0..=0xD7).contains(&m) {
+                        j += 2; // byte-stuffed 0xFF or RSTn: still scan data
+                        continue;
+                    }
+                    if m == 0xFF {
+                        j += 1; // fill byte before a marker
+                        continue;
+                    }
+                    break; // real marker begins at j
                 }
                 j += 1;
             }
-            match last_eoi {
-                Some(end) => {
-                    out.extend_from_slice(&data[i..end]);
-                    saw_sos = true;
-                    break;
-                }
-                None => {
-                    // No EOI: malformed/truncated image (consistent with #88 reject behavior).
-                    anyhow::bail!("Corrupt image (missing JPEG end marker)");
-                }
+            if j + 1 >= data.len() {
+                // Ran off the end without a terminating marker/EOI.
+                anyhow::bail!("Corrupt image (missing JPEG end marker)");
             }
+            // Copy the entropy-coded bytes and resume marker parsing at j.
+            out.extend_from_slice(&data[scan_start..j]);
+            saw_sos = true;
+            i = j;
+            continue;
         }
 
         // EOI

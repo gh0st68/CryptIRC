@@ -94,8 +94,17 @@ impl PasteStore {
         let id = Uuid::new_v4().to_string().replace('-', "");
         let now = chrono::Utc::now().timestamp();
 
+        // audit #F20: clamp expires_in and use saturating arithmetic so an
+        // attacker-supplied value near i64::MAX can't overflow `now + secs`.
+        // Release builds have no overflow-checks, so a raw `+` would wrap to a
+        // large NEGATIVE timestamp — the paste would be written then treated as
+        // already-expired on first view (silent data loss). The UI's largest
+        // expiry option is 30 days; MAX_EXPIRES_IN (1 year) is well above every
+        // legitimate choice so no real selection is cut. None / 0 (never
+        // expires) is preserved.
+        const MAX_EXPIRES_IN: i64 = 365 * 24 * 60 * 60; // 1 year
         let expires_at = match req.expires_in {
-            Some(secs) if secs > 0 => Some(now + secs),
+            Some(secs) if secs > 0 => Some(now.saturating_add(secs.min(MAX_EXPIRES_IN))),
             _ => None,
         };
 

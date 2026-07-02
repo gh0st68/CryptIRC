@@ -39,6 +39,14 @@ const FANOUT_DEADLINE: Duration = Duration::from_secs(12);
 const RATE_MAX_PER_WINDOW: usize = 30;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 
+/// Cap on the number of per-username buckets held in `rate_state()` (#24). The
+/// map keeps one entry per username that ever triggered a notify and never
+/// reclaims it (even after account deletion). When it crosses this cap we sweep
+/// buckets whose timestamps have all aged out of the window (see
+/// `rate_limit_allow`). Mirrors the opportunistic cap-sweep on auth's
+/// `login_fails` map and `otpk_low_should_notify`.
+const MAX_RATE_KEYS: usize = 8192;
+
 /// In-module per-user rate-limit state. Keyed by username; value is the list of
 /// recent send timestamps within the sliding window. DashMap is concurrency-safe
 /// and `'static`, so this needs no plumbing through other files.
@@ -52,7 +60,18 @@ fn rate_state() -> &'static DashMap<String, Vec<Instant>> {
 /// only if under `RATE_MAX_PER_WINDOW`.
 fn rate_limit_allow(username: &str) -> bool {
     let now = Instant::now();
-    let mut entry = rate_state().entry(username.to_string()).or_default();
+    let state = rate_state();
+    // #24: `state` keeps one bucket per username that ever triggered a notify and
+    // never reclaims it (even after account deletion). When it crosses
+    // MAX_RATE_KEYS, opportunistically drop any bucket whose timestamps have ALL
+    // aged out of the window — such a bucket contributes nothing to a future
+    // decision (its stale timestamps would be pruned on the next access anyway,
+    // see the retain below), so removing it is behavior-preserving. Mirrors the
+    // cap-sweep on auth's login_fails / the otpk_low map.
+    if state.len() > MAX_RATE_KEYS {
+        state.retain(|_, v| v.iter().any(|t| now.duration_since(*t) < RATE_WINDOW));
+    }
+    let mut entry = state.entry(username.to_string()).or_default();
     entry.retain(|t| now.duration_since(*t) < RATE_WINDOW);
     if entry.len() >= RATE_MAX_PER_WINDOW {
         return false;
@@ -429,6 +448,14 @@ impl NotificationManager {
     }
 
     pub async fn send_monitor_notification(&self, username: &str, nick: &str, status: &str) {
+        // #23: monitor pushes are client-triggered (MonitorPush WS msg) and each
+        // fans out one signed web-push per endpoint. Route through the SAME
+        // per-user rate limit as maybe_notify so a MonitorPush flood (across
+        // sockets) cannot drive unbounded outbound POSTs / self-spam devices.
+        if !rate_limit_allow(username) {
+            warn!("Push rate limit hit for {} — dropping monitor notification", username);
+            return;
+        }
         let subs = self.load_subscriptions(username).await;
         if subs.is_empty() { return; }
         let icon = if status == "online" { "🟢" } else { "🔴" };
@@ -444,6 +471,13 @@ impl NotificationManager {
     }
 
     pub async fn send_test_notification(&self, username: &str) {
+        // #23: gate the test send through the shared per-user push rate limit too
+        // so every fan_out path is bounded uniformly (the HTTP route has its own
+        // coarse push_test bucket; this is the same choke point as maybe_notify).
+        if !rate_limit_allow(username) {
+            warn!("Push rate limit hit for {} — dropping test notification", username);
+            return;
+        }
         let subs = self.load_subscriptions(username).await;
         if subs.is_empty() { return; }
         let payload = serde_json::json!({
@@ -592,11 +626,11 @@ impl NotificationManager {
     }
 
     fn subs_path(&self, username: &str) -> PathBuf {
-        let safe: String = username.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect();
+        let safe: String = username.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
         PathBuf::from(&self.data_dir).join("push").join(format!("{}.json", safe))
     }
     fn prefs_path(&self, username: &str) -> PathBuf {
-        let safe: String = username.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect();
+        let safe: String = username.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
         PathBuf::from(&self.data_dir).join("notif_prefs").join(format!("{}.json", safe))
     }
 }

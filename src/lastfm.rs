@@ -67,10 +67,20 @@ pub async fn now_playing(_client: &reqwest::Client, api_key: &str, lfm_user: &st
         .map_err(|e| anyhow!("Last.fm request failed (timeout={}, connect={})", e.is_timeout(), e.is_connect()))?;
 
     let status = resp.status();
-    // Cap the buffered body (audit #64): pull bytes and refuse anything over MAX_BODY so a
-    // hostile endpoint can't exhaust memory. (Chunk-wise capping would be stricter, but
-    // bytes()+length check bounds the final allocation for our expected tiny payloads.)
-    let raw = resp.bytes().await.map_err(|_| anyhow!("Last.fm: unreadable response"))?;
+    // Cap the buffered body (audit #64/#44): reject up front if Content-Length already
+    // exceeds the cap, then read the body INCREMENTALLY (chunk-wise) via the shared
+    // read_capped_body helper so a hostile/MITM'd endpoint streaming gigabytes (or a
+    // gzip bomb) can never force more than MAX_BODY+1 bytes into RAM before we bail.
+    if let Some(len) = resp.content_length() {
+        if len > MAX_BODY as u64 {
+            bail!("Last.fm: response too large");
+        }
+    }
+    // Read one byte past the cap so an oversized body whose Content-Length was absent or
+    // understated is still detected and rejected, without ever buffering the whole thing.
+    let raw = crate::preview::read_capped_body(resp, MAX_BODY + 1)
+        .await
+        .map_err(|_| anyhow!("Last.fm: unreadable response"))?;
     if raw.len() > MAX_BODY {
         bail!("Last.fm: response too large");
     }

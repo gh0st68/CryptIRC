@@ -4,7 +4,7 @@
 /// Unlocking one user's vault does not affect any other user's vault.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Key, Nonce,
 };
 use anyhow::{bail, Result};
@@ -49,6 +49,19 @@ async fn set_secret_mode(path: impl AsRef<Path>) {
     }
     #[cfg(not(unix))]
     { let _ = path; }
+}
+
+/// Best-effort chmod 0700 on a per-user vault directory (audit #45): create_dir_all
+/// honors the umask (~0755) and does not re-chmod a pre-existing dir on upgrade, so
+/// tighten it explicitly. No-op on non-unix. Mirrors certs.rs::set_dir_mode.
+async fn set_dir_mode(path: impl AsRef<Path>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path.as_ref(), std::fs::Permissions::from_mode(0o700)).await;
+    }
+    #[cfg(not(unix))]
+    { let _ = path.as_ref(); }
 }
 
 pub struct CryptoManager {
@@ -111,11 +124,23 @@ impl CryptoManager {
         // record: it embeds the salt under which it was wrapped, so unlocking
         // never depends on the legacy vault.salt/vault.canary being in sync.
         let mkey_path = self.mkey_path(username);
-        if let Ok(bundle) = tokio::fs::read_to_string(&mkey_path).await {
-            let master = unwrap_master_bundle(&bundle, passphrase)
-                .map_err(|_| anyhow::anyhow!("Incorrect passphrase"))?;
-            self.keys.insert(username.to_string(), master);
-            return Ok(());
+        match tokio::fs::read_to_string(&mkey_path).await {
+            Ok(bundle) => {
+                let master = unwrap_master_bundle(&bundle, passphrase)
+                    .map_err(|_| anyhow::anyhow!("Incorrect passphrase"))?;
+                self.keys.insert(username.to_string(), master);
+                return Ok(());
+            }
+            // Only a genuinely-missing mkey (NotFound) means "legacy vault". Any
+            // other read error (transient I/O, EPERM) must ABORT: falling through
+            // to the legacy branch would re-derive master==kdf(salt) and have
+            // write_master_bundle OVERWRITE the authoritative bundle with the
+            // wrong master — irreversible loss of all at-rest blobs + a silent
+            // E2E identity change (audit #F17).
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(anyhow::anyhow!("Reading vault.mkey: {}", e));
+            }
+            Err(_) => {} // NotFound → fall through to the legacy path below.
         }
 
         // ── Legacy vault (no mkey yet) ───────────────────────────────────────
@@ -140,13 +165,34 @@ impl CryptoManager {
             // First unlock — write canary
             let dir = self.vault_dir(username);
             tokio::fs::create_dir_all(&dir).await?;
+            set_dir_mode(&dir).await;
             let enc = encrypt_with_key(&kdf_key, CANARY_PT)?;
             write_secret(&canary, enc.as_bytes()).await?;
         }
 
         // master == kdf_key for the legacy cohort (keeps existing blobs valid).
         let master = kdf_key;
-        self.write_master_bundle(username, &salt, &kdf_key, &master).await?;
+        // Finding #40: legacy migration copied ONE shared vault.salt into every
+        // user's vault dir, so the KDF wrapping key derived above is identical for
+        // identical passphrases and a single Argon2 dictionary attacks all migrated
+        // users at once (and master == kdf_key self-wraps, removing key separation).
+        // Now that we hold the passphrase, re-wrap the SAME master (kept == old
+        // kdf_key so every existing cert/.enc/e2e/log blob and the E2E key stay
+        // valid) under a FRESH per-user random salt: the authoritative vault.mkey
+        // then embeds a unique salt and master != wrapping key.
+        let mut new_salt = [0u8; SALT_LEN];
+        OsRng.fill_bytes(&mut new_salt); // OS CSPRNG (audit #21)
+        let new_kdf = derive_key(passphrase, &new_salt)?;
+        self.write_master_bundle(username, &new_salt, &new_kdf, &master).await?;
+
+        // Refresh the legacy salt/canary mirrors to the fresh salt so the shared
+        // salt no longer sits on disk (best-effort; vault.mkey is already the
+        // authoritative record and is all unlock reads once it exists).
+        let _ = write_secret(self.salt_path(username), &new_salt).await;
+        if let Ok(new_canary) = encrypt_with_key(&new_kdf, CANARY_PT) {
+            let _ = write_secret(self.canary_path(username), new_canary.as_bytes()).await;
+        }
+
         self.keys.insert(username.to_string(), master);
         Ok(())
     }
@@ -163,6 +209,7 @@ impl CryptoManager {
     ) -> Result<()> {
         let dir = self.vault_dir(username);
         tokio::fs::create_dir_all(&dir).await?;
+        set_dir_mode(&dir).await;
         let wrapped = encrypt_with_key(kdf_key, master)?;
         // Persist the Argon2 params used (audit #106) so cost can be raised later
         // without invalidating existing vaults. v:2 carries m/t/p; v:1 readers
@@ -231,10 +278,18 @@ impl CryptoManager {
         // configs) stays valid and derive_e2e_enc_key stays stable — fixing the
         // silent E2E identity loss + partial-migration data loss (audit #8, #29).
         let mkey_path = self.mkey_path(username);
-        let master = if let Ok(bundle) = tokio::fs::read_to_string(&mkey_path).await {
-            unwrap_master_bundle(&bundle, old)
-                .map_err(|_| anyhow::anyhow!("Old passphrase incorrect"))?
-        } else {
+        let master = match tokio::fs::read_to_string(&mkey_path).await {
+            Ok(bundle) => unwrap_master_bundle(&bundle, old)
+                .map_err(|_| anyhow::anyhow!("Old passphrase incorrect"))?,
+            // Only a genuinely-missing mkey (NotFound) is a legacy vault. On any
+            // other read error (transient I/O, EPERM) ABORT rather than falling
+            // into the legacy branch, which would adopt master==kdf(canary salt)
+            // and have write_master_bundle OVERWRITE the authoritative bundle
+            // with the wrong master — irreversible at-rest data loss (audit #F17).
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(anyhow::anyhow!("Reading vault.mkey: {}", e));
+            }
+            Err(_) => {
             // Legacy vault with no bundle yet: verify the old passphrase against
             // the canary and adopt the old KDF key as the master.
             //
@@ -254,6 +309,7 @@ impl CryptoManager {
                 .map_err(|_| anyhow::anyhow!("Old passphrase incorrect"))?;
             if pt.ct_eq(CANARY_PT).unwrap_u8() == 0 { bail!("Old passphrase incorrect"); } // #87
             old_key
+            }
         };
 
         // Derive a fresh KDF key from a new random salt and re-wrap the SAME
@@ -269,6 +325,7 @@ impl CryptoManager {
         // the mkey bundle is already authoritative, so failure here is harmless).
         let dir = self.vault_dir(username);
         let _ = tokio::fs::create_dir_all(&dir).await;
+        set_dir_mode(&dir).await;
         let _ = write_secret(self.salt_path(username), &new_salt).await;
         if let Ok(new_canary) = encrypt_with_key(&new_kdf, CANARY_PT) {
             let _ = write_secret(self.canary_path(username), new_canary.as_bytes()).await;
@@ -291,6 +348,18 @@ impl CryptoManager {
         decrypt_with_key(entry.value(), encoded)
     }
 
+    pub async fn encrypt_aad(&self, username: &str, plaintext: &[u8], aad: &[u8]) -> Result<String> {
+        let entry = self.keys.get(username)
+            .ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
+        encrypt_with_key_aad(entry.value(), plaintext, aad)
+    }
+
+    pub async fn decrypt_aad(&self, username: &str, encoded: &str, aad: &[u8]) -> Result<Vec<u8>> {
+        let entry = self.keys.get(username)
+            .ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
+        decrypt_with_key_aad(entry.value(), encoded, aad)
+    }
+
     pub async fn derive_e2e_enc_key(&self, username: &str) -> Result<[u8; KEY_LEN]> {
         let entry = self.keys.get(username)
             .ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
@@ -308,6 +377,7 @@ impl CryptoManager {
         } else {
             let dir = self.vault_dir(username);
             tokio::fs::create_dir_all(&dir).await?;
+            set_dir_mode(&dir).await;
             let mut salt = [0u8; SALT_LEN];
             OsRng.fill_bytes(&mut salt);
             // Salt is sensitive (enables offline KDF attacks) — write 0600 (#7).
@@ -336,6 +406,7 @@ impl CryptoManager {
                         let user_canary = self.canary_path(uname);
                         if !user_salt.exists() {
                             tokio::fs::create_dir_all(&user_vault).await?;
+                            set_dir_mode(&user_vault).await;
                             tokio::fs::copy(&old_salt, &user_salt).await?;
                             // Tighten perms on copied secrets — copy preserves the
                             // legacy (possibly world-readable) mode otherwise (#7).
@@ -362,6 +433,16 @@ impl CryptoManager {
 // ─── Pure crypto helpers ──────────────────────────────────────────────────────
 
 pub fn encrypt_with_key(key_bytes: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<String> {
+    // No AAD — byte-for-byte the historical behavior for canary/master-bundle/
+    // prefs/cert blobs. Log lines use encrypt_with_key_aad to bind location (#11).
+    encrypt_with_key_aad(key_bytes, plaintext, &[])
+}
+
+/// Like `encrypt_with_key`, but authenticates `aad` (AES-GCM additional data).
+/// The AAD is tag-covered but NOT stored in the output, so decryption must
+/// supply the identical AAD. Used to bind each encrypted log line to its
+/// conn/target/date so a ciphertext can't be relocated between files (#11).
+pub fn encrypt_with_key_aad(key_bytes: &[u8; KEY_LEN], plaintext: &[u8], aad: &[u8]) -> Result<String> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
     // Random 96-bit nonce from the OS CSPRNG (audit #21). AES-GCM with random
     // nonces has a 2^32-message birthday bound per key; the per-user master key
@@ -372,7 +453,7 @@ pub fn encrypt_with_key(key_bytes: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<S
     let mut nonce_bytes = [0u8; NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce      = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, plaintext)
+    let ciphertext = cipher.encrypt(nonce, Payload { msg: plaintext, aad })
         .map_err(|_| anyhow::anyhow!("Encryption failed"))?;
     let mut out = nonce_bytes.to_vec();
     out.extend_from_slice(&ciphertext);
@@ -380,11 +461,17 @@ pub fn encrypt_with_key(key_bytes: &[u8; KEY_LEN], plaintext: &[u8]) -> Result<S
 }
 
 pub fn decrypt_with_key(key_bytes: &[u8; KEY_LEN], encoded: &str) -> Result<Vec<u8>> {
+    decrypt_with_key_aad(key_bytes, encoded, &[])
+}
+
+/// Like `decrypt_with_key`, but requires `aad` to match the AAD supplied at
+/// encryption time (#11); decryption fails if it differs.
+pub fn decrypt_with_key_aad(key_bytes: &[u8; KEY_LEN], encoded: &str, aad: &[u8]) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key_bytes));
     let data   = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)?;
     if data.len() < NONCE_LEN + 16 { bail!("Ciphertext too short"); }
     let nonce = Nonce::from_slice(&data[..NONCE_LEN]);
-    let pt    = cipher.decrypt(nonce, &data[NONCE_LEN..])
+    let pt    = cipher.decrypt(nonce, Payload { msg: &data[NONCE_LEN..], aad })
         .map_err(|_| anyhow::anyhow!("Decryption failed"))?;
     Ok(pt)
 }

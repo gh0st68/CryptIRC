@@ -124,6 +124,14 @@ pub struct E2EStore {
     otpk_consume_rate: Arc<DashMap<String, (Instant, u32)>>,
 }
 
+/// #41: outcome of an OTPK rate-budget check. `Blocked { first }` carries whether
+/// this is the FIRST over-budget hit in the current window, so the per-victim warn
+/// is emitted at most once per window (prevents log-spam keyed on victim identity).
+enum OtpkBudget {
+    Allowed,
+    Blocked { first: bool },
+}
+
 impl E2EStore {
     pub fn new(data_dir: &str) -> Self {
         // #32/#142: create e2e/ with mode 0700 (secret-bearing) and surface failures.
@@ -168,12 +176,16 @@ impl E2EStore {
             .clone()
     }
 
-    /// #27: Returns true if consuming an OTPK for `username` is within the
-    /// per-target rate budget, and records the consumption. Sliding 60s window,
-    /// max OTPK_CONSUME_MAX_PER_WINDOW consumptions per target per window. When
-    /// the budget is exhausted this returns false and the caller MUST NOT consume
-    /// an OTPK (it falls back to a 3-DH bundle instead).
-    fn otpk_consume_allowed(&self, username: &str) -> bool {
+    /// #27/#41: consult (and, when allowed, charge) the per-target OTPK rate budget
+    /// for `username`. Sliding 60s window, max OTPK_CONSUME_MAX_PER_WINDOW
+    /// consumptions per target per window. Returns `Allowed` when the caller may
+    /// consume an OTPK (the consumption is recorded); otherwise returns `Blocked`
+    /// and the caller MUST NOT consume (it falls back to a 3-DH bundle instead).
+    /// `Blocked { first }` is true only on the first over-budget hit in the current
+    /// window, so the per-victim warn is logged at most once per window. MUST be
+    /// called only after confirming the pool is non-empty, so budget is charged
+    /// solely when an OTPK actually exists to be consumed.
+    fn otpk_consume_allowed(&self, username: &str) -> OtpkBudget {
         let now = Instant::now();
         // Bound the map: an attacker querying many distinct target usernames would
         // otherwise grow it without limit. Drop fully-expired windows (which would be
@@ -190,12 +202,15 @@ impl E2EStore {
         if now.duration_since(window_start) >= OTPK_CONSUME_WINDOW {
             // window expired — start a fresh window with this consumption
             *entry = (now, 1);
-            true
+            OtpkBudget::Allowed
         } else if count < OTPK_CONSUME_MAX_PER_WINDOW {
             *entry = (window_start, count + 1);
-            true
+            OtpkBudget::Allowed
         } else {
-            false
+            // over budget — keep counting so the first block in this window is
+            // distinguishable (log once); caller still gets a 3-DH fallback.
+            *entry = (window_start, count.saturating_add(1));
+            OtpkBudget::Blocked { first: count == OTPK_CONSUME_MAX_PER_WINDOW }
         }
     }
 
@@ -203,8 +218,8 @@ impl E2EStore {
 
     pub async fn store_identity_enc(&self, username: &str, blob: &str) -> Result<()> {
         let dir = self.user_dir(username);
-        tokio::fs::create_dir_all(&dir).await?;
-        tokio::fs::write(dir.join("identity.enc"), blob).await?;
+        create_dir_secure(&dir).await?;
+        write_secret(&dir.join("identity.enc"), blob).await?;
         Ok(())
     }
 
@@ -222,16 +237,16 @@ impl E2EStore {
             anyhow::bail!("Invalid key bundle");
         }
         let dir = self.user_dir(username);
-        tokio::fs::create_dir_all(&dir).await?;
+        create_dir_secure(&dir).await?;
 
         // Store main bundle without one-time prekeys
         let mut b = bundle.clone();
         b.one_time_prekeys = vec![];
-        tokio::fs::write(dir.join("bundle.json"), serde_json::to_string(&b)?).await?;
+        write_secret(&dir.join("bundle.json"), serde_json::to_string(&b)?).await?;
 
         // Store one-time prekeys individually
         let otpk_dir = dir.join("otpk");
-        tokio::fs::create_dir_all(&otpk_dir).await?;
+        create_dir_secure(&otpk_dir).await?;
         // HIGH: bound the OTPK writes by BOTH the per-call cap AND the per-user TOTAL cap
         // (MAX_OTPK_TOTAL). Like add_one_time_prekeys, the per-call cap alone is bypassable
         // by repeated E2EPublishBundle calls (each carrying fresh, non-colliding key_ids),
@@ -247,10 +262,7 @@ impl E2EStore {
         let headroom = MAX_OTPK_TOTAL.saturating_sub(existing);
         let limit = headroom.min(MAX_OTPK_WRITES_PER_CALL);
         for opk in bundle.one_time_prekeys.iter().filter(|o| valid_key_field(&o.public_key)).take(limit) {
-            tokio::fs::write(
-                otpk_dir.join(format!("{}.json", opk.key_id)),
-                serde_json::to_string(opk)?,
-            ).await?;
+            write_secret(&otpk_dir.join(format!("{}.json", opk.key_id)), serde_json::to_string(opk)?).await?;
         }
         Ok(())
     }
@@ -262,27 +274,52 @@ impl E2EStore {
         tokio::fs::metadata(dir.join("bundle.json")).await.is_ok()
     }
 
+    /// #49: return this user's published identity keys as `(identity_dh_key,
+    /// identity_sign_key)` (base64), or None if they have no published bundle.
+    /// Used to cross-check a relayed X3DH header against what the sender actually
+    /// published, so a responder cannot be made to pin a divergent identity.
+    /// Reads the bundle WITHOUT consuming an OTPK (unlike `fetch_bundle`).
+    pub async fn bundle_identity_keys(&self, username: &str) -> Option<(String, String)> {
+        let dir  = self.user_dir(username);
+        let json = tokio::fs::read_to_string(dir.join("bundle.json")).await.ok()?;
+        let bundle: KeyBundle = serde_json::from_str(&json).ok()?;
+        Some((bundle.identity_dh_key, bundle.identity_sign_key))
+    }
+
     pub async fn fetch_bundle(&self, username: &str) -> Option<FetchedBundle> {
         let dir  = self.user_dir(username);
         let json = tokio::fs::read_to_string(dir.join("bundle.json")).await.ok()?;
         let bundle: KeyBundle = serde_json::from_str(&json).ok()?;
 
-        // #27/#23: throttle OTPK consumption per target so a third party cannot drain
-        // the victim's pool on demand. Over budget → return the bundle without an
-        // OTPK (3-DH fallback), exactly as if the pool were empty. The rate check MUST
-        // run INSIDE the otpk_lock critical section (atomic with the consume) — checking
-        // it before acquiring the lock let concurrent fetches diverge the recorded budget
-        // from actual consumption (#23).
+        // #27/#23/#41: throttle OTPK consumption per target so a third party cannot
+        // drain the victim's pool on demand. The rate budget is charged ONLY when an
+        // OTPK is actually consumed: peek the pool first and, on an empty pool, serve
+        // the bundle without an OTPK (3-DH fallback) WITHOUT charging the budget or
+        // emitting a per-victim log — the same wire response an over-budget fetch
+        // produces, so empty-pool / over-budget / consumed cases are indistinguishable
+        // at the budget layer. Over budget → same 3-DH fallback, with the per-victim
+        // warn emitted at most once per window. The check MUST run INSIDE the
+        // otpk_lock critical section (atomic with the consume) — checking it before
+        // acquiring the lock let concurrent fetches diverge the recorded budget from
+        // actual consumption (#23).
         let lock = self.otpk_lock(username);
         let _guard = lock.lock().await;
-        let otpk = if self.otpk_consume_allowed(username) {
-            self.consume_one_time_prekey_locked(username).await
-        } else {
-            warn!(
-                "[E2E] OTPK consume rate limit hit for '{}' — serving 3-DH bundle (no OTPK consumed)",
-                username
-            );
+        let otpk = if self.otpk_count(username).await == 0 {
+            // Empty pool: nothing to consume — don't charge the budget, don't log.
             None
+        } else {
+            match self.otpk_consume_allowed(username) {
+                OtpkBudget::Allowed => self.consume_one_time_prekey_locked(username).await,
+                OtpkBudget::Blocked { first } => {
+                    if first {
+                        warn!(
+                            "[E2E] OTPK consume rate limit hit for '{}' — serving 3-DH bundle (no OTPK consumed)",
+                            username
+                        );
+                    }
+                    None
+                }
+            }
         };
         drop(_guard);
 
@@ -317,7 +354,7 @@ impl E2EStore {
 
     pub async fn add_one_time_prekeys(&self, username: &str, keys: Vec<OneTimePrekey>) -> Result<()> {
         let otpk_dir = self.user_dir(username).join("otpk");
-        tokio::fs::create_dir_all(&otpk_dir).await?;
+        create_dir_secure(&otpk_dir).await?;
         // MEDIUM: the per-call cap (MAX_OTPK_WRITES_PER_CALL) is bypassable by
         // repeated E2EAddOTPKs calls, so cap the TOTAL OTPK files held per user.
         // Count what already exists and only write up to the remaining headroom.
@@ -347,10 +384,7 @@ impl E2EStore {
         // remaining total headroom, whichever is smaller.
         let limit = headroom.min(MAX_OTPK_WRITES_PER_CALL);
         for opk in keys.into_iter().filter(|o| valid_key_field(&o.public_key)).take(limit) { // #88
-            tokio::fs::write(
-                otpk_dir.join(format!("{}.json", opk.key_id)),
-                serde_json::to_string(&opk)?,
-            ).await?;
+            write_secret(&otpk_dir.join(format!("{}.json", opk.key_id)), serde_json::to_string(&opk)?).await?;
         }
         Ok(())
     }
@@ -369,10 +403,8 @@ impl E2EStore {
 
     pub async fn store_session(&self, username: &str, partner: &str, blob: &str) -> Result<()> {
         let dir = self.user_dir(username).join("sessions");
-        tokio::fs::create_dir_all(&dir).await?;
-        let safe: String = partner.chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-            .take(128).collect();
+        create_dir_secure(&dir).await?;
+        let safe = safe_partner(partner);
         let path = dir.join(format!("{}.enc", safe));
         // MEDIUM: one session file per partner with no cap lets a user create an
         // unbounded number of session files (one inode each). Only a NEW partner
@@ -389,23 +421,19 @@ impl E2EStore {
             );
             anyhow::bail!("session storage limit reached");
         }
-        tokio::fs::write(path, blob).await?;
+        write_secret(&path, blob).await?;
         Ok(())
     }
 
     pub async fn load_session(&self, username: &str, partner: &str) -> Option<String> {
-        let safe: String = partner.chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-            .take(128).collect();
+        let safe = safe_partner(partner);
         tokio::fs::read_to_string(
             self.user_dir(username).join("sessions").join(format!("{}.enc", safe))
         ).await.ok()
     }
 
     pub async fn delete_session(&self, username: &str, partner: &str) -> Result<()> {
-        let safe: String = partner.chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-            .take(128).collect();
+        let safe = safe_partner(partner);
         let _ = tokio::fs::remove_file(
             self.user_dir(username).join("sessions").join(format!("{}.enc", safe))
         ).await;
@@ -416,7 +444,7 @@ impl E2EStore {
 
     pub async fn store_channel_key(&self, username: &str, channel: &str, blob: &str) -> Result<()> {
         let dir = self.user_dir(username).join("channels");
-        tokio::fs::create_dir_all(&dir).await?;
+        create_dir_secure(&dir).await?;
         let safe = safe_channel(channel);
         let path = dir.join(format!("{}.enc", safe));
         // MEDIUM: one channel-key file per channel with no cap lets a user create
@@ -434,7 +462,7 @@ impl E2EStore {
             );
             anyhow::bail!("channel key storage limit reached");
         }
-        tokio::fs::write(path, blob).await?;
+        write_secret(&path, blob).await?;
         Ok(())
     }
 
@@ -466,7 +494,7 @@ impl E2EStore {
                 // safe_channel strips `.` from channel names before they become filenames.)
                 if path.extension().and_then(|x| x.to_str()) != Some("enc") { continue; }
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    out.push(stem.to_string());
+                    out.push(fs_decode(stem));
                     if out.len() >= MAX_CHANNEL_KEY_FILES { break; }
                 }
             }
@@ -499,12 +527,12 @@ impl E2EStore {
 
     pub async fn save_trust(&self, username: &str, records: &[TrustRecord]) -> Result<()> {
         let dir = self.user_dir(username);
-        tokio::fs::create_dir_all(&dir).await?;
+        create_dir_secure(&dir).await?;
         // #90: atomic tmp+rename so a crash mid-write can't leave a truncated
         // (corrupt) trust.json that would erase all pins on next load.
         let final_path = dir.join("trust.json");
         let tmp = dir.join(format!("trust.json.tmp.{}", uuid::Uuid::new_v4()));
-        tokio::fs::write(&tmp, serde_json::to_string_pretty(records)?).await?;
+        write_secret(&tmp, serde_json::to_string_pretty(records)?).await?;
         if let Err(e) = tokio::fs::rename(&tmp, &final_path).await {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(e.into());
@@ -563,6 +591,41 @@ impl E2EStore {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/// audit #45: best-effort chmod 0700 on a per-user e2e dir/subdir so the
+/// world-traversable data dir cannot let other local users enumerate accounts,
+/// reconstruct a contact graph from session/channel filenames, or read trust.json.
+/// No-op on non-unix. Mirrors certs.rs::set_dir_mode.
+async fn set_dir_mode(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await;
+    }
+    #[cfg(not(unix))]
+    { let _ = path; }
+}
+
+/// audit #45: create an e2e dir recursively, then tighten it AND its per-user
+/// parent to 0700 (create_dir_all honors the umask and never re-chmods an
+/// existing dir on upgrade).
+async fn create_dir_secure(dir: &std::path::Path) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(dir).await?;
+    set_dir_mode(dir).await;
+    if let Some(parent) = dir.parent() { set_dir_mode(parent).await; }
+    Ok(())
+}
+
+/// audit #45: write an e2e file then chmod 0600. No-op mode on non-unix.
+async fn write_secret(path: &std::path::Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    tokio::fs::write(path, bytes).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
+    }
+    Ok(())
+}
+
 /// Cheaply count the number of entries in a directory. Used to enforce per-user
 /// on-disk file caps. A missing/unreadable directory counts as 0 (nothing stored
 /// yet), so a first write is always allowed.
@@ -593,9 +656,66 @@ fn valid_signed_prekey(spk: &SignedPrekey) -> bool {
     valid_key_field(&spk.public_key) && valid_key_field(&spk.signature)
 }
 
-fn safe_channel(channel: &str) -> String {
-    channel.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '#' || *c == '&')
-        .take(64)
-        .collect()
+// Finding #13/#36: ONE canonical, injective encoding for on-disk partner/channel
+// filenames. Previously names were STRIPPED of "unsafe" chars in two DIVERGENT
+// layers (main.rs kept Unicode alnum, e2e stripped to ASCII), so distinct nicks or
+// channels that differ only by non-ASCII homoglyphs (and IRC-legal `[nick]`)
+// collapsed onto a SINGLE `.enc` file, letting one peer's/channel's ratchet, trust,
+// replay-guard, or PSK state silently overwrite another's. We percent-encode
+// instead: bytes in the allow-set pass through verbatim (identity on the old safe
+// set, so every file already on disk stays reachable and the ASCII case — including
+// the reserved `__spk__`/`__otpk__<id>` blobs — is byte-for-byte unchanged), while
+// every other byte, including the escape byte `%`, becomes `%XX`. That makes the map
+// injective (losslessly decodable): distinct names can never collide, which closes
+// the channel-key collision of #36 as well. Output is capped so a pathological name
+// can't exceed the filesystem's per-name byte limit.
+fn fs_encode(name: &str, is_safe: fn(u8) -> bool) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::new();
+    for &b in name.as_bytes() {
+        if b != b'%' && is_safe(b) {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        if out.len() >= 248 { break; } // + ".enc" stays within the 255-byte limit
+    }
+    out
 }
+
+/// Inverse of `fs_encode`; used only to report stored channel names back to the
+/// client verbatim. Identity on names with no `%` escape (all pre-existing ASCII
+/// channel files), so behavior for real channels is unchanged.
+fn fs_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) =
+                ((b[i + 1] as char).to_digit(16), (b[i + 2] as char).to_digit(16))
+            {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn partner_is_safe(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
+fn channel_is_safe(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'#' || b == b'&'
+}
+
+fn safe_partner(partner: &str) -> String { fs_encode(partner, partner_is_safe) }
+
+fn safe_channel(channel: &str) -> String { fs_encode(channel, channel_is_safe) }

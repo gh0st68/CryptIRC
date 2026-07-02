@@ -47,6 +47,14 @@ const E2E_CHAN_PREFIX    = 'sd8~';       // ASCII-only
 const E2E_MAX_SKIP      = 100;   // max buffered out-of-order message keys per session
 const OTPK_REFILL_BELOW = 10;   // replenish when server reports fewer than this (L5)
 const OTPK_BATCH_SIZE   = 20;   // keys generated per replenishment batch
+// #F4: distinguished return from e2eEncryptOutgoing meaning "a DM E2E session EXISTS but
+// is not yet send-ready" (typically the responder has no sending chain until it receives
+// the peer's first message → ratchetEncrypt throws 'Cannot send yet'). Callers MUST treat
+// this as BLOCKED: drop the outbound message and warn — NEVER fall back to sending
+// plaintext, which would leak cleartext on an "encrypted" DM. It is a frozen sentinel so
+// it can never collide with a real (string) wire payload or the null "no E2E → plaintext"
+// result; identify it by strict === or the duck-typed marker `.e2eBlocked === true`.
+const E2E_ENCRYPT_BLOCKED = Object.freeze({ e2eBlocked: true });
 // #81: X3DH "F" domain-separation constant — 32 bytes of 0xFF prepended to the IKM
 // before the X3DH KDF, per the Signal X3DH spec. Applied at both X3DH call sites.
 const X3DH_F_CONSTANT   = new Uint8Array(32).fill(0xFF);
@@ -62,6 +70,7 @@ window.E2E = {
   trustStore:   Object.create(null),  // nick → { fingerprint, verified, keyChanged }
   _spkBlob:     null,       // raw encrypted SPK blob (set when server sends it)
   _encryptLock: Object.create(null),  // nick → Promise chain (S3: serialise ALL per-session ratchet ops — encrypt AND decrypt — via _withRatchetLock)
+  _sessionEpoch: Object.create(null),  // #12: nick → monotonic epoch high-water mark (per page session; survives re-handshakes) so stale server-pushed session blobs can be rejected
 };
 
 // ─── Initialise on vault unlock ───────────────────────────────────────────────
@@ -162,7 +171,7 @@ async function e2ePublishBundle() {
   // the id-keyed storage + header selection here is the mechanism that makes that safe.)
   let spkId = 1;
   if (E2E._spkBlob) {
-    try { const o = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(E2E._spkBlob))); if (Number.isInteger(o.spk_id)) spkId = o.spk_id; } catch(_) {}
+    try { const o = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(E2E._spkBlob))); if (Number.isInteger(o.spk_id)) spkId = o.spk_id + 1; } catch(_) {}
   }
   const spkPrivJwk = await crypto.subtle.exportKey('jwk', spkPair.privateKey);
   const spkBlob    = await aesEncryptBlob(
@@ -283,10 +292,10 @@ async function x3dhRespond(x3dhHeader) {
   if (!spkRaw) {
     if (!E2E._spkBlob) {
       console.warn('[E2E] SPK blob not in memory, requesting...');
-      wsend({ type: 'e2e_load_session', partner: '__spk__' });
-      for (let i = 0; i < 30 && !E2E._spkBlob; i++) {
-        await new Promise(r => setTimeout(r, 100));
-      }
+      // #48: event-driven wait (see loadSessionBlobFromCache) instead of a 3s
+      // spin-poll. The __spk__ e2e_session reply sets E2E._spkBlob and wakes this
+      // waiter; a miss resolves immediately rather than blocking the pipeline 3s.
+      await loadSessionBlobFromCache('__spk__');
     }
     spkRaw = E2E._spkBlob;
   }
@@ -388,7 +397,21 @@ async function x3dhRespond(x3dhHeader) {
 function _e2eReservedNamespace(name){
   return String(name).replace(/[^A-Za-z0-9_-]/g, '').startsWith('__');
 }
-async function e2eEstablishResponderSession(from, header) {
+// #47: canonical byte-encoding of the X3DH header fields the sender signs with its
+// ECDSA identity (sender_sign_ik) and the responder verifies BEFORE pinning, so a relay
+// cannot flip the sign-key half of the TOFU pin on first contact. Sender and verifier
+// build this from the SAME four header fields; '\n' is a safe separator (base64 pubkeys
+// never contain it, spk_id/used_otpk_id are integers or null). Domain-separated.
+function _x3dhHeaderSigMsg(senderIk, ephemeralPub, spkId, usedOtpkId) {
+  return new TextEncoder().encode(
+    'CryptIRC-X3DH-HDR-v1\n' +
+    String(senderIk || '') + '\n' +
+    String(ephemeralPub || '') + '\n' +
+    (spkId == null ? '' : String(spkId)) + '\n' +
+    (usedOtpkId == null ? '' : String(usedOtpkId))
+  );
+}
+async function e2eEstablishResponderSession(from, header, opts = {}) {
   // SECURITY: peer ratchet sessions share the server-side e2e/sessions namespace with
   // the user's OWN internal key blobs ('__spk__', '__otpk__<id>'). A peer whose nick
   // SANITIZES to a reserved name could otherwise overwrite the victim's own private-key
@@ -437,6 +460,29 @@ async function e2eEstablishResponderSession(from, header) {
     console.warn('[E2E] refusing X3DH from', from, '— missing identity key(s)');
     return false;
   }
+  // #47: sender_sign_ik is never DH-bound (only feeds the pin/AAD/HKDF-info), so require
+  // an ECDSA signature over sender_ik||ephemeral_pub||spk_id||used_otpk_id and verify it
+  // BEFORE pinning; refuse on any missing/invalid/error so a relay-tampered sign key can
+  // never become the pinned TOFU fingerprint.
+  if (!header.sender_sign_sig) {
+    console.warn('[E2E] refusing X3DH from', from, '— missing header signature');
+    return false;
+  }
+  try {
+    const _signPub = await importPub(header.sender_sign_ik, 'ECDSA');
+    const _sigOk = await crypto.subtle.verify(
+      { name:'ECDSA', hash:'SHA-256' }, _signPub,
+      base64ToBytes(header.sender_sign_sig),
+      _x3dhHeaderSigMsg(header.sender_ik, header.ephemeral_pub, header.spk_id, header.used_otpk_id)
+    );
+    if (!_sigOk) {
+      console.warn('[E2E] refusing X3DH from', from, '— header signature invalid (possible relay tamper)');
+      return false;
+    }
+  } catch (e) {
+    console.warn('[E2E] refusing X3DH from', from, '— header signature verify error:', e && e.message);
+    return false;
+  }
   // #11/#25: pin BOTH identity keys (dh + sign).
   const fp    = await computeIdentityFingerprint(header.sender_ik, header.sender_sign_ik);
   const trust = await e2eCheckTrust(from, fp);
@@ -446,8 +492,45 @@ async function e2eEstablishResponderSession(from, header) {
     e2eShowKeyChangeWarning(from, fp);
     return false;
   }
+  // #1: first-contact identity was not confirmed out-of-band — abort cleanly
+  // (no pin, no session) exactly like a key change.
+  if (trust.status === 'rejected') {
+    console.warn('[E2E] responder establish refused — unconfirmed identity:', from);
+    return false;
+  }
   // status 'tofu' already recorded the pin inside e2eCheckTrust (first contact),
   // mirroring the initiator side; 'trusted'/'verified' mean the pin matches.
+
+  // #3: DoS hardening for X3DH RE-establishment over an ALREADY-LIVE session. The
+  // header is unauthenticated (only the SPK is signed, verified by the INITIATOR); a
+  // fresh ephemeral bypasses the byte-replay guard above, and the server relays headers
+  // verbatim with no dedup, so a compromised server or any peer can craft a header with
+  // the real peer's PINNED identity keys but a new ephemeral to silently reset a working
+  // receive chain (inbound-DM DoS).
+  if (_existing) {
+    // (a) A header that arrives ALONE (relayed e2e_x3dh_header or inline [e2ex3dh], with
+    // NO accompanying ciphertext — opts.withEnvelope !== true) cannot be authenticated, so
+    // it must NOT overwrite a live session. Defer: leave the caller's pending header for
+    // the [e2edm2] path, which commits the new session only if its first message decrypts.
+    if (!opts.withEnvelope) {
+      console.warn('[E2E] deferring header-only X3DH re-establishment for live session:', from);
+      return false;
+    }
+    // (b) Envelope-driven re-establishment IS allowed (the caller commits only on a
+    // successful decrypt below), but rate-limit it per peer — the inline path was
+    // previously unbounded. A genuine re-handshake is a handful; a forgery flood is capped
+    // at 10/60s. First contact and byte-replays never reach here.
+    const _now = Date.now();
+    E2E._reestablishLog = E2E._reestablishLog || Object.create(null);
+    const _log = (E2E._reestablishLog[from] || []).filter(t => _now - t < 60000);
+    if (_log.length >= 10) {
+      console.warn('[E2E] refusing X3DH re-establishment — rate limit exceeded for', from);
+      E2E._reestablishLog[from] = _log;
+      return false;
+    }
+    _log.push(_now);
+    E2E._reestablishLog[from] = _log;
+  }
 
   const { sharedSecret, identityAD, consumedOtpkId, selectedSpk } = await x3dhRespond(header);
   // #2: pin the initiator's long-term identity DH pub (header.sender_ik).
@@ -471,12 +554,41 @@ E2E._sessionCache = Object.create(null);  // partner → raw blob string (null p
 
 async function loadSessionBlobFromCache(partner) {
   if (E2E._sessionCache[partner]) return E2E._sessionCache[partner];
-  // Not cached — request from server and wait
+  // #48: event-driven, not a 3s spin-poll. The server ALWAYS replies to
+  // e2e_load_session with an e2e_session event (the blob on a hit, an empty
+  // string on a miss), so resolve the instant that reply is handled instead of
+  // sleeping 30x100ms. Previously a header naming a nonexistent __otpk__/__spk__
+  // id forced the full 3s wait before throwing, letting a peer stream such
+  // headers to stall the (globally-serialised) incoming-decrypt pipeline. The
+  // timeout is now only a dead-connection backstop.
   wsend({ type: 'e2e_load_session', partner });
-  for (let i = 0; i < 30 && !E2E._sessionCache[partner]; i++) {
-    await new Promise(r => setTimeout(r, 100));
-  }
-  return E2E._sessionCache[partner] || null;
+  return await new Promise(resolve => {
+    if (E2E._sessionCache[partner]) { resolve(E2E._sessionCache[partner]); return; }
+    if (!E2E._sessionBlobWaiters) E2E._sessionBlobWaiters = Object.create(null);
+    const list = E2E._sessionBlobWaiters[partner] || (E2E._sessionBlobWaiters[partner] = []);
+    let entry;
+    const timeout = setTimeout(() => {
+      const arr = E2E._sessionBlobWaiters[partner];
+      if (arr) {
+        const idx = arr.indexOf(entry);
+        if (idx >= 0) arr.splice(idx, 1);
+        if (arr.length === 0) delete E2E._sessionBlobWaiters[partner];
+      }
+      resolve(E2E._sessionCache[partner] || null);
+    }, 3000);
+    entry = (blob) => { clearTimeout(timeout); resolve(blob || null); };
+    list.push(entry);
+  });
+}
+
+// #48: resolve every pending loadSessionBlobFromCache waiter for `partner` as
+// soon as the server's e2e_session reply is handled (hit -> blob, miss -> null),
+// so no caller has to spin-poll. Called from the e2e_session event handler.
+function _e2eResolveBlobWaiters(partner, blob) {
+  const arr = E2E._sessionBlobWaiters && E2E._sessionBlobWaiters[partner];
+  if (!arr) return;
+  delete E2E._sessionBlobWaiters[partner];
+  for (const cb of arr) { try { cb(blob); } catch (_) {} }
 }
 
 // ─── Double Ratchet ───────────────────────────────────────────────────────────
@@ -620,10 +732,35 @@ async function _ratchetEncryptInner(nick, plaintext) {
         `Cannot send yet — waiting for ${nick} to send the first message to establish the ratchet.`
       );
     }
-    // Responder's first send: do DH ratchet step per Signal spec
-    // ECDH(our current DHs = SPK, their DHr = initiator's DH pub) → derive CKr (unused now) and CKs
-    await dhRatchetStep(session, session.DHr);
-    // dhRatchetStep derived CKr (for receiving next from initiator) and CKs (for sending now)
+    // Responder's FIRST send. We must open a sending chain WITHOUT disturbing the LIVE
+    // receive chain (CKr/Nr/DHr) that is still decrypting the initiator's initial chain.
+    // A full dhRatchetStep() here is WRONG: its step 1 overwrites session.CKr and resets
+    // session.Nr, so the initiator's later initial-chain messages (n=1,2,… on DHr) would
+    // fail AES-GCM. Instead mirror the initiator's step-0 (see ~line 800): advance ONLY
+    // the root key via ECDH(our initial DHs = SPK, their DHr = initiator's ratchet pub) —
+    // discarding the receive half — then derive ONLY a fresh sending chain exactly like
+    // dhRatchetStep()'s step 2. The KDF inputs/order are byte-identical to what the old
+    // dhRatchetStep produced, so the initiator still derives a matching CKr; we simply no
+    // longer clobber our receive state.
+    const ourPrivR0  = await importPriv(session.DHs.priv);   // our SPK priv (initial DHs)
+    const theirPubR  = await importPub(session.DHr, 'ECDH'); // initiator's ratchet pub
+    const dhR0       = await ecdh(ourPrivR0, theirPubR);
+    const dR0        = await hkdf(concat(base64ToBytes(session.RK), dhR0), 'DR-Ratchet-v1', 64);
+    session.RK       = bytesToBase64(dR0.slice(0, 32));       // advance RK only; DISCARD dR0[32:64] (that would clobber CKr)
+    // Step 2 (mirrors dhRatchetStep): fresh DHs → ECDH → derive new RK + our sending chain.
+    const newDHsR    = await crypto.subtle.generateKey(
+      { name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']
+    );
+    const newDHsRPub = await exportPub(newDHsR.publicKey, 'ECDH');
+    const dhR2       = await ecdh(newDHsR.privateKey, theirPubR);
+    const derivedR2  = await hkdf(concat(base64ToBytes(session.RK), dhR2), 'DR-Ratchet-v1', 64);
+    session.RK       = bytesToBase64(derivedR2.slice(0, 32));
+    session.CKs      = bytesToBase64(derivedR2.slice(32, 64));
+    session.PN       = session.Ns;   // no prior sending chain → 0
+    session.Ns       = 0;
+    session.DHs      = { pub: newDHsRPub, priv: await exportPriv(newDHsR.privateKey) };
+    // NOTE: intentionally leave session.CKr / session.Nr / session.DHr / session.rgen
+    // untouched — the initiator's initial receive chain must stay live.
     await saveSession(nick, session);
   }
 
@@ -680,6 +817,7 @@ async function _ratchetDecryptInner(nick, envelope) {
   if (session.skipped[skipKey]) {
     const mk = base64ToBytes(session.skipped[skipKey]);
     delete session.skipped[skipKey];
+    if (session.skippedMeta) delete session.skippedMeta[skipKey];  // #39: keep eviction side-table in sync
     const pt = await messageDecrypt(mk, ct, header, identAD);
     await saveSession(nick, session);
     return new TextDecoder().decode(pt);
@@ -732,6 +870,10 @@ async function dhRatchetStep(session, theirNewDHPub) {
   session.Ns      = 0;
   session.Nr      = 0;
   session.DHr     = theirNewDHPub;
+  // #39: advance the receive-generation counter so skipped keys buffered AFTER this
+  // step sort (by generation) strictly after keys from the prior generation, making
+  // eviction a true (generation, n) LRU instead of raw insertion order.
+  session.rgen    = (session.rgen || 0) + 1;
 
   // Step 2: Generate new DHs, ECDH(new DHs, their DH pub) → KDF → new RK, CKs
   const newDHs    = await crypto.subtle.generateKey(
@@ -750,18 +892,38 @@ async function skipMessageKeys(session, nick, until) {
   if (until - session.Nr > E2E_MAX_SKIP) throw new Error('Too many skipped messages');
   if (!session.CKr) return;
 
+  // #39: stamp each buffered key with its (generation, n) so eviction below is by true
+  // sequence, not raw Object.keys insertion order. session.rgen advances on every DH
+  // ratchet step, so old-generation skips (stamped before the step) always sort before
+  // new-generation skips (stamped after), regardless of insertion timing.
+  const _gen = session.rgen || 0;
+  session.skippedMeta = session.skippedMeta || {};
+
   while (session.Nr < until) {
     const [mk, newCKr] = await chainKeyStep(base64ToBytes(session.CKr));
     session.CKr = bytesToBase64(newCKr);
     const sk = `${nick}/${session.DHr}/${session.Nr}`;
     session.skipped[sk] = bytesToBase64(mk);
+    session.skippedMeta[sk] = { g: _gen, n: session.Nr };
     session.Nr++;
   }
 
-  // S4: evict oldest skipped keys if over limit
+  // S4/#39: evict by true (generation, message-number) LRU when over the cap — NOT raw
+  // insertion order. Across a DH-ratchet step the DHr prefix changes, so insertion order
+  // no longer tracks sequence and a skip burst in a newer generation could otherwise
+  // evict a newer, still-needed key before a stale one. Sorting by the stamped (g, n)
+  // ascending and dropping the front keeps the most-recent MAX_SKIP keys.
   const keys = Object.keys(session.skipped);
   if (keys.length > E2E_MAX_SKIP) {
-    keys.slice(0, keys.length - E2E_MAX_SKIP).forEach(k => delete session.skipped[k]);
+    const meta = session.skippedMeta || {};
+    keys.sort((a, b) => {
+      const ma = meta[a] || { g: 0, n: 0 }, mb = meta[b] || { g: 0, n: 0 };
+      return (ma.g - mb.g) || (ma.n - mb.n);
+    });
+    for (const k of keys.slice(0, keys.length - E2E_MAX_SKIP)) {
+      delete session.skipped[k];
+      delete session.skippedMeta[k];
+    }
   }
 }
 
@@ -910,16 +1072,56 @@ async function saveSession(nick, session) {
     console.warn('[E2E] refusing to store peer session under reserved name:', nick);
     return;
   }
+  // #12: stamp a per-nick MONOTONIC epoch (high-water mark; never decreases within
+  // this page session, so a re-handshake generation is never "older" than a prior one).
+  // The e2e_session loader uses this to reject a stale/rolled-back blob the server replays.
+  E2E._sessionEpoch[nick] = (E2E._sessionEpoch[nick] || 0) + 1;
+  session.epoch = E2E._sessionEpoch[nick];
   E2E.dmSessions[nick] = session;
-  const blob = await aesEncryptBlob(new TextEncoder().encode(JSON.stringify(session)));
+  // #39: never persist buffered skipped message keys (session.skipped) to the untrusted
+  // server — they are up to 100 live AES message keys whose lifetime would otherwise
+  // extend far beyond use (a future e2eEncKey compromise would expose them). Keep them
+  // in-memory ONLY: the live E2E.dmSessions[nick] above retains the full buffer; the
+  // persisted blob carries an EMPTY skipped map (schema preserved so reloads still index
+  // session.skipped safely). skippedMeta (the #39 eviction-order side table) is dropped too.
+  const { skipped, skippedMeta, ...persist } = session;
+  const blob = await aesEncryptBlob(new TextEncoder().encode(JSON.stringify({ ...persist, skipped: {} })));
   wsend({ type:'e2e_store_session', partner:nick, blob });
 }
 
 // ─── TOFU / trust ─────────────────────────────────────────────────────────────
 
+// #1: explicit out-of-band confirmation for a BRAND-NEW (first-contact) identity.
+// An IRC nick is unauthenticated and the server bridges nick→key-bundle via a global
+// connection map, so the first party to grab a peer's nick can offer its own key.
+// Never silently auto-pin — force the local user to eyeball the fingerprint and confirm
+// it out-of-band before it is pinned and used. Returns true iff the user approves.
+async function e2eConfirmNewIdentity(nick, fingerprint) {
+  try {
+    if (typeof confirm !== 'function') return false;
+    return confirm(
+      `🔐 New encryption identity for ${nick}\n\n` +
+      `Fingerprint:\n${fingerprint}\n\n` +
+      `Anyone can claim this IRC nick. Confirm this fingerprint with ${nick} over a ` +
+      `trusted channel (voice/in person) BEFORE accepting.\n\n` +
+      `Accept and start encrypting with ${nick}?`
+    );
+  } catch (e) { console.warn('[E2E] identity confirmation unavailable:', e); return false; }
+}
+
 async function e2eCheckTrust(nick, fingerprint) {
   const existing = E2E.trustStore[nick];
-  if (!existing) {
+  // #F1: a server_seeded pin (delivered via e2e_trust with NO local out-of-band
+  // confirmation) must NEVER stand in for a user-confirmed pin — otherwise a malicious
+  // server preseeds an attacker fingerprint and the checks below see a "match" and skip
+  // the confirm() gate (silent MITM). Treat such a pin exactly like first contact:
+  // require confirmation of the ACTUAL locally-derived fingerprint (authoritative) before
+  // pinning/using it. On approval it is re-recorded WITHOUT server_seeded (now locally
+  // owned); on rejection the seeded record is left in place and will re-prompt next time.
+  if (!existing || existing.server_seeded) {
+    // #1: no SILENT TOFU auto-pin — require explicit out-of-band confirmation first.
+    const confirmed = await e2eConfirmNewIdentity(nick, fingerprint);
+    if (!confirmed) return { status:'rejected', keyChanged:false };
     E2E.trustStore[nick] = { fingerprint, verified:false, keyChanged:false };
     wsend({ type:'e2e_update_trust', nick, fingerprint, verified:false });
     return { status:'tofu', keyChanged:false };
@@ -951,6 +1153,10 @@ function e2eMarkVerified(nick) {
   // P1 fix: a manual verification re-establishes trust in the new key — clear
   // the key-change wedge so continuing messages can be read again.
   E2E.trustStore[nick].keyChanged = false;
+  // #F1: /encrypt trust is an explicit local confirmation act, so this pin is now
+  // locally owned — drop the server_seeded flag so e2eCheckTrust won't redundantly
+  // re-prompt (and downgrade `verified`) on the next establishment.
+  delete E2E.trustStore[nick].server_seeded;
   wsend({ type:'e2e_update_trust', nick, fingerprint:E2E.trustStore[nick].fingerprint, verified:true });
 }
 
@@ -1046,6 +1252,7 @@ async function e2eHandleEvent(ev) {
       if (ev.partner === '__spk__') {
         // C2: store blob so x3dhRespond can read it
         if (ev.blob) E2E._spkBlob = ev.blob;
+        _e2eResolveBlobWaiters('__spk__', ev.blob || null);  // #48: wake SPK-reload waiter
         break;
       }
       // Cache all session blobs (SPK, OTPKs, ratchet sessions)
@@ -1054,12 +1261,29 @@ async function e2eHandleEvent(ev) {
       }
       // Only deserialise actual ratchet sessions (not __otpk__* blobs)
       if (!ev.partner.startsWith('__')) {
-        try {
-          const plain   = await aesDecryptBlob(ev.blob);
-          const session = JSON.parse(new TextDecoder().decode(plain));
-          E2E.dmSessions[ev.partner] = session;
-        } catch(e) { console.warn('[E2E] Failed to load session:', ev.partner, e); }
+        // #12: the server can't read/forge this blob (AEAD-encrypted under the user's
+        // key) but it fully controls WHICH version and WHEN it is delivered. Treat a
+        // server-pushed session as CACHE-FILL ONLY — never authoritative over live
+        // ratchet state: install under the per-nick ratchet lock, and only when there
+        // is no in-memory session OR the blob is STRICTLY NEWER (higher monotonic
+        // epoch). Blocks a rollback push from reverting the live send/receive chains
+        // (forward-secrecy regression / message-key reuse / ciphertext replay / desync DoS).
+        const _partner = ev.partner, _blob = ev.blob;
+        await _withRatchetLock(_partner, async () => {
+          try {
+            const plain   = await aesDecryptBlob(_blob);
+            const session = JSON.parse(new TextDecoder().decode(plain));
+            const live    = E2E.dmSessions[_partner];
+            if (!live || (session.epoch || 0) > (live.epoch || 0)) {
+              E2E.dmSessions[_partner] = session;
+              // Keep the high-water mark >= any installed epoch so a later save/re-handshake
+              // always advances strictly past it and a re-pushed copy of this blob is rejected.
+              E2E._sessionEpoch[_partner] = Math.max(E2E._sessionEpoch[_partner] || 0, session.epoch || 0);
+            }
+          } catch(e) { console.warn('[E2E] Failed to load session:', _partner, e); }
+        });
       }
+      _e2eResolveBlobWaiters(ev.partner, ev.blob || null);  // #48: wake blob waiters (hit or miss)
       break;
     }
 
@@ -1082,10 +1306,23 @@ async function e2eHandleEvent(ev) {
           e2eShowKeyChangeWarning(nick, fp);
           return;
         }
+        // #1: first-contact identity was not confirmed out-of-band — abort with no
+        // pin/session (e2eCheckTrust already recorded nothing on a 'rejected' return).
+        if (trust.status === 'rejected') {
+          e2eSysMsg(nick, `🔐 Encryption with ${nick} cancelled — identity not confirmed`);
+          return;
+        }
 
         const { sharedSecret, ephemeralPub, usedOTPKId, identityAD } = await x3dhInitiate(bundle);
         const myIKPub     = await exportPub(E2E.identityKeys.dhKeyPair.publicKey,   'ECDH');
         const mySignIKPub = await exportPub(E2E.identityKeys.signKeyPair.publicKey, 'ECDSA');
+
+        // #47: sign sender_ik||ephemeral_pub||spk_id||used_otpk_id with our ECDSA identity
+        // so the responder can verify sender_sign_ik has integrity before pinning.
+        const _hdrSig = new Uint8Array(await crypto.subtle.sign(
+          { name:'ECDSA', hash:'SHA-256' }, E2E.identityKeys.signKeyPair.privateKey,
+          _x3dhHeaderSigMsg(myIKPub, ephemeralPub, bundle.signed_prekey.key_id, usedOTPKId)
+        ));
 
         // L1: pass SPK pub (not identity key) as DHr seed.
         // #2: pin the partner's long-term identity DH pub (bundle.identity_dh_key).
@@ -1099,6 +1336,8 @@ async function e2eHandleEvent(ev) {
           // #12: include our SIGN identity so the responder can reconstruct the
           // identical identity AD and pin BOTH our keys via TOFU (#11).
           sender_sign_ik: mySignIKPub,
+          // #47: ECDSA signature over sender_ik||ephemeral_pub||spk_id||used_otpk_id.
+          sender_sign_sig: bytesToBase64(_hdrSig),
           ephemeral_pub:  ephemeralPub,
           used_otpk_id:   usedOTPKId,
           spk_id:         bundle.signed_prekey.key_id,
@@ -1180,15 +1419,31 @@ async function e2eHandleEvent(ev) {
       //     existing pin (reject the silent overwrite), regardless of ev.key_changed.
       //   • First contact (no local pin) records the pin as unverified.
       const existing = E2E.trustStore[ev.nick];
-      if (existing && existing.fingerprint && existing.fingerprint !== ev.fingerprint) {
-        existing.keyChanged = true;
-        e2eShowKeyChangeWarning(ev.nick, ev.fingerprint);
-        // keep the original pin; refuse the server's overwrite
-      } else if (!existing) {
+      if (existing) {
+        // #46: a server-relayed e2e_trust must NEVER flip the decryption-gating
+        // keyChanged flag or raise the key-change warning. A compromised server
+        // could otherwise forge a mismatched fingerprint for every pinned peer,
+        // wedging each DM into a permanent 'key changed' state (no-content DoS)
+        // and luring a blind re-trust. Genuine key changes are detected ONLY from
+        // locally-derived fingerprints in e2eCheckTrust (X3DH establishment /
+        // bundle fetch) and the continuing-ratchet guard. Keep the authoritative
+        // local pin; ignore the server's conflicting fingerprint (this also still
+        // refuses the silent overwrite from the #3 fix by doing nothing).
+      } else {
         E2E.trustStore[ev.nick] = {
           fingerprint: ev.fingerprint,
           verified:    false,        // never trust a server-supplied verified flag
           keyChanged:  false,
+          // #F1: this pin arrived from the SERVER (e2e_trust relay/load) and was NOT
+          // confirmed out-of-band on THIS device. A server is untrusted here, so it must
+          // not be able to preseed a pin that later silently satisfies the TOFU gate — a
+          // malicious server could preseed the attacker's fingerprint and the first real
+          // establishment (initiator/responder) would see a "matching" pin and SKIP the
+          // e2eConfirmNewIdentity() confirm() dialog → silent MITM. Mark it server-seeded
+          // so e2eCheckTrust still routes the first establishment through confirmation.
+          // Genuine multi-device sync is preserved: the fingerprint still propagates and
+          // shows in the UI; the user just confirms it once on this device before use.
+          server_seeded: true,
         };
       }
       updateE2EIndicator(ev.nick);
@@ -1279,7 +1534,15 @@ async function e2eEncryptOutgoing(target, plaintext) {
         if (cid) wsend({type:'send', conn_id:cid, raw:`PRIVMSG ${target} :${headerPayload}`});
       }
       return E2E_DM_PREFIX + btoa(JSON.stringify(envelope));
-    } catch(e) { console.error('[E2E] DM encrypt failed:', e); return null; }
+    } catch(e) {
+      console.error('[E2E] DM encrypt failed:', e);
+      // #F4: we are INSIDE the E2E.dmSessions[target] branch, so a DM session EXISTS —
+      // the encrypt just failed (most often 'Cannot send yet': a responder has no sending
+      // chain until it receives the peer's first message). Returning null here would make
+      // callers silently transmit this message in CLEARTEXT on an encrypted DM. Signal the
+      // distinct BLOCKED outcome so the caller drops+warns instead of leaking plaintext.
+      return E2E_ENCRYPT_BLOCKED;
+    }
   }
 
   return null;
@@ -1337,9 +1600,10 @@ async function e2eDecryptIncoming(from, target, text) {
   if (isDM && text.startsWith(E2E_DM_PREFIX)) {
     try {
       const envelope = JSON.parse(atob(text.slice(E2E_DM_PREFIX.length)));
-      // Check for x3dh header: inline (legacy), compact (x), or relayed via server
-      let x3dh = envelope.x3dh_header
-        || (envelope.x ? { sender_ik: envelope.x.i, ephemeral_pub: envelope.x.e, used_otpk_id: envelope.x.o, spk_id: envelope.x.s } : null);
+      // #47: x3dh header comes inline (envelope.x3dh_header) or relayed via server. The
+      // dead compact-`envelope.x` decoder was removed: no encoder ever produced it, and it
+      // omitted sender_sign_ik/sender_sign_sig (a latent unsigned-header path).
+      let x3dh = envelope.x3dh_header || null;
       // Check for x3dh header relayed via server
       if (!x3dh && E2E._pendingIncomingX3DH?.[from]) {
         x3dh = E2E._pendingIncomingX3DH[from];
@@ -1374,13 +1638,30 @@ async function e2eDecryptIncoming(from, target, text) {
         // BEFORE establishing and decrypting. e2eEstablishResponderSession runs
         // x3dhRespond + ratchetInitRecv internally, pinning the identity pub (#2)
         // and the identity-binding AD (#12).
-        const ok = await e2eEstablishResponderSession(from, x3dh);
+        const ok = await e2eEstablishResponderSession(from, x3dh, { withEnvelope: true });
         if (!ok) {
-          // Changed identity — refuse to silently decrypt under an unverified key.
-          return { plaintext:'🔐 [identity key changed — verify before reading]', encrypted:true };
+          // Changed identity, or rate-limited re-establishment — refuse to silently
+          // decrypt under an unverified key.
+          return { plaintext:'🔐 [identity unverified — run /encrypt verify before reading]', encrypted:true };
         }
         console.log('[E2E] responder session established, calling ratchetDecrypt...');
-        const pt = await ratchetDecrypt(from, envelope);
+        // #3: BIND re-establishment to the first message. e2eEstablishResponderSession may
+        // have overwritten a pre-existing live session with a fresh (blank) receive chain
+        // from this unauthenticated X3DH header. A valid first message under the new root is
+        // NOT forgeable without the peer's private identity key (X3DH DH1), so if the decrypt
+        // fails, restore the session we clobbered — a forged/replayed fresh-ephemeral header
+        // can no longer wipe a working session. On genuine first contact savedSession is
+        // null / unchanged, so nothing is restored.
+        let pt;
+        try {
+          pt = await ratchetDecrypt(from, envelope);
+        } catch (e) {
+          if (savedSession && E2E.dmSessions[from] !== savedSession) {
+            await saveSession(from, savedSession);
+            console.warn('[E2E] X3DH re-establishment failed to authenticate — restored prior session for', from);
+          }
+          throw e;
+        }
         console.log('[E2E] Decrypt OK');
 
         // #28: glare handling. Previously, if we were ALSO an initiator
@@ -1412,7 +1693,7 @@ async function e2eDecryptIncoming(from, target, text) {
       // pin that diverged. (The mandatory identity AD #24 would also fail the AEAD on a
       // substituted identity; this surfaces a clear message instead of a generic error.)
       if (E2E.trustStore[from]?.keyChanged) {
-        return { plaintext:'🔐 [identity key changed — verify before reading]', encrypted:true };
+        return { plaintext:'🔐 [identity unverified — run /encrypt verify before reading]', encrypted:true };
       }
       const pt = await ratchetDecrypt(from, envelope);
       return { plaintext:pt, encrypted:true };

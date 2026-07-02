@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "cryptirc"
-version = "0.3.9"
+version = "0.3.11"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -456,6 +456,7 @@ dependencies = [
  "futures-util",
  "hkdf",
  "lettre",
+ "libc",
  "native-tls",
  "openssl",
  "openssl-sys",
