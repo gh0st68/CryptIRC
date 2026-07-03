@@ -114,6 +114,10 @@ pub struct AppState {
     pub gif_rate:            Arc<DashMap<String, (std::time::Instant, u32)>>,
     /// Shared outbound HTTP client for the GIF proxy (fixed hosts, so no SSRF risk).
     pub gif_client:          reqwest::Client,
+    /// Cached copy of the public news feed (cryptirc.com/news/news.json), served by
+    /// /api/news. (body, fetched_at) — refreshed after NEWS_TTL; stale copy served on
+    /// a fetch failure. Fixed URL ⇒ no SSRF.
+    pub news_cache:          Arc<tokio::sync::Mutex<Option<(String, std::time::Instant)>>>,
 }
 
 /// #33: max simultaneous outbound link-preview fetches, process-wide.
@@ -901,6 +905,7 @@ async fn main() -> Result<()> {
         tenor_server_key: Arc::new(tokio::sync::RwLock::new(tenor_server_key)),
         gif_rate:         Arc::new(DashMap::new()),
         gif_client,
+        news_cache:       Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     // #31: sweep abandoned in-progress chunked uploads once at startup so a restart
@@ -1021,6 +1026,7 @@ async fn main() -> Result<()> {
         .route("/preview",              get(route_link_preview))
         .route("/admin/link-preview",   get(route_admin_get_preview_settings).put(route_admin_put_preview_settings))
         .route("/api/gif/config",       get(route_gif_config))
+        .route("/api/news",             get(route_news))
         .route("/api/gif/search",       get(route_gif_search))
         .route("/push/vapid-public-key", get(route_push_vapid_key))
         .route("/push/subscribe",        post(route_push_subscribe).layer(DefaultBodyLimit::max(4_096)))
@@ -2522,6 +2528,59 @@ async fn route_admin_put_preview_settings(
 /// Tells the client which provider is active and how keys are sourced, WITHOUT
 /// exposing any server key. server_available is true only when mode=="server" and
 /// the active provider's shared key is configured (so the client may use the proxy).
+/// Public news feed URL (a static file on the cryptirc.com site). Fixed ⇒ no SSRF.
+const NEWS_FEED_URL: &str = "https://cryptirc.com/news/news.json";
+const NEWS_MAX_BYTES: usize = 256 * 1024;
+const NEWS_TTL_SECS: u64 = 45;  // short so site edits show in clients within ~1 min
+
+/// GET /api/news — server-side proxy + cache for the public news feed. The client only
+/// talks to its own origin (CSP connect-src 'self'), so the server fetches the feed here,
+/// caches it for NEWS_TTL_SECS, and serves it. On a fetch/parse failure a stale cached
+/// copy is served if one exists (else 502). Auth-gated like the other /api routes.
+async fn route_news(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if extract_session_user(&state, &headers).is_none() {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response();
+    }
+    let json_ct = [(axum::http::header::CONTENT_TYPE, "application/json")];
+    // Serve a fresh cached copy without hitting the origin.
+    {
+        let cache = state.news_cache.lock().await;
+        if let Some((body, at)) = cache.as_ref() {
+            if at.elapsed() < std::time::Duration::from_secs(NEWS_TTL_SECS) {
+                return (json_ct, body.clone()).into_response();
+            }
+        }
+    }
+    // Fetch fresh: size-capped, JSON-validated (must have a `releases` array) before caching.
+    let fresh = async {
+        let resp = state.gif_client.get(NEWS_FEED_URL)
+            .timeout(std::time::Duration::from_secs(8)).send().await.ok()?;
+        if !resp.status().is_success() { return None; }
+        let bytes = resp.bytes().await.ok()?;
+        if bytes.len() > NEWS_MAX_BYTES { return None; }
+        let text = String::from_utf8(bytes.to_vec()).ok()?;
+        let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+        // Accept the site-mirror shape (`posts`) or the legacy `releases` shape.
+        if !(v.get("posts").map_or(false, |x| x.is_array()) || v.get("releases").map_or(false, |x| x.is_array())) { return None; }
+        Some(text)
+    }.await;
+    match fresh {
+        Some(text) => {
+            *state.news_cache.lock().await = Some((text.clone(), std::time::Instant::now()));
+            (json_ct, text).into_response()
+        }
+        None => {
+            // Origin unreachable/invalid — serve a stale cached copy if we have one.
+            let cache = state.news_cache.lock().await;
+            if let Some((body, _)) = cache.as_ref() {
+                (json_ct, body.clone()).into_response()
+            } else {
+                (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"news feed unavailable"}))).into_response()
+            }
+        }
+    }
+}
+
 async fn route_gif_config(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if extract_session_user(&state, &headers).is_none() {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response();

@@ -991,6 +991,7 @@ function handleEvent(ev) {
       // If idle on reconnect, tell server immediately after auth
       if(_isIdle&&ws&&ws.readyState===1)ws.send(JSON.stringify({type:'idle'}));
       wsend({type:'load_appearance'}); wsend({type:'load_preferences'}); wsend({type:'upload_list_get'});
+      fetchNews();  // pull the live news feed on connect so the "new news" dot can show without opening the tab
       // Re-check push subscription after auth
       setTimeout(async()=>{
         if(swRegistration && Notification?.permission==='granted'){
@@ -1116,7 +1117,7 @@ function handleEvent(ev) {
         // internal dedup-by-id at the buf.push() path.
         window._sentMsgs.splice(idx,1);
         const _eb=getBuf(ev.conn_id,ev.target);
-        let _ei=_eb.findIndex(m=>m.ts===ev.ts&&m.from===ev.from&&(m.text||'').slice(0,50)===(ev.text||'').slice(0,50));
+        let _ei=_eb.findIndex(m=>!m.id&&m.ts===ev.ts&&m.from===ev.from&&(m.text||'').slice(0,50)===(ev.text||'').slice(0,50));
         if(_ei<0){
           // Fallback covering two failure modes of the strict-equality
           // findIndex above:
@@ -1990,6 +1991,14 @@ function previewNotifSound(id){
   }catch(e){}
 }
 
+// Status/system lines (join/part/quit/nick/mode/kick/away/back/chghost/topic) arrive
+// id-LESS on the live path (sysMsg) but get a msg_id when replayed from the log, so
+// id-based dedup can't bridge the live copy and its replayed copy. Unlike chat, an
+// identical status line at the same ts from the same source IS the same event (not a
+// legit rapid-repeat), so these are deduped by content (ts|from|text) regardless of id.
+const _STATUS_KINDS=new Set(['join','part','quit','nick','mode','kick','away','back','chghost','topic']);
+function _isStatusKind(k){return _STATUS_KINDS.has(k);}
+function _statusKey(m){return (m.ts)+'|'+(m.from)+'|'+((m.text||'').slice(0,50));}
 function addMessage(conn_id,target,msg){
   const buf=getBuf(conn_id,target);
   // History view: the buffer is a focused window from the past, not the live
@@ -2016,6 +2025,17 @@ function addMessage(conn_id,target,msg){
   if(msg&&msg.id&&msg.from!=='*'&&msg.kind!=='system'&&msg.kind!=='error'){
     for(let i=0;i<buf.length;i++){
       if(buf[i].id===msg.id) return;
+    }
+  }
+  // Status-line content dedup: a live (id-less) status line that duplicates a copy
+  // already in the buffer (e.g. the same mode/join replayed from the log on connect,
+  // which carries an id) must not double. Bounded tail scan — a live+replay pair is
+  // always temporally adjacent (same connect burst), so the match sits near the tail.
+  if(msg && _isStatusKind(msg.kind)){
+    const _sk=_statusKey(msg);
+    for(let i=buf.length-1,_n=0;i>=0&&_n<500;i--,_n++){
+      const b=buf[i];
+      if(b && _isStatusKind(b.kind) && _statusKey(b)===_sk) return;
     }
   }
   buf.push(msg);
@@ -2229,7 +2249,9 @@ async function prependLogs(conn_id,target,lines){
     // receive time (logger.append returns 0), so gate on our own nick to never
     // collapse a genuinely-distinct same-text message from another user.
     if(m.id>0&&m.from===_selfNick&&_reconcileSelfRow(buf,m.from,m.text,m.id,m.ts)) return false;
-    if(m.id>0) return true;
+    // Status lines: content-dedup even when id'd, so a replayed status copy doesn't
+    // double an id-less live copy already in the buffer (see _isStatusKind).
+    if(m.id>0 && !_isStatusKind(m.kind)) return true;
     return !existingKeys.has(m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50));
   });
   if(unique.length>0){
@@ -2310,12 +2332,13 @@ async function appendSyncLines(conn_id,target,lines){
     if(id>0&&existingIds.has(id)) continue;
     // Exact fuzzy key — catches the common case where ts/from/text match.
     const fk=l.ts+'|'+l.from+'|'+(l.text||'').slice(0,50);
-    // Only fuzzy-dedup UNSTAMPED lines (id===0). An id>0 line is already deduped
-    // by id above; running the ts|from|text(50) fuzzy check on it too would drop a
-    // genuinely-distinct NEW-id message whose first-50 chars collide with an
-    // existing row (e.g. two "gg" in the same second). Mirrors prependLogs, which
-    // short-circuits the fuzzy path for any id>0 line ('if(m.id>0) return true').
-    if(id===0 && existingKeys.has(fk)) continue;
+    // Only fuzzy-dedup UNSTAMPED lines (id===0) — EXCEPT status lines, which are
+    // fuzzy-deduped even when id'd so a replayed status copy can't double an id-less
+    // live copy (see _isStatusKind). An id>0 CHAT line is already deduped by id above;
+    // running the ts|from|text(50) fuzzy check on it too would drop a genuinely-distinct
+    // NEW-id message whose first-50 chars collide with an existing row (e.g. two "gg"
+    // in the same second) — so that stays id-only.
+    if((id===0 || _isStatusKind(l.kind)) && existingKeys.has(fk)) continue;
     // Clock-skew + E2E fuzzy match: an optimistic self-sent entry in the
     // buffer has m.ts = client clock (Date.now()/1000) while l.ts is the
     // server clock — they diverge by 1-2s commonly, breaking the strict
@@ -3265,6 +3288,27 @@ function isSameOriginUrl(url){
   // is safe to auto-load; foreign media is not (see mediaPlaceholder).
   try{ return new URL(url, location.href).origin===location.origin; }catch(_){ return false; }
 }
+function _mediaAutoLoad(url){
+  // Decide whether to auto-load foreign media or show a click-to-load placeholder.
+  // Same-origin (/files/) is always safe to auto-load. For foreign hosts, honor the
+  // user's Appearance ▸ Media & Previews "External media" setting: 'all' auto-loads
+  // everything, 'allowlist' auto-loads only matching hosts, 'off' never auto-loads.
+  // (See mediaPlaceholder for why foreign auto-load is a privacy consideration.)
+  if(isSameOriginUrl(url)) return true;
+  const cfg=loadAppearance();
+  const mode=cfg.extMedia||'all';
+  if(mode==='all') return true;
+  if(mode==='off') return false;
+  // allowlist: suffix-match the URL host against the configured hosts, so an entry
+  // like "giphy.com" also covers "media.giphy.com"/"i.giphy.com".
+  let host;
+  try{ host=new URL(url,location.href).hostname.toLowerCase(); }catch(_){ return false; }
+  const hosts=Array.isArray(cfg.extMediaHosts)?cfg.extMediaHosts:[];
+  return hosts.some(h=>{
+    h=String(h).trim().toLowerCase().replace(/^\*?\.?/,''); // tolerate "*.giphy.com"/".giphy.com"
+    return h && (host===h || host.endsWith('.'+h));
+  });
+}
 function mediaPlaceholder(kind,url,buildReal){
   // SECURITY: do NOT auto-load foreign-origin media. Setting img/audio/video.src to
   // an attacker-chosen URL from an incoming message issues a zero-click GET that
@@ -3300,7 +3344,7 @@ function buildMediaEl(url){
       wrap.appendChild(img);
       return wrap;
     };
-    return isSameOriginUrl(url)?buildImg():mediaPlaceholder('image',url,buildImg);
+    return _mediaAutoLoad(url)?buildImg():mediaPlaceholder('image',url,buildImg);
   }
   // Audio
   if(AUDIO_EXTS.test(url)){
@@ -3310,7 +3354,7 @@ function buildMediaEl(url){
       wrap.appendChild(aud);
       return wrap;
     };
-    return isSameOriginUrl(url)?buildAudio():mediaPlaceholder('audio',url,buildAudio);
+    return _mediaAutoLoad(url)?buildAudio():mediaPlaceholder('audio',url,buildAudio);
   }
   // Videos
   if(VID_EXTS.test(url)){
@@ -3320,7 +3364,7 @@ function buildMediaEl(url){
       wrap.appendChild(vid);
       return wrap;
     };
-    return isSameOriginUrl(url)?buildVideo():mediaPlaceholder('video',url,buildVideo);
+    return _mediaAutoLoad(url)?buildVideo():mediaPlaceholder('video',url,buildVideo);
   }
   // YouTube — rich card with thumbnail + info. CLICK-TO-LOAD: the card starts
   // dormant and contacts NO third party (img.youtube.com / noembed /
@@ -5419,8 +5463,13 @@ function renderMessagesView(){
   // the 'log_lines' handler (prependLogs) re-renders this view when it lands.
   for(const c of convs){
     if(c.last) continue;
-    if(_pendingLogs.has(bk(c.conn_id,c.lc))) continue;
-    wsend({type:'get_logs',conn_id:c.conn_id,target:c.lc,limit:1});
+    // Fetch with the ORIGINAL-CASE nick (c.display), NOT the lowercased key: DM logs
+    // are stored server-side under the sender's original-case nick and the backend
+    // get_logs read is case-sensitive, so a lowercased target reads an empty file and
+    // the preview stays blank until the conversation is opened (which uses c.display).
+    // Key the dedup guard on the same string wsend registers in _pendingLogs.
+    if(_pendingLogs.has(c.conn_id+'/'+c.display)) continue;
+    wsend({type:'get_logs',conn_id:c.conn_id,target:c.display,limit:1});
   }
   const totalUnread=convs.reduce((a,c)=>a+(c.unread||0),0);
   const header=document.createElement('div');
@@ -5484,6 +5533,17 @@ function renderMessagesView(){
       b.textContent=c.unread>99?'99+':c.unread;
       row.appendChild(b);
     }
+    // Per-row close (✕): close just this conversation without opening it. Same
+    // semantics as closing a PM anywhere else (closeQuery keeps history, clears
+    // unread, marks it closed so a replay won't resurrect it); stopPropagation so
+    // the tap doesn't also open the conversation, then refresh the inbox list.
+    const closeBtn=document.createElement('button');
+    closeBtn.type='button'; closeBtn.className='msgs-row-close'; closeBtn.textContent='✕';
+    closeBtn.title='Close conversation';
+    closeBtn.setAttribute('aria-label','Close conversation with '+c.display);
+    closeBtn.onclick=(e)=>{ e.stopPropagation(); closeQuery(c.conn_id, c.lc); renderMessagesView(); };
+    closeBtn.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' ') e.stopPropagation(); });
+    row.appendChild(closeBtn);
     // Route through _sidebarActivate so a popped-out (detached) DM re-focuses its
     // window instead of opening a duplicate inline (mirrors every other open path).
     const open=()=>{ _sidebarActivate(c.conn_id, c.display); };
@@ -6634,6 +6694,13 @@ const APPEAR_DEFAULTS={
   ghost:'off',
   fish:'off',
   alien:'off',
+  // External media auto-load policy (foreign-origin images/gifs/video/audio):
+  //   'all'       = auto-load everything (default — show all images/gifs)
+  //   'allowlist' = auto-load only hosts in extMediaHosts; click-to-load others
+  //   'off'       = click-to-load everything (privacy-safe; no zero-click GETs)
+  // Same-origin (/files/) uploads always auto-load regardless of this setting.
+  extMedia:'all',
+  extMediaHosts:['giphy.com','tenor.com','imgur.com','media.discordapp.net','i.redd.it'],
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -6739,6 +6806,9 @@ function applyAppearance(){
     barColorM:  !el('a-bar-color-m') ||el('a-bar-color-m').classList.contains('on'),
     // Unified Messages inbox tab (default on; absent element ⇒ keep default-on).
     msgsTab:    !el('a-msgs-tab')||el('a-msgs-tab').classList.contains('on'),
+    // External media auto-load policy + allowlist hosts (absent element ⇒ keep prev).
+    extMedia:       el('a-ext-media')?.value || prev.extMedia || 'all',
+    extMediaHosts:  el('a-ext-media-hosts') ? el('a-ext-media-hosts').value.split(/[\s,]+/).map(h=>h.trim()).filter(Boolean) : (prev.extMediaHosts||[]),
     mediaShape:     el('a-media-shape')?.value || prev.mediaShape || 'rounded',
     mediaSize:      el('a-media-size')?.value || prev.mediaSize || 'medium',
     mediaBorder:    el('a-media-border')?.value || prev.mediaBorder || 'none',
@@ -7392,6 +7462,12 @@ fireflyMeadow(cv,ctx){
 },
 };
 
+function _toggleExtMediaHostsRow(){
+  // Only show the allowlist hosts editor when the "Allowed hosts only" mode is picked.
+  const sel=document.getElementById('a-ext-media');
+  const row=document.getElementById('a-ext-media-hosts-row');
+  if(sel&&row) row.style.display=(sel.value==='allowlist')?'':'none';
+}
 function populateAppearanceModal(cfg){
   const el=id=>document.getElementById(id);
   el('a-font').value=cfg.font||"'DM Sans',sans-serif";
@@ -7471,6 +7547,9 @@ function populateAppearanceModal(cfg){
   el('a-mobile-link-color').value=_mlEff;
   el('a-mobile-link-swatch').style.background=_mlEff;
   // Media & previews
+  if (el('a-ext-media')) el('a-ext-media').value = cfg.extMedia || 'all';
+  if (el('a-ext-media-hosts')) el('a-ext-media-hosts').value = (Array.isArray(cfg.extMediaHosts)?cfg.extMediaHosts:[]).join('\n');
+  _toggleExtMediaHostsRow();
   if (el('a-media-shape'))  el('a-media-shape').value  = cfg.mediaShape  || 'rounded';
   if (el('a-media-size'))   el('a-media-size').value   = cfg.mediaSize   || 'medium';
   if (el('a-media-border')) el('a-media-border').value = cfg.mediaBorder || 'none';
@@ -9119,6 +9198,11 @@ function rateLimitedSend(msg){
 }
 function drainRateQueue(){
   if(!_rateQueue.length){_rateTimer=null;return;}
+  // Don't drop a queued send when the socket is down: peek WS readiness BEFORE
+  // shifting so a disconnect mid-queue doesn't silently lose the message (it was
+  // shown optimistically). Keep it queued and retry — it drains once the WS is
+  // back. Guards against silent outgoing message loss on flaky links / restarts.
+  if(!(ws&&ws.readyState===1)){ _rateTimer=setTimeout(drainRateQueue,1000); return; }
   const msg=_rateQueue.shift();
   wsend(msg);
   _rateTimer=setTimeout(drainRateQueue,getRateLimit());
@@ -11490,8 +11574,20 @@ function toggleMuteNetwork(conn_id, checkbox) {
   renderSidebar();
 }
 
+// Byte-compare an existing subscription's applicationServerKey (ArrayBuffer) against
+// the current VAPID key (Uint8Array). Used to detect a stale-key subscription.
+function _samePushKey(a, b){
+  try{
+    if(!a) return false;
+    const ua=new Uint8Array(a), ub=new Uint8Array(b);
+    if(ua.length!==ub.length) return false;
+    for(let i=0;i<ua.length;i++) if(ua[i]!==ub[i]) return false;
+    return true;
+  }catch(_){ return false; }
+}
 async function subscribePush() {
   if (!swRegistration) return;
+  let sub=null;
   try {
     // Get VAPID public key
     const r = await fetch('/cryptirc/push/vapid-public-key');
@@ -11499,21 +11595,46 @@ async function subscribePush() {
     const vapidData = await r.json();
     const appServerKey = urlBase64ToUint8Array(vapidData.publicKey || vapidData.public_key);
 
-    pushSubscription = await swRegistration.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: appServerKey,
-    });
-    // Send subscription to server
-    await fetch('/cryptirc/push/subscribe', {
-      method: 'POST',
-      headers: {'Authorization':'Bearer '+sessionToken, 'Content-Type':'application/json'},
-      body: JSON.stringify({ ...pushSubscription.toJSON(), label: navigator.userAgent.slice(0,80) }),
-    });
+    // Reuse an existing browser subscription when possible. Calling subscribe() while
+    // one already exists with a DIFFERENT applicationServerKey throws InvalidStateError
+    // — the "complains at login but push still works" case. If the existing sub was made
+    // with a stale key, drop it and re-subscribe with the current one; otherwise reuse it.
+    sub = await swRegistration.pushManager.getSubscription();
+    if (sub && !_samePushKey(sub.options && sub.options.applicationServerKey, appServerKey)) {
+      try { await sub.unsubscribe(); } catch(_){}
+      sub = null;
+    }
+    if (!sub) {
+      sub = await swRegistration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: appServerKey,
+      });
+    }
+    pushSubscription = sub;
   } catch(e) {
     console.warn('Push subscribe failed:', e);
-    // #132: surface the failure instead of leaving push silently "enabled".
-    try { showToast('Could not enable push notifications: ' + (e.message || e)); } catch(_){}
+    // #132: surface a REAL failure — but only nag when we genuinely ended up with NO
+    // subscription and permission is granted. A benign race / redundant call must not
+    // toast while push is actually set up (the spurious "could not enable" at login).
+    let have=false; try{ have=!!(sub||await swRegistration.pushManager.getSubscription()); }catch(_){}
+    if (!have && typeof Notification!=='undefined' && Notification.permission==='granted') {
+      try { showToast('Could not enable push notifications: ' + (e.message || e)); } catch(_){}
+    }
+    if (!have) return;
+    pushSubscription = pushSubscription || sub;
   }
+  // Register (or refresh) the endpoint with the server, best-effort: the browser
+  // subscription above is what makes push work; a transient POST failure here must NOT
+  // toast (it re-registers on the next login).
+  try {
+    if (pushSubscription) {
+      await fetch('/cryptirc/push/subscribe', {
+        method: 'POST',
+        headers: {'Authorization':'Bearer '+sessionToken, 'Content-Type':'application/json'},
+        body: JSON.stringify({ ...pushSubscription.toJSON(), label: navigator.userAgent.slice(0,80) }),
+      });
+    }
+  } catch(e) { console.warn('Push server-register failed (will retry next login):', e); }
 }
 
 async function unsubscribePush() {
@@ -12865,7 +12986,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.11';
+const CRYPTIRC_VERSION='0.3.17';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -12873,6 +12994,18 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.14', date:'July 2026', items:[
+    {tag:'fix', text:'Messages inbox: conversation previews now fill in automatically. Previously a conversation from a prior session showed a blank preview until you opened it and came back (the preview fetch used the wrong-case nick and read an empty log).'},
+  ]},
+  {version:'0.3.13', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed status lines (mode/join/part/topic etc.) sometimes appearing twice — e.g. a "sets mode +qo" line doubling right after connecting. The live event and its logged copy are now de-duplicated by content.'},
+    {tag:'fix', text:'Fixed a duplicate that could appear when sending two identical lines in quick succession (e.g. /me or an emote button twice).'},
+    {tag:'fix', text:'Outgoing messages are no longer silently lost if the connection drops while sending — they now wait and send when the connection returns, instead of appearing sent but never delivered.'},
+    {tag:'fix', text:'Push notifications: the desktop app no longer spuriously complains it "could not enable push notifications" when push is actually working; subscription setup is now reused/repaired instead of re-attempted.'},
+  ]},
+  {version:'0.3.12', date:'July 2026', items:[
+    {tag:'new', text:'External media now auto-loads again by default. New setting in Appearance ▸ Media & Previews ▸ External media: Show all (default), Allowed hosts only (auto-load just the hosts you list — e.g. giphy.com, tenor.com — and click-to-view the rest), or Click to view (nothing auto-loads). Your own uploads always load.'},
+  ]},
   {version:'0.3.11', date:'July 2026', items:[
     {tag:'fix', text:'Fixed a bug where a network could fail to connect forever: a single non-UTF-8 byte in a server’s MOTD/topic (e.g. HybridIRC) dropped the whole connection right after login, looping reconnect endlessly. Server text is now decoded leniently so the connection stays up.'},
   ]},
@@ -12930,21 +13063,79 @@ const NEWS=[
     {tag:'fix', text:'The user-list collapse state and Do-Not-Disturb settings now stay in sync across all your devices.'},
   ]},
 ];
-function showNewsPanel(){
+// Built-in default news, snapshotted from the site at build time. Shown instantly on a
+// brand-new client (no cache yet) or when offline from first launch; the live feed
+// (localStorage cache → /api/news) overrides it as soon as it loads.
+const NEWS_DEFAULT={"posts":[{"tag":"Release","date":"v0.3.4 · Jun 2026","title":"CryptIRC 0.3.4 — sync & stability","body":["The latest desktop and mobile builds ship faster reconnects, smoother multi-device history sync, and a batch of polish across the vault and notification pipeline."],"bullets":["Faster bouncer re-attach and backlog replay after your device wakes.","Tighter cross-device sync so desktop and mobile stay perfectly in step.","Fixes to push notifications, typing indicators and inline media previews."],"link":"https://github.com/gh0st68/CryptIRC/releases"},{"tag":"Feature","date":"Jun 2026","title":"End-to-end encrypted DMs, everywhere","body":["Direct messages now use the Signal Protocol end to end, with forward secrecy and deniability — and your logs, credentials and notes stay sealed in an AES-256-GCM vault whose key never leaves your device."],"bullets":[],"link":"https://cryptirc.com/#security"},{"tag":"Themes","date":"Jun 2026","title":"172 themes and 140 fonts built in","body":["Make CryptIRC yours. The theme gallery now bundles 172 curated themes and 140 fonts, all switchable on the fly. Browse the full set and preview them live before you pick."],"bullets":[],"link":"https://gh0st68.github.io/CryptIRC/"},{"tag":"Self-host","date":"Jun 2026","title":"One-command self-hosting","body":["Run your own always-on CryptIRC in minutes. The deploy script sets up the Rust backend, Caddy, TLS, systemd and your first admin user on a fresh Debian, Ubuntu or Arch box. No domain? It serves on your IP with a self-signed cert."],"bullets":[],"link":"https://cryptirc.com/#selfhost"}]};
+// ─── Live news feed (mirrors the cryptirc.com/news/ page via the server's /api/news
+// proxy). Editing the site regenerates its news.json (tesla cron) → the app shows it,
+// no client rebuild. Offline-cached in localStorage (last download shown if a fetch
+// fails); refreshed on connect, on open, and every 12h. A dot flags unseen posts.
+let _newsFeed=null;         // array of posts (null = not loaded this session)
+let _newsLoadFailed=false;  // true only if a fetch failed AND we have no cached copy
+// Seed from the last download so the panel renders instantly + works offline.
+try{ var _nc0=JSON.parse(localStorage.getItem('cryptirc_news_cache')||'null'); if(_nc0&&Array.isArray(_nc0.posts)) _newsFeed=_nc0.posts; }catch(e){}
+if(!_newsFeed && typeof NEWS_DEFAULT!=='undefined' && Array.isArray(NEWS_DEFAULT.posts)) _newsFeed=NEWS_DEFAULT.posts;  // built-in default for first-ever load / offline-from-launch
+function _newsLatestId(){ if(!_newsFeed||!_newsFeed[0]) return ''; var p=_newsFeed[0]; return (p.title||'')+'|'+(p.date||''); }
+function _markNewsSeen(){ var l=_newsLatestId(); if(l){ try{ localStorage.setItem('cryptirc_news_seen',l); }catch(e){} } _updateNewsDot(); }
+function _updateNewsDot(){
+  // Small red dot on the ⚙ Settings button + News menu item when the newest post
+  // in the live feed hasn't been seen on this device yet.
+  var latest=_newsLatestId(); var seen=''; try{ seen=localStorage.getItem('cryptirc_news_seen')||''; }catch(e){}
+  var unseen=!!latest && latest!==seen;
+  ['settings-gear-btn','news-menu-btn'].forEach(function(id){
+    var el=document.getElementById(id); if(!el) return;
+    var dot=el.querySelector('.news-dot');
+    if(unseen && !dot){ dot=document.createElement('span'); dot.className='news-dot'; dot.style.cssText='display:inline-block;width:7px;height:7px;border-radius:50%;background:#ff4d4f;margin-left:6px;vertical-align:middle'; el.appendChild(dot); }
+    else if(!unseen && dot){ dot.remove(); }
+  });
+}
+async function fetchNews(){
+  if(!sessionToken) return;
+  try{
+    var r=await fetch('/cryptirc/api/news',{headers:{'Authorization':'Bearer '+sessionToken},cache:'no-store'});
+    if(r.ok){
+      var d=await r.json();
+      if(d && Array.isArray(d.posts)){
+        _newsFeed=d.posts; _newsLoadFailed=false;
+        try{ localStorage.setItem('cryptirc_news_cache',JSON.stringify({posts:d.posts})); }catch(e){}  // save the offline copy
+      } else { _newsLoadFailed=!_newsFeed; }
+    } else { _newsLoadFailed=!_newsFeed; }  // keep the cached copy on a bad response
+  }catch(e){ _newsLoadFailed=!_newsFeed; }   // offline → fall back to the cached copy if present
+  _updateNewsDot();
+  var ov=document.getElementById('news-overlay');
+  if(ov && ov.classList.contains('show')){ _renderNewsBody(); _markNewsSeen(); }
+}
+function _renderNewsBody(){
   var body=document.getElementById('news-body'); if(!body) return;
+  if(_newsFeed && _newsFeed.length){
+    body.innerHTML=_newsFeed.map(function(p){
+      var head='<div class="news-rel-head">'+
+        (p.tag?'<span class="news-tag '+esc(String(p.tag).toLowerCase())+'">'+esc(p.tag)+'</span>':'')+
+        (p.date?'<span class="news-rel-date">'+esc(p.date)+'</span>':'')+'</div>';
+      var title=p.title?'<div class="news-post-title">'+esc(p.title)+'</div>':'';
+      var bodyps=(Array.isArray(p.body)?p.body:[]).map(function(t){return '<div class="news-p">'+esc(t)+'</div>';}).join('');
+      var bullets=(Array.isArray(p.bullets)&&p.bullets.length)?'<ul class="news-bullets">'+p.bullets.map(function(b){return '<li>'+esc(b)+'</li>';}).join('')+'</ul>':'';
+      var link=(typeof p.link==='string'&&/^https:\/\//.test(p.link))?'<a class="news-more" href="'+esc(p.link)+'" target="_blank" rel="noopener noreferrer">Read more ↗</a>':'';
+      return '<div class="news-rel">'+head+title+bodyps+bullets+link+'</div>';
+    }).join('');
+  } else if(_newsLoadFailed){
+    body.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">Couldn’t load the latest news — please try again later.</div>';
+  } else {
+    body.innerHTML='<div style="padding:24px;text-align:center;color:var(--text3)">Loading news…</div>';
+  }
+}
+function showNewsPanel(){
   var pill=document.getElementById('news-ver-pill'); if(pill) pill.textContent=_verLabel();
-  var label={new:'New', fix:'Fix', sec:'Security'};
-  body.innerHTML=NEWS.map(function(rel){
-    return '<div class="news-rel"><div class="news-rel-head"><span class="news-rel-ver">v'+esc(rel.version)+'</span><span class="news-rel-date">'+esc(rel.date)+'</span></div>'+
-      rel.items.map(function(it){
-        return '<div class="news-item"><span><span class="news-tag '+esc(it.tag)+'">'+esc(label[it.tag]||it.tag)+'</span>'+esc(it.text)+'</span></div>';
-      }).join('')+
-    '</div>';
-  }).join('');
+  _renderNewsBody();
+  _markNewsSeen();  // marks the currently-shown latest post seen; fetchNews re-marks on arrival
   document.getElementById('news-overlay').classList.add('show');
   _overlayOpen('newsPanel', closeNewsPanel);
+  fetchNews();      // refresh from the live feed on open (server caches ~45s)
 }
 function closeNewsPanel(){_overlayClose('newsPanel');document.getElementById('news-overlay').classList.remove('show');}
+// Auto-refresh every 12h so a long-open client picks up site news without reopening.
+setInterval(function(){ try{ fetchNews(); }catch(e){} }, 12*60*60*1000);
 
 // ─── Admin Panel ──────────────────────────────────────────────────────────────
 let _isAdmin=false;
