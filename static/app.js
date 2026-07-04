@@ -549,6 +549,10 @@ async function doLogout() {
   document.getElementById('auth-screen').style.display='flex';
   document.getElementById('app').style.display='none';
   document.getElementById('vault-overlay').classList.remove('show');
+  // Logout swaps to the auth screen WITHOUT a reload: tear down the PWA install
+  // banner and gate so it can't linger over (or pop up on) the login screen.
+  window._appShown=false;
+  try{ _hidePwaBanner(); }catch(_){}
 }
 function setErr(id,msg){document.getElementById(id).textContent=msg;}
 
@@ -669,6 +673,11 @@ function showApp() {
   connectWs();
   checkAdmin();
   _loadGifConfig();   // learn the active GIF provider + mode (giphy/user by default)
+  // PWA install prompt: only offer once the user is actually logged in. The
+  // 4s delay lets the app shell settle (and beforeinstallprompt usually land).
+  window._appShown=true;
+  _refreshPwaMenuItem();
+  setTimeout(_maybeShowPwaBanner,4000);
   // Check for notification_click from SW (URL params path).
   // #77: conn and target now arrive as SEPARATE params (?conn=…&target=…), each
   // individually encoded, so a '/' inside either field can't shift the boundary the
@@ -1007,7 +1016,9 @@ function handleEvent(ev) {
         }
       },2000);
       break;
-    case 'auth_failed': hideBootSplash(); sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; break;
+    // auth_failed swaps back to the login screen without a reload — same PWA-banner
+    // teardown as doLogout, so the banner can't linger over (or pop up on) it.
+    case 'auth_failed': hideBootSplash(); sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break;
     case 'vault_unlocked':
       document.getElementById('vault-overlay').classList.remove('show'); renderSidebar();
       {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
@@ -1170,8 +1181,11 @@ function handleEvent(ev) {
           // _sentMsgs window lands here; reconcile by stamping it rather than adding
           // a 2nd copy (the exact-ts key above can't catch the client/server skew).
           if(_reconcileSelfRow(echoBuf,_eFrom,dtext,_eId,_eTs)) return;
+          // own:true — an IrcEcho is always THIS account's own send (from some
+          // device); it must never bump unread or fire a PM sound/notification,
+          // even if the local nick tracker is stale/case-mismatched (see _isOwnMsg).
           addMessage(_eConn,_eTarget,{
-            id:_eId, ts:_eTs, from:_eFrom, text:dtext, encrypted:enc,
+            id:_eId, ts:_eTs, from:_eFrom, text:dtext, encrypted:enc, own:true,
             kind:_eKind==='Action'?'action':_eKind==='Notice'?'notice':'privmsg',
           });
         });
@@ -1999,6 +2013,21 @@ function previewNotifSound(id){
 const _STATUS_KINDS=new Set(['join','part','quit','nick','mode','kick','away','back','chghost','topic']);
 function _isStatusKind(k){return _STATUS_KINDS.has(k);}
 function _statusKey(m){return (m.ts)+'|'+(m.from)+'|'+((m.text||'').slice(0,50));}
+// Is this message OUR OWN? Two signals: an explicit `own:true` flag (set by the
+// irc_echo path — an IrcEcho is BY DEFINITION this account's own send, from any
+// device, so it must never count as unread / play a sound no matter what the
+// nick tracker thinks), or a nick match against getNick(). The nick compare is
+// case-INSENSITIVE: IRC nick namespaces are case-insensitive (no two users can
+// differ only by case), while our tracked nick can differ in case from the
+// server's echo of it — a strict === there made our own echo look like someone
+// else's message and bumped unread/sounds for it (the "my own new DM shows up
+// unread" bug).
+function _isOwnMsg(conn_id,msg){
+  if(msg&&msg.own===true) return true;
+  if(!msg||!msg.from) return false;
+  const n=getNick(conn_id);
+  return !!n && String(msg.from).toLowerCase()===String(n).toLowerCase();
+}
 function addMessage(conn_id,target,msg){
   const buf=getBuf(conn_id,target);
   // History view: the buffer is a focused window from the past, not the live
@@ -2007,7 +2036,7 @@ function addMessage(conn_id,target,msg){
   // grafted onto the window (it would appear with a misleading time gap); it's
   // persisted server-side and shows when the user taps "jump to present".
   if(_historyView && _historyView.bk===bk(conn_id,target)){
-    if(msg && msg.from && msg.from===getNick(conn_id)){ _exitHistoryView(); }
+    if(_isOwnMsg(conn_id,msg)){ _exitHistoryView(); }
     else { return; }
   }
   // Dedup by msg_id only. Server-delivered messages carry a unique ID — if
@@ -2067,9 +2096,37 @@ function addMessage(conn_id,target,msg){
     saveQueryBufs();
     if(_newQueryRow) renderSidebar();
   }
-  if(isActive(conn_id,target)){appendMsgRow(msg);const isOwn=msg.from&&msg.from===getNick(conn_id);if(isOwn)scrollForce();else scrollBottom();}
+  if(isActive(conn_id,target)){
+    appendMsgRow(msg);
+    const isOwn=_isOwnMsg(conn_id,msg);
+    if(isOwn){
+      scrollForce();
+      // Sending while viewing means everything up to our own message is read:
+      // advance this conversation's read horizon (monotonic) and drop any
+      // spurious unread entry a stale cross-device sync may have planted. For a
+      // BRAND-NEW conversation this is the only writer — renderChat only
+      // advances the horizon when the buffer is non-empty at render time, so a
+      // fresh DM otherwise kept lastRead=0 and any synced unread count for it
+      // stuck as an "unread" badge on our own just-sent message.
+      const _rk=bk(conn_id,target);
+      try{
+        const _lrk='cryptirc_lastread_'+_rk;
+        const _prev=parseFloat(localStorage.getItem(_lrk)||'0');
+        if((msg.ts||0)>_prev) localStorage.setItem(_lrk,String(msg.ts));
+      }catch(e){}
+      if(unread.has(_rk)||mentionUnread.has(_rk)){
+        unreadClear(_rk); mentionUnread.delete(_rk);
+        saveUnread();
+        // Mirror the increment path: the in-place badge update skips the full
+        // sidebar render where the Messages-tab pin total is rebuilt — refresh
+        // just the pin so its count doesn't go stale after this clear.
+        if(!updateUnreadBadge(conn_id,target)) renderSidebar();
+        else if(isDM && msgsTabEnabled()){ const _mp=document.getElementById('messages-pin'); if(_mp){ _mp.innerHTML=''; const _me=_renderMessagesSidebarEntry(); if(_me) _mp.appendChild(_me); } }
+      }
+    } else scrollBottom();
+  }
   else{
-    const _ownMsg=msg.from&&msg.from===getNick(conn_id);
+    const _ownMsg=_isOwnMsg(conn_id,msg);
     // Status (server) buffer is kept "fully quiet": it may still show a plain
     // unread count, but never a mention-red badge, sound, or desktop popup —
     // even if a server line happens to contain your nick / a highlight word.
@@ -3375,7 +3432,10 @@ function buildMediaEl(url){
   // this card used to bypass.
   const ytId=extractYouTubeId(url);
   if(ytId && loadAppearance().linkPreviews!==false){
-    const _ytUid=ytId+'_'+(Date.now()%1000000);
+    // Sequence counter keeps the uid unique even when the SAME video renders
+    // twice in the same millisecond (history-replay loop) — duplicate DOM ids
+    // would make the second card's async title/meta writes land on the first.
+    const _ytUid=ytId+'_'+(Date.now()%1000000)+'_'+(window._ytSeq=(window._ytSeq||0)+1);
     const wrap=document.createElement('div');
     wrap.className='msg-yt';
     wrap.innerHTML=`<div class="msg-yt-thumb" style="aspect-ratio:var(--yt-aspect,16/9);background:#000"><span class="yt-play"></span></div><div class="msg-yt-info"><div class="msg-yt-title" id="yt-t-${_ytUid}">YouTube</div><div class="msg-yt-desc" id="yt-d-${_ytUid}"></div><div class="msg-yt-meta" id="yt-m-${_ytUid}"><span>Click to load</span></div></div>`;
@@ -3443,6 +3503,16 @@ function buildMediaEl(url){
       if(!_ytLoaded){ _ytReveal(); return; }
       window.open(url,'_blank','noopener,noreferrer');
     });
+    // 'auto' (default): reveal the thumbnail/title card immediately so YouTube
+    // links show without a click — playback/opening still requires a click.
+    // 'click' keeps the dormant privacy-safe card (no third-party request
+    // until the viewer explicitly clicks it). Auto-reveal ALSO defers to the
+    // External-media policy (_mediaAutoLoad): a user who chose "Click to view"
+    // (or an allowlist without youtube.com) opted out of zero-click foreign
+    // fetches, and the YT card's thumbnail/metadata fetches are exactly that.
+    // Deferred a tick: _ytReveal's getElementById lookups need the card to be
+    // IN the document, and the caller appends it right after buildMediaEl returns.
+    if((loadAppearance().ytPreview||'auto')!=='click' && _mediaAutoLoad(url)) setTimeout(_ytReveal,0);
     return wrap;
   }
   // Link preview — fetch metadata from server for non-media HTTPS links
@@ -4764,7 +4834,108 @@ async function submitPaste(btn){
     btn.closest('[style*=fixed]').remove();
   }catch(e){showToast('Error: '+e.message);}finally{btn.disabled=false;btn.textContent='Create Paste';}
 }
-function handleFileSelect(files){if(!active)return;Array.from(files).forEach(uploadFile);}
+// Sequential (not forEach): each image/video now awaits its preview-confirm
+// dialog, and parallel dialogs would stomp each other's overlay state.
+async function handleFileSelect(files){ if(!active) return; for(const f of Array.from(files)) await uploadFile(f); }
+
+// ── Upload preview/confirm (images & videos) ────────────────────────────────
+// Before an image/video upload starts: show a thumbnail + destination and ask.
+// Yes → upload runs AND the share link auto-sends to that chat on completion
+// (plus the view goes there). Cancel → nothing is uploaded. Other file types
+// keep the classic flow (straight to the Uploads view, manual Insert).
+let _upcResolve=null,_upcUrl=null;
+// Desktop Escape = Cancel (bubble phase so a customConfirm stacked above —
+// which consumes its own Escape via stopPropagation — wins over this).
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&_upcResolve){ e.preventDefault(); e.stopPropagation(); _upcClose(false); }
+});
+function _upcClose(ans){
+  const r=_upcResolve; _upcResolve=null;
+  const ov=document.getElementById('upload-confirm-overlay');
+  if(ov) ov.classList.remove('show');
+  if(_upcUrl){ try{ URL.revokeObjectURL(_upcUrl); }catch(_){} _upcUrl=null; }
+  const pv=document.getElementById('upc-preview'); if(pv) pv.innerHTML='';
+  _overlayClose('uploadConfirm');
+  if(r) r(!!ans);
+}
+function confirmUploadPreview(file,src){
+  return new Promise(res=>{
+    const ov=document.getElementById('upload-confirm-overlay');
+    if(!ov){ res(true); return; }               // markup missing → behave as before
+    if(_upcResolve){                            // safety: never two pending dialogs
+      try{ showToast('Previous upload prompt canceled'); }catch(_){}
+      _upcClose(false);
+    }
+    _upcResolve=res;
+    const pv=document.getElementById('upc-preview');
+    pv.innerHTML='';
+    let el=null;
+    try{
+      _upcUrl=URL.createObjectURL(file);
+      if((file.type||'').startsWith('video/')){
+        el=document.createElement('video');
+        el.src=_upcUrl; el.muted=true; el.playsInline=true; el.preload='metadata'; el.controls=false;
+      } else {
+        el=document.createElement('img');
+        el.src=_upcUrl; el.alt='';
+      }
+      el.className='upc-thumb';
+      el.onerror=()=>{ try{ el.remove(); }catch(_){} pv.textContent='(no preview available)'; };
+      pv.appendChild(el);
+    }catch(_){ pv.textContent='(no preview available)'; }
+    const metaEl=document.getElementById('upc-meta');
+    if(metaEl) metaEl.textContent=(file.name||'file')+' · '+fmtBytes(file.size||0);
+    const destEl=document.getElementById('upc-dest');
+    if(destEl){
+      destEl.innerHTML='';
+      const net=networks.find(n=>n.config.id===src.conn_id);
+      const netLabel=net?(net.config.label||net.config.server||''):'';
+      const isChan=/^[#&+!]/.test(src.target);
+      destEl.appendChild(document.createTextNode('Send to '));
+      const b=document.createElement('b'); b.textContent=(isChan?'':'@')+src.target; destEl.appendChild(b);
+      if(netLabel) destEl.appendChild(document.createTextNode(' on '+netLabel));
+      destEl.appendChild(document.createTextNode('?'));
+    }
+    const go=document.getElementById('upc-go'), no=document.getElementById('upc-cancel');
+    if(go) go.onclick=()=>_upcClose(true);
+    if(no) no.onclick=()=>_upcClose(false);
+    ov.classList.add('show');
+    _overlayOpen('uploadConfirm', ()=>_upcClose(false));
+  });
+}
+// autoSend must survive a tab close: the resume path rebuilds _uploadJobs from
+// IndexedDB and would otherwise drop the flag, silently never sending the link
+// the user already confirmed. Tiny localStorage map id → epoch-ms; entries are
+// cleared on finalize/cancel/remove and pruned after 7 days as a backstop.
+function _upcFlagLoad(){ try{ return JSON.parse(localStorage.getItem('cryptirc_upload_autosend')||'{}'); }catch(_){ return {}; } }
+function _upcFlagSave(o){ try{ localStorage.setItem('cryptirc_upload_autosend',JSON.stringify(o)); }catch(_){} }
+function _upcFlagSet(id){ const o=_upcFlagLoad(); const now=Date.now(); for(const k in o){ if(now-o[k]>7*24*3600*1000) delete o[k]; } o[id]=now; _upcFlagSave(o); }
+function _upcFlagHas(id){ return !!_upcFlagLoad()[id]; }
+function _upcFlagClear(id){ const o=_upcFlagLoad(); if(id in o){ delete o[id]; _upcFlagSave(o); } }
+// Send a completed upload's share link to its source chat as a normal message
+// (mirrors the plain-send path: E2E-encrypts when a session/channel key exists,
+// NEVER falls back to plaintext on a blocked DM session), then jump there.
+async function _autoSendUploadLink(id, rec){
+  // Prefer the finalize response passed in by the caller: _uploads[id] can be
+  // transiently rebuilt (url:'') by a late pre-finalize upload_state broadcast
+  // processed during the awaits before this call — the direct record can't.
+  const r=(rec&&rec.url)?rec:_uploads[id]; if(!r||!r.url) return;
+  const conn_id=r.source_conn_id, target=r.source_target;
+  if(!conn_id||!target||target==='status') return;
+  if(!networks.find(n=>n.config.id===conn_id)){ showToast('Upload done — the original chat is gone; the link is in Upload Status'); return; }
+  const pubUrl=r.url.replace('/files/','/pub/');
+  const shareUrl=`${location.origin}${pubUrl}`;
+  const isImg=['jpg','jpeg','png','gif','webp','avif','ico'].includes((r.filename||'').split('.').pop().toLowerCase());
+  const text=isImg?shareUrl:`${r.original_name}: ${shareUrl}`;
+  // Encryption failure of ANY kind (blocked sentinel OR an unexpected throw)
+  // must drop the send — never downgrade a confirmed send to plaintext.
+  let wire=null,_encFail=false;
+  try{ wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,text):null; }catch(_){ _encFail=true; }
+  if(_encFail||_e2eBlocked(wire)){ showToast('🔒 Encrypted session not ready — link not sent automatically. It\'s in Upload Status.'); return; }
+  rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||text}`});
+  addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text,kind:'privmsg',encrypted:!!wire});
+  if(!isActive(conn_id,target)) setActive(conn_id,target);
+}
 
 // ─── Chunked / resumable upload system ───────────────────────────────────────
 //
@@ -4881,6 +5052,12 @@ async function _postJson(url,body){
 async function uploadFile(file){
   if(!sessionToken){showToast('Not authenticated');return;}
   if(!file){return;}
+  // Snapshot the destination NOW (before any await): the async hydration and
+  // the preview-confirm dialog below both yield, and the user may switch
+  // channels meanwhile — the upload must go where it was initiated.
+  const _srcRef=(active && !isUploadsConn(active.conn_id)) ? active : _lastIrcActive;
+  if(!_srcRef){showToast('Select a channel first');return;}
+  const src={conn_id:_srcRef.conn_id, target:_srcRef.target};
   // Some environments hand us a File whose .size is 0 even though the file has
   // data — notably drag-and-drop on certain Linux/Chromium (Wayland, or sandboxed
   // Flatpak/Snap) setups, and cloud "online-only" placeholders. The chunk loop is
@@ -4905,13 +5082,20 @@ async function uploadFile(file){
       return;
     }
   }
-  // Source = the chat the user was last on (so even files dropped while
-  // viewing the Uploads channel get a sensible "Insert into chat" target).
-  const src = (active && !isUploadsConn(active.conn_id)) ? active : _lastIrcActive;
-  if(!src){showToast('Select a channel first');return;}
+  // Images & videos: preview + confirm before a single byte moves. Yes arms
+  // auto-send-on-completion; Cancel aborts with nothing uploaded. Status
+  // buffers can't receive a PRIVMSG, so uploads initiated there keep the
+  // classic no-confirm flow. Other file types are unchanged too.
+  const _isMedia=!!(file.type&&(file.type.startsWith('image/')||file.type.startsWith('video/'))) && src.target!=='status';
+  let _autoSend=false;
+  if(_isMedia){
+    if(!(await confirmUploadPreview(file,src))) return;
+    _autoSend=true;
+  }
   const id=_newUploadId();
   await idbPutFile(id,file);
-  _uploadJobs[id]={canceled:false, file, lastTickAt:Date.now(), lastTickBytes:0, speed:0};
+  if(_autoSend) _upcFlagSet(id);   // survives tab close → resume keeps the promise
+  _uploadJobs[id]={canceled:false, file, lastTickAt:Date.now(), lastTickBytes:0, speed:0, autoSend:_autoSend};
   // Pre-seed local state so the row appears instantly (server broadcast
   // confirms / replaces this in milliseconds).
   _uploads[id]={
@@ -4921,12 +5105,20 @@ async function uploadFile(file){
     source_conn_id: src.conn_id, source_target: src.target,
   };
   setUploadsHidden(false);
-  // Jump straight to the Uploads view so the user sees the row appear with
-  // its progress bar instantly. We do this only on the originating device —
-  // other sessions get the sidebar update + tiny toast but aren't yanked
-  // away from whatever they were doing.
-  if(!isUploadsActive()) setActive(UPLOAD_CONN, UPLOAD_TARGET);
-  else renderChat();
+  if(_autoSend){
+    // Confirmed media: stay in (or go to) the DESTINATION chat instead of the
+    // Uploads view — the pip shows progress and the link auto-sends there.
+    const haveNet=networks.find(n=>n.config.id===src.conn_id);
+    if(haveNet && !isActive(src.conn_id,src.target)) setActive(src.conn_id,src.target);
+    else if(isUploadsActive()) renderChat();
+  } else {
+    // Jump straight to the Uploads view so the user sees the row appear with
+    // its progress bar instantly. We do this only on the originating device —
+    // other sessions get the sidebar update + tiny toast but aren't yanked
+    // away from whatever they were doing.
+    if(!isUploadsActive()) setActive(UPLOAD_CONN, UPLOAD_TARGET);
+    else renderChat();
+  }
   renderSidebar();
   flashUploadPip(`📤 ${file.name}`);
   try{
@@ -4937,6 +5129,7 @@ async function uploadFile(file){
     if(!init.ok){
       showToast(init.data.error||'Upload init failed');
       _uploads[id].status='error'; _uploads[id].error=init.data.error||'init failed';
+      _upcFlagClear(id);
       delete _uploadJobs[id]; await idbDeleteFile(id);
       if(isUploadsActive()) renderChat();
       renderSidebar();
@@ -4946,6 +5139,7 @@ async function uploadFile(file){
   }catch(e){
     showToast('Upload init failed: '+e.message);
     _uploads[id].status='error'; _uploads[id].error=e.message;
+    _upcFlagClear(id);
     delete _uploadJobs[id]; await idbDeleteFile(id);
     if(isUploadsActive()) renderChat();
     renderSidebar();
@@ -4967,7 +5161,7 @@ async function runUploadLoop(id){
       delete _uploadJobs[id];
       return;
     }
-    _uploadJobs[id]={canceled:false, file, lastTickAt:Date.now(), lastTickBytes:0, speed:0};
+    _uploadJobs[id]={canceled:false, file, lastTickAt:Date.now(), lastTickBytes:0, speed:0, autoSend:_upcFlagHas(id)};
   }
   _uploadJobs[id].running=true;
   try{
@@ -5024,8 +5218,18 @@ async function runUploadLoop(id){
           // _uploads[id] will be updated via broadcast, but populate now so the
           // UI doesn't briefly flicker between "100%" and the Done state.
           Object.assign(_uploads[id]||{}, d);
-          await idbDeleteFile(id);
+          // Preview-confirmed media: fire the share link into the source chat
+          // exactly once. The localStorage flag is the SEND CLAIM: two tabs of
+          // the same browser share IndexedDB+localStorage, so both can pump and
+          // both get a 200 from the (idempotent) finalize — the first tab to
+          // check-and-clear the flag wins, the other sees it gone and stays
+          // silent. Other devices never send (no IDB bytes → no local job).
+          const _doAutoSend=!!(_uploadJobs[id] && _uploadJobs[id].autoSend && !_uploadJobs[id]._autoSent && _upcFlagHas(id));
+          if(_doAutoSend) _uploadJobs[id]._autoSent=true;
+          _upcFlagClear(id);           // claim consumed (or cleanup for non-autoSend)
+          try{ await idbDeleteFile(id); }catch(_){}  // an IDB error must not abort the confirmed send below
           delete _uploadJobs[id];
+          if(_doAutoSend){ try{ await _autoSendUploadLink(id, d); }catch(_){} }
           if(isUploadsActive()) renderChat();
           renderSidebar();
           return;
@@ -5042,6 +5246,7 @@ async function runUploadLoop(id){
 async function cancelUpload(id){
   const j=_uploadJobs[id];
   if(j) j.canceled=true;
+  _upcFlagClear(id);
   try{ await fetch(`${_uploadBase()}/upload/cancel/${encodeURIComponent(id)}`,{method:'POST',headers:_uploadAuthHeader()}); }catch(_){}
   await idbDeleteFile(id);
   delete _uploadJobs[id];
@@ -5051,6 +5256,7 @@ function removeUploadRow(id){
   wsend({type:'upload_remove', id});
   // Optimistic local removal so the row disappears immediately even if
   // the WS round-trip is slow.
+  _upcFlagClear(id);
   delete _uploads[id];
   delete _uploadJobs[id];
   idbDeleteFile(id);
@@ -5521,7 +5727,7 @@ function renderMessagesView(){
       const t=c.last.text||'';
       if(typeof t==='string'&&t.startsWith('sd8~')) prev.textContent='🔒 Encrypted message';
       else {
-        const who=(c.last.from&&c.last.from===getNick(c.conn_id))?'You: ':'';
+        const who=_isOwnMsg(c.conn_id,c.last)?'You: ':'';
         const pt=_msgsPlain(t);
         prev.textContent=(who+(c.last.kind==='action'?'• '+pt:pt)).slice(0,140)||'—';
       }
@@ -5582,8 +5788,130 @@ function blinkUserCount(type){
 }
 
 // ─── Settings Menu ───────────────────────────────────────────────────────────
-function toggleSettingsMenu(){document.getElementById('settings-menu').classList.toggle('open');}
-function closeSettingsMenu(){document.getElementById('settings-menu').classList.remove('open');}
+function toggleSettingsMenu(){
+  const m=document.getElementById('settings-menu'); if(!m) return;
+  // Closing via the gear must run the full close path (clears any in-progress
+  // search) — a bare class toggle left stale results + 'searching' behind, so
+  // reopening showed only the old hit list with every menu item hidden.
+  if(m.classList.contains('open')) closeSettingsMenu();
+  else m.classList.add('open');
+}
+function closeSettingsMenu(){
+  // 'search-focus' (mobile top-pin while the search input has focus) is cleared
+  // HERE and only here — clearing it on blur would snap the menu back to the
+  // bottom mid-tap and move the result buttons out from under the finger.
+  const m=document.getElementById('settings-menu'); if(m) m.classList.remove('open','searching','search-focus');
+  // Reset any in-progress settings search so the menu reopens clean.
+  const i=document.getElementById('settings-search'); if(i) i.value='';
+  const r=document.getElementById('settings-search-results'); if(r) r.innerHTML='';
+}
+// ── Settings search ──────────────────────────────────────────────────────────
+// Searches across the gear-menu entries PLUS the individual setting rows inside
+// the static Theme (#appearance-overlay) and Notifications (#notif-modal)
+// overlays. Index is built from the live DOM on each keystroke (~100 nodes —
+// cheap), so it self-maintains as settings are added. Picking a row result
+// opens its panel, scrolls the row into view and flashes it.
+function _settingsSearchIndex(){
+  const idx=[];
+  document.querySelectorAll('#settings-menu .settings-menu-item').forEach(btn=>{
+    if(btn.style.display==='none') return; // hidden entries (e.g. Admin for non-admins)
+    const label=(btn.textContent||'').trim();
+    if(!label) return;
+    // Attribute the item to its group header (the nearest preceding
+    // .settings-menu-sect sibling) so hits read "Settings ▸ Account" etc.
+    let sec='Settings menu';
+    for(let p=btn.previousElementSibling;p;p=p.previousElementSibling){
+      if(p.classList&&p.classList.contains('settings-menu-sect')){
+        const t=(p.textContent||'').trim(); if(t) sec='Settings › '+t; break;
+      }
+    }
+    idx.push({label, section:sec, run:()=>btn.click()});
+  });
+  // `sec` is captured alongside `row` because some rows are DYNAMIC (e.g. the
+  // notif Per-Network list is innerHTML-rebuilt on every showNotifModal): by
+  // the time the jump runs, the indexed row node can be detached — closest()
+  // on a detached node finds nothing, so keep the static section as fallback.
+  document.querySelectorAll('#appearance-overlay .appear-section').forEach(sec=>{
+    const st=(sec.querySelector('.appear-section-title')?.textContent||'').trim();
+    if(st) idx.push({label:st, section:'Theme', row:sec, sec, open:'appearance'});
+    sec.querySelectorAll('.appear-row').forEach(row=>{
+      const l=(row.querySelector('.appear-label')?.textContent||'').trim();
+      if(l) idx.push({label:l, section:st?('Theme › '+st):'Theme', row, sec, open:'appearance'});
+    });
+  });
+  document.querySelectorAll('#notif-modal .notif-section').forEach(sec=>{
+    const st=(sec.querySelector('.notif-section-title')?.textContent||'').trim();
+    const rows=sec.querySelectorAll('.notif-row');
+    if(!rows.length){ if(st) idx.push({label:st, section:'Notifications', row:sec, sec, open:'notif'}); return; }
+    rows.forEach(row=>{
+      const l=(row.querySelector('.notif-label')?.textContent||'').trim();
+      const kw=(row.querySelector('.notif-sublabel')?.textContent||'').trim();
+      if(l) idx.push({label:l, keywords:kw, section:st?('Notifications › '+st):'Notifications', row, sec, open:'notif'});
+    });
+  });
+  return idx;
+}
+function _settingsJump(entry){
+  closeSettingsMenu();
+  if(!entry.open){ if(entry.run) entry.run(); return; }
+  const doJump=()=>{
+    let t=entry.row;
+    if(!t) return;
+    // Row rebuilt/detached since indexing (dynamic lists) → jump to its
+    // still-attached section card instead.
+    if(!t.isConnected){ if(entry.sec && entry.sec.isConnected) t=entry.sec; else return; }
+    // A row inside a collapsed/conditional block (display:none) can't be
+    // scrolled to — fall back to its parent section card.
+    if(t.offsetParent===null){ const sec=t.closest('.appear-section,.notif-section')||entry.sec; if(sec && sec.isConnected) t=sec; }
+    try{t.scrollIntoView({block:'center',behavior:'smooth'});}catch(_){try{t.scrollIntoView();}catch(__){}}
+    t.classList.remove('settings-hit-flash'); void t.offsetWidth; t.classList.add('settings-hit-flash');
+    setTimeout(()=>{try{t.classList.remove('settings-hit-flash');}catch(_){}} ,2000);
+  };
+  if(entry.open==='appearance'){ showAppearanceModal(); setTimeout(doJump,150); }
+  else if(entry.open==='notif'){ Promise.resolve().then(()=>showNotifModal()).then(()=>setTimeout(doJump,150)).catch(()=>{}); }
+}
+function settingsSearch(q){
+  const menu=document.getElementById('settings-menu');
+  const res=document.getElementById('settings-search-results');
+  if(!menu||!res) return;
+  q=(q||'').trim().toLowerCase();
+  if(!q){ menu.classList.remove('searching'); res.innerHTML=''; return; }
+  menu.classList.add('searching');
+  const hits=[];
+  for(const e of _settingsSearchIndex()){
+    const ll=e.label.toLowerCase();
+    const hay=ll+' '+(e.keywords||'').toLowerCase()+' '+e.section.toLowerCase();
+    if(hay.indexOf(q)<0) continue;
+    // Rank: label prefix > label substring > section/keyword-only match.
+    hits.push([ll.startsWith(q)?0:(ll.indexOf(q)>=0?1:2), e]);
+  }
+  hits.sort((a,b)=>a[0]-b[0]);
+  res.innerHTML='';
+  if(!hits.length){
+    const d=document.createElement('div'); d.className='settings-search-empty'; d.textContent='No settings match'; res.appendChild(d);
+    return;
+  }
+  for(const [,e] of hits.slice(0,12)){
+    const b=document.createElement('button');
+    b.type='button'; b.className='settings-search-hit';
+    const l=document.createElement('span'); l.className='ssh-label'; l.textContent=e.label;
+    const s=document.createElement('span'); s.className='ssh-sec'; s.textContent=e.section;
+    b.appendChild(l); b.appendChild(s);
+    b.onclick=()=>_settingsJump(e);
+    res.appendChild(b);
+  }
+}
+function settingsSearchKey(ev){
+  if(ev.key==='Enter'){
+    ev.preventDefault();
+    const first=document.querySelector('#settings-search-results .settings-search-hit');
+    if(first) first.click();
+  } else if(ev.key==='Escape'){
+    ev.preventDefault(); ev.stopPropagation();
+    if(ev.target.value){ ev.target.value=''; settingsSearch(''); }
+    else closeSettingsMenu();
+  }
+}
 document.addEventListener('click',e=>{const m=document.getElementById('settings-menu');if(m&&m.classList.contains('open')&&!e.target.closest('#settings-menu')&&!e.target.closest('#settings-gear-btn'))closeSettingsMenu();});
 
 // ─── Custom prompt (works in Electron where window.prompt is broken) ─────────
@@ -6701,6 +7029,10 @@ const APPEAR_DEFAULTS={
   // Same-origin (/files/) uploads always auto-load regardless of this setting.
   extMedia:'all',
   extMediaHosts:['giphy.com','tenor.com','imgur.com','media.discordapp.net','i.redd.it'],
+  // YouTube preview cards: 'auto' = reveal thumbnail/title immediately (default —
+  // videos show without a click; playback still needs a click), 'click' = the
+  // dormant privacy-safe card (no third-party request until clicked).
+  ytPreview:'auto',
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -6809,6 +7141,7 @@ function applyAppearance(){
     // External media auto-load policy + allowlist hosts (absent element ⇒ keep prev).
     extMedia:       el('a-ext-media')?.value || prev.extMedia || 'all',
     extMediaHosts:  el('a-ext-media-hosts') ? el('a-ext-media-hosts').value.split(/[\s,]+/).map(h=>h.trim()).filter(Boolean) : (prev.extMediaHosts||[]),
+    ytPreview:      el('a-yt-preview')?.value || prev.ytPreview || 'auto',
     mediaShape:     el('a-media-shape')?.value || prev.mediaShape || 'rounded',
     mediaSize:      el('a-media-size')?.value || prev.mediaSize || 'medium',
     mediaBorder:    el('a-media-border')?.value || prev.mediaBorder || 'none',
@@ -7549,6 +7882,7 @@ function populateAppearanceModal(cfg){
   // Media & previews
   if (el('a-ext-media')) el('a-ext-media').value = cfg.extMedia || 'all';
   if (el('a-ext-media-hosts')) el('a-ext-media-hosts').value = (Array.isArray(cfg.extMediaHosts)?cfg.extMediaHosts:[]).join('\n');
+  if (el('a-yt-preview')) el('a-yt-preview').value = cfg.ytPreview || 'auto';
   _toggleExtMediaHostsRow();
   if (el('a-media-shape'))  el('a-media-shape').value  = cfg.mediaShape  || 'rounded';
   if (el('a-media-size'))   el('a-media-size').value   = cfg.mediaSize   || 'medium';
@@ -12986,7 +13320,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.17';
+const CRYPTIRC_VERSION='0.3.21';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13077,6 +13411,60 @@ let _newsLoadFailed=false;  // true only if a fetch failed AND we have no cached
 try{ var _nc0=JSON.parse(localStorage.getItem('cryptirc_news_cache')||'null'); if(_nc0&&Array.isArray(_nc0.posts)) _newsFeed=_nc0.posts; }catch(e){}
 if(!_newsFeed && typeof NEWS_DEFAULT!=='undefined' && Array.isArray(NEWS_DEFAULT.posts)) _newsFeed=NEWS_DEFAULT.posts;  // built-in default for first-ever load / offline-from-launch
 function _newsLatestId(){ if(!_newsFeed||!_newsFeed[0]) return ''; var p=_newsFeed[0]; return (p.title||'')+'|'+(p.date||''); }
+// Newest release version the WEBSITE knows about: scan the feed (newest post
+// first) and take the first x.y[.z] found in a post's tag/date/title — release
+// posts carry it ("v0.3.17 · Jul 2026" / "CryptIRC 0.3.17 — …"). Body text is
+// deliberately NOT scanned (prose can reference old versions).
+function _newsLatestVersion(){
+  if(!_newsFeed) return '';
+  // Pass 1: release/update-tagged posts, bare or v-prefixed version. Pass 2:
+  // any post, but ONLY a v-prefixed version — an unanchored number scan would
+  // false-match future prose like "TLS 1.3 support" or a dotted date and
+  // permanently flag a bogus "update available".
+  for(var pass=0;pass<2;pass++){
+    for(var i=0;i<_newsFeed.length;i++){
+      var p=_newsFeed[i]||{};
+      var isRel=/release|update/i.test(String(p.tag||''));
+      if((pass===0)!==isRel) continue;   // pass 0 = release posts, pass 1 = the rest
+      var re=pass===0?/(?:^|[^0-9.])v?(\d+\.\d+(?:\.\d+)?)(?![0-9.])/:/(?:^|[^0-9.A-Za-z])v(\d+\.\d+(?:\.\d+)?)(?![0-9.])/;
+      var m=String((p.tag||'')+' '+(p.date||'')+' '+(p.title||'')).match(re);
+      if(m) return m[1];
+    }
+  }
+  return '';
+}
+// Numeric dotted-version compare: -1 a<b, 0 a==b, 1 a>b.
+function _cmpVer(a,b){
+  var pa=String(a).split('.'),pb=String(b).split('.');
+  for(var i=0;i<Math.max(pa.length,pb.length);i++){
+    var x=parseInt(pa[i],10)||0,y=parseInt(pb[i],10)||0;
+    if(x<y) return -1; if(x>y) return 1;
+  }
+  return 0;
+}
+// News-panel version pill: shows the website's latest release ("Latest version:
+// vX.Y.Z") and flags when this client is older ("update available"). Falls back
+// to the plain running-version label when the feed has no parseable version.
+function _updateNewsVerPill(){
+  var pill=document.getElementById('news-ver-pill'); if(!pill) return;
+  var latest=_newsLatestVersion();
+  var c=latest?_cmpVer(CRYPTIRC_VERSION,latest):1;
+  if(!latest || c>0){
+    // No parseable version, or the feed lags behind the running client (e.g.
+    // the built-in/offline snapshot, or the site post isn't up yet): don't
+    // assert a stale "Latest version" — show the plain running version.
+    pill.textContent=_verLabel(); pill.classList.remove('outdated'); pill.title=''; return;
+  }
+  if(c<0){
+    pill.textContent='Latest version: v'+latest+' — update available';
+    pill.classList.add('outdated');
+    pill.title='You are running v'+CRYPTIRC_VERSION+'; v'+latest+' is out.';
+  } else {
+    pill.textContent='Latest version: v'+latest+' ✓';
+    pill.classList.remove('outdated');
+    pill.title='You are running v'+CRYPTIRC_VERSION+' — up to date.';
+  }
+}
 function _markNewsSeen(){ var l=_newsLatestId(); if(l){ try{ localStorage.setItem('cryptirc_news_seen',l); }catch(e){} } _updateNewsDot(); }
 function _updateNewsDot(){
   // Small red dot on the ⚙ Settings button + News menu item when the newest post
@@ -13104,7 +13492,7 @@ async function fetchNews(){
   }catch(e){ _newsLoadFailed=!_newsFeed; }   // offline → fall back to the cached copy if present
   _updateNewsDot();
   var ov=document.getElementById('news-overlay');
-  if(ov && ov.classList.contains('show')){ _renderNewsBody(); _markNewsSeen(); }
+  if(ov && ov.classList.contains('show')){ _renderNewsBody(); _updateNewsVerPill(); _markNewsSeen(); }
 }
 function _renderNewsBody(){
   var body=document.getElementById('news-body'); if(!body) return;
@@ -13126,7 +13514,7 @@ function _renderNewsBody(){
   }
 }
 function showNewsPanel(){
-  var pill=document.getElementById('news-ver-pill'); if(pill) pill.textContent=_verLabel();
+  _updateNewsVerPill();   // "Latest version: vX.Y.Z" from the site feed (+ update-available flag)
   _renderNewsBody();
   _markNewsSeen();  // marks the currently-shown latest post seen; fetchNews re-marks on arrival
   document.getElementById('news-overlay').classList.add('show');
@@ -13557,6 +13945,128 @@ function _cancelScrollForce(){
 function _isNearBottom(a,thresh){return a.scrollHeight-a.scrollTop-a.clientHeight<thresh;}
 // iPhone/iPad (incl. iPadOS reporting as Mac). Desktop Mac (no touch) is NOT iOS.
 const _IS_IOS=(function(){try{const ua=navigator.userAgent||'';return /iP(hone|ad|od)/.test(ua)||(/Mac/.test(navigator.platform||'')&&(navigator.maxTouchPoints||0)>1);}catch(e){return false;}})();
+
+// ─── PWA install prompt ──────────────────────────────────────────────────────
+// Chromium: intercept beforeinstallprompt, show our own slide-up banner, call the
+// stashed event's prompt() on Install. iOS Safari has no install API — show a
+// one-time "Share → Add to Home Screen" instruction banner instead. Suppressed
+// when already installed (standalone), in Electron, or within 30 days of a
+// dismissal. A permanent Settings ▸ Install App entry (shown whenever not
+// installed/Electron) works regardless of the cooldown.
+let _bipEvent=null;      // stashed beforeinstallprompt (single-use per Chromium spec)
+let _pwaBannerEl=null;
+const _PWA_DISMISS_KEY='cryptirc_pwa_dismissed';
+const _PWA_COOLDOWN_MS=30*24*3600*1000;
+function _pwaInstalled(){
+  try{ return window.matchMedia('(display-mode: standalone)').matches || navigator.standalone===true; }catch(e){ return false; }
+}
+function _pwaDismissedRecently(){
+  try{ const t=parseInt(localStorage.getItem(_PWA_DISMISS_KEY)||'0'); return t>0 && (Date.now()-t)<_PWA_COOLDOWN_MS; }catch(e){ return false; }
+}
+function _pwaMarkDismissed(){ try{ localStorage.setItem(_PWA_DISMISS_KEY,String(Date.now())); }catch(e){} }
+// Callbacks only run after the whole script has parsed, so forward refs to
+// _IS_IOS/showToast here are safe even though the listener registers mid-file.
+window.addEventListener('beforeinstallprompt',e=>{
+  e.preventDefault();   // suppress Chrome's own mini-infobar; we present the banner
+  _bipEvent=e;
+  _refreshPwaMenuItem();
+  _maybeShowPwaBanner();   // no-op pre-login / on cooldown / already showing
+});
+window.addEventListener('appinstalled',()=>{
+  _bipEvent=null;
+  _hidePwaBanner();
+  _refreshPwaMenuItem();
+  try{ showToast('✅ CryptIRC installed — launch it from your home screen / app list'); }catch(e){}
+});
+// Settings ▸ Install App visibility: anyone not already installed and not in
+// Electron can use it (Chromium → native prompt; iOS/others → guidance banner).
+function _refreshPwaMenuItem(){
+  const b=document.getElementById('pwa-install-menu-btn'); if(!b) return;
+  b.style.display=(_pwaInstalled()||window.electronAPI?.isElectron)?'none':'';
+}
+// Auto path: called post-login (showApp setTimeout) and when beforeinstallprompt
+// lands late. Honors the 30-day dismiss cooldown; the manual menu path doesn't.
+function _maybeShowPwaBanner(){
+  if(!window._appShown) return;
+  if(_pwaBannerEl) return;
+  if(_pwaInstalled() || window.electronAPI?.isElectron) return;
+  if(_pwaDismissedRecently()) return;
+  if(!_bipEvent && !_IS_IOS) return;   // nothing useful to offer this browser automatically
+  _showPwaBanner();
+}
+function _showPwaBanner(){
+  _hidePwaBanner();
+  const ios=!_bipEvent && _IS_IOS;
+  const b=document.createElement('div');
+  b.id='pwa-banner';
+  const icon=document.createElement('img');
+  icon.src='/cryptirc/icon-192.png'; icon.alt=''; icon.className='pwa-b-icon';
+  const txt=document.createElement('div'); txt.className='pwa-b-text';
+  const t1=document.createElement('div'); t1.className='pwa-b-title'; t1.textContent='Install CryptIRC';
+  const t2=document.createElement('div'); t2.className='pwa-b-sub';
+  if(_bipEvent){
+    t2.textContent='Full-screen app with push notifications — no browser bars.';
+  } else if(ios){
+    // Non-Safari iOS browsers can't reliably Add to Home Screen — route to Safari.
+    const alt=/CriOS|FxiOS|EdgiOS/.test(navigator.userAgent||'');
+    t2.textContent=alt
+      ? 'Open this site in Safari, then tap the Share button (square with ↑) and “Add to Home Screen”.'
+      : 'Tap the Share button (square with ↑), then “Add to Home Screen” for the full-screen app with push.';
+  } else {
+    t2.textContent='Your browser doesn’t offer installs here. In Chrome or Edge, use the ⋮ menu → “Install app”.';
+  }
+  txt.appendChild(t1); txt.appendChild(t2);
+  b.appendChild(icon); b.appendChild(txt);
+  if(_bipEvent){
+    const go=document.createElement('button');
+    go.type='button'; go.className='pwa-b-btn'; go.textContent='Install';
+    go.onclick=()=>_pwaDoInstall();
+    b.appendChild(go);
+    const x=document.createElement('button');
+    x.type='button'; x.className='pwa-b-x'; x.textContent='✕'; x.title='Not now';
+    x.setAttribute('aria-label','Dismiss install prompt');
+    x.onclick=()=>{ _pwaMarkDismissed(); _hidePwaBanner(); };
+    b.appendChild(x);
+  } else {
+    const ok=document.createElement('button');
+    ok.type='button'; ok.className='pwa-b-btn'; ok.textContent='Got it';
+    ok.onclick=()=>{ _pwaMarkDismissed(); _hidePwaBanner(); };
+    b.appendChild(ok);
+  }
+  document.body.appendChild(b);
+  _pwaBannerEl=b;
+  requestAnimationFrame(()=>b.classList.add('show'));
+}
+async function _pwaDoInstall(){
+  const ev=_bipEvent;
+  _hidePwaBanner();
+  if(!ev) return;
+  _bipEvent=null;   // the event object is single-use
+  try{
+    ev.prompt();
+    const ch=await ev.userChoice;   // {outcome:'accepted'|'dismissed'}
+    if(ch && ch.outcome==='dismissed') _pwaMarkDismissed();
+    // Accepted → the appinstalled listener handles cleanup/toast.
+  }catch(e){
+    // User clicked Install and the browser refused (already used / not allowed):
+    // don't fail silently — point at the browser's own install affordance.
+    try{ showToast('Install prompt unavailable — look for “Install app” in your browser menu.'); }catch(_){}
+  }
+  _refreshPwaMenuItem();
+}
+function _hidePwaBanner(){
+  const b=_pwaBannerEl; _pwaBannerEl=null;
+  if(!b) return;
+  b.classList.remove('show');
+  setTimeout(()=>{ try{ b.remove(); }catch(e){} },300);
+}
+// Settings ▸ Install App: native prompt when available, else the guidance banner
+// (iOS steps / generic pointer). Deliberately ignores the dismiss cooldown.
+function pwaInstallFromMenu(){
+  if(_pwaInstalled()){ try{ showToast('CryptIRC is already installed 🎉'); }catch(e){} return; }
+  if(_bipEvent){ _pwaDoInstall(); return; }
+  _showPwaBanner();
+}
 // Force the chat to the bottom. The overflowY:hidden→'' toggle is an iOS-PWA-only
 // workaround (Safari can swallow a bare scrollTop); on desktop with classic, space-
 // reserving scrollbars that toggle reflows the view every message, which reads as a

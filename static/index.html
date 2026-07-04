@@ -486,6 +486,82 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   min-height:44px; display:flex; align-items:center;
 }
 .settings-menu-item:hover { background:var(--bg4); color:var(--text); }
+/* Settings search (top of the gear menu) */
+.settings-search-wrap { padding:4px 4px 6px; }
+#settings-search {
+  width:100%; box-sizing:border-box; background:var(--bg3); border:1px solid var(--border);
+  border-radius:8px; color:var(--text); font-size:12px; font-family:var(--mono);
+  padding:7px 10px; outline:none; min-height:34px;
+}
+#settings-search:focus { border-color:var(--accent); }
+#settings-search::placeholder { color:var(--text3); }
+/* Group headers inside the settings menu — same accent-tick language as the
+   Appearance panel's section titles, shrunk to popover scale. */
+.settings-menu-sect {
+  display:flex; align-items:center; gap:7px; padding:10px 10px 3px;
+  font-family:var(--mono); font-size:10px; letter-spacing:.16em;
+  text-transform:uppercase; color:var(--text3); user-select:none; -webkit-user-select:none;
+}
+.settings-menu-sect::before { content:''; width:3px; height:10px; border-radius:2px; background:var(--accent); flex-shrink:0; }
+.settings-menu-sect.dz::before { background:#f0c040; }
+.settings-menu-rule { border-top:1px dashed var(--border2); margin:8px 6px 2px; }
+/* While a query is typed, the normal menu items give way to the results list */
+#settings-menu.searching > .settings-menu-item { display:none !important; }
+/* ...and so do the group headers/divider — only the search + results remain */
+#settings-menu.searching > .settings-menu-sect,
+#settings-menu.searching > .settings-menu-rule { display:none !important; }
+/* Keep the popover a stable size while searching: without a floor it collapses
+   to a sliver around 1-2 hits and its top edge jumps on every keystroke. The
+   results list scrolls inside the fixed frame instead. */
+#settings-menu.searching { min-height:min(340px, 55vh); }
+#settings-menu.searching #settings-search-results { flex:1; min-height:0; overflow-y:auto; }
+.settings-search-hit {
+  display:flex; flex-direction:column; align-items:flex-start; gap:2px; width:100%;
+  background:none; border:none; text-align:left; padding:8px 12px; border-radius:8px;
+  cursor:pointer; color:var(--text2); font-family:var(--mono);
+}
+.settings-search-hit:hover { background:var(--bg4); }
+.settings-search-hit .ssh-label { font-size:12px; color:var(--text); }
+.settings-search-hit .ssh-sec { font-size:10px; color:var(--text3); }
+.settings-search-empty { padding:8px 12px; font-size:11px; color:var(--text3); }
+/* Flash highlight on the setting row a search result jumps to */
+@keyframes settingsHitFlash { 0%,60% { background:var(--bg4); box-shadow:inset 0 0 0 1px var(--accent); } 100% { background:transparent; box-shadow:none; } }
+.settings-hit-flash { animation:settingsHitFlash 1.8s ease; border-radius:8px; }
+/* Long label ("Install CryptIRC to your device") must wrap instead of clipping
+   against the menu's nowrap default, esp. on the mobile 280px-max menu */
+#pwa-install-menu-btn { white-space:normal; text-align:left; line-height:1.3; }
+/* PWA install banner (slide-up above the input bar; built dynamically in app.js) */
+#pwa-banner {
+  /* Track the real input-bar height (live --input-bar-h var, 48px default) + gap. */
+  position:fixed; left:50%; bottom:calc(var(--input-bar-h, 48px) + 18px + var(--sab, 0px));
+  transform:translate(-50%, 140%); transition:transform .28s ease;
+  display:flex; align-items:center; gap:10px; box-sizing:border-box;
+  width:min(460px, calc(100vw - 20px)); padding:10px 12px;
+  background:var(--bg2); border:1px solid var(--border2); border-radius:14px;
+  box-shadow:0 12px 36px rgba(0,0,0,.55);
+  /* Root-level 40: above the chat chrome (day dividers 6, scroll-btn 20) and
+     below EVERYTHING else that can overlap this spot. Key subtlety (3rd audit):
+     #settings-menu lives INSIDE #sidebar, whose own z-index:50 creates a
+     stacking context — the menu's z300/400 can never escape it, so ANY
+     body-level banner above 50 pointer-blocks the open menu (killed picks 900,
+     140, AND 80). 40 also ducks the clickable upload-progress pip (60), the
+     pets (87-91), pickers/modals (100+), vault (150), and every panel. */
+  z-index:40;
+}
+#pwa-banner.show { transform:translate(-50%, 0); }
+.pwa-b-icon { width:38px; height:38px; border-radius:9px; flex-shrink:0; }
+.pwa-b-text { flex:1; min-width:0; }
+.pwa-b-title { font-size:13px; font-weight:700; color:var(--text); font-family:var(--sans); }
+.pwa-b-sub { font-size:11px; color:var(--text3); line-height:1.45; }
+.pwa-b-btn {
+  background:var(--accent); color:#000; border:none; border-radius:8px;
+  padding:8px 14px; font-family:var(--mono); font-weight:700; font-size:12px;
+  cursor:pointer; min-height:36px; flex-shrink:0;
+}
+.pwa-b-x { background:none; border:none; color:var(--text3); font-size:15px; cursor:pointer; padding:6px; min-width:32px; min-height:32px; flex-shrink:0; }
+.pwa-b-x:hover { color:var(--text); }
+@media (hover:none) { .pwa-b-btn { min-height:44px; } .pwa-b-x { min-width:44px; min-height:44px; } }
+@media (prefers-reduced-motion: reduce) { #pwa-banner { transition:none; } }
 /* nick context menu */
 .nick-ctx {
   position:fixed; z-index:200; background:var(--bg2); border:1px solid var(--border2);
@@ -1242,6 +1318,36 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
   font-family:var(--sans); font-size:22px; color:var(--accent); font-weight:700;
 }
 #drop-overlay.show { display:flex; }
+/* Upload preview/confirm dialog (images & videos) */
+#upload-confirm-overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:9500;
+  display:none; align-items:center; justify-content:center;
+  padding:16px; padding-top:max(16px, var(--sat)); padding-bottom:max(16px, var(--sab));
+}
+#upload-confirm-overlay.show { display:flex; }
+.upc-box {
+  background:var(--bg2); border:1px solid var(--border2); border-radius:14px;
+  padding:16px; width:min(360px, calc(100vw - 32px)); max-height:min(80vh, 80dvh);
+  display:flex; flex-direction:column; gap:10px; box-shadow:0 18px 50px rgba(0,0,0,.6);
+  box-sizing:border-box;
+}
+.upc-title { font-family:var(--sans); font-size:15px; font-weight:700; color:var(--text); }
+.upc-preview { display:flex; align-items:center; justify-content:center; min-height:80px; max-height:min(300px, 40vh); overflow:hidden; border-radius:10px; background:var(--bg1); }
+.upc-thumb { max-width:100%; max-height:min(300px, 40vh); object-fit:contain; border-radius:10px; display:block; }
+.upc-meta { font-family:var(--mono); font-size:11px; color:var(--text3); word-break:break-all; }
+.upc-dest { font-family:var(--sans); font-size:13px; color:var(--text2); }
+.upc-dest b { color:var(--accent); }
+.upc-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:2px; }
+.upc-cancel {
+  background:var(--bg4); color:var(--text2); border:1px solid var(--border);
+  border-radius:8px; padding:9px 16px; font-family:var(--mono); font-size:12px; cursor:pointer; min-height:40px;
+}
+.upc-cancel:hover { color:var(--text); }
+.upc-go {
+  background:var(--accent); color:#000; border:none; border-radius:8px;
+  padding:9px 18px; font-family:var(--mono); font-weight:700; font-size:12px; cursor:pointer; min-height:40px;
+}
+@media (hover:none) { .upc-cancel, .upc-go { min-height:44px; } }
 
 /* ── LIGHTBOX ──────────────────────────────────────────────────────────────── */
 #lightbox {
@@ -1601,6 +1707,17 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
     bottom:calc(60px + var(--sab)) !important;
     min-width:200px !important; max-width:min(280px, 80vw) !important;
     z-index:400 !important;
+  }
+  /* Searching (or search input focused): pin the menu's top so it becomes a
+     stable full-height sheet instead of a bottom-anchored box that (a) resizes
+     jumpily per keystroke and (b) hides behind the iOS keyboard — the search
+     input sits at the menu's TOP, so top-pinned it stays visible while typing.
+     .search-focus is set on input focus and cleared only by closeSettingsMenu,
+     never on blur (an on-blur snap-back would move the result buttons out from
+     under a tap mid-gesture — the iOS blur-cascade problem). */
+  #settings-menu.searching, #settings-menu.search-focus {
+    top:calc(var(--sat) + 10px) !important;
+    max-height:none !important; /* let top+bottom pins define the height — the base 500px cap left a dead gap on tall phones */
   }
   #mentions-panel { left:0; right:0; width:auto; max-width:92vw; }
   #scroll-bottom-btn { right:12px; }
@@ -2043,6 +2160,20 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 <!-- ── DROP OVERLAY ──────────── -->
 <div id="drop-overlay">📎 Drop file to upload</div>
 
+<!-- ── UPLOAD PREVIEW/CONFIRM (images & videos: thumbnail + destination + Upload/Cancel) ──────── -->
+<div id="upload-confirm-overlay" onclick="if(event.target===this)_upcClose(false)">
+  <div class="upc-box">
+    <div class="upc-title">📤 Upload this?</div>
+    <div class="upc-preview" id="upc-preview"></div>
+    <div class="upc-meta" id="upc-meta"></div>
+    <div class="upc-dest" id="upc-dest"></div>
+    <div class="upc-actions">
+      <button type="button" class="upc-cancel" id="upc-cancel">Cancel</button>
+      <button type="button" class="upc-go" id="upc-go">Upload &amp; send</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── SIDEBAR BACKDROP ──────── -->
 <div id="sidebar-backdrop" onclick="closeSidebar();document.getElementById('nick-panel').classList.remove('open');this.classList.remove('show')"></div>
 
@@ -2405,6 +2536,13 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <span class="appear-label" style="margin-bottom:4px">Allowed hosts (one per line)</span>
           <textarea id="a-ext-media-hosts" onchange="applyAppearance()" rows="4" spellcheck="false" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;font-family:var(--mono);padding:6px 8px;resize:vertical" placeholder="giphy.com&#10;tenor.com&#10;imgur.com"></textarea>
           <span style="font-size:10px;color:var(--text3);margin-top:4px">A host like <code>giphy.com</code> also covers <code>media.giphy.com</code>. Your own uploads always load.</span>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">YouTube previews</span>
+          <select id="a-yt-preview" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+            <option value="auto">Show automatically (default)</option>
+            <option value="click">Click to load</option>
+          </select>
         </div>
         <div class="appear-row">
           <span class="appear-label">Shape</span>
@@ -2967,26 +3105,39 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div style="position:relative">
         <button class="sidebar-btn" onclick="toggleSettingsMenu()" id="settings-gear-btn">⚙ Settings</button>
         <div id="settings-menu" class="settings-menu">
-          <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Notifications</button>
-          <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="19" cy="13.5" r="2.5"/><circle cx="6.5" cy="10" r="2.5"/><circle cx="10.5" cy="17.5" r="2.5"/></svg>Theme</button>
-          <button class="settings-menu-item" onclick="closeSettingsMenu();openMsgColorPop()"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="13.5" cy="6.5" r="1.1"/><circle cx="17.3" cy="10.3" r="1.1"/><circle cx="6.7" cy="12.3" r="1.1"/><circle cx="8.7" cy="7.7" r="1.1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3C7 3 3 7 3 12s4 9 9 9c1.1 0 2-.9 2-2 0-.5-.2-.95-.5-1.3-.32-.36-.5-.82-.5-1.2 0-1.1.9-2 2-2H17c2.2 0 4-1.8 4-4 0-4.4-4-7.5-9-7.5z"/></svg>Text Color</button>
-          <button class="settings-menu-item" onclick="showSecurityPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Security</button>
-          <button class="settings-menu-item" onclick="showStatsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>Channel Stats</button>
-          <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>Monitor</button>
-          <button class="settings-menu-item" onclick="showNotepad();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Notepad</button>
-          <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 7V5a4 4 0 0 0-8 0v2"/><circle cx="12" cy="14" r="1.5"/></svg> Certs</button>
-          <button class="settings-menu-item" onclick="showCapsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRCv3 Caps</button>
-          <button class="settings-menu-item" onclick="showIgnorePanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>Ignored Users</button>
-          <button class="settings-menu-item" onclick="showUploadsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>My Uploads</button>
-          <button class="settings-menu-item" onclick="setUploadsHidden(false);setActive(UPLOAD_CONN,UPLOAD_TARGET);closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Upload Status</button>
+          <div class="settings-search-wrap">
+            <input id="settings-search" type="text" placeholder="🔍 Search settings…" autocomplete="off" spellcheck="false" oninput="settingsSearch(this.value)" onkeydown="settingsSearchKey(event)" onfocus="document.getElementById('settings-menu').classList.add('search-focus')">
+          </div>
+          <div id="settings-search-results"></div>
           <button class="settings-menu-item" onclick="showProfilePanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Profile</button>
+          <div class="settings-menu-sect">Account</div>
           <button class="settings-menu-item" onclick="showSessionManager();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>Sessions</button>
           <button class="settings-menu-item" onclick="showPasswordPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>Password Safe</button>
+          <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 7V5a4 4 0 0 0-8 0v2"/><circle cx="12" cy="14" r="1.5"/></svg> Certs</button>
+          <div class="settings-menu-sect">Look &amp; Feel</div>
+          <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="19" cy="13.5" r="2.5"/><circle cx="6.5" cy="10" r="2.5"/><circle cx="10.5" cy="17.5" r="2.5"/></svg>Theme</button>
+          <button class="settings-menu-item" onclick="closeSettingsMenu();openMsgColorPop()"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="13.5" cy="6.5" r="1.1"/><circle cx="17.3" cy="10.3" r="1.1"/><circle cx="6.7" cy="12.3" r="1.1"/><circle cx="8.7" cy="7.7" r="1.1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3C7 3 3 7 3 12s4 9 9 9c1.1 0 2-.9 2-2 0-.5-.2-.95-.5-1.3-.32-.36-.5-.82-.5-1.2 0-1.1.9-2 2-2H17c2.2 0 4-1.8 4-4 0-4.4-4-7.5-9-7.5z"/></svg>Text Color</button>
+          <div class="settings-menu-sect">Alerts</div>
+          <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Notifications</button>
+          <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>Monitor</button>
+          <div class="settings-menu-sect">Privacy</div>
+          <button class="settings-menu-item" onclick="showSecurityPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Security</button>
+          <button class="settings-menu-item" onclick="showIgnorePanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>Ignored Users</button>
+          <div class="settings-menu-sect">Tools</div>
+          <button class="settings-menu-item" onclick="showNotepad();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Notepad</button>
+          <button class="settings-menu-item" onclick="showStatsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>Channel Stats</button>
+          <button class="settings-menu-item" onclick="showUploadsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>My Uploads</button>
+          <button class="settings-menu-item" onclick="setUploadsHidden(false);setActive(UPLOAD_CONN,UPLOAD_TARGET);closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Upload Status</button>
+          <button class="settings-menu-item" onclick="showCapsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRCv3 Caps</button>
+          <div class="settings-menu-sect">App</div>
+          <button class="settings-menu-item" id="pwa-install-menu-btn" style="display:none" onclick="closeSettingsMenu();pwaInstallFromMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="8 12 12 16 16 12"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Install CryptIRC to your device</button>
           <button class="settings-menu-item" id="news-menu-btn" onclick="showNewsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8M15 18h-5M10 6h8v4h-8z"/></svg>News</button>
           <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Help</button>
+          <div class="settings-menu-rule"></div>
+          <div class="settings-menu-sect dz">Power &amp; Danger</div>
           <button class="settings-menu-item" onclick="showOperPanel();closeSettingsMenu()" style="color:#f0c040"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRC Oper</button>
           <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Admin</button>
-          <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#f59e0b"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Clear All Data</button>
+          <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#e05555"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Clear All Data</button>
         </div>
       </div>
       <button class="sidebar-btn" onclick="doLogout()">Logout</button>
@@ -3122,6 +3273,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 #help-overlay.show{display:flex !important;}
 #news-overlay.show{display:flex !important;}
 .ver-pill { display:inline-block; background:var(--bg3); border:1px solid var(--accent); color:var(--accent); border-radius:20px; padding:2px 9px; font-size:11px; font-weight:700; font-family:var(--sans); letter-spacing:.02em; line-height:1.4; white-space:nowrap; }
+/* News pill when the running client is older than the website's latest release */
+.ver-pill.outdated { border-color:#f59e0b; color:#f59e0b; }
 .news-rel { margin-bottom:20px; }
 .news-rel:last-child { margin-bottom:4px; }
 .news-rel-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; padding-bottom:5px; border-bottom:1px solid var(--border); }
