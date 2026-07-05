@@ -8742,10 +8742,10 @@ document.addEventListener('click',e=>{
     // ── IRCOp ──
     {cmd:'oper',desc:'Authenticate as IRCOp',usage:'/oper login password'},
     {cmd:'kill',desc:'Kill a user',usage:'/kill nick reason'},
-    {cmd:'shun',desc:'Shun a user',usage:'/shun mask duration reason'},
-    {cmd:'gline',desc:'G-line (network ban)',usage:'/gline mask duration reason'},
-    {cmd:'zline',desc:'Z-line (IP ban)',usage:'/zline mask duration reason'},
-    {cmd:'kline',desc:'K-line (server ban)',usage:'/kline mask duration reason'},
+    {cmd:'shun',desc:'Shun a user',usage:'/shun +user@host duration reason  (or nick duration reason)'},
+    {cmd:'gline',desc:'G-line (network ban)',usage:'/gline *@host duration reason'},
+    {cmd:'zline',desc:'Z-line (IP ban)',usage:'/zline *@ipmask duration reason'},
+    {cmd:'kline',desc:'K-line (server ban)',usage:'/kline *@host duration reason'},
     {cmd:'rehash',desc:'Reload server config',usage:'/rehash'},
     {cmd:'squit',desc:'Disconnect a server',usage:'/squit server reason'},
     // ── Connection ──
@@ -9280,32 +9280,32 @@ function operConfirm(title,msg,onYes){
 const OPER_IRCDS={
   unrealircd:{label:'UnrealIRCd',commands:{
     bans:[
-      {label:'List G-Lines',icon:'📋',action:()=>operSend('STATS G')},
-      {label:'List K-Lines',icon:'📋',action:()=>operSend('STATS k')},
-      {label:'List Z-Lines',icon:'📋',action:()=>operSend('STATS Z')},
+      {label:'List G/GZ-Lines',icon:'📋',action:()=>operSend('STATS G')},
+      {label:'List K/Z-Lines',icon:'📋',action:()=>operSend('STATS k')},
       {label:'List Shuns',icon:'📋',action:()=>operSend('STATS s')},
-      {label:'List Spamfilters',icon:'📋',action:()=>operSend('STATS S')},
+      {label:'List Spamfilters',icon:'📋',action:()=>operSend('STATS f')},
       {label:'List Excepts (E-Lines)',icon:'📋',action:()=>operSend('STATS e')},
       {label:'Add G-Line',icon:'🔨',action:()=>operPrompt('Add G-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host.com'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0 (permanent)'},{id:'reason',label:'Reason',placeholder:'Reason for ban'}],v=>operSend(`GLINE ${v.mask} ${v.duration} :${v.reason}`))},
       {label:'Remove G-Line',icon:'✖',action:()=>operPrompt('Remove G-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host.com'}],v=>operSend(`GLINE -${v.mask}`))},
       {label:'Add K-Line',icon:'🔨',action:()=>operPrompt('Add K-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host.com'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`KLINE ${v.mask} ${v.duration} :${v.reason}`))},
       {label:'Remove K-Line',icon:'✖',action:()=>operPrompt('Remove K-Line',[{id:'mask',label:'Host mask',placeholder:'*@bad.host.com'}],v=>operSend(`KLINE -${v.mask}`))},
-      {label:'Add Z-Line',icon:'🔨',action:()=>operPrompt('Add Z-Line (IP ban)',[{id:'ip',label:'IP / CIDR',placeholder:'192.168.1.0/24'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`ZLINE ${v.ip} ${v.duration} :${v.reason}`))},
-      {label:'Remove Z-Line',icon:'✖',action:()=>operPrompt('Remove Z-Line',[{id:'ip',label:'IP / CIDR',placeholder:'192.168.1.0/24'}],v=>operSend(`ZLINE -${v.ip}`))},
-      {label:'Add Shun',icon:'🔇',action:()=>operPrompt('Add Shun',[{id:'mask',label:'Host mask',placeholder:'*@annoying.host'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`SHUN ${v.mask} ${v.duration} :${v.reason}`))},
+      {label:'Add Z-Line',icon:'🔨',action:()=>operPrompt('Add Z-Line (IP ban)',[{id:'ip',label:'IP mask',placeholder:'*@192.168.1.1'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`ZLINE ${v.ip} ${v.duration} :${v.reason}`))},
+      {label:'Remove Z-Line',icon:'✖',action:()=>operPrompt('Remove Z-Line',[{id:'ip',label:'IP mask',placeholder:'*@192.168.1.1'}],v=>operSend(`ZLINE -${v.ip}`))},
+      {label:'Add GZ-Line',icon:'🔨',action:()=>operPrompt('Add GZ-Line (Global IP ban)',[{id:'ip',label:'IP mask',placeholder:'*@192.168.1.1'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`GZLINE ${v.ip} ${v.duration} :${v.reason}`))},
+      {label:'Remove GZ-Line',icon:'✖',action:()=>operPrompt('Remove GZ-Line',[{id:'ip',label:'IP mask',placeholder:'*@192.168.1.1'}],v=>operSend(`GZLINE -${v.ip}`))},
+      {label:'Add Shun',icon:'🔇',action:()=>operPrompt('Add Shun',[{id:'mask',label:'Host mask',placeholder:'*@annoying.host'},{id:'duration',label:'Duration',placeholder:'1d / 7d / 0'},{id:'reason',label:'Reason',placeholder:'Reason'}],v=>operSend(`SHUN +${v.mask} ${v.duration} :${v.reason}`))},
       {label:'Remove Shun',icon:'✖',action:()=>operPrompt('Remove Shun',[{id:'mask',label:'Host mask',placeholder:'*@annoying.host'}],v=>operSend(`SHUN -${v.mask}`))},
-      {label:'Add Spamfilter',icon:'🛡',action:()=>operPrompt('Add Spamfilter',[{id:'target',label:'Target',placeholder:'cpn',default:'cpn'},{id:'action',label:'Action',type:'select',options:[{value:'kill',label:'Kill'},{value:'gzline',label:'GZ-Line'},{value:'gline',label:'G-Line'},{value:'shun',label:'Shun'},{value:'block',label:'Block'},{value:'warn',label:'Warn'}]},{id:'duration',label:'Ban duration',placeholder:'1d / 0',default:'0'},{id:'reason',label:'Reason',placeholder:'No spamming'},{id:'regex',label:'Regex pattern',placeholder:'/badword/i'}],v=>operSend(`SPAMFILTER add ${v.target} ${v.action} ${v.duration} ${v.reason} ${v.regex}`))},
-      {label:'Add E-Line (Exempt)',icon:'✅',action:()=>operPrompt('Add Exception',[{id:'mask',label:'Host mask',placeholder:'*@trusted.host'},{id:'duration',label:'Duration',placeholder:'0'},{id:'reason',label:'Reason',placeholder:'Trusted'}],v=>operSend(`ELINE ${v.mask} ${v.duration} :${v.reason}`))},
+      {label:'Add Spamfilter',icon:'🛡',action:()=>operPrompt('Add Spamfilter',[{id:'method',label:'Match method',type:'select',options:[{value:'-simple',label:'Simple (?/* wildcards)'},{value:'-regex',label:'Regex (PCRE)'}]},{id:'target',label:'Target',placeholder:'cpn',default:'cpn'},{id:'action',label:'Action',type:'select',options:[{value:'kill',label:'Kill'},{value:'gzline',label:'GZ-Line'},{value:'gline',label:'G-Line'},{value:'shun',label:'Shun'},{value:'block',label:'Block'},{value:'warn',label:'Warn'}]},{id:'duration',label:'Ban duration',placeholder:'1d / - (default)',default:'-'},{id:'reason',label:'Reason (no spaces, use _)',placeholder:'No_spamming'},{id:'pattern',label:'Pattern (regex or simple)',placeholder:'*viagra*'}],v=>operSend(`SPAMFILTER add ${v.method} ${v.target} ${v.action} ${v.duration} ${v.reason} ${v.pattern}`))},
+      {label:'Add E-Line (Exempt)',icon:'✅',action:()=>operPrompt('Add Exception',[{id:'mask',label:'Host mask',placeholder:'*@trusted.host'},{id:'bantypes',label:'Bantypes (k/G/z/Z/Q/s/F/b/...)',placeholder:'kGF',default:'kGF'},{id:'duration',label:'Duration',placeholder:'0'},{id:'reason',label:'Reason',placeholder:'Trusted'}],v=>operSend(`ELINE ${v.mask} ${v.bantypes} ${v.duration} ${v.reason}`))},
       {label:'Remove E-Line',icon:'✖',action:()=>operPrompt('Remove E-Line',[{id:'mask',label:'Host mask',placeholder:'*@trusted.host'}],v=>operSend(`ELINE -${v.mask}`))},
     ],
     users:[
       {label:'Kill User',icon:'💀',danger:true,action:()=>operPrompt('Kill User',[{id:'nick',label:'Nickname',placeholder:'baduser'},{id:'reason',label:'Reason',placeholder:'Violation of rules'}],v=>operSend(`KILL ${v.nick} :${v.reason}`))},
       {label:'SAJOIN',icon:'➡️',action:()=>operPrompt('Force Join',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'chan',label:'Channel',placeholder:'#channel'}],v=>operSend(`SAJOIN ${v.nick} ${v.chan}`))},
       {label:'SAPART',icon:'⬅️',action:()=>operPrompt('Force Part',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'chan',label:'Channel',placeholder:'#channel'},{id:'reason',label:'Reason',placeholder:''}],v=>operSend(`SAPART ${v.nick} ${v.chan}${v.reason?` :${v.reason}`:''}`))},
-      {label:'SANICK',icon:'✏️',action:()=>operPrompt('Force Nick Change',[{id:'nick',label:'Current nick',placeholder:'oldnick'},{id:'newnick',label:'New nick',placeholder:'newnick'}],v=>operSend(`SANICK ${v.nick} ${v.newnick}`))},
       {label:'SAMODE',icon:'🔧',action:()=>operPrompt('Force Mode',[{id:'target',label:'Target',placeholder:'#channel or nick'},{id:'modes',label:'Modes',placeholder:'+o user'}],v=>operSend(`SAMODE ${v.target} ${v.modes}`))},
       {label:'SAUMODE',icon:'🔧',action:()=>operPrompt('Force User Mode',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'modes',label:'Modes',placeholder:'+x / -i'}],v=>operSend(`SAUMODE ${v.nick} ${v.modes}`))},
-      {label:'Check Clones',icon:'🔍',action:()=>operPrompt('Check Clones',[{id:'ip',label:'IP address',placeholder:'192.168.1.1'}],v=>operSend(`WHO ${v.ip}`))},
+      {label:'Check Clones',icon:'🔍',action:()=>operPrompt('Check Clones (server ban match count)',[{id:'ip',label:'IP / mask',placeholder:'*@192.168.1.1'}],v=>operSend(`TLINE ${v.ip}`))},
       {label:'GLOBOPS',icon:'📢',action:()=>operPrompt('GLOBOPS Notice',[{id:'msg',label:'Message',type:'textarea',placeholder:'Announcement...'}],v=>operSend(`GLOBOPS :${v.msg}`))},
       {label:'Wallops',icon:'📢',action:()=>operPrompt('Wallops',[{id:'msg',label:'Message',type:'textarea',placeholder:'Message...'}],v=>operSend(`WALLOPS :${v.msg}`))},
       {label:'CHGHOST',icon:'🏷',action:()=>operPrompt('Change Host',[{id:'nick',label:'Nickname',placeholder:'user'},{id:'vhost',label:'Virtual host',placeholder:'cool.vhost.net'}],v=>operSend(`CHGHOST ${v.nick} ${v.vhost}`))},
@@ -9329,8 +9329,8 @@ const OPER_IRCDS={
       {label:'Uptime',icon:'⏱',action:()=>operSend('STATS u')},
       {label:'Traffic Stats',icon:'📈',action:()=>operSend('STATS T')},
       {label:'MOTD',icon:'📜',action:()=>operSend('MOTD')},
-      {label:'Opers Online',icon:'👑',action:()=>operSend('STATS p')},
-      {label:'Module List',icon:'📦',action:()=>operSend('STATS l')},
+      {label:'Opers Online',icon:'👑',action:()=>operSend('STATS o')},
+      {label:'Module List',icon:'📦',action:()=>operSend('MODULE -all')},
       {label:'Connect Server',icon:'🔗',action:()=>operPrompt('Connect Server',[{id:'server',label:'Server',placeholder:'hub.irc.net'}],v=>operSend(`CONNECT ${v.server}`))},
       {label:'Squit',icon:'✂️',danger:true,action:()=>operPrompt('Squit',[{id:'server',label:'Server',placeholder:'leaf.irc.net'},{id:'reason',label:'Reason',placeholder:'Maintenance'}],v=>operSend(`SQUIT ${v.server} :${v.reason}`))},
       {label:'DIE',icon:'☠️',danger:true,action:()=>operConfirm('⚠ Shutdown','SHUT DOWN the IRC server?',()=>operSend('DIE'))},
@@ -13587,7 +13587,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.35';
+const CRYPTIRC_VERSION='0.3.36';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13595,6 +13595,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.36', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed the IRC Oper Panel\'s ban commands against real UnrealIRCd syntax: Z-Line required a bare IP instead of a *@ mask (now fixed), Shun was missing its required + prefix, E-Line was missing its required bantypes parameter, Spamfilter was missing its match-method parameter, and the Spamfilter/Opers-Online/Module-List buttons were sending the wrong STATS letters entirely. Added the missing GZ-Line (global IP ban) commands, and removed the non-functional SANICK button (not a real UnrealIRCd command).'},
+  ]},
   {version:'0.3.35', date:'July 2026', items:[
     {tag:'new', text:'Upload Status now shows image thumbnails, just like My Uploads — including a live preview while a photo is still uploading.'},
   ]},
