@@ -6785,6 +6785,7 @@ const THEMES={
   cyberpunk:{label:'Cyberpunk',bg0:'#0a0a0f',bg1:'#0f0f18',bg2:'#161622',bg3:'#1e1e2e',bg4:'#28283a',border:'#ff00ff33',border2:'#ff00ff55',text:'#e0e0ff',text2:'#ff00ff',text3:'#8888aa'},
   matrix:   {label:'Matrix',  bg0:'#000000',bg1:'#001100',bg2:'#002200',bg3:'#003300',bg4:'#004400',border:'#005500',border2:'#008800',text:'#00ff00',text2:'#00cc00',text3:'#006600'},
   discord:  {label:'Discord', bg0:'#36393f',bg1:'#2f3136',bg2:'#32353b',bg3:'#40444b',bg4:'#42464d',border:'#202225',border2:'#26282c',text:'#dcddde',text2:'#5865f2',text3:'#96989d'},
+  slack:    {label:'Slack',   bg0:'#1a1d21',bg1:'#19171d',bg2:'#222529',bg3:'#27242c',bg4:'#2c2d30',border:'#35373b',border2:'#424244',text:'#d1d2d3',text2:'#9b59d0',text3:'#ababad'},
   ocean:    {label:'Ocean',   bg0:'#0d1926',bg1:'#132636',bg2:'#1a3346',bg3:'#214056',bg4:'#284d66',border:'#1e4060',border2:'#2a5a80',text:'#d4e8f8',text2:'#5cacee',text3:'#4a7090'},
   sunset:   {label:'Sunset',  bg0:'#1a0f1e',bg1:'#241528',bg2:'#2e1b32',bg3:'#38213c',bg4:'#422746',border:'#3d2640',border2:'#5a3860',text:'#e8d0e8',text2:'#ff8866',text3:'#8a6080'},
   blumhouse:{label:'Blumhouse',bg0:'#0a0000',bg1:'#120000',bg2:'#1a0505',bg3:'#220808',bg4:'#2d0b0b',border:'#3a0a0a',border2:'#551111',text:'#d4b8b8',text2:'#cc0000',text3:'#663333'},
@@ -13415,7 +13416,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.24';
+const CRYPTIRC_VERSION='0.3.25';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
