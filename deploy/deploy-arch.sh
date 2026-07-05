@@ -138,26 +138,58 @@ INTERACTIVE=true; [[ -n "$DOMAIN" ]] && INTERACTIVE=false
 [[ ! -t 0 ]] && INTERACTIVE=false
 SELF_SIGNED=false
 HOSTADDR=""
+HOSTADDR2=""
 
-SERVER_IP=$(curl -s --max-time 5 ip.me 2>/dev/null \
-         || curl -s --max-time 5 ifconfig.me 2>/dev/null \
-         || curl -s --max-time 5 icanhazip.com 2>/dev/null \
-         || echo "")
+# Best-effort public IPv4 / IPv6 — detected separately (over a v4-only and a
+# v6-only connection, respectively) so a dual-stack box gets BOTH, not
+# whichever one the OS/resolver happened to prefer for a family-agnostic
+# hostname. Used as the self-signed default(s) and the DNS hint(s).
+detect_public_ip() {   # detect_public_ip -4|-6
+    local fam="$1" ip=""
+    ip=$(curl -s "$fam" --max-time 5 https://api.ipify.org 2>/dev/null)
+    [[ -z "$ip" ]] && ip=$(curl -s "$fam" --max-time 5 ifconfig.me 2>/dev/null)
+    [[ -z "$ip" ]] && ip=$(curl -s "$fam" --max-time 5 icanhazip.com 2>/dev/null | tr -d '[:space:]')
+    echo "$ip"
+}
+SERVER_IPV4=$(detect_public_ip -4)
+SERVER_IPV6=$(detect_public_ip -6)
+# Legacy single-value var (kept for the non-interactive bare-IP path below) —
+# prefer v4 since that's what most networks/clients still expect by default.
+SERVER_IP="${SERVER_IPV4:-$SERVER_IPV6}"
 
 if [[ "$INTERACTIVE" == true ]]; then
     step "[1/6] Server address"
-    [[ -n "$SERVER_IP" ]] && echo -e "  Detected public IP: ${GREEN}${SERVER_IP}${NC}\n"
+    [[ -n "$SERVER_IPV4" ]] && echo -e "  Detected public IPv4: ${GREEN}${SERVER_IPV4}${NC}"
+    [[ -n "$SERVER_IPV6" ]] && echo -e "  Detected public IPv6: ${GREEN}${SERVER_IPV6}${NC}"
+    [[ -n "${SERVER_IPV4}${SERVER_IPV6}" ]] && echo ""
     echo -e "  ${DIM}A domain gives you a free, browser-trusted Let's Encrypt certificate."
     echo -e "  No domain? Just press Enter to serve on your IP with a self-signed cert —"
     echo -e "  it works fine; browsers only show a one-time \"proceed anyway\" warning.${NC}\n"
     read -rp "  Domain name (or press Enter to use the IP): " DOMAIN
     if [[ -z "$DOMAIN" ]]; then
         SELF_SIGNED=true
-        read -rp "  Address to serve on [${SERVER_IP:-type an IP/hostname}]: " HOSTADDR
-        HOSTADDR="${HOSTADDR:-$SERVER_IP}"
+        if [[ -n "$SERVER_IPV4" && -n "$SERVER_IPV6" ]]; then
+            echo -e "\n  Which address should CryptIRC serve on?"
+            echo -e "    1) IPv4 — ${SERVER_IPV4} ${DIM}(default)${NC}"
+            echo -e "    2) IPv6 — ${SERVER_IPV6}"
+            echo -e "    3) Both"
+            read -rp "  Choice [1]: " IP_CHOICE
+            case "${IP_CHOICE:-1}" in
+                2) HOSTADDR="$SERVER_IPV6" ;;
+                3) HOSTADDR="$SERVER_IPV4"; HOSTADDR2="$SERVER_IPV6" ;;
+                *) HOSTADDR="$SERVER_IPV4" ;;
+            esac
+        else
+            read -rp "  Address to serve on [${SERVER_IP:-type an IP/hostname}]: " HOSTADDR
+            HOSTADDR="${HOSTADDR:-$SERVER_IP}"
+        fi
         [[ -n "$HOSTADDR" ]] || die "No address provided."
         DOMAIN="$HOSTADDR"
-        echo -e "\n  ${CYAN}→ Self-signed mode:${NC} https://$(url_host "$HOSTADDR")  ${DIM}(no domain, no email needed)${NC}"
+        if [[ -n "$HOSTADDR2" ]]; then
+            echo -e "\n  ${CYAN}→ Self-signed mode:${NC} https://$(url_host "$HOSTADDR")  and  https://$(url_host "$HOSTADDR2")  ${DIM}(no domain, no email needed)${NC}"
+        else
+            echo -e "\n  ${CYAN}→ Self-signed mode:${NC} https://$(url_host "$HOSTADDR")  ${DIM}(no domain, no email needed)${NC}"
+        fi
     else
         read -rp "  Your email (for Let's Encrypt renewal notices): " EMAIL
         [[ -n "$EMAIL" ]] || die "An email is required for a Let's Encrypt domain."
@@ -174,40 +206,69 @@ else
 fi
 
 URL_HOST="$(url_host "$DOMAIN")"
+URL_HOST2=""; [[ -n "$HOSTADDR2" ]] && URL_HOST2="$(url_host "$HOSTADDR2")"
 
 # ── Step 2: DNS check (domain mode only) ──────────────────────────────────────
 if [[ "$SELF_SIGNED" == false ]]; then
     step "[2/6] Checking DNS"
 
-    check_dns() {
-        local r=""
+    resolve_dns() {   # resolve_dns A|AAAA <domain> — dig → host → getent, family-aware
+        local rtype="$1" dom="$2" r=""
         if command -v dig &>/dev/null; then
-            r=$(dig +short A "$DOMAIN" 2>/dev/null | grep -E '^[0-9]' | head -1)
-            [[ -z "$r" ]] && r=$(dig +short AAAA "$DOMAIN" 2>/dev/null | grep -E '^[0-9a-fA-F:]' | head -1)
+            r=$(dig +short "$rtype" "$dom" 2>/dev/null | grep -E '^[0-9a-fA-F.:]+$' | head -1)
         fi
-        [[ -z "$r" ]] && command -v host &>/dev/null && r=$(host "$DOMAIN" 2>/dev/null | grep -E 'has (IPv6 )?address' | head -1 | awk '{print $NF}')
-        [[ -z "$r" ]] && r=$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -1)
+        if [[ -z "$r" ]] && command -v host &>/dev/null; then
+            if [[ "$rtype" == "AAAA" ]]; then
+                r=$(host -t AAAA "$dom" 2>/dev/null | grep -E 'has IPv6 address' | head -1 | awk '{print $NF}')
+            else
+                r=$(host -t A "$dom" 2>/dev/null | grep -E 'has address' | head -1 | awk '{print $NF}')
+            fi
+        fi
+        if [[ -z "$r" ]]; then
+            # getent doesn't distinguish families in its output — only trust it
+            # for whichever family its result actually looks like.
+            local g; g=$(getent hosts "$dom" 2>/dev/null | awk '{print $1}' | head -1)
+            [[ "$rtype" == "AAAA" ]] && is_ipv6 "$g" && r="$g"
+            [[ "$rtype" == "A" ]] && is_ipv4 "$g" && r="$g"
+        fi
         echo "$r"
     }
 
-    DOMAIN_IP=$(check_dns)
-    if [[ -n "$SERVER_IP" && "$DOMAIN_IP" == "$SERVER_IP" ]]; then
-        ok "DNS points here: ${DOMAIN} → ${SERVER_IP}"
+    DOMAIN_A=$(resolve_dns A "$DOMAIN")
+    DOMAIN_AAAA=$(resolve_dns AAAA "$DOMAIN")
+    MATCH_V4=false; MATCH_V6=false
+    [[ -n "$SERVER_IPV4" && "$DOMAIN_A" == "$SERVER_IPV4" ]] && MATCH_V4=true
+    [[ -n "$SERVER_IPV6" && "$DOMAIN_AAAA" == "$SERVER_IPV6" ]] && MATCH_V6=true
+
+    if [[ "$MATCH_V4" == true || "$MATCH_V6" == true ]]; then
+        [[ "$MATCH_V4" == true ]] && ok "DNS points here (A):    ${DOMAIN} → ${SERVER_IPV4}"
+        [[ "$MATCH_V6" == true ]] && ok "DNS points here (AAAA): ${DOMAIN} → ${SERVER_IPV6}"
     else
-        warn "${DOMAIN} doesn't appear to resolve to this server (${SERVER_IP:-unknown})."
+        warn "${DOMAIN} doesn't appear to resolve to this server."
         echo -e "  ${DIM}If you use Cloudflare's proxy or IPv6-only DNS this check can be wrong — that's fine.${NC}"
-        echo -e "  ${DIM}Create an A record:  ${DOMAIN} → ${SERVER_IP:-<your server IP>}${NC}"
+        if [[ -n "$SERVER_IPV4" ]]; then
+            echo -e "  ${DIM}Create an A record:     ${DOMAIN} → ${SERVER_IPV4}${NC}"
+        fi
+        if [[ -n "$SERVER_IPV6" ]]; then
+            echo -e "  ${DIM}Create an AAAA record:  ${DOMAIN} → ${SERVER_IPV6}${NC}"
+        fi
+        [[ -z "${SERVER_IPV4}${SERVER_IPV6}" ]] && echo -e "  ${DIM}Create an A or AAAA record pointing to this server.${NC}"
         if [[ "$INTERACTIVE" == true ]]; then
             echo ""
             read -rp "  Press Enter to wait for DNS (up to ~10 min), or type 'skip' to continue now: " DNS_CHOICE
             if [[ "$DNS_CHOICE" != skip ]]; then
                 for ((i=1; i<=20; i++)); do
-                    DOMAIN_IP=$(check_dns)
-                    if [[ "$DOMAIN_IP" == "$SERVER_IP" ]]; then ok "DNS resolved! ${DOMAIN} → ${SERVER_IP}"; break; fi
-                    echo -e "  ${DIM}waiting… (${i}/20, currently: ${DOMAIN_IP:-nothing})${NC}"
+                    DOMAIN_A=$(resolve_dns A "$DOMAIN"); DOMAIN_AAAA=$(resolve_dns AAAA "$DOMAIN")
+                    MATCH_V4=false; MATCH_V6=false
+                    [[ -n "$SERVER_IPV4" && "$DOMAIN_A" == "$SERVER_IPV4" ]] && MATCH_V4=true
+                    [[ -n "$SERVER_IPV6" && "$DOMAIN_AAAA" == "$SERVER_IPV6" ]] && MATCH_V6=true
+                    if [[ "$MATCH_V4" == true || "$MATCH_V6" == true ]]; then
+                        ok "DNS resolved! ${DOMAIN} → ${DOMAIN_A:-$DOMAIN_AAAA}"; break
+                    fi
+                    echo -e "  ${DIM}waiting… (${i}/20, currently: ${DOMAIN_A:-${DOMAIN_AAAA:-nothing}})${NC}"
                     sleep 30
                 done
-                [[ "$DOMAIN_IP" == "$SERVER_IP" ]] || warn "Still not matching — continuing. Let's Encrypt will keep retrying once DNS is correct."
+                [[ "$MATCH_V4" == true || "$MATCH_V6" == true ]] || warn "Still not matching — continuing. Let's Encrypt will keep retrying once DNS is correct."
             fi
         else
             warn "Continuing (non-interactive). Let's Encrypt issues the cert once DNS points here."
@@ -402,14 +463,25 @@ fi
 install -m 755 -o root -g root target/release/cryptirc "$INSTALL_DIR/cryptirc"
 ok "CryptIRC built and installed"
 
-# irc_core (the always-on IRC connection daemon) — only present once the
-# daemon-split has landed on this checkout. Older commits build without it,
-# and that's fine: cryptirc.service alone still works exactly as before.
+# irc_core (the always-on IRC connection daemon). On a modern checkout the web
+# binary NO LONGER dials IRC itself — it hands every connection to this daemon
+# over a Unix socket, so without it the site would come up but ALL IRC would be
+# dead. This deploy script ships FROM the same checkout as the source, so if
+# src/bin/irc_core.rs exists then a successful `cargo build --release` MUST have
+# produced the binary; its absence means a broken/partial build, and installing
+# only the web half would silently strand every IRC connection. Abort loudly in
+# that case. (A genuinely old pre-split checkout has no src/bin/irc_core.rs, and
+# there cryptirc.service alone really is standalone — so we allow that path.)
 HAVE_IRC_CORE=false
 if [[ -f target/release/irc_core ]]; then
     HAVE_IRC_CORE=true
     install -m 755 -o root -g root target/release/irc_core "$INSTALL_DIR/irc_core"
     ok "irc-core daemon built and installed"
+elif [[ -f "$REPO_DIR/src/bin/irc_core.rs" || -f src/bin/irc_core.rs ]]; then
+    die "Build succeeded but the irc-core daemon binary (target/release/irc_core) is missing.
+  This checkout expects the daemon — installing only the web binary would leave the
+  site up but every IRC connection dead. Aborting. Re-run 'cargo build --release' and
+  check for a build error specific to the irc_core binary."
 fi
 
 # ── Step 6: configure TLS + service ───────────────────────────────────────────
@@ -420,10 +492,21 @@ step "[6/6] Configuring services"
 
 if [[ "$SELF_SIGNED" == true ]]; then
     mkdir -p "$SS_DIR"
-    # (Re)generate the cert if there isn't one, OR an existing one doesn't cover this
-    # address (e.g. re-running the installer after the server's IP changed).
-    if [[ ! -f "$SS_DIR/cert.pem" ]] || ! openssl x509 -in "$SS_DIR/cert.pem" -noout -text 2>/dev/null | grep -qF "$HOSTADDR"; then
+    # (Re)generate the cert if there isn't one, OR an existing one doesn't cover
+    # every address we're serving on (e.g. re-running the installer after the
+    # server's IP changed, or after adding a second IP family via "Both").
+    NEED_CERT=false
+    if [[ ! -f "$SS_DIR/cert.pem" ]]; then
+        NEED_CERT=true
+    else
+        openssl x509 -in "$SS_DIR/cert.pem" -noout -text 2>/dev/null | grep -qF "$HOSTADDR" || NEED_CERT=true
+        [[ -n "$HOSTADDR2" ]] && { openssl x509 -in "$SS_DIR/cert.pem" -noout -text 2>/dev/null | grep -qF "$HOSTADDR2" || NEED_CERT=true; }
+    fi
+    if [[ "$NEED_CERT" == true ]]; then
         if is_ip "$HOSTADDR"; then SAN="IP:$HOSTADDR"; else SAN="DNS:$HOSTADDR"; fi
+        if [[ -n "$HOSTADDR2" ]]; then
+            if is_ip "$HOSTADDR2"; then SAN="${SAN},IP:$HOSTADDR2"; else SAN="${SAN},DNS:$HOSTADDR2"; fi
+        fi
         run "Generating self-signed certificate" openssl req -x509 -newkey rsa:2048 -nodes \
             -keyout "$SS_DIR/key.pem" -out "$SS_DIR/cert.pem" -days 3650 \
             -subj "/CN=$HOSTADDR" -addext "subjectAltName=$SAN"
@@ -431,16 +514,24 @@ if [[ "$SELF_SIGNED" == true ]]; then
     chown caddy:caddy "$SS_DIR/key.pem" "$SS_DIR/cert.pem" 2>/dev/null || true
     chmod 640 "$SS_DIR/key.pem"; chmod 644 "$SS_DIR/cert.pem"
 
+    # Caddyfile site addresses: space-separated so ONE block handles both
+    # families when "Both" was chosen — Caddy matches any listed address.
+    HTTP_HOSTS="http://$URL_HOST"; HTTPS_HOSTS="https://$URL_HOST"
+    if [[ -n "$URL_HOST2" ]]; then
+        HTTP_HOSTS="$HTTP_HOSTS http://$URL_HOST2"
+        HTTPS_HOSTS="$HTTPS_HOSTS https://$URL_HOST2"
+    fi
+
     cat > /etc/caddy/Caddyfile <<CADDY
 {
     admin off
 }
 
-http://$URL_HOST {
-    redir https://$URL_HOST{uri}
+$HTTP_HOSTS {
+    redir https://{host}{uri}
 }
 
-https://$URL_HOST {
+$HTTPS_HOSTS {
     tls $SS_DIR/cert.pem $SS_DIR/key.pem
     reverse_proxy 127.0.0.1:9001 {
         header_up Host {host}
@@ -619,6 +710,8 @@ RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
 LockPersonality=true
 ProtectClock=true
 ProtectKernelLogs=true
@@ -762,6 +855,7 @@ echo -e "${CYAN}║${NC}  ${DIM}Check: journalctl -u cryptirc -n 50 --no-pager${
 fi
 echo -e "${CYAN}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${CYAN}║${NC}  ${BOLD}URL${NC}: ${GREEN}https://${URL_HOST}${NC}"
+[[ -n "$URL_HOST2" ]] && echo -e "${CYAN}║${NC}       ${GREEN}https://${URL_HOST2}${NC}"
 if [[ "$SELF_SIGNED" == true ]]; then
 echo -e "${CYAN}║${NC}  ${YELLOW}Self-signed cert:${NC} your browser shows a one-time warning."
 echo -e "${CYAN}║${NC}  ${DIM}Click \"Advanced\" → \"Proceed\" — that's expected & safe.${NC}"
