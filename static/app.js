@@ -13533,7 +13533,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.30';
+const CRYPTIRC_VERSION='0.3.31';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13541,6 +13541,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.31', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed your own channel messages sometimes appearing twice. A background service update could leave duplicate-suppression turned off until your next full reconnect — this restores it immediately after any update instead.'},
+  ]},
   {version:'0.3.30', date:'July 2026', items:[
     {tag:'new', text:'New message button in the Messages inbox — tap ✎ New message to start a DM with anyone you share a channel with, on any of your connected networks. Search by nick, network, or channel.'},
   ]},

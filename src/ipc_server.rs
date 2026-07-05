@@ -33,6 +33,8 @@ struct ConnCache {
     registered: bool,
     connected: bool,
     lag_ms: Option<u64>,
+    message_tags: bool,
+    echo_message_enabled: bool,
 }
 
 impl ConnCache {
@@ -54,6 +56,8 @@ impl ConnCache {
             registered: self.registered,
             connected: self.connected,
             lag_ms: self.lag_ms,
+            message_tags: self.message_tags,
+            echo_message_enabled: self.echo_message_enabled,
         });
         for line in &self.ring {
             out.push(IpcMessage::RawLine { conn_id: conn_id.to_string(), line: line.clone() });
@@ -266,12 +270,14 @@ async fn update_cache(cache: &Arc<Mutex<ConnCache>>, msg: &IpcMessage) {
     let mut c = cache.lock().await;
     match msg {
         IpcMessage::RawLine { line, .. } => c.push_line(line.clone()),
-        IpcMessage::SessionSync { nick, channels, registered, connected, lag_ms, .. } => {
+        IpcMessage::SessionSync { nick, channels, registered, connected, lag_ms, message_tags, echo_message_enabled, .. } => {
             c.nick = nick.clone();
             c.channels = channels.clone();
             c.registered = *registered;
             c.connected = *connected;
             c.lag_ms = *lag_ms;
+            c.message_tags = *message_tags;
+            c.echo_message_enabled = *echo_message_enabled;
         }
         IpcMessage::ConnStatus { state, .. } => match state {
             ConnLifecycle::Connecting => { c.connected = false; }

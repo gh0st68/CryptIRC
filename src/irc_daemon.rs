@@ -84,6 +84,13 @@ struct DaemonConn {
     nick: String,
     channels: HashSet<String>,
     writer: Box<dyn AsyncWrite + Send + Unpin>,
+    /// Set once, when the corresponding CAP ACK is seen during registration.
+    /// Carried into every `SessionSync` so a re-`Attach`'d web process (fresh
+    /// `IrcConnection`, defaults false) learns the CAPs this already-live
+    /// connection actually negotiated instead of silently losing self-echo
+    /// suppression / TAGMSG support until a real reconnect happens.
+    message_tags: bool,
+    echo_message_enabled: bool,
 }
 
 impl DaemonConn {
@@ -306,6 +313,8 @@ where
         nick: params.nick.clone(),
         channels: HashSet::new(),
         writer: Box::new(write_half),
+        message_tags: false,
+        echo_message_enabled: false,
     }));
 
     let sync = |c: &DaemonConn, registered: bool, connected: bool, lag_ms: Option<u64>| {
@@ -316,6 +325,8 @@ where
             registered,
             connected,
             lag_ms,
+            message_tags: c.message_tags,
+            echo_message_enabled: c.echo_message_enabled,
         });
     };
     let fwd = |line: &str| emit(IpcMessage::RawLine { conn_id: conn_id.to_string(), line: line.to_string() });
@@ -507,6 +518,11 @@ where
                             }
                             "ACK" => {
                                 info!("[{}] CAP ACK: {}", conn_id, caps);
+                                {
+                                    let mut c = conn.lock().await;
+                                    if caps.contains("message-tags") { c.message_tags = true; }
+                                    if caps.contains("echo-message") { c.echo_message_enabled = true; }
+                                }
                                 if caps.contains("sasl") && sasl_state == SaslState::CapReqSent {
                                     let method = match &sasl_method {
                                         Some(SaslMethod::External) => "EXTERNAL",

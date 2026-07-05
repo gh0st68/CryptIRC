@@ -116,7 +116,7 @@ async fn handle_message(
             }
         }
 
-        IpcMessage::SessionSync { conn_id, nick, channels, registered, connected, lag_ms } => {
+        IpcMessage::SessionSync { conn_id, nick, channels, registered, connected, lag_ms, message_tags, echo_message_enabled } => {
             seen.insert(conn_id.clone());
             if let Some((username, conn)) = ensure_connection_entry(state, &conn_id).await {
                 let mut resync: Vec<String> = Vec::new();
@@ -138,6 +138,12 @@ async fn handle_message(
                     c.registered = registered;
                     c.connected = connected;
                     if lag_ms.is_some() { c.lag_ms = lag_ms; }
+                    // Restores self-echo suppression / TAGMSG support after a
+                    // re-Attach (fresh IrcConnection defaults both false) —
+                    // see the SessionSync field doc comment for why this can't
+                    // be re-derived by reparsing a forwarded RawLine alone.
+                    c.message_tags = message_tags;
+                    c.echo_message_enabled = echo_message_enabled;
                     // Rebuild any channel the daemon says we're in but this
                     // (freshly (re)hydrated) web process doesn't have yet —
                     // insert a stub and queue a NAMES/TOPIC resync for it. This
@@ -206,6 +212,9 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
         lag_ms: None,
         channels: HashMap::new(),
         ipc_out: state.ipc_out.clone(),
+        // Placeholder only — a real Dial's CAP negotiation, or (on reattach)
+        // the very next SessionSync, corrects this before any PRIVMSG can
+        // arrive. See SessionSync's field doc comment in ipc.rs.
         message_tags: false,
         self_userhost: String::new(),
         registered: false,

@@ -67,6 +67,22 @@ pub enum IpcMessage {
         registered: bool,
         connected: bool,
         lag_ms: Option<u64>,
+        /// Negotiated CAPs the web side needs to correctly re-parse forwarded
+        /// `RawLine`s (self-echo suppression, TAGMSG typing indicators). The
+        /// daemon negotiates these once at connect time and they never change
+        /// again for the connection's life, but a re-`Attach`'d web process
+        /// (e.g. after a routine `cryptirc.service` restart) starts with
+        /// fresh, un-negotiated state and would otherwise never learn them —
+        /// see the matching fields on `irc::IrcConnection`/`irc_daemon::DaemonConn`.
+        /// `#[serde(default)]` (= false, the safe "unknown, suppress nothing"
+        /// value) so an old daemon talking to a freshly-upgraded web binary
+        /// degrades gracefully (same stuck-false bug this fixes, not a hard
+        /// IPC decode failure that would tear down the whole connection and
+        /// crash-reconnect-loop) if the two binaries ever restart out of step.
+        #[serde(default)]
+        message_tags: bool,
+        #[serde(default)]
+        echo_message_enabled: bool,
     },
 }
 
