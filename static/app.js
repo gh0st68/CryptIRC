@@ -4236,7 +4236,7 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 172 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 174 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'NP': case 'NOWPLAYING': {
         const sub=(args[0]||'').toLowerCase();
         if(sub==='set'){ const u=(args[1]||'').trim(); if(!u){ sysMsg(conn_id,target,'Usage: /np set <your-lastfm-username>','error'); break; } doSetLastfm(conn_id,target,u); break; }
@@ -7008,7 +7008,7 @@ function _safeColor(v,fallback){
   return fallback;
 }
 const APPEAR_DEFAULTS={
-  theme:'arctic', chatSize:13, sidebarFont:12, nickFont:12,
+  theme:'discord', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
   timestamps:true, joinpart:true, statusMsg:'condense', compact:false, coloredNicks:true,
   accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'water-drop', msgGap:4, inputH:36,
@@ -7907,6 +7907,7 @@ function populateAppearanceModal(cfg){
   if (_ytp) (cfg.ytPlayOverlay !== false) ? _ytp.classList.add('on') : _ytp.classList.remove('on');
   // Privacy/Security/Behavior settings are now in the standalone Security panel
   // Theme cards
+  const _tsInput=el('theme-search'); if(_tsInput) _tsInput.value='';
   const grid=el('theme-grid'); grid.innerHTML='';
   const selectCard=(card)=>{grid.querySelectorAll('.theme-card').forEach(c=>c.classList.remove('active'));card.classList.add('active');applyAppearance();};
   // 1) User-created custom themes first (with an edit pencil). Labels are user
@@ -7946,6 +7947,28 @@ function populateAppearanceModal(cfg){
   // (the theme owns those colors) — surface a hint so the controls don't look broken.
   const _ch=el('a-colors-customhint');
   if(_ch) _ch.style.display=(typeof cfg.theme==='string'&&cfg.theme.indexOf('custom:')===0)?'':'none';
+}
+// Filters the theme grid by name as the user types in #theme-search. The
+// "Create theme" card is exempt — it's an action, not a theme, so it should
+// never disappear out from under someone mid-search.
+function filterThemeGrid(){
+  const grid=el('theme-grid'); if(!grid) return;
+  const q=(el('theme-search')?.value||'').toLowerCase().trim();
+  let shown=0;
+  grid.querySelectorAll('.theme-card').forEach(card=>{
+    if(card.classList.contains('theme-card-create')){card.classList.remove('theme-card-hidden');return;}
+    const name=(card.querySelector('.theme-name')?.textContent||'').toLowerCase();
+    const match=!q||name.includes(q);
+    card.classList.toggle('theme-card-hidden',!match);
+    if(match) shown++;
+  });
+  let empty=grid.querySelector('.theme-grid-empty');
+  if(q&&shown===0){
+    if(!empty){empty=document.createElement('div');empty.className='theme-grid-empty';grid.appendChild(empty);}
+    empty.textContent=`No themes match "${q}"`;
+  } else if(empty){
+    empty.remove();
+  }
 }
 function showAppearanceModal(){
   const cfg=loadAppearance();
@@ -13416,7 +13439,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.25';
+const CRYPTIRC_VERSION='0.3.26';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.

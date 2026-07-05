@@ -675,7 +675,16 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
   background:#fff; border-radius:50%; transition:transform .2s;
 }
 .appear-toggle.on::after { transform:translateX(20px); }
+.theme-search-input {
+  width:100%; box-sizing:border-box; margin-bottom:8px; padding:8px 10px;
+  border-radius:6px; border:1px solid var(--border); background:var(--bg1);
+  color:var(--text); font-family:var(--mono); font-size:12px; outline:none;
+}
+.theme-search-input:focus { border-color:var(--accent); }
+.theme-search-input::placeholder { color:var(--text3); }
 .theme-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.theme-card.theme-card-hidden { display:none; }
+.theme-grid-empty { grid-column:1/-1; text-align:center; padding:16px 8px; font-size:12px; color:var(--text3); }
 .theme-card {
   background:var(--bg3); border:2px solid var(--border); border-radius:8px;
   padding:10px; cursor:pointer; transition:all .15s; text-align:center;
@@ -2010,7 +2019,7 @@ body.no-nicklist #nick-panel{display:none!important}
 // Apply theme colors immediately — :root no longer sets theme defaults,
 // so this MUST run to provide bg/border/text/accent values.
 (function(){try{var c=JSON.parse(localStorage.getItem('cryptirc_appear')||'{}');
-var T={midnight:{bg0:'#0b0d0f',bg1:'#111418',bg2:'#181d24',bg3:'#1e242e',bg4:'#252c38',border:'#2a3444',border2:'#3a4a60',text:'#c8d8e8',text2:'#7a9ab8',text3:'#82a0b8'/* lightened from #4a6278 for WCAG AA contrast (audit #92) */},dracula:{bg0:'#282a36',bg1:'#2d303e',bg2:'#343746',bg3:'#3b3f51',bg4:'#44495e',border:'#44475a',border2:'#6272a4',text:'#f8f8f2',text2:'#bd93f9',text3:'#6272a4'},monokai:{bg0:'#272822',bg1:'#2d2e27',bg2:'#383830',bg3:'#3e3d32',bg4:'#49483e',border:'#49483e',border2:'#75715e',text:'#f8f8f2',text2:'#a6e22e',text3:'#75715e'},nord:{bg0:'#2e3440',bg1:'#3b4252',bg2:'#434c5e',bg3:'#4c566a',bg4:'#576279',border:'#4c566a',border2:'#5e6779',text:'#eceff4',text2:'#88c0d0',text3:'#616e88'},solarize:{bg0:'#002b36',bg1:'#073642',bg2:'#0a3f4e',bg3:'#0d4a5a',bg4:'#1a5c6e',border:'#2aa198',border2:'#586e75',text:'#93a1a1',text2:'#839496',text3:'#586e75'},gruvbox:{bg0:'#282828',bg1:'#3c3836',bg2:'#504945',bg3:'#665c54',bg4:'#7c6f64',border:'#504945',border2:'#665c54',text:'#ebdbb2',text2:'#b8bb26',text3:'#928374'},abyss:{bg0:'#000',bg1:'#080808',bg2:'#101010',bg3:'#181818',bg4:'#222',border:'#1a1a1a',border2:'#333',text:'#ccc',text2:'#888',text3:'#555'},light:{bg0:'#f5f5f5',bg1:'#ebebeb',bg2:'#e0e0e0',bg3:'#d5d5d5',bg4:'#cacaca',border:'#c0c0c0',border2:'#aaa',text:'#1a1a1a',text2:'#444',text3:'#888'},cobalt:{bg0:'#002240',bg1:'#002b50',bg2:'#003460',bg3:'#003d70',bg4:'#004880',border:'#0050a0',border2:'#1a6ab5',text:'#fff',text2:'#80d4ff',text3:'#4488aa'},arctic:{bg0:'#0c1218',bg1:'#101820',bg2:'#141e28',bg3:'#1a2632',bg4:'#202e3c',border:'#283a4c',border2:'#384e64',text:'#e4eef4',text2:'#66bbdd',text3:'#4a7a90'}};
+var T={midnight:{bg0:'#0b0d0f',bg1:'#111418',bg2:'#181d24',bg3:'#1e242e',bg4:'#252c38',border:'#2a3444',border2:'#3a4a60',text:'#c8d8e8',text2:'#7a9ab8',text3:'#82a0b8'/* lightened from #4a6278 for WCAG AA contrast (audit #92) */},dracula:{bg0:'#282a36',bg1:'#2d303e',bg2:'#343746',bg3:'#3b3f51',bg4:'#44495e',border:'#44475a',border2:'#6272a4',text:'#f8f8f2',text2:'#bd93f9',text3:'#6272a4'},monokai:{bg0:'#272822',bg1:'#2d2e27',bg2:'#383830',bg3:'#3e3d32',bg4:'#49483e',border:'#49483e',border2:'#75715e',text:'#f8f8f2',text2:'#a6e22e',text3:'#75715e'},nord:{bg0:'#2e3440',bg1:'#3b4252',bg2:'#434c5e',bg3:'#4c566a',bg4:'#576279',border:'#4c566a',border2:'#5e6779',text:'#eceff4',text2:'#88c0d0',text3:'#616e88'},solarize:{bg0:'#002b36',bg1:'#073642',bg2:'#0a3f4e',bg3:'#0d4a5a',bg4:'#1a5c6e',border:'#2aa198',border2:'#586e75',text:'#93a1a1',text2:'#839496',text3:'#586e75'},gruvbox:{bg0:'#282828',bg1:'#3c3836',bg2:'#504945',bg3:'#665c54',bg4:'#7c6f64',border:'#504945',border2:'#665c54',text:'#ebdbb2',text2:'#b8bb26',text3:'#928374'},abyss:{bg0:'#000',bg1:'#080808',bg2:'#101010',bg3:'#181818',bg4:'#222',border:'#1a1a1a',border2:'#333',text:'#ccc',text2:'#888',text3:'#555'},light:{bg0:'#f5f5f5',bg1:'#ebebeb',bg2:'#e0e0e0',bg3:'#d5d5d5',bg4:'#cacaca',border:'#c0c0c0',border2:'#aaa',text:'#1a1a1a',text2:'#444',text3:'#888'},cobalt:{bg0:'#002240',bg1:'#002b50',bg2:'#003460',bg3:'#003d70',bg4:'#004880',border:'#0050a0',border2:'#1a6ab5',text:'#fff',text2:'#80d4ff',text3:'#4488aa'},arctic:{bg0:'#0c1218',bg1:'#101820',bg2:'#141e28',bg3:'#1a2632',bg4:'#202e3c',border:'#283a4c',border2:'#384e64',text:'#e4eef4',text2:'#66bbdd',text3:'#4a7a90'},discord:{bg0:'#36393f',bg1:'#2f3136',bg2:'#32353b',bg3:'#40444b',bg4:'#42464d',border:'#202225',border2:'#26282c',text:'#dcddde',text2:'#5865f2',text3:'#96989d'}};
 var r=document.documentElement.style;
 var sc=function(v,f){if(typeof v==='string'){var s=v.trim();if(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s))return s;if(/^(?:rgb|rgba|hsl|hsla)\(\s*[0-9a-zA-Z.,%\s\/]+\)$/i.test(s))return s;if(/^[a-zA-Z]+$/.test(s))return s;}return f;};
 // Resolve the active theme name (respect mobile override if a phone-width viewport).
@@ -2020,7 +2029,7 @@ var themeName=(mob&&c.mobileTheme)?c.mobileTheme:c.theme;
 // there's no flash of a built-in fallback before app.js runs applyThemeCSS().
 var ct=null;
 if(typeof themeName==='string'&&themeName.indexOf('custom:')===0&&c.customThemes){ct=c.customThemes[themeName.slice(7)]||null;}
-var t=ct||T[themeName]||T.arctic;
+var t=ct||T[themeName]||T.discord;
 r.setProperty('--bg0',sc(t.bg0,'#0b0d0f'));r.setProperty('--bg1',sc(t.bg1,'#111418'));r.setProperty('--bg2',sc(t.bg2,'#181d24'));r.setProperty('--bg3',sc(t.bg3,'#1e242e'));r.setProperty('--bg4',sc(t.bg4,'#252c38'));
 r.setProperty('--border',sc(t.border,'#2a3444'));r.setProperty('--border2',sc(t.border2,'#3a4a60'));r.setProperty('--text',sc(t.text,'#c8d8e8'));r.setProperty('--text2',sc(t.text2,'#7a9ab8'));r.setProperty('--text3',sc(t.text3,'#82a0b8'));
 // Accent/accent2/link: a custom theme carries its own; built-in themes use the global prefs.
@@ -2316,6 +2325,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div class="appear-body">
       <div class="appear-section">
         <div class="appear-section-title">Theme</div>
+        <input type="text" id="theme-search" class="theme-search-input" placeholder="🔍 Search themes…" autocomplete="off" spellcheck="false" oninput="filterThemeGrid()">
         <div class="theme-grid" id="theme-grid"></div>
       </div>
 
