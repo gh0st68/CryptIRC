@@ -763,7 +763,8 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
     h.insert(HeaderName::from_static("content-security-policy"),  HeaderValue::from_static(
         "default-src 'self'; object-src 'none'; base-uri 'self'; script-src 'self' 'unsafe-inline'; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-         font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; \
+         font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; \
+         media-src 'self' blob:; \
          connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com https://api.urbandictionary.com https://api.giphy.com https://tenor.googleapis.com; \
          frame-src https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';"
     ));
