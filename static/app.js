@@ -5143,6 +5143,7 @@ async function uploadFile(file){
       showToast(init.data.error||'Upload init failed');
       _uploads[id].status='error'; _uploads[id].error=init.data.error||'init failed';
       _upcFlagClear(id);
+      _uploadRevokePreview(id);
       delete _uploadJobs[id]; await idbDeleteFile(id);
       if(isUploadsActive()) renderChat();
       renderSidebar();
@@ -5153,6 +5154,7 @@ async function uploadFile(file){
     showToast('Upload init failed: '+e.message);
     _uploads[id].status='error'; _uploads[id].error=e.message;
     _upcFlagClear(id);
+    _uploadRevokePreview(id);
     delete _uploadJobs[id]; await idbDeleteFile(id);
     if(isUploadsActive()) renderChat();
     renderSidebar();
@@ -5240,6 +5242,7 @@ async function runUploadLoop(id){
           const _doAutoSend=!!(_uploadJobs[id] && _uploadJobs[id].autoSend && !_uploadJobs[id]._autoSent && _upcFlagHas(id));
           if(_doAutoSend) _uploadJobs[id]._autoSent=true;
           _upcFlagClear(id);           // claim consumed (or cleanup for non-autoSend)
+          _uploadRevokePreview(id);    // release the blob: preview before dropping the only ref to it
           try{ await idbDeleteFile(id); }catch(_){}  // an IDB error must not abort the confirmed send below
           delete _uploadJobs[id];
           if(_doAutoSend){ try{ await _autoSendUploadLink(id, d); }catch(_){} }
@@ -5260,6 +5263,7 @@ async function cancelUpload(id){
   const j=_uploadJobs[id];
   if(j) j.canceled=true;
   _upcFlagClear(id);
+  _uploadRevokePreview(id);   // job entry is about to be deleted below
   try{ await fetch(`${_uploadBase()}/upload/cancel/${encodeURIComponent(id)}`,{method:'POST',headers:_uploadAuthHeader()}); }catch(_){}
   await idbDeleteFile(id);
   delete _uploadJobs[id];
@@ -5270,6 +5274,7 @@ function removeUploadRow(id){
   // Optimistic local removal so the row disappears immediately even if
   // the WS round-trip is slow.
   _upcFlagClear(id);
+  _uploadRevokePreview(id);   // job entry is about to be deleted below
   delete _uploads[id];
   delete _uploadJobs[id];
   idbDeleteFile(id);
@@ -5363,6 +5368,7 @@ function _onUploadUpdate(rec){
 function _onUploadRemoved(id){
   delete _uploads[id];
   if(_uploadJobs[id]) _uploadJobs[id].canceled=true;
+  _uploadRevokePreview(id);
   delete _uploadJobs[id];
   idbDeleteFile(id);
   if(isUploadsActive()) renderChat();
@@ -5422,11 +5428,47 @@ function _uploadStatusLabel(r){
   if(r.status==='canceled') return 'Canceled';
   return job ? `Uploading${speedTxt?' · '+speedTxt:''}` : 'Uploading (other device)';
 }
+// Thumbnail shown on an Upload Status row — mirrors "My Uploads"' treatment
+// exactly (36x36 <img> for images, a generic 📄 for everything else) once the
+// upload is done and the server has told us the real content_type. While
+// still uploading, content_type is empty (server hasn't seen the whole file
+// yet) — fall back to a LOCAL blob: preview from the File already held in
+// _uploadJobs[id] for the (common) case of an image being uploaded, so the
+// thumbnail appears immediately instead of only after completion. Caches the
+// created blob: URL on the job (_previewUrl) so repeated re-renders (each
+// progress tick can trigger one) don't leak a fresh object URL every time —
+// see _uploadRevokePreview for the matching cleanup.
+function _uploadThumbHtml(id, r){
+  if(r.status==='done' && (r.content_type||'').startsWith('image/') && r.url){
+    return `<img src="${esc(r.url)}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0">`;
+  }
+  if(r.status!=='done'){
+    const job=_uploadJobs[id];
+    const file=job&&job.file;
+    if(file && (file.type||'').startsWith('image/')){
+      if(!job.previewUrl){
+        try{ job.previewUrl=URL.createObjectURL(file); }catch(_){}
+      }
+      if(job.previewUrl) return `<img src="${job.previewUrl}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0">`;
+    }
+  }
+  return '<span style="font-size:20px;flex-shrink:0;width:36px;text-align:center">📄</span>';
+}
+// Revoke a cached blob: preview URL — called once the row no longer needs it
+// (upload finished, so the real server URL takes over) or is torn down
+// (canceled/removed) so we don't accumulate object URLs over a long session.
+function _uploadRevokePreview(id){
+  const job=_uploadJobs[id];
+  if(job && job.previewUrl){
+    try{ URL.revokeObjectURL(job.previewUrl); }catch(_){}
+    job.previewUrl=null;
+  }
+}
 function _renderUploadRow(r){
   const row=document.createElement('div');
   row.dataset.uploadId=r.id;
   row.dataset.uploadStatus=r.status||'uploading';
-  row.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:6px';
+  row.style.cssText='background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;gap:10px;align-items:flex-start';
   const pct=r.size?Math.min(100, Math.floor((r.progress_bytes||0) * 100 / r.size)):0;
   const status=r.status||'uploading';
   const statusColor=_uploadStatusColor(status);
@@ -5435,16 +5477,19 @@ function _renderUploadRow(r){
   // Data-* hooks let _updateUploadRowInPlace() target just the changing
   // bits per progress event instead of nuking the whole row each chunk.
   row.innerHTML=`
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px">
-      <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)" title="${esc(r.original_name||'')}">${esc(r.original_name||'(unnamed)')}</div>
-      <div data-pct style="font-size:11px;color:var(--text3);font-family:var(--mono);flex-shrink:0">${pct}%</div>
-    </div>
-    <div style="height:6px;background:var(--bg3);border-radius:3px;overflow:hidden">
-      <div data-bar style="height:100%;width:${pct}%;background:${statusColor};transition:width .2s ease"></div>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:var(--text3);font-family:var(--mono)">
-      <div><span data-size>${sizeTxt}</span> · <span data-status style="color:${statusColor}">${esc(statusLabel)}</span></div>
-      <div data-actions style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    <div data-thumb>${_uploadThumbHtml(r.id, r)}</div>
+    <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px">
+        <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)" title="${esc(r.original_name||'')}">${esc(r.original_name||'(unnamed)')}</div>
+        <div data-pct style="font-size:11px;color:var(--text3);font-family:var(--mono);flex-shrink:0">${pct}%</div>
+      </div>
+      <div style="height:6px;background:var(--bg3);border-radius:3px;overflow:hidden">
+        <div data-bar style="height:100%;width:${pct}%;background:${statusColor};transition:width .2s ease"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:10px;color:var(--text3);font-family:var(--mono)">
+        <div><span data-size>${sizeTxt}</span> · <span data-status style="color:${statusColor}">${esc(statusLabel)}</span></div>
+        <div data-actions style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      </div>
     </div>`;
   _fillUploadRowActions(row, r);
   return row;
@@ -5489,6 +5534,15 @@ function _updateUploadRowInPlace(r){
   if(prevStatus !== status){
     row.dataset.uploadStatus = status;
     _fillUploadRowActions(row, r);
+    // Swap the thumbnail on every status change, not just into 'done' — an
+    // 'error'/'canceled' transition must also drop back to the generic icon
+    // rather than keep showing a since-revoked blob preview. Once the real
+    // server image takes over (or the row can no longer use a live preview),
+    // the cached blob: URL is no longer needed — revoke it so a long session
+    // with many image uploads doesn't accumulate unreleased object URLs.
+    const thumbEl=row.querySelector('[data-thumb]');
+    if(thumbEl) thumbEl.innerHTML=_uploadThumbHtml(r.id, r);
+    if(status==='done'||status==='error'||status==='canceled') _uploadRevokePreview(r.id);
   }
 }
 // Surgical pin refresh: just the "Upload Status · 2 uploading" subtitle
@@ -13533,7 +13587,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.34';
+const CRYPTIRC_VERSION='0.3.35';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13541,6 +13595,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.35', date:'July 2026', items:[
+    {tag:'new', text:'Upload Status now shows image thumbnails, just like My Uploads — including a live preview while a photo is still uploading.'},
+  ]},
   {version:'0.3.34', date:'July 2026', items:[
     {tag:'new', text:'Privacy metadata stripping now covers every image and video format the app accepts — including iPhone HEIC photos, GIF, WEBP, AVIF, TIFF, and MOV/AVI/MKV/3GP/FLV/WMV video — not just JPEG/PNG/MP4/WEBM as before.'},
   ]},
