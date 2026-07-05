@@ -179,6 +179,20 @@ pub struct NotifPrefs {
     pub muted_networks: Vec<String>,
     /// "conn_id/target" keys that are muted
     pub muted_channels: Vec<String>,
+    /// Do Not Disturb (fix: mobile push must honor DND / quiet hours, previously
+    /// client-only). `dnd` = manual DND on (suppress unconditionally). `dnd_start`
+    /// / `dnd_end` = "HH:MM" scheduled quiet-hours window in the user's local time;
+    /// `dnd_tz_offset` = the client's `Date.getTimezoneOffset()` (minutes to ADD to
+    /// local to reach UTC) so the server can evaluate the window in the user's TZ.
+    /// All `#[serde(default)]` so older clients / prefs files deserialize cleanly.
+    #[serde(default)]
+    pub dnd: bool,
+    #[serde(default)]
+    pub dnd_start: String,
+    #[serde(default)]
+    pub dnd_end: String,
+    #[serde(default)]
+    pub dnd_tz_offset: i64,
 }
 
 // ─── Notification manager ─────────────────────────────────────────────────────
@@ -301,8 +315,7 @@ impl NotificationManager {
             return NotifPrefs {
                 enabled: false,
                 trigger: "mentions_and_dms".to_string(),
-                muted_networks: vec![],
-                muted_channels: vec![],
+                ..Default::default()
             };
         };
         match serde_json::from_str(&json) {
@@ -369,6 +382,15 @@ impl NotificationManager {
         };
 
         if !should_notify { return; }
+
+        // Honor Do Not Disturb / scheduled quiet hours (fix: DND was client-only, so
+        // mobile push ignored it and fired during quiet hours — exactly when the app
+        // is idle/closed and push actually sends). Server-authoritative now: the
+        // client syncs its DND state + TZ offset into notif_prefs. Scoped to
+        // DM/mention pushes; test/monitor sends are intentionally exempt.
+        if dnd_active_now(&prefs) {
+            return;
+        }
 
         // #11: per-user rate limit BEFORE any subscription read / fan-out, so a
         // flood of matching messages cannot drive unbounded outbound POSTs.
@@ -650,6 +672,46 @@ fn text_mentions_nick(text: &str, nick: &str) -> bool {
         if before_ok && after_ok { return true; }
     }
     false
+}
+
+/// Parse an "HH:MM" 24-hour time into minutes-of-day (0..1440). Returns None for
+/// empty/malformed input so a missing or bad schedule simply means "no window".
+fn parse_hhmm(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() { return None; }
+    let (h, m) = s.split_once(':')?;
+    let h: i64 = h.trim().parse().ok()?;
+    let m: i64 = m.trim().parse().ok()?;
+    if !(0..24).contains(&h) || !(0..60).contains(&m) { return None; }
+    Some(h * 60 + m)
+}
+
+/// True if the user's Do Not Disturb is active right now. Mirrors the client's
+/// `isDndActive()`: manual DND (`prefs.dnd`) suppresses unconditionally; otherwise a
+/// [start,end) schedule suppresses when the current wall-clock time in the user's
+/// timezone falls in the window, with midnight wraparound (start>end) handled the
+/// same way. The user's local time is derived from the client-supplied
+/// `dnd_tz_offset` (JS `getTimezoneOffset()`, minutes to ADD to local to reach UTC,
+/// so local = UTC − offset). A bad/zero offset degrades to UTC evaluation, never a
+/// panic; the `% 1440` bounds any absurd client-supplied offset.
+fn dnd_active_now(prefs: &NotifPrefs) -> bool {
+    if prefs.dnd { return true; }
+    let (Some(sv), Some(ev)) = (parse_hhmm(&prefs.dnd_start), parse_hhmm(&prefs.dnd_end)) else {
+        return false;
+    };
+    let secs = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(_) => return false,
+    };
+    let utc_min = (secs / 60) % 1440;
+    // local = UTC − offset; normalize into [0,1440).
+    let local_min = (((utc_min - (prefs.dnd_tz_offset % 1440)) % 1440) + 1440) % 1440;
+    if sv < ev {
+        local_min >= sv && local_min < ev
+    } else {
+        // Wraparound window (e.g. 22:00–07:00): active if past start OR before end.
+        local_min >= sv || local_min < ev
+    }
 }
 
 fn truncate(s: &str, max: usize) -> &str {

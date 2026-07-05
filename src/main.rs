@@ -28,6 +28,7 @@ mod certs;
 mod crypto;
 mod e2e;
 mod email;
+mod ipc_client;
 mod irc;
 mod lastfm;
 mod logs;
@@ -35,6 +36,8 @@ mod notifications;
 mod paste;
 mod preview;
 mod upload;
+
+use cryptirc::ircproto::strip_crlf;
 
 use auth::{validate_uuid, AuthManager};
 use certs::CertStore;
@@ -58,6 +61,12 @@ pub struct AppState {
     /// the old "set flag + sleep 200ms + clear flag" race that let zombie tasks
     /// survive a disconnect and reconnect in parallel with the new task.
     pub connect_tasks:       Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Whatever IPC connection to the irc-core daemon is CURRENTLY up — `None`
+    /// while disconnected/reconnecting. `IrcConnection::send_raw` and every
+    /// Dial/Drop/RawSend call site read through this same cell, so a daemon
+    /// reconnect (which mints a fresh channel) transparently keeps every live
+    /// connection able to send without updating them individually.
+    pub ipc_out:             Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<cryptirc::ipc::IpcMessage>>>>,
     pub crypto:              Arc<CryptoManager>,
     pub certs:               Arc<CertStore>,
     pub logger:              Arc<EncryptedLogger>,
@@ -880,6 +889,7 @@ async fn main() -> Result<()> {
         conn_owners:         Arc::new(DashMap::new()),
         disconnect_requests: Arc::new(DashSet::new()),
         connect_tasks:       Arc::new(DashMap::new()),
+        ipc_out:             Arc::new(tokio::sync::Mutex::new(None)),
         crypto, certs, logger, auth, notifier, e2e_store, paste_store, preview_service,
         user_events:         Arc::new(DashMap::new()),
         active_sessions:     Arc::new(DashMap::new()),
@@ -907,6 +917,43 @@ async fn main() -> Result<()> {
         gif_client,
         news_cache:       Arc::new(tokio::sync::Mutex::new(None)),
     };
+
+    // irc-core daemon split: AppState.connections/conn_owners are pure in-memory
+    // DashMaps, wiped on every restart — including the ordinary web-code redeploy
+    // this whole split exists to stop disrupting. Without this scan, a freshly
+    // restarted web process has no way to resolve a conn_id the daemon reports
+    // (via Attach's replay burst) back to a username, since that mapping today
+    // only ever lived in memory. The file PATH alone
+    // ({data_dir}/networks/{username}/{conn_id}.json) encodes ownership — this
+    // needs no vault access (only the specific encrypted FIELDS inside each file
+    // do), so it's safe to do before anyone has logged in. Bounded, one-time,
+    // proportional to total registered users × their networks — not a hot path.
+    {
+        let networks_root = format!("{}/networks", data_dir);
+        let mut seeded = 0usize;
+        if let Ok(mut users) = tokio::fs::read_dir(&networks_root).await {
+            while let Ok(Some(user_entry)) = users.next_entry().await {
+                let Some(username) = user_entry.file_name().to_str().map(str::to_string) else { continue };
+                let Ok(mut confs) = tokio::fs::read_dir(user_entry.path()).await else { continue };
+                while let Ok(Some(conf_entry)) = confs.next_entry().await {
+                    if let Some(conn_id) = conf_entry.path().file_stem().and_then(|s| s.to_str()) {
+                        state.conn_owners.insert(conn_id.to_string(), username.clone());
+                        seeded += 1;
+                    }
+                }
+            }
+        }
+        info!("Seeded conn_owners for {} network config(s) from disk", seeded);
+    }
+
+    // Connect to the irc-core daemon (a separate always-on process holding the
+    // actual IRC sockets) and keep reconnecting to it for the life of this
+    // process. Socket path matches the daemon's own default resolution.
+    {
+        let sock_path = std::env::var("CRYPTIRC_IPC_SOCK").unwrap_or_else(|_| format!("{}/irc-core.sock", data_dir.trim_end_matches('/')));
+        let s = state.clone();
+        tokio::spawn(async move { ipc_client::run(sock_path, s).await; });
+    }
 
     // #31: sweep abandoned in-progress chunked uploads once at startup so a restart
     // reclaims disk left by uploads whose client died before finalize/cancel.
@@ -3244,22 +3291,16 @@ async fn handle_command(
         }
         ClientMessage::RemoveNetwork { id } => {
             if !state.owns_network(username, &id).await { return; }
-            state.request_disconnect(&id);
-            // #20: resolve the reason and clone the Arc out before locking, so the
-            // DashMap Ref is dropped before any await.
+            // #20: resolve the reason before any await elsewhere.
             let reason = match state.get_network_config(&id, username).await {
                 Some(cfg) => strip_crlf(quit_reason_for(&cfg)),
                 None => DEFAULT_QUIT_MESSAGE.to_string(),
             };
-            let conn = state.connections.get(&id).map(|c| c.clone());
-            if let Some(conn) = conn {
-                let mut c = conn.lock().await;
-                let _ = c.send_raw(&format!("QUIT :{}\r\n", reason)).await;
-            }
-            state.abort_connect_task(&id);
+            // The daemon owns the actual socket now — Drop makes it send QUIT
+            // and stop reconnecting; this side just forgets the local record.
+            ipc_client::send_drop(&state, &id, reason).await;
             state.connections.remove(&id);
             state.conn_owners.remove(&id);
-            state.clear_disconnect_request(&id);
             // #4: serialize the config-file DELETE behind the SAME per-config lock
             // every save_network writer takes. Without it, a concurrent
             // JoinChannel/PartChannel/SaveChannelOrder/Send/GenerateCert/UpdateNetwork
@@ -3268,8 +3309,7 @@ async fn handle_command(
             // (write), RESURRECTING the just-removed network's <id>.json on disk. The
             // resurrected file reappears in user_network_states and is auto-reconnected
             // by reconnect_for_user on the next vault unlock. Holding the lock across
-            // the delete makes delete and save mutually exclusive. The QUIT/abort/map
-            // removal above don't touch the config file, so they stay outside the lock.
+            // the delete makes delete and save mutually exclusive.
             {
                 let _cfg_lock = network_config_lock(username, &id);
                 let _cfg_guard = _cfg_lock.lock().await;
@@ -3282,66 +3322,26 @@ async fn handle_command(
         }
         ClientMessage::Connect { id } => {
             if !state.owns_network(username, &id).await { return; }
-            // Kill any existing connection first to prevent ghost sessions.
-            // Order matters: send QUIT while the socket is still alive, then abort
-            // the task so its reconnect loop can't resurrect itself.
-            // #20: resolve reason + clone the Arc out before locking (drop Ref pre-await).
-            let reason = match state.get_network_config(&id, username).await {
-                Some(cfg) => strip_crlf(quit_reason_for(&cfg)),
-                None => DEFAULT_QUIT_MESSAGE.to_string(),
-            };
-            let conn = state.connections.get(&id).map(|c| c.clone());
-            if let Some(conn) = conn {
-                let mut c = conn.lock().await;
-                let _ = c.send_raw(&format!("QUIT :{}\r\n", reason)).await;
-            }
-            // #84: set the disconnect flag before aborting the old task so its
-            // reconnect loop is guaranteed to bail and can't resurrect after QUIT
-            // and wipe the new task's map entry. Cleared again just below before
-            // the new connect spawns.
-            state.request_disconnect(&id);
-            state.abort_connect_task(&id);
-            state.connections.remove(&id);
-            state.conn_owners.remove(&id);
-            state.clear_disconnect_request(&id);
+            // The daemon's Dial is atomically rejected if it already owns this
+            // conn_id (see ipc_server.rs), so an already-live (or mid-backoff)
+            // network just no-ops here instead of the old force-kill-and-restart
+            // dance — that dance existed to prevent ghost/duplicate connections,
+            // which the daemon's own check-and-insert now prevents more robustly.
+            if state.connections.contains_key(&id) { return; }
             if let Some(cfg) = state.get_network_config(&id, username).await {
-                // irc::connect() emits Connecting at the top of each attempt — don't double-emit here.
-                let (s2, u2) = (state.clone(), username.to_string());
-                let id2 = id.clone();
-                let handle = tokio::spawn(async move {
-                    if let Err(e) = irc::connect(id2, cfg, u2, s2).await { error!("IRC: {}", e); }
-                });
-                // Abort any predecessor handle this insert displaces. Normally
-                // abort_connect_task above already emptied the slot so this returns
-                // None, but if a concurrent Connect/reconnect_for_user for the SAME
-                // conn_id raced in between, the displaced task would otherwise be
-                // dropped-but-not-aborted, leaving an untracked ghost IRC socket that
-                // auto-reconnects forever and can never be killed. Aborting it here
-                // closes that hole; it is a no-op in the normal (uncontended) path.
-                if let Some(old) = state.connect_tasks.insert(id, handle) { old.abort(); }
+                state.conn_owners.insert(id.clone(), username.to_string());
+                ipc_client::dial_current(&state, username, cfg).await;
             }
         }
         ClientMessage::Disconnect { id } => {
             if !state.owns_network(username, &id).await { return; }
-            // Send QUIT first (while socket is alive), then abort the reconnect loop.
-            // abort() is deterministic — no sleep/flag race.
-            // #20: resolve reason + clone the Arc out before locking (drop Ref pre-await).
             let reason = match state.get_network_config(&id, username).await {
                 Some(cfg) => strip_crlf(quit_reason_for(&cfg)),
                 None => DEFAULT_QUIT_MESSAGE.to_string(),
             };
-            // #84: set the disconnect flag before aborting so the old task's
-            // reconnect loop bails and can't resurrect the connection.
-            state.request_disconnect(&id);
-            let conn = state.connections.get(&id).map(|c| c.clone());
-            if let Some(conn) = conn {
-                let mut c = conn.lock().await;
-                let _ = c.send_raw(&format!("QUIT :{}\r\n", reason)).await;
-            }
-            state.abort_connect_task(&id);
+            ipc_client::send_drop(&state, &id, reason).await;
             state.connections.remove(&id);
             state.conn_owners.remove(&id);
-            state.clear_disconnect_request(&id);
             send(ServerEvent::Disconnected { conn_id: id, reason: "User requested".into() });
         }
         ClientMessage::Send { conn_id, raw } => {
@@ -4264,29 +4264,15 @@ impl AppState {
     pub async fn reconnect_for_user(&self, username: &str) {
         for cfg in self.load_user_configs(username).await {
             let id = cfg.id.clone();
-            // Kill any existing connection first to prevent duplicate sessions.
-            // #20: clone the Arc out and drop the DashMap Ref before awaiting.
-            let conn = self.connections.get(&id).map(|c| c.clone());
-            if let Some(conn) = conn {
-                let mut c = conn.lock().await;
-                let reason = quit_reason_for(&cfg);
-                // #24: defense-in-depth — strip CRLF from the reason at the send site too.
-                let _ = c.send_raw(&format!("QUIT :{}\r\n", strip_crlf(reason))).await;
-            }
-            self.abort_connect_task(&id);
-            self.connections.remove(&id);
-            self.conn_owners.remove(&id);
-            self.clear_disconnect_request(&id);
-            // irc::connect() emits Connecting at the top of each attempt — don't double-emit here.
-            let (s, u) = (self.clone(), username.to_string());
-            let id2 = id.clone();
-            let handle = tokio::spawn(async move {
-                if let Err(e) = irc::connect(id2, cfg, u, s).await { error!("{}", e); }
-            });
-            // Abort any predecessor handle displaced by a concurrent Connect/reconnect
-            // for the same conn_id (see the Connect handler note). No-op in the normal
-            // path since abort_connect_task above just emptied the slot.
-            if let Some(old) = self.connect_tasks.insert(id, handle) { old.abort(); }
+            // Already live — most likely reattached from a daemon that was
+            // still running across a web-process restart (see ipc_client's
+            // Attach/AttachComplete reconciliation, which runs once at process
+            // startup, independent of any user's login timing). Nothing to do;
+            // unlike the old per-process model, "connected" can now already be
+            // true the very first time a freshly-logged-in session checks.
+            if self.connections.contains_key(&id) { continue; }
+            self.conn_owners.insert(id.clone(), username.to_string());
+            crate::ipc_client::dial_current(self, username, cfg).await;
         }
     }
 
@@ -4515,10 +4501,6 @@ fn appearance_json_is_safe(v: &serde_json::Value, depth: u32) -> bool {
 /// Sanitize a username for safe filesystem path usage (defense-in-depth)
 pub fn safe_username(s: &str) -> String {
     s.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').take(64).collect()
-}
-
-pub fn strip_crlf(s: &str) -> String {
-    s.chars().filter(|&c| c != '\r' && c != '\n' && c != '\0').collect()
 }
 
 /// #7: create a directory (recursively) with mode 0700 so at-rest secrets are not

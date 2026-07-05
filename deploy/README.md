@@ -21,7 +21,10 @@ This installs and configures:
 - Caddy (via official apt repo)
 - Postfix (local mail relay for verification emails)
 - CryptIRC binary to `/opt/cryptirc/`
-- systemd service with full security hardening
+- `irc-core` binary + service — a small always-on daemon that owns the raw
+  IRC connections, so restarting/redeploying CryptIRC itself no longer drops
+  anyone's IRC session (see "irc-core daemon" below)
+- systemd service(s) with full security hardening
 - Caddy config with automatic HTTPS
 
 **Total time:** ~5 minutes, mostly waiting for Rust to compile.
@@ -46,7 +49,30 @@ git pull
 sudo bash deploy/update.sh
 ```
 
-This rebuilds the binary and does a hot-swap restart. The service is down for under a second.
+This rebuilds the binary and does a hot-swap restart. The service is down for
+under a second — and since `irc-core` isn't restarted by an ordinary update,
+**no one's IRC connection drops**, unlike CryptIRC's own brief web restart.
+Only pass `--restart-daemon` if you specifically changed `irc_core.rs` or the
+`ipc*.rs` files — that's the one case where IRC connections genuinely need to
+reconnect:
+
+```bash
+sudo bash deploy/update.sh --restart-daemon
+```
+
+---
+
+## irc-core daemon
+
+CryptIRC's IRC connections are held by a separate always-on process,
+`irc-core`, communicating with the main `cryptirc` process over a local Unix
+socket (`/var/lib/cryptirc/irc-core.sock`). It only holds the raw connection
+open (dial, registration, SASL, PING/PONG, reconnect) — all message parsing,
+logging, encryption, and push notifications still happen entirely in the main
+`cryptirc` process, unchanged. The practical effect: restarting/redeploying
+CryptIRC itself (the frequent case) no longer causes a visible part/rejoin on
+any channel. Both processes run as the same unprivileged `cryptirc` user —
+this is a lifecycle split, not a privilege boundary.
 
 ---
 
@@ -55,13 +81,16 @@ This rebuilds the binary and does a hot-swap restart. The service is down for un
 ```bash
 # Live logs
 journalctl -u cryptirc -f
+journalctl -u irc-core -f
 
 # Status
 systemctl status cryptirc
+systemctl status irc-core
 systemctl status caddy
 
-# Restart
+# Restart (irc-core rarely needs it — see "Updating" above)
 sudo systemctl restart cryptirc
+sudo systemctl restart irc-core
 
 # Caddy reload after Caddyfile edit (no downtime)
 sudo systemctl reload caddy
@@ -76,12 +105,14 @@ caddy trust
 
 ```
 /opt/cryptirc/
-└── cryptirc              ← compiled binary
+├── cryptirc              ← compiled binary (web/WS process)
+└── irc_core              ← compiled binary (IRC connection daemon)
 
 /var/lib/cryptirc/
 ├── vault.salt            ← random salt for Argon2id key derivation
 ├── vault.canary          ← encrypted canary for passphrase verification
 ├── vapid.json            ← VAPID keys for push notifications (keep safe)
+├── irc-core.sock         ← Unix socket between cryptirc and irc-core (0600)
 ├── users/                ← user accounts (hashed passwords)
 ├── pending/              ← email verification tokens
 ├── networks/             ← IRC network configs (creds AES-256-GCM encrypted)

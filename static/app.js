@@ -1013,6 +1013,11 @@ function handleEvent(ev) {
             pushSubscription=await swRegistration.pushManager.getSubscription();
             if(!pushSubscription) await subscribePush();
           }
+          // #2 fix: recover a subscription the browser rotated while we were closed
+          // (drain the SW bridge) and re-sync the live endpoint to the server so a
+          // silently-rotated push subscription self-heals on connect.
+          await _drainPushResubBridge();
+          await _reconcilePushSubscription();
         }
       },2000);
       break;
@@ -4413,15 +4418,18 @@ async function handleInput(raw){
       }
       case 'DND': {
         const sub=args[0]?.toLowerCase();
-        if(sub==='on'){localStorage.setItem('cryptirc_dnd','1');savePrefsToServer();sysMsg(conn_id,target,'🔕 Do Not Disturb ON — notifications suppressed','system');}
-        else if(sub==='off'){const hadSched=!!(localStorage.getItem('cryptirc_dnd_start')||localStorage.getItem('cryptirc_dnd_end'));localStorage.removeItem('cryptirc_dnd');localStorage.removeItem('cryptirc_dnd_start');localStorage.removeItem('cryptirc_dnd_end');savePrefsToServer();sysMsg(conn_id,target,`🔔 Do Not Disturb OFF${hadSched?' — schedule cleared':''}`,'system');}
+        // #1 fix: each DND state change also pushes DND into notif_prefs via
+        // _syncMutedChannelsToServer() so the SERVER push engine honors it (not just
+        // the in-browser popup). savePrefsToServer() still handles cross-device sync.
+        if(sub==='on'){localStorage.setItem('cryptirc_dnd','1');savePrefsToServer();_syncMutedChannelsToServer();sysMsg(conn_id,target,'🔕 Do Not Disturb ON — notifications suppressed','system');}
+        else if(sub==='off'){const hadSched=!!(localStorage.getItem('cryptirc_dnd_start')||localStorage.getItem('cryptirc_dnd_end'));localStorage.removeItem('cryptirc_dnd');localStorage.removeItem('cryptirc_dnd_start');localStorage.removeItem('cryptirc_dnd_end');savePrefsToServer();_syncMutedChannelsToServer();sysMsg(conn_id,target,`🔔 Do Not Disturb OFF${hadSched?' — schedule cleared':''}`,'system');}
         else if(sub==='schedule'){
           const start=args[1],end=args[2];
           if(!start||!end){sysMsg(conn_id,target,'Usage: /dnd schedule <HH:MM> <HH:MM>  e.g. /dnd schedule 23:00 07:00','error');break;}
-          localStorage.setItem('cryptirc_dnd_start',start);localStorage.setItem('cryptirc_dnd_end',end);savePrefsToServer();
+          localStorage.setItem('cryptirc_dnd_start',start);localStorage.setItem('cryptirc_dnd_end',end);savePrefsToServer();_syncMutedChannelsToServer();
           sysMsg(conn_id,target,`🔕 DND scheduled: ${start} — ${end}`,'system');
         }
-        else if(sub==='unschedule'){localStorage.removeItem('cryptirc_dnd_start');localStorage.removeItem('cryptirc_dnd_end');savePrefsToServer();sysMsg(conn_id,target,'🔔 DND schedule cleared','system');}
+        else if(sub==='unschedule'){localStorage.removeItem('cryptirc_dnd_start');localStorage.removeItem('cryptirc_dnd_end');savePrefsToServer();_syncMutedChannelsToServer();sysMsg(conn_id,target,'🔔 DND schedule cleared','system');}
         else{const on=localStorage.getItem('cryptirc_dnd')==='1';const hasSched=!!(localStorage.getItem('cryptirc_dnd_start')&&localStorage.getItem('cryptirc_dnd_end'));sysMsg(conn_id,target,`DND is ${on?'ON':'OFF'}${hasSched?' (schedule set)':''}. Usage: /dnd on|off|schedule <start> <end>|unschedule`,'system');}
         break;
       }
@@ -6776,6 +6784,7 @@ const THEMES={
   tokyonight:{label:'Tokyo Night',bg0:'#1a1b26',bg1:'#16161e',bg2:'#1f2335',bg3:'#24283b',bg4:'#292e42',border:'#292e42',border2:'#3b4261',text:'#c0caf5',text2:'#7aa2f7',text3:'#565f89'},
   cyberpunk:{label:'Cyberpunk',bg0:'#0a0a0f',bg1:'#0f0f18',bg2:'#161622',bg3:'#1e1e2e',bg4:'#28283a',border:'#ff00ff33',border2:'#ff00ff55',text:'#e0e0ff',text2:'#ff00ff',text3:'#8888aa'},
   matrix:   {label:'Matrix',  bg0:'#000000',bg1:'#001100',bg2:'#002200',bg3:'#003300',bg4:'#004400',border:'#005500',border2:'#008800',text:'#00ff00',text2:'#00cc00',text3:'#006600'},
+  discord:  {label:'Discord', bg0:'#36393f',bg1:'#2f3136',bg2:'#32353b',bg3:'#40444b',bg4:'#42464d',border:'#202225',border2:'#26282c',text:'#dcddde',text2:'#5865f2',text3:'#96989d'},
   ocean:    {label:'Ocean',   bg0:'#0d1926',bg1:'#132636',bg2:'#1a3346',bg3:'#214056',bg4:'#284d66',border:'#1e4060',border2:'#2a5a80',text:'#d4e8f8',text2:'#5cacee',text3:'#4a7090'},
   sunset:   {label:'Sunset',  bg0:'#1a0f1e',bg1:'#241528',bg2:'#2e1b32',bg3:'#38213c',bg4:'#422746',border:'#3d2640',border2:'#5a3860',text:'#e8d0e8',text2:'#ff8866',text3:'#8a6080'},
   blumhouse:{label:'Blumhouse',bg0:'#0a0000',bg1:'#120000',bg2:'#1a0505',bg3:'#220808',bg4:'#2d0b0b',border:'#3a0a0a',border2:'#551111',text:'#d4b8b8',text2:'#cc0000',text3:'#663333'},
@@ -8386,19 +8395,35 @@ document.addEventListener('click',e=>{
   nacEl.style.cssText='position:absolute;bottom:100%;left:0;right:0;background:var(--bg1);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:102;touch-action:pan-y;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;';
   inp.parentNode.appendChild(nacEl);
   let nacIdx=-1, nacNicks=[];   // nacNicks = the exact list as rendered (for keyboard completion)
+  // Most recently @-mentioned/addressed nick per channel (set in completeNick
+  // below) — pinned first in the list so continuing a conversation surfaces
+  // that person even if others have spoken more recently in a busy channel.
+  const _lastMentioned={};
   function getChannelNicks(){
     if(!active)return [];
     const net=networks.find(n=>n.config.id===active.conn_id);
-    const ch=net?.channels?.find(c=>c.name===active.target);
+    // Case-insensitive channel lookup: IRC channel names are case-insensitive
+    // and the live entry is keyed by whatever case the server echoed (JOIN/
+    // NAMES), which can differ from active.target's case (e.g. a saved/typed
+    // variant). An exact === match silently misses in that case, returning no
+    // channel and thus no nicks — the "@ shows nobody" bug. Fold both sides.
+    const tgtLc=(active.target||'').toLowerCase();
+    const ch=net?.channels?.find(c=>(c.name||'').toLowerCase()===tgtLc);
     const names=(ch?.names||[]).map(n=>stripPfx(n));
-    // Order by most-recent speaker (from _lastSpoke) then alphabetical, so typing
-    // "@" surfaces the people who just talked first — especially handy on mobile
-    // where you tap a name rather than type it. Matches tabComplete's ordering.
-    const sm=_lastSpoke[bk(active.conn_id,active.target)]||{};
+    // Order: the person you last addressed first, then most-recent speaker
+    // (from _lastSpoke), then alphabetical — so typing "@" surfaces whoever
+    // you're likely continuing to talk to, then who just talked, especially
+    // handy on mobile where you tap a name rather than type it.
+    const bkey=bk(active.conn_id,active.target);
+    const sm=_lastSpoke[bkey]||{};
+    const lastM=(_lastMentioned[bkey]||'').toLowerCase();
     names.sort((a,b)=>{
-      const ta=sm[a.toLowerCase()]||0, tb=sm[b.toLowerCase()]||0;
+      const al=a.toLowerCase(), bl=b.toLowerCase();
+      if(al===lastM && bl!==lastM) return -1;
+      if(bl===lastM && al!==lastM) return 1;
+      const ta=sm[al]||0, tb=sm[bl]||0;
       if(tb!==ta) return tb-ta;
-      return a.toLowerCase().localeCompare(b.toLowerCase());
+      return al.localeCompare(bl);
     });
     return names;
   }
@@ -8408,7 +8433,12 @@ document.addEventListener('click',e=>{
     const m=before.match(/@([a-zA-Z0-9_\-\[\]\\`^]{0,20})$/);
     if(!m){nacEl.style.display='none';nacIdx=-1;return;}
     const q=m[1].toLowerCase();
-    const nicks=getChannelNicks().filter(n=>n.toLowerCase().startsWith(q)).slice(0,10);
+    // Cap at 50 (not the old 10) so a bare "@" actually shows the whole
+    // channel on anything but a very large room — the container already
+    // scrolls (overflow-y:auto above), this just stops truncating who's
+    // reachable that way. Still bounded so a huge channel can't dump an
+    // unbounded DOM list.
+    const nicks=getChannelNicks().filter(n=>n.toLowerCase().startsWith(q)).slice(0,50);
     if(!nicks.length){nacEl.style.display='none';nacIdx=-1;nacNicks=[];return;}
     nacNicks=nicks;   // cache so keyboard Tab/Enter completes exactly the highlighted item
     nacEl.style.display='block'; nacIdx=0;
@@ -8439,6 +8469,7 @@ document.addEventListener('click',e=>{
     inp.value=before.slice(0,idx)+nick+' '+v.slice(pos);
     inp.focus();
     nacEl.style.display='none';nacIdx=-1;
+    if(active) _lastMentioned[bk(active.conn_id,active.target)]=nick;
   }
   inp.addEventListener('keydown',e=>{
     if(nacEl.style.display==='none')return;
@@ -10173,6 +10204,7 @@ function gatherPreferences(){
     favorites: loadFavorites(),
     _favsTs: parseInt(localStorage.getItem('cryptirc_favs_ts')||'0'),
     muted: loadMuted(),
+    _mutedTs: parseInt(localStorage.getItem('cryptirc_muted_ts')||'0'),
     monitor: loadMonitor(),
     monitorNotifs: localStorage.getItem('cryptirc_monitor_notifs')||'on',
     monitorPush: localStorage.getItem('cryptirc_monitor_push')||'on',
@@ -10268,9 +10300,22 @@ function restorePreferences(p){
       }
     }
     if(p.muted){
-      const localMuted=loadMuted();
-      const merged={...p.muted,...localMuted};
-      localStorage.setItem('cryptirc_muted',JSON.stringify(merged));
+      // #3 fix: timestamp-gate instead of a pure union merge. Local wins only if it
+      // was modified more recently than the server snapshot; otherwise adopt the
+      // server's map WHOLESALE so an unmute made on another device actually removes
+      // the key here (the old union `{...p.muted,...localMuted}` resurrected any key
+      // still present locally, so unmutes never propagated). Missing _mutedTs → 0, so
+      // a fresh device (localTs 0) accepts the server and the server wins on a tie —
+      // matching the favorites/monitor/channelKeys gates.
+      const localTs=parseInt(localStorage.getItem('cryptirc_muted_ts')||'0');
+      const serverTs=p._mutedTs||0;
+      if(localTs<=serverTs){
+        localStorage.setItem('cryptirc_muted',JSON.stringify(p.muted));
+        localStorage.setItem('cryptirc_muted_ts',String(serverTs));
+        // Push the adopted mute set into notif_prefs so the SERVER push engine's
+        // muted_channels matches (an unmute must also re-enable mobile push).
+        try{ _syncMutedChannelsToServer(); }catch(_){}
+      }
     }
     {
       // F29: timestamp-gate the monitor group (list + notif/push toggles) as one
@@ -10895,7 +10940,12 @@ function filterChanList(){
 // ─── Remove network ───────────────────────────────────────────────────────────
 // ─── Mute system ──────────────────────────────────────────────────────────────
 function loadMuted(){try{return JSON.parse(localStorage.getItem('cryptirc_muted')||'{}');}catch{return {};}}
-function saveMuted(m){try{localStorage.setItem('cryptirc_muted',JSON.stringify(m));}catch(e){} savePrefsToServer();}
+// #3 fix: stamp a change timestamp so restorePreferences can timestamp-gate the
+// muted store (like favorites/monitor/channelKeys) instead of a pure union merge.
+// The old union merge could never propagate an UNMUTE — a stale device holding the
+// old (muted) key would resurrect it on the next merge, so a channel you un-muted
+// (to resume push) silently stayed muted across devices.
+function saveMuted(m){try{localStorage.setItem('cryptirc_muted',JSON.stringify(m));localStorage.setItem('cryptirc_muted_ts',String(Date.now()));}catch(e){} savePrefsToServer();}
 function isMuted(key){return !!loadMuted()[key];}
 function toggleMute(key){const m=loadMuted();if(m[key])delete m[key];else m[key]=true;saveMuted(m);_syncMutedChannelsToServer();renderSidebar();}
 // True when a channel/PM buffer is silenced — the buffer itself or its whole
@@ -10921,9 +10971,18 @@ function _syncMutedChannelsToServer(){
   const curC=(_notifPrefs.muted_channels||[]).slice().sort().join('\n');
   const curN=(_notifPrefs.muted_networks||[]).slice().sort().join('\n');
   const nextC=chans.slice().sort().join('\n'), nextN=nets.slice().sort().join('\n');
-  if(!_mig && curC===nextC && curN===nextN) return;   // unchanged → skip the PUT
+  // #1 fix: also fold the client DND state into notif_prefs so the SERVER push
+  // engine honors Do Not Disturb / quiet hours (mobile push previously ignored it).
+  const dnd=localStorage.getItem('cryptirc_dnd')==='1';
+  const dndStart=localStorage.getItem('cryptirc_dnd_start')||'';
+  const dndEnd=localStorage.getItem('cryptirc_dnd_end')||'';
+  const dndTz=new Date().getTimezoneOffset();
+  const dndUnchanged = _notifPrefs.dnd===dnd && (_notifPrefs.dnd_start||'')===dndStart
+                    && (_notifPrefs.dnd_end||'')===dndEnd && (_notifPrefs.dnd_tz_offset||0)===dndTz;
+  if(!_mig && curC===nextC && curN===nextN && dndUnchanged) return;   // unchanged → skip the PUT
   _notifPrefs.muted_channels=chans;
   _notifPrefs.muted_networks=nets;
+  _notifPrefs.dnd=dnd; _notifPrefs.dnd_start=dndStart; _notifPrefs.dnd_end=dndEnd; _notifPrefs.dnd_tz_offset=dndTz;
   try{ fetch('/cryptirc/push/settings',{method:'PUT',headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},body:JSON.stringify(_notifPrefs)}).catch(()=>{}); }catch(e){}
 }
 
@@ -11798,6 +11857,12 @@ async function loadNotifPrefs() {
 async function saveNotifPrefs() {
   if (!sessionToken || !_notifPrefs) return;
   _notifPrefs.trigger = document.getElementById('notif-trigger').value;
+  // #1 fix: carry the DND state on every push-settings PUT so the enabled/trigger
+  // path can't overwrite notif_prefs with dnd defaults (server honors DND now).
+  _notifPrefs.dnd = localStorage.getItem('cryptirc_dnd')==='1';
+  _notifPrefs.dnd_start = localStorage.getItem('cryptirc_dnd_start')||'';
+  _notifPrefs.dnd_end = localStorage.getItem('cryptirc_dnd_end')||'';
+  _notifPrefs.dnd_tz_offset = new Date().getTimezoneOffset();
   try {
     await fetch('/cryptirc/push/settings', {
       method: 'PUT',
@@ -12013,6 +12078,36 @@ async function reregisterPushSubscription(subJSON) {
       body: JSON.stringify({ ...subJSON, label: navigator.userAgent.slice(0,80) }),
     });
   } catch(e) {}
+}
+
+// #2 fix (rotation gap): recover a push subscription the browser rotated while the
+// app was closed. The SW's pushsubscriptionchange stashes the new subscription in a
+// Cache bridge (it can't reach the server itself — no token there); we drain it here
+// on startup and re-register with the server (save_subscription dedups by endpoint).
+async function _drainPushResubBridge() {
+  if (!sessionToken || !('caches' in self)) return;
+  try {
+    const c = await caches.open('cryptirc-push-resub');
+    const r = await c.match('/__push_resub__');
+    if (r) {
+      const sub = await r.json();
+      if (sub && sub.endpoint) await reregisterPushSubscription(sub);
+      await c.delete('/__push_resub__');
+    }
+  } catch(_) {}
+}
+
+// #2 fix: proactively re-register the CURRENT browser subscription with the server on
+// every connect. If the endpoint rotated (getSubscription() returns the new one) but
+// the pushsubscriptionchange postMessage was lost — or the subscribe path short-
+// circuited because a subscription already existed — the server still had the stale
+// endpoint. Re-POSTing the live one (idempotent; dedups by endpoint) self-heals it.
+async function _reconcilePushSubscription() {
+  if (!sessionToken || !swRegistration || !_notifPrefs?.enabled) return;
+  try {
+    const sub = await swRegistration.pushManager.getSubscription();
+    if (sub) { pushSubscription = sub; await reregisterPushSubscription(sub.toJSON()); }
+  } catch(_) {}
 }
 
 function notifDiagLog(msg,ok){
@@ -13320,7 +13415,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.21';
+const CRYPTIRC_VERSION='0.3.24';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13328,6 +13423,10 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.24', date:'July 2026', items:[
+    {tag:'new', text:'Routine updates no longer disconnect you from IRC. Your connection now lives in a small always-on background process, separate from the web server — so when the server gets updated or restarted, you stay connected the whole time instead of seeing a part/rejoin.'},
+    {tag:'new', text:'New Discord theme — a familiar dark look for anyone coming from Discord. Pick it in Appearance ▸ Themes.'},
+  ]},
   {version:'0.3.14', date:'July 2026', items:[
     {tag:'fix', text:'Messages inbox: conversation previews now fill in automatically. Previously a conversation from a prior session showed a blank preview until you opened it and came back (the preview fetch used the wrong-case nick and read an empty log).'},
   ]},

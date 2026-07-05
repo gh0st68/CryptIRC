@@ -13,6 +13,10 @@ After=network-online.target
 Wants=network-online.target
 # Start after Caddy so it's behind the proxy when it comes up
 After=caddy.service
+# If irc-core.service (see deploy/irc-core.service) is installed, start after
+# it too — ordering only, no Requires=, so a daemon restart/crash never
+# cascade-stops the web service or vice versa. Inert if the unit is absent.
+After=irc-core.service
 
 [Service]
 Type=simple

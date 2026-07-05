@@ -362,7 +362,9 @@ if [[ ! -f "$SETTINGS_FILE" ]]; then
     # Write via python3 (already a dependency) so the reg code is correctly JSON-encoded
     # for ANY input — control chars, quotes, unicode — and the file is always valid JSON.
     # An invalid file would make the server silently fall back to open, codeless registration.
-    CRYPTIRC_S_OPEN="$REG_OPEN" CRYPTIRC_S_CODE="$REG_CODE" \
+    # umask 077 up front so the file is never briefly world-readable between
+    # creation and the chmod below (it holds the registration code in plaintext).
+    (umask 077; CRYPTIRC_S_OPEN="$REG_OPEN" CRYPTIRC_S_CODE="$REG_CODE" \
     CRYPTIRC_S_EMAILREQ="$EMAIL_REQUIRED" CRYPTIRC_S_CAPTCHA="$CAPTCHA_ENABLED" \
     python3 - "$SETTINGS_FILE" <<'PY'
 import json, os, sys
@@ -376,6 +378,7 @@ data = {
 with open(sys.argv[1], "w") as f:
     json.dump(data, f, indent=2)
 PY
+    )
     chown "$SERVICE_USER:$SERVICE_USER" "$SETTINGS_FILE"
     chmod 600 "$SETTINGS_FILE"
     ok "Admin settings seeded (registration · email · captcha)"
@@ -392,13 +395,36 @@ echo -e "  ${DIM}First build takes 3-5 minutes. Please wait.${NC}\n"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_DIR"
-source "$HOME/.cargo/env" 2>/dev/null || true
+# $HOME is root's home under sudo, but cargo may instead live under a human
+# dev account's home (installed directly via rustup, not by this script).
+# rustup's own env script isn't self-locating (trusts $HOME internally, so
+# sourcing the right file under the wrong $HOME still resolves to the wrong
+# bin dir) and its proxy binaries also need RUSTUP_HOME/CARGO_HOME to find
+# the toolchain config — so set all three explicitly per candidate.
+if ! command -v cargo &>/dev/null; then
+    for home in "/root" "$HOME" "${SUDO_USER:+/home/$SUDO_USER}"; do
+        if [[ -n "$home" && -x "$home/.cargo/bin/cargo" ]]; then
+            export CARGO_HOME="$home/.cargo" RUSTUP_HOME="$home/.rustup" PATH="$home/.cargo/bin:$PATH"
+            command -v cargo &>/dev/null && break
+        fi
+    done
+fi
 if ! cargo build --release; then
     die "Build failed (see output above). Common causes: low RAM (need ~1 GB free — add swap) or missing libssl-dev."
 fi
 [[ -f target/release/cryptirc ]] || die "Build reported success but target/release/cryptirc is missing."
 install -m 755 -o root -g root target/release/cryptirc "$INSTALL_DIR/cryptirc"
 ok "CryptIRC built and installed"
+
+# irc_core (the always-on IRC connection daemon) — only present once the
+# daemon-split has landed on this checkout. Older commits build without it,
+# and that's fine: cryptirc.service alone still works exactly as before.
+HAVE_IRC_CORE=false
+if [[ -f target/release/irc_core ]]; then
+    HAVE_IRC_CORE=true
+    install -m 755 -o root -g root target/release/irc_core "$INSTALL_DIR/irc_core"
+    ok "irc-core daemon built and installed"
+fi
 
 # ── Step 6: configure TLS + service ───────────────────────────────────────────
 step "[6/6] Configuring services"
@@ -487,6 +513,71 @@ if ! caddy validate --config /etc/caddy/Caddyfile >"$RUN_LOG" 2>&1; then
 fi
 ok "Caddy configured"
 
+# irc-core unit — the always-on IRC connection daemon (see deploy/irc-core.service
+# for the full annotated reference). Installed alongside cryptirc.service so a
+# fresh install starts directly on the split architecture: no legacy direct-
+# connect state to migrate, so there's no reason to hold it back. Enabled and
+# started BEFORE cryptirc.service further down (After=irc-core.service below).
+if [[ "$HAVE_IRC_CORE" == true ]]; then
+    cat > /etc/systemd/system/irc-core.service <<UNIT
+[Unit]
+Description=irc-core — persistent IRC connection daemon for CryptIRC
+After=network-online.target
+Wants=network-online.target
+Before=cryptirc.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR
+ExecStart=$INSTALL_DIR/irc_core
+ExecStop=/bin/kill -s TERM \$MAINPID
+TimeoutStopSec=30
+KillMode=mixed
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+Environment=CRYPTIRC_DATA=$DATA_DIR
+Environment=RUST_LOG=info
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=$DATA_DIR
+ProtectHome=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+ProtectClock=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectHostname=true
+LimitNOFILE=4096
+LimitNPROC=64
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    # Reload right after writing this unit (not batched with cryptirc's, further
+    # down) so an interruption between the two units still leaves systemd's
+    # view of THIS one consistent, rather than deferring both reloads to one
+    # point that a dropped connection could skip entirely.
+    systemctl daemon-reload
+    ok "irc-core service unit installed"
+fi
+
 # systemd unit. For self-signed/IP, HSTS is turned OFF — otherwise the browser
 # would refuse the cert-warning click-through and lock everyone out for 2 years.
 CRYPTIRC_REG_VALUE="closed"; [[ "$REG_OPEN" == true ]] && CRYPTIRC_REG_VALUE="open"
@@ -496,10 +587,13 @@ FROM_EMAIL="${EMAIL:-noreply@localhost}"
 # is authoritative; this env var is only a fallback, but keep the unit file valid).
 REG_CODE_SYSTEMD=$(printf '%s' "$REG_CODE" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-cat > /etc/systemd/system/cryptirc.service <<UNIT
+# umask 077 up front — this unit embeds the plaintext registration code via
+# Environment=, and the file would otherwise briefly be world-readable
+# (default umask) between creation and the explicit chmod 640 below.
+(umask 077; cat > /etc/systemd/system/cryptirc.service <<UNIT
 [Unit]
 Description=CryptIRC — Encrypted IRC Client
-After=network-online.target caddy.service
+After=network-online.target caddy.service irc-core.service
 Wants=network-online.target
 # Crash-loop guard. The correct location in modern systemd is [Unit]; the
 # legacy [Service] StartLimitInterval=/StartLimitBurst= spelling is deprecated.
@@ -556,10 +650,18 @@ LimitNPROC=512
 [Install]
 WantedBy=multi-user.target
 UNIT
+)
 # The unit holds the registration code — keep it out of world-readable view.
+# (Belt-and-suspenders — umask 077 above already prevented any exposure window.)
 chmod 640 /etc/systemd/system/cryptirc.service
 
 systemctl daemon-reload
+if [[ "$HAVE_IRC_CORE" == true ]]; then
+    systemctl enable irc-core >/dev/null 2>&1 || true
+    # Start irc-core FIRST — a cold-started daemon just waits idle for Dial
+    # requests, so it's always safe to bring up ahead of the web process.
+    systemctl restart irc-core >/dev/null 2>&1 || true
+fi
 systemctl enable cryptirc >/dev/null 2>&1 || true           # start on boot
 # Use `restart`, NOT `enable --now`: `--now` only does a `start`, which is a no-op
 # if the unit is already active. Re-running this installer on a live system installs
@@ -568,16 +670,45 @@ systemctl enable cryptirc >/dev/null 2>&1 || true           # start on boot
 # `restart` starts it on a fresh install and swaps in the new binary on a re-run.
 systemctl restart cryptirc >/dev/null 2>&1 || true          # don't abort — the check below reports real status
 systemctl enable caddy >/dev/null 2>&1 || true              # persist across reboot (pacman/some setups don't auto-enable)
+# `caddy validate` above runs as root (this whole script does) and creates the
+# log file it references as a side effect of parsing the config — root:root,
+# 0600. The chown of /var/log/caddy itself (done earlier, at directory-creation
+# time) doesn't retroactively cover a file created after that. Caddy then
+# starts as the unprivileged `caddy` user and can't open its own log file
+# ("permission denied") — caught this for real on a fresh box, not by reading
+# the code. Re-chown recursively right before the actual restart.
+chown -R caddy:caddy /var/log/caddy 2>/dev/null || true
 systemctl reload-or-restart caddy  >/dev/null 2>&1 || true
 ok "Services started"
 
-sleep 3
-if systemctl is-active --quiet cryptirc; then
+# `is-active` only proves the process didn't immediately exit — poll the real
+# HTTP endpoint for up to 10s so a start-then-panic or bind-then-deadlock is
+# caught here instead of reported as "running".
+CRYPTIRC_HEALTH_PORT=$(systemctl show cryptirc.service -p Environment --value | tr ' ' '\n' | grep -m1 '^CRYPTIRC_PORT=' | cut -d= -f2 || true)
+CRYPTIRC_HEALTHY=false
+for _ in $(seq 1 10); do
+    if systemctl is-active --quiet cryptirc \
+        && curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:${CRYPTIRC_HEALTH_PORT:-9001}/"; then
+        CRYPTIRC_HEALTHY=true
+        break
+    fi
+    sleep 1
+done
+if [[ "$CRYPTIRC_HEALTHY" == "true" ]]; then
     ok "CryptIRC is running"
     SERVICE_OK=true
 else
-    warn "CryptIRC isn't active yet. Check:  journalctl -u cryptirc -n 50 --no-pager"
+    warn "CryptIRC isn't responding yet. Check:  journalctl -u cryptirc -n 50 --no-pager"
     SERVICE_OK=false
+fi
+if [[ "$HAVE_IRC_CORE" == true ]]; then
+    IRC_CORE_SOCK=$(systemctl show irc-core.service -p Environment --value | tr ' ' '\n' | grep -m1 '^CRYPTIRC_IPC_SOCK=' | cut -d= -f2 || true)
+    [[ -z "$IRC_CORE_SOCK" ]] && IRC_CORE_SOCK="${DATA_DIR}/irc-core.sock"
+    if systemctl is-active --quiet irc-core && [[ -S "$IRC_CORE_SOCK" ]]; then
+        ok "irc-core is running"
+    else
+        warn "irc-core isn't active/ready yet. Check:  journalctl -u irc-core -n 50 --no-pager"
+    fi
 fi
 if ! systemctl is-active --quiet caddy; then
     warn "Caddy (reverse proxy) isn't active. Check:  journalctl -u caddy -n 50 --no-pager"

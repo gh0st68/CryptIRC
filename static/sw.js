@@ -1,11 +1,22 @@
-// CryptIRC Service Worker v10
+// CryptIRC Service Worker v11
 // Handles: offline caching, push notifications, notification click actions
 
-const CACHE = 'cryptirc-v208';
+const CACHE = 'cryptirc-v209';
 // notif-intent cache: a fallback bridge that stores a single notification-click
 // intent so the client can read it on startup if postMessage is lost. It stores
 // only minimal opaque IDs (conn_id/target/from/ts) — no auth material (audit #75).
 const NOTIF_INTENT_CACHE = 'cryptirc-notif-intent';
+// push-resub bridge: when the browser rotates the push subscription in the
+// background (pushsubscriptionchange) with no app window open, the SW cannot reach
+// the server (no auth token lives here). We stash the NEW subscription JSON here so
+// the client re-registers it on its next startup — otherwise the server keeps the
+// stale endpoint (410-pruned) and never learns the new one → push silently dies
+// until a full re-enable. Holds the browser-issued subscription (endpoint +
+// p256dh/auth push keys) — same material getSubscription() already exposes to any
+// same-origin script, NOT the session token. Same-origin/per-profile like the push
+// store itself, so no new exposure. Whitelisted in `activate` so a version bump
+// doesn't drop a pending one; the client deletes it right after re-registering.
+const PUSH_RESUB_CACHE = 'cryptirc-push-resub';
 const STATIC = ['/cryptirc/manifest.json', '/cryptirc/icon.svg', '/cryptirc/icon-192.png', '/cryptirc/icon-512.png'];
 
 // Only cache first-party, non-redirected, 200 responses. This rejects opaque
@@ -38,7 +49,7 @@ self.addEventListener('activate', e => {
   // Whitelist of caches that survive a version bump. The notif-intent cache is
   // explicitly managed here so it is no longer an orphan that survives forever
   // outside version control (audit #75).
-  const KEEP = [CACHE, NOTIF_INTENT_CACHE];
+  const KEEP = [CACHE, NOTIF_INTENT_CACHE, PUSH_RESUB_CACHE];
   e.waitUntil(
     caches.keys()
       .then(keys => Promise.all(
@@ -247,8 +258,17 @@ self.addEventListener('pushsubscriptionchange', e => {
       applicationServerKey: e.oldSubscription
         ? e.oldSubscription.options.applicationServerKey
         : null,
-    }).then(sub => {
-      // Notify the client app to re-register
+    }).then(async sub => {
+      // Stash the new subscription in the resub bridge FIRST, so it survives even if
+      // no window is open to receive the postMessage below. The client drains this on
+      // its next startup and re-registers with the server (audit #2: rotation gap).
+      try {
+        const c = await caches.open(PUSH_RESUB_CACHE);
+        await c.put('/__push_resub__', new Response(JSON.stringify(sub.toJSON()), {
+          headers: { 'Content-Type': 'application/json' },
+        }));
+      } catch (err) { /* non-fatal — postMessage path below still covers open clients */ }
+      // Notify any open client app to re-register immediately (fast path).
       return self.clients.matchAll().then(clients => {
         clients.forEach(c => c.postMessage({
           type: 'push_resubscribe',

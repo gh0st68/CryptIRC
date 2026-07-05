@@ -1,0 +1,89 @@
+# irc-core systemd service — the persistent IRC connection daemon
+# Place at /etc/systemd/system/irc-core.service
+#
+# irc-core owns the raw IRC TCP/TLS sockets so that redeploying/restarting
+# cryptirc.service (the frequent case) no longer drops any user's IRC
+# connection. It's a thin "socket-keeper" — cryptirc.service still does 100%
+# of parsing/logging/E2E/push; this daemon only dials, registers, and holds
+# the wire open, handing lines back and forth over a local Unix socket.
+#
+# Install:
+#   sudo cp deploy/irc-core.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now irc-core
+#
+# Start this BEFORE cryptirc.service on a fresh boot (see After= below) — a
+# cold-started daemon just waits idle for Dial requests, so starting it first
+# is always safe. Ordinary code-only redeploys of cryptirc.service should NOT
+# restart this unit — see deploy/update.sh's --restart-daemon flag.
+
+[Unit]
+Description=irc-core — persistent IRC connection daemon for CryptIRC
+Documentation=https://github.com/gh0st68/CryptIRC
+After=network-online.target
+Wants=network-online.target
+# Ordering only (no Requires=) — cryptirc.service should start after this,
+# but this daemon crashing/restarting must never cascade-stop the web
+# service, and vice versa. Lifecycle-decoupling is the entire point.
+Before=cryptirc.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cryptirc
+Group=cryptirc
+WorkingDirectory=/opt/cryptirc
+
+# The compiled daemon binary (built as `irc_core` — see src/bin/irc_core.rs)
+ExecStart=/opt/cryptirc/irc_core
+
+# Graceful shutdown — sends SIGTERM, waits up to 30s, then SIGKILL
+ExecStop=/bin/kill -s TERM $MAINPID
+TimeoutStopSec=30
+KillMode=mixed
+
+# Restart policy — always restart on crash, but not if we stop it intentionally
+Restart=on-failure
+RestartSec=5
+
+# Files/dirs the daemon creates (the IPC socket) default to 0600/0700.
+UMask=0077
+
+# Same data dir as cryptirc.service — the daemon derives its Unix socket
+# path as $CRYPTIRC_DATA/irc-core.sock (override with CRYPTIRC_IPC_SOCK if
+# ever needed). It never reads/writes any other file in this directory:
+# NetworkConfig secrets are decrypted by the web process, never the daemon.
+Environment=CRYPTIRC_DATA=/var/lib/cryptirc
+Environment=RUST_LOG=info
+
+# ── Security hardening (matches cryptirc.service's posture) ────────────────
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cryptirc
+ProtectHome=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+# AF_INET/6 for the outbound IRC TCP/TLS dial, AF_UNIX for the IPC socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=true
+ProtectClock=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ProtectHostname=true
+
+# One process, few sockets — the web service's higher limits don't apply.
+LimitNOFILE=4096
+LimitNPROC=64
+
+[Install]
+WantedBy=multi-user.target

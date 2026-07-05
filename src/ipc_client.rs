@@ -1,0 +1,313 @@
+//! ipc_client.rs — the web process's side of the IPC boundary. Connects to the
+//! irc-core daemon's Unix socket, sends `Attach` on every (re)connect, and
+//! dispatches every inbound `IpcMessage` — routing `RawLine`s through
+//! `irc::dispatch_line` exactly as the old `run_loop` did for bytes read
+//! directly off a socket, translating `ConnStatus`/`SessionSync` into the
+//! existing `ServerEvent`s the browser already understands.
+//!
+//! Web-process-only (not part of the shared lib — the daemon has no use for
+//! any of this; it only needs `cryptirc::ipc`/`cryptirc::ipc_framing`, both
+//! already shared).
+
+use crate::{irc, AppState, NetworkConfig, SaslConfig, ServerEvent};
+use cryptirc::ipc::{ClientIdentity, ConnLifecycle, DialParams, IpcMessage, SaslParams};
+use cryptirc::ipc_framing::{read_frame, write_frame};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use tokio::net::UnixStream;
+use tokio::sync::{mpsc, Mutex};
+use tracing::{info, warn};
+
+/// Run forever: connect to the daemon, and on any disconnect (daemon
+/// restarted/crashed, or never came up yet) retry after a short fixed delay.
+/// Unlike IRC-side reconnect this is a local socket — either the daemon is up
+/// or it's not, so there's no need for the exponential backoff the daemon
+/// itself uses against real network flakiness.
+pub async fn run(sock_path: String, state: AppState) {
+    loop {
+        match UnixStream::connect(&sock_path).await {
+            Ok(stream) => {
+                info!("Connected to irc-core daemon at {}", sock_path);
+                if let Err(e) = handle_connection(stream, &state).await {
+                    warn!("irc-core IPC connection lost: {}", e);
+                }
+            }
+            Err(e) => {
+                warn!("Could not connect to irc-core daemon at {} ({}) — retrying", sock_path, e);
+            }
+        }
+        *state.ipc_out.lock().await = None;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+async fn handle_connection(stream: UnixStream, state: &AppState) -> anyhow::Result<()> {
+    let (mut read_half, write_half) = stream.into_split();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<IpcMessage>();
+
+    // Install this connection's sender as the one every IrcConnection::send_raw
+    // (and the Dial/RawSend/Drop senders below) will use.
+    *state.ipc_out.lock().await = Some(out_tx.clone());
+
+    let mut write_half = write_half;
+    let writer_task = tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
+            if write_frame(&mut write_half, &msg).await.is_err() { break; }
+        }
+    });
+
+    // Snapshot of conn_ids we believe should be live BEFORE this Attach cycle —
+    // compared against what the daemon actually reports once AttachComplete
+    // arrives, so a conn_id we expected but the daemon doesn't have (e.g. the
+    // daemon itself restarted) gets a fresh Dial. `seen` accumulates as
+    // SessionSync arrives during the replay burst.
+    let expected: HashSet<String> = state.connections.iter().map(|e| e.key().clone()).collect();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    out_tx.send(IpcMessage::Attach {}).ok();
+
+    let result = loop {
+        match read_frame(&mut read_half).await {
+            Ok(Some(msg)) => handle_message(msg, state, &expected, &mut seen, &out_tx).await,
+            Ok(None) => break Ok(()),
+            Err(e) => break Err(anyhow::Error::from(e)),
+        }
+    };
+    writer_task.abort();
+    result
+}
+
+async fn handle_message(
+    msg: IpcMessage,
+    state: &AppState,
+    expected: &HashSet<String>,
+    seen: &mut HashSet<String>,
+    out_tx: &mpsc::UnboundedSender<IpcMessage>,
+) {
+    match msg {
+        IpcMessage::RawLine { conn_id, line } => {
+            if let Some((_username, conn)) = ensure_connection_entry(state, &conn_id).await {
+                if let Err(e) = irc::dispatch_line(state, &_username, &conn_id, &conn, &line).await {
+                    warn!("[{}] dispatch_line error: {}", conn_id, e);
+                }
+            }
+        }
+
+        IpcMessage::ConnStatus { conn_id, state: lifecycle } => {
+            // ensure_connection_entry (not just a conn_owners lookup) so a
+            // brand-new Dial's very first message — always this one — has
+            // somewhere to read `cfg.server` from for display.
+            if let Some((username, conn)) = ensure_connection_entry(state, &conn_id).await {
+                let evt = match lifecycle {
+                    ConnLifecycle::Connecting => {
+                        let server = conn.lock().await.cfg.server.clone();
+                        ServerEvent::Connecting { conn_id: conn_id.clone(), server }
+                    }
+                    ConnLifecycle::Disconnected { reason } => {
+                        conn.lock().await.connected = false;
+                        ServerEvent::Disconnected { conn_id: conn_id.clone(), reason }
+                    }
+                    ConnLifecycle::Reconnecting { attempt, delay_secs, reason } => {
+                        conn.lock().await.connected = false;
+                        ServerEvent::Reconnecting { conn_id: conn_id.clone(), attempt, delay_secs, reason }
+                    }
+                };
+                state.send_to_user(&username, evt);
+            }
+        }
+
+        IpcMessage::SessionSync { conn_id, nick, channels, registered, connected, lag_ms } => {
+            seen.insert(conn_id.clone());
+            if let Some((username, conn)) = ensure_connection_entry(state, &conn_id).await {
+                let mut resync: Vec<String> = Vec::new();
+                let mut newly_registered = None;
+                {
+                    let mut c = conn.lock().await;
+                    c.nick = nick.clone();
+                    // SessionSync is the single authoritative source for
+                    // registered/Connected — the daemon always calls its own
+                    // sync() BEFORE forwarding the raw "001" line, so
+                    // dispatch_line's 001 arm deliberately does nothing (see
+                    // its comment) rather than racing this same flag. Only
+                    // fire Connected on the actual false→true edge, so a
+                    // later SessionSync (still registered:true, e.g. after a
+                    // JOIN) doesn't re-emit it.
+                    if registered && !c.registered {
+                        newly_registered = Some((nick.clone(), c.cfg.server.clone()));
+                    }
+                    c.registered = registered;
+                    c.connected = connected;
+                    if lag_ms.is_some() { c.lag_ms = lag_ms; }
+                    // Rebuild any channel the daemon says we're in but this
+                    // (freshly (re)hydrated) web process doesn't have yet —
+                    // insert a stub and queue a NAMES/TOPIC resync for it. This
+                    // is the "rebuild display state via an ordinary resync
+                    // burst" mechanism: no channel-state protocol of its own,
+                    // just the same commands a manual /names would send.
+                    for chan in &channels {
+                        let key = cryptirc::ircproto::irc_lower(chan);
+                        if !c.channels.contains_key(&key) {
+                            c.channels.insert(key, crate::irc::ChannelState {
+                                name: chan.clone(), topic: String::new(), names: vec![], key: None,
+                            });
+                            resync.push(chan.clone());
+                        }
+                    }
+                }
+                if let Some((connected_nick, server)) = newly_registered {
+                    state.send_to_user(&username, ServerEvent::Connected {
+                        conn_id: conn_id.clone(), server, nick: connected_nick,
+                    });
+                }
+                if let Some(ms) = lag_ms {
+                    state.send_to_user(&username, ServerEvent::LagUpdate { conn_id: conn_id.clone(), ms });
+                }
+                for chan in resync {
+                    let mut c = conn.lock().await;
+                    let _ = c.send_raw(&format!("NAMES {}\r\n", chan)).await;
+                    let _ = c.send_raw(&format!("TOPIC {}\r\n", chan)).await;
+                }
+            }
+        }
+
+        IpcMessage::AttachComplete {} => {
+            // Reconciliation: anything we expected before this Attach cycle
+            // that the daemon never reported (it restarted and lost its live
+            // sockets, or this is a genuinely stale entry) gets re-Dialed —
+            // reusing the exact decrypt-and-resolve path a normal Connect uses.
+            for conn_id in expected.difference(seen) {
+                let Some(username) = state.conn_owners.get(conn_id).map(|r| r.clone()) else { continue };
+                let Some(cfg) = state.get_network_config(conn_id, &username).await else { continue };
+                info!("[{}] missing from daemon's Attach reply — re-dialing", conn_id);
+                dial(state, &username, cfg, out_tx).await;
+            }
+        }
+
+        // Web → daemon variants; the client never receives its own outbound messages.
+        IpcMessage::Attach {} | IpcMessage::Dial { .. } | IpcMessage::RawSend { .. } | IpcMessage::Drop { .. } => {}
+    }
+}
+
+/// Get the existing `IrcConnection` for `conn_id`, or create one on first
+/// sight (a fresh Dial's first reply, or an Attach-triggered rehydration).
+/// Returns `None` only if `conn_id` has no known owner at all (shouldn't
+/// happen — the daemon only ever tracks conn_ids the web side itself Dialed).
+async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(String, Arc<Mutex<irc::IrcConnection>>)> {
+    if let Some(conn) = state.connections.get(conn_id) {
+        let username = state.conn_owners.get(conn_id)?.clone();
+        return Some((username, conn.clone()));
+    }
+    let username = state.conn_owners.get(conn_id)?.clone();
+    let cfg = state.get_network_config(conn_id, &username).await?;
+    let conn = Arc::new(Mutex::new(irc::IrcConnection {
+        conn_id: conn_id.to_string(),
+        nick: cfg.nick.clone(),
+        connected: false,
+        lag_ms: None,
+        channels: HashMap::new(),
+        ipc_out: state.ipc_out.clone(),
+        message_tags: false,
+        self_userhost: String::new(),
+        registered: false,
+        echo_message_enabled: false,
+        names_buf: HashMap::new(),
+        who_pending: HashSet::new(),
+        who_away: HashMap::new(),
+        cfg,
+    }));
+    state.connections.insert(conn_id.to_string(), conn.clone());
+    Some((username, conn))
+}
+
+/// Resolve a `NetworkConfig` into fully-decrypted `DialParams` and send `Dial`.
+/// Shared by the `Connect`/`RemoveNetwork`-then-reconnect handlers and the
+/// Attach-time reconciliation above — the single place that knows how to turn
+/// a stored config into what the daemon needs to actually open a socket.
+pub async fn dial(state: &AppState, username: &str, cfg: NetworkConfig, out_tx: &mpsc::UnboundedSender<IpcMessage>) {
+    let conn_id = cfg.id.clone();
+    let params = build_dial_params(state, username, &cfg).await;
+    let _ = out_tx.send(IpcMessage::Dial { conn_id, params });
+}
+
+/// Send `Drop` for `conn_id` through whatever IPC connection is currently up.
+/// Best-effort, matching `send_raw`'s philosophy — if the daemon link happens
+/// to be down right when the user disconnects, the daemon will simply have
+/// nothing to tear down (there's no live socket for it to hold open either).
+pub async fn send_drop(state: &AppState, conn_id: &str, reason: String) {
+    if let Some(tx) = state.ipc_out.lock().await.as_ref() {
+        let _ = tx.send(IpcMessage::Drop { conn_id: conn_id.to_string(), reason });
+    }
+}
+
+/// Same as `dial`, but sends through whatever IPC connection is CURRENTLY
+/// installed on `state.ipc_out` — for call sites (ClientMessage handlers) that
+/// don't have a specific `out_tx` in hand. Best-effort: if the daemon link is
+/// briefly down, this silently no-ops (matches `send_raw`'s existing
+/// best-effort philosophy) — the user can just press Connect again, and if
+/// this was actually `reconnect_for_user`, the same network will surface via
+/// the daemon-restart reconciliation path once the link comes back anyway.
+pub async fn dial_current(state: &AppState, username: &str, cfg: NetworkConfig) {
+    let out_tx = state.ipc_out.lock().await.clone();
+    match out_tx {
+        Some(tx) => dial(state, username, cfg, &tx).await,
+        None => warn!("[{}] Dial requested but no irc-core connection is up yet", cfg.id),
+    }
+}
+
+async fn build_dial_params(state: &AppState, username: &str, cfg: &NetworkConfig) -> DialParams {
+    let client_identity = match &cfg.client_cert_id {
+        Some(cert_id) if state.certs.exists(cert_id).await => {
+            let dir = state.certs.cert_path_for(cert_id);
+            let cert_bytes = tokio::fs::read(dir.join("cert.pem")).await;
+            let key_enc = tokio::fs::read_to_string(dir.join("key.enc")).await;
+            match (cert_bytes, key_enc) {
+                (Ok(cert_bytes), Ok(key_enc)) => match state.crypto.decrypt(username, key_enc.trim()).await {
+                    Ok(key_bytes) => Some(ClientIdentity {
+                        cert_pem: String::from_utf8_lossy(&cert_bytes).into_owned(),
+                        key_pem: String::from_utf8_lossy(&key_bytes).into_owned(),
+                    }),
+                    Err(e) => {
+                        warn!("[{}] client cert key decrypt failed (vault locked?): {}", cfg.id, e);
+                        None
+                    }
+                },
+                _ => {
+                    warn!("[{}] client cert files unreadable for cert_id {}", cfg.id, cert_id);
+                    None
+                }
+            }
+        }
+        Some(_) => {
+            warn!("[{}] client_cert_id configured but cert files not found", cfg.id);
+            None
+        }
+        None => None,
+    };
+
+    DialParams {
+        server: cfg.server.clone(),
+        port: cfg.port,
+        tls: cfg.tls,
+        tls_accept_invalid_certs: cfg.tls_accept_invalid_certs,
+        nick: cfg.nick.clone(),
+        username: cfg.username.clone(),
+        realname: cfg.realname.clone(),
+        password: cfg.password.clone(),
+        sasl_plain: cfg.sasl_plain.as_ref().map(|s: &SaslConfig| SaslParams {
+            account: s.account.clone(),
+            password: s.password.clone(),
+        }),
+        sasl_external: cfg.sasl_external,
+        client_identity,
+        oper_login: cfg.oper_login.clone(),
+        oper_pass: cfg.oper_pass.clone(),
+        nickserv_pass: cfg.nickserv_pass.clone(),
+        auto_identify: cfg.auto_identify,
+        auto_join: cfg.auto_join.clone(),
+        channel_keys: cfg.channel_keys.clone(),
+        perform_commands: cfg.perform_commands.clone(),
+        disabled_caps: cfg.disabled_caps.clone(),
+        label: cfg.label.clone(),
+        auto_reconnect: cfg.auto_reconnect,
+    }
+}
