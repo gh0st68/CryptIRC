@@ -4401,7 +4401,10 @@ async function handleInput(raw){
         }catch(e){sysMsg(conn_id,target,'URL shortener error','error');}
         break;
       }
-      case 'STATS': {
+      // Renamed from /stats to /chanstats — /stats was shadowing the real IRC
+      // STATS command (/stats z, /stats u, /stats p, etc.), which fell through
+      // to `default:` below and got sent raw only when nothing else intercepted it.
+      case 'CHANSTATS': {
         showChannelStats(conn_id,target);
         break;
       }
@@ -8623,7 +8626,7 @@ document.addEventListener('click',e=>{
     {cmd:'ascii',desc:'Generate ASCII art text',usage:'/ascii <text>'},
     {cmd:'ud',desc:'Urban Dictionary lookup',usage:'/ud <word>'},
     {cmd:'shorten',desc:'Shorten a URL',usage:'/shorten <url>'},
-    {cmd:'stats',desc:'Channel statistics dashboard',usage:'/stats'},
+    {cmd:'chanstats',desc:'Channel statistics dashboard',usage:'/chanstats'},
     {cmd:'note',desc:'Set/view notes on a nick',usage:'/note <nick> [text]'},
     {cmd:'dnd',desc:'Do Not Disturb mode',usage:'/dnd on|off|schedule HH:MM HH:MM'},
     {cmd:'split',desc:'Toggle split view (two channels)',usage:'/split'},
@@ -9940,7 +9943,7 @@ function handleStatsData(data){
 }
 window.addEventListener('beforeunload',()=>{if(_chanStatsDirty)saveStatsToServer();});
 
-// /stats command — quick view for current channel (unchanged UX)
+// /chanstats command (renamed from /stats — see CHANSTATS case above) — quick view for current channel
 function showChannelStats(conn_id,target){
   showStatsPanel();
   setTimeout(()=>renderStatsDetail(bk(conn_id,target)),50);
@@ -13388,7 +13391,7 @@ function showHelpPanel(){
     <div class="help-cmd"><span class="help-cmd-name">User notes</span><span class="help-cmd-desc">Private notes on nicks (right-click → Note)</span></div>
     <div class="help-cmd"><span class="help-cmd-name">DND mode</span><span class="help-cmd-desc">Suppress notifications with scheduled quiet hours</span></div>
     <div class="help-cmd"><span class="help-cmd-name">URL shortener</span><span class="help-cmd-desc">Built-in /shorten command creates short links</span></div>
-    <div class="help-cmd"><span class="help-cmd-name">Channel stats</span><span class="help-cmd-desc">Top talkers dashboard (/stats)</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Channel stats</span><span class="help-cmd-desc">Top talkers dashboard (/chanstats)</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Link previews</span><span class="help-cmd-desc">Images, YouTube cards, and metadata previews</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Pastebin</span><span class="help-cmd-desc">Share text snippets with password &amp; expiration</span></div>
     <div class="help-cmd"><span class="help-cmd-name">File uploads</span><span class="help-cmd-desc">Drag-and-drop or paperclip button</span></div>
@@ -13441,7 +13444,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.28';
+const CRYPTIRC_VERSION='0.3.29';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
