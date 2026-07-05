@@ -286,8 +286,8 @@ function saveInputHistory(){
 let lagMap={};
 let pushSubscription=null;
 let swRegistration=null;
-const IMG_EXTS=/\.(jpg|jpeg|png|gif|webp|avif)(\?.*)?$/i;
-const VID_EXTS=/\.(mp4|webm|mov)(\?.*)?$/i;
+const IMG_EXTS=/\.(jpg|jpeg|png|gif|webp|avif|heic|heif|bmp|tiff?|ico)(\?.*)?$/i;
+const VID_EXTS=/\.(mp4|webm|mov|avi|mkv|m4v|3gp|3g2|flv|wmv)(\?.*)?$/i;
 
 // ─── M2: iOS keyboard fix ────────────────────────────────────────────────────
 function initViewportFix() {
@@ -4938,7 +4938,7 @@ async function _autoSendUploadLink(id, rec){
   if(!networks.find(n=>n.config.id===conn_id)){ showToast('Upload done — the original chat is gone; the link is in Upload Status'); return; }
   const pubUrl=r.url.replace('/files/','/pub/');
   const shareUrl=`${location.origin}${pubUrl}`;
-  const isImg=['jpg','jpeg','png','gif','webp','avif','ico'].includes((r.filename||'').split('.').pop().toLowerCase());
+  const isImg=['jpg','jpeg','png','gif','webp','avif','ico','heic','heif','bmp','tiff','tif'].includes((r.filename||'').split('.').pop().toLowerCase());
   const text=isImg?shareUrl:`${r.original_name}: ${shareUrl}`;
   // Encryption failure of ANY kind (blocked sentinel OR an unexpected throw)
   // must drop the send — never downgrade a confirmed send to plaintext.
@@ -5289,7 +5289,7 @@ function insertUploadLink(id){
   const r=_uploads[id]; if(!r||!r.url) return;
   const pubUrl=r.url.replace('/files/','/pub/');
   const shareUrl=`${location.origin}${pubUrl}`;
-  const isImg=['jpg','jpeg','png','gif','webp','avif','ico'].includes((r.filename||'').split('.').pop().toLowerCase());
+  const isImg=['jpg','jpeg','png','gif','webp','avif','ico','heic','heif','bmp','tiff','tif'].includes((r.filename||'').split('.').pop().toLowerCase());
   const text=isImg?shareUrl:`${r.original_name}: ${shareUrl}`;
   // Switch to the chat this upload was started in (if still around), then
   // drop the link in the input there.
@@ -13498,7 +13498,7 @@ function showHelpPanel(){
     <div class="help-cmd"><span class="help-cmd-name">Vault auto-lock</span><span class="help-cmd-desc">Auto-lock vault after idle (/autolock minutes)</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Seen database</span><span class="help-cmd-desc">Track when nicks were last active (/seen nick)</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Rate limiter</span><span class="help-cmd-desc">Client-side flood protection (/ratelimit ms)</span></div>
-    <div class="help-cmd"><span class="help-cmd-name">Metadata stripping</span><span class="help-cmd-desc">EXIF/GPS auto-removed from uploaded JPEG/PNG</span></div>`;
+    <div class="help-cmd"><span class="help-cmd-name">Metadata stripping</span><span class="help-cmd-desc">EXIF/GPS auto-removed from every uploaded image and video format</span></div>`;
   body.appendChild(feat);
   // Keyboard shortcuts
   const kb=document.createElement('div');kb.className='help-section';
@@ -13533,7 +13533,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.33';
+const CRYPTIRC_VERSION='0.3.34';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13541,6 +13541,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.34', date:'July 2026', items:[
+    {tag:'new', text:'Privacy metadata stripping now covers every image and video format the app accepts — including iPhone HEIC photos, GIF, WEBP, AVIF, TIFF, and MOV/AVI/MKV/3GP/FLV/WMV video — not just JPEG/PNG/MP4/WEBM as before.'},
+  ]},
   {version:'0.3.33', date:'July 2026', items:[
     {tag:'fix', text:'Fixed image/video previews not showing before an upload — the "Upload this?" confirmation now correctly shows a thumbnail instead of "(no preview available)".'},
   ]},

@@ -21,7 +21,29 @@
 ///   #39 — formats needing no metadata stripping are moved (rename) into the
 ///         upload dir instead of being re-buffered + rewritten.
 ///   #88 — malformed images are rejected rather than stored with metadata intact.
-
+///   #99 — metadata stripping extended to every image/video format the app
+///         accepts, not just JPEG/PNG/MP4/WEBM. JPEG/PNG keep the existing
+///         in-process byte-level strippers (no external dependency, already
+///         battle-tested). GIF/WEBP/AVIF/HEIC/HEIF/TIFF now route through
+///         `exiftool` (the one tool on this box with genuine HEIC/HEIF write
+///         support — ffmpeg has none, and ImageMagick would fully decode+
+///         re-encode, which is lossy for these formats), via copy-then-
+///         `-overwrite_original` (exiftool's `-o` direct-write mode rejects
+///         WEBP/RIFF outright even though in-place edit works fine on it).
+///         MOV/AVI/MKV/M4V/3GP/3G2/FLV/WMV now route through the EXISTING
+///         ffmpeg `-c copy` path (same mechanism already trusted for MP4/
+///         WEBM, just a wider extension allowlist) — verified empirically
+///         for every new format (frame-count-exact, metadata confirmed
+///         removed) before shipping.
+///         ICO and BMP are deliberately NOT included: exiftool cannot WRITE
+///         either format at all ("Writing of ICO/BMP files is not yet
+///         supported" — confirmed empirically, not assumed), and neither
+///         format has a realistic EXIF/GPS/personal-metadata exposure to
+///         justify inventing a bespoke stripper for them (ICO is a Windows
+///         icon container; BMP is a raw pixel dump with no standard
+///         metadata segment for a camera/phone to have populated). Both are
+///         still accepted as valid uploads with a correct content-type —
+///         they're just not run through a stripping step, same as today.
 use anyhow::Result;
 use axum::extract::Multipart;
 use dashmap::DashMap;
@@ -99,6 +121,20 @@ fn img_strip_semaphore() -> &'static Semaphore {
     SEM.get_or_init(|| Semaphore::new(IMG_STRIP_MAX_CONCURRENT))
 }
 
+/// #99: global cap on concurrent `exiftool` metadata-strip jobs (GIF/WEBP/AVIF/
+/// HEIC/HEIF/TIFF — NOT BMP, see the module doc comment for why). Same
+/// rationale as `av_strip_semaphore` — bounds CPU/process count under a
+/// burst rather than letting it grow unbounded.
+const EXIFTOOL_STRIP_MAX_CONCURRENT: usize = 4;
+/// Wall-clock timeout for a single exiftool job. Shorter than the A/V timeout —
+/// exiftool edits metadata segments directly rather than transcoding, so even a
+/// large TIFF/HEIC finishes in well under this on any real upload.
+const EXIFTOOL_STRIP_TIMEOUT: Duration = Duration::from_secs(30);
+fn exiftool_strip_semaphore() -> &'static Semaphore {
+    static SEM: OnceLock<Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| Semaphore::new(EXIFTOOL_STRIP_MAX_CONCURRENT))
+}
+
 // ─── Per-user records-file serialization (#21) ───────────────────────────────
 
 /// One async mutex per username, guarding the read-modify-write of that user's
@@ -139,7 +175,10 @@ fn prune_record_locks() {
 fn ext_needs_strip(ext: &str) -> bool {
     matches!(
         ext,
-        "jpg" | "jpeg" | "png" | "mp4" | "webm" | "mp3" | "ogg" | "wav" | "flac"
+        "jpg" | "jpeg" | "png"
+        | "gif" | "webp" | "avif" | "heic" | "heif" | "tiff" | "tif"
+        | "mp4" | "webm" | "mov" | "avi" | "mkv" | "m4v" | "3gp" | "3g2" | "flv" | "wmv"
+        | "mp3" | "ogg" | "wav" | "flac"
     )
 }
 
@@ -252,9 +291,21 @@ pub fn safe_content_type(ext: &str) -> &'static str {
         "gif"          => "image/gif",
         "webp"         => "image/webp",
         "avif"         => "image/avif",
+        "heic"         => "image/heic",
+        "heif"         => "image/heif",
+        "bmp"          => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
         "ico"          => "image/x-icon",
         "mp4"          => "video/mp4",
         "webm"         => "video/webm",
+        "mov"          => "video/quicktime",
+        "avi"          => "video/x-msvideo",
+        "mkv"          => "video/x-matroska",
+        "m4v"          => "video/x-m4v",
+        "3gp"          => "video/3gpp",
+        "3g2"          => "video/3gpp2",
+        "flv"          => "video/x-flv",
+        "wmv"          => "video/x-ms-wmv",
         "mp3"          => "audio/mpeg",
         "ogg"          => "audio/ogg",
         "wav"          => "audio/wav",
@@ -919,9 +970,16 @@ pub async fn finalize_chunked_upload(
                 tokio::fs::write(&final_path, &stripped).await?;
                 stripped.len()
             }
-            // A/V (mp4/webm/mp3/ogg/wav/flac): path-based ffmpeg strip, input is
-            // data_path, output is final_path. REJECTS on failure (#30) rather
-            // than storing un-stripped data.
+            // #99: GIF/WEBP/AVIF/HEIC/HEIF/TIFF — path-based exiftool strip,
+            // same shape as the A/V arm below (avoids buffering large images
+            // through RAM). REJECTS on failure rather than storing un-stripped data.
+            "gif" | "webp" | "avif" | "heic" | "heif" | "tiff" | "tif" => {
+                strip_image_metadata_exiftool_path(&data_path, &final_path, &ext).await?;
+                tokio::fs::metadata(&final_path).await.map(|m| m.len() as usize).unwrap_or(on_disk_len)
+            }
+            // A/V (mp4/webm/mov/avi/mkv/m4v/3gp/3g2/flv/wmv/mp3/ogg/wav/flac):
+            // path-based ffmpeg strip, input is data_path, output is final_path.
+            // REJECTS on failure (#30) rather than storing un-stripped data.
             _ => {
                 strip_av_metadata_path(&data_path, &final_path, &ext).await?;
                 tokio::fs::metadata(&final_path).await.map(|m| m.len() as usize).unwrap_or(on_disk_len)
@@ -1163,7 +1221,11 @@ async fn load_user_records(path: &PathBuf) -> Vec<UploadRecord> {
 /// Returns true if the filename has an image extension (safe for inline display).
 pub fn is_image(filename: &str) -> bool {
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
-    matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "ico")
+    matches!(
+        ext.as_str(),
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "ico"
+        | "heic" | "heif" | "bmp" | "tiff" | "tif"
+    )
 }
 
 /// Strip metadata from uploads for privacy.
@@ -1189,7 +1251,10 @@ async fn strip_metadata(data: &[u8], ext: &str) -> Result<Vec<u8>> {
                 .map_err(|_| anyhow::anyhow!("image strip unavailable"))?;
             strip_png_metadata(data)
         }
-        "mp4" | "webm" | "mp3" | "ogg" | "wav" | "flac" =>
+        "gif" | "webp" | "avif" | "heic" | "heif" | "tiff" | "tif" =>
+            strip_image_metadata_exiftool(data, ext).await,
+        "mp4" | "webm" | "mov" | "avi" | "mkv" | "m4v" | "3gp" | "3g2" | "flv" | "wmv"
+        | "mp3" | "ogg" | "wav" | "flac" =>
             strip_av_metadata(data, ext).await,
         _ => Ok(data.to_vec()),
     }
@@ -1295,6 +1360,98 @@ async fn strip_av_metadata_path(
             let _ = tokio::fs::remove_file(output_path).await;
             anyhow::bail!("Metadata stripping produced no output");
         }
+    }
+}
+
+/// #99: strip metadata from GIF/WEBP/AVIF/HEIC/HEIF/TIFF via `exiftool -all=`,
+/// copying `input_path` to `output_path` first, then running exiftool's
+/// `-overwrite_original` in place on the copy. (Exiftool's `-o <new-file>`
+/// direct-write mode was tried first but rejects WEBP/RIFF outright — "Can't
+/// write RIFF files" — even though in-place `-overwrite_original` edits a
+/// WEBP file just fine; copy-then-edit-in-place is the one approach that
+/// works for every format this function is actually called with.)
+/// Bounded by a concurrency semaphore + wall-clock timeout, and REJECTS (returns
+/// Err) on exiftool failure, timeout, or absence — same fail-closed contract as
+/// `strip_av_metadata_path`. Verified empirically (see module doc comment) that
+/// this is a metadata-only edit: exiftool does not decode/re-encode the image,
+/// so pixel data is untouched and dimensions/frame data are preserved exactly.
+async fn strip_image_metadata_exiftool_path(
+    input_path: &std::path::Path,
+    output_path: &std::path::Path,
+    _ext: &str,
+) -> Result<()> {
+    use tokio::process::Command;
+
+    let _permit = exiftool_strip_semaphore().acquire().await
+        .map_err(|_| anyhow::anyhow!("Metadata stripper unavailable"))?;
+
+    tokio::fs::copy(input_path, output_path).await
+        .map_err(|_| anyhow::anyhow!("Failed to stage upload for metadata stripping"))?;
+
+    let out_str = match output_path.to_str() {
+        Some(o) => o,
+        None => anyhow::bail!("Invalid temp path"),
+    };
+
+    let mut cmd = Command::new("exiftool");
+    cmd.args(["-all=", "-overwrite_original", out_str])
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let status = match tokio::time::timeout(EXIFTOOL_STRIP_TIMEOUT, cmd.status()).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(_)) => {
+            let _ = tokio::fs::remove_file(output_path).await;
+            anyhow::bail!("Could not strip image metadata (exiftool unavailable)");
+        }
+        Err(_) => {
+            let _ = tokio::fs::remove_file(output_path).await;
+            anyhow::bail!("Image metadata stripping timed out");
+        }
+    };
+
+    if !status.success() {
+        let _ = tokio::fs::remove_file(output_path).await;
+        anyhow::bail!("Could not strip image metadata (malformed or unsupported file)");
+    }
+
+    match tokio::fs::metadata(output_path).await {
+        Ok(m) if m.len() > 0 => Ok(()),
+        _ => {
+            let _ = tokio::fs::remove_file(output_path).await;
+            anyhow::bail!("Metadata stripping produced no output");
+        }
+    }
+}
+
+/// In-RAM wrapper around `strip_image_metadata_exiftool_path` for the legacy
+/// (non-chunked) `/upload` path, which only has the bytes in memory. Mirrors
+/// `strip_av_metadata`'s stage-to-temp-file/read-back/cleanup shape.
+async fn strip_image_metadata_exiftool(data: &[u8], ext: &str) -> Result<Vec<u8>> {
+    let tmp_dir = std::env::temp_dir();
+    let id = uuid::Uuid::new_v4();
+    let input_path = tmp_dir.join(format!("cryptirc_in_{}.{}", id, ext));
+    let output_path = tmp_dir.join(format!("cryptirc_out_{}.{}", id, ext));
+
+    if tokio::fs::write(&input_path, data).await.is_err() {
+        let _ = tokio::fs::remove_file(&input_path).await;
+        anyhow::bail!("Failed to stage upload for metadata stripping");
+    }
+
+    let result = strip_image_metadata_exiftool_path(&input_path, &output_path, ext).await;
+    let read_back = match &result {
+        Ok(()) => tokio::fs::read(&output_path).await.ok(),
+        Err(_) => None,
+    };
+    let _ = tokio::fs::remove_file(&input_path).await;
+    let _ = tokio::fs::remove_file(&output_path).await;
+
+    result?;
+    match read_back {
+        Some(bytes) if !bytes.is_empty() => Ok(bytes),
+        _ => anyhow::bail!("Metadata stripping produced no output"),
     }
 }
 
