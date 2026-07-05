@@ -12,14 +12,15 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.3.9-brightgreen" alt="Version">
-  <img src="https://img.shields.io/badge/themes-172-9b59ff" alt="Themes">
+  <img src="https://img.shields.io/badge/version-0.3.24-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/themes-173-9b59ff" alt="Themes">
   <img src="https://img.shields.io/badge/fonts-140-blue" alt="Fonts">
   <img src="https://img.shields.io/badge/commands-100+-red" alt="Commands">
   <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
 </p>
 
 <p align="center">
+  <a href="https://cryptirc.com"><b>🌐 cryptirc.com</b></a> ·
   <a href="https://gh0st68.github.io/CryptIRC/"><b>🎨 Browse the live Theme Gallery</b></a> ·
   <a href="https://client.twistednet.org/cryptirc"><b>Launch the hosted client</b></a> ·
   <a href="https://github.com/gh0st68/CryptIRC/releases"><b>Download apps</b></a>
@@ -86,10 +87,11 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 ### Key Features
 
 - **24/7 connectivity** — your server stays connected to IRC around the clock, logs everything encrypted, and syncs across all your devices
+- **Updates without disconnecting** — IRC connections live in a small, always-on background process, separate from the web server. Routine updates and restarts no longer part/rejoin you from every channel — only a change to that background process itself would ever require reconnecting
 - **Multi-network** — connect to as many IRC networks as you want simultaneously
 - **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
 - **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
-- **172 themes** (57 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin: title/menu/tool/status bars, `<nick>` brackets, `[HH:MM]` timestamps) + **140 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
+- **173 themes** (57 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin and a **Discord** theme) + **140 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
 - **🐑🦀👻🐟👽 Desktop pets** — five to pick from (desktop, mobile, or both): the classic '95 **eSheep** (wanders, climbs walls, naps, UFO abduction), a furious **Angry Crab** (scuttles sideways, snaps its claws, eats shrimp, naps, digs — drag it around, and it pesters the sheep), a friendly **Ghost** (floats freely, fades through walls, the odd spooky "BOO!"), a serene **Calm Fish** (drifts around, click near it to feed), and a **Little Alien** flying saucer (UFO tractor-beam abductions). The sheep and crab are draggable; the ghost, fish, and alien let clicks pass through
 - **In-app News & changelog** with an auto-versioning build badge, so you always see exactly what changed
 - **Full IRCv3 support** — 17 user-toggleable capabilities including typing indicators, away-notify, server-time, message-tags, plus SASL PLAIN/EXTERNAL and nick MONITOR
@@ -97,13 +99,14 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 - **Nick monitoring** — track when specific users come online/offline with push alerts
 - **Inline media** — images, videos, YouTube rich cards, audio player, link previews
 - **Mobile-first PWA** — swipe gestures, safe-area support, works perfectly on iOS and Android
-- **Single Rust binary** — deploy in one command on any Linux server
+- **Deploy in one command** — the installer builds both binaries and sets everything up on any Linux server
 
 ### Deployment
-- **Single binary** — one `cargo build` and you're done
+- Two small Rust binaries — the web server and the always-on IRC daemon — one `cargo build` for both
 - Interactive deploy script for **Debian/Ubuntu** and **Arch Linux** with Caddy, Postfix, and systemd
 - Automatic **HTTPS** via Caddy + Let's Encrypt
-- Hardened systemd unit with **full sandboxing** (ProtectSystem, PrivateTmp, restricted syscalls, no capabilities)
+- Hardened systemd units with **full sandboxing** (ProtectSystem, PrivateTmp, restricted syscalls, no capabilities)
+- Routine `update.sh` redeploys restart only the web server — the IRC daemon (and everyone's connections) stays up
 - **Automatic backups** on update — last 5 snapshots of all user data kept in `/var/lib/cryptirc-backups/`
 - Existing Caddyfile backed up before overwriting — safe for servers already running Caddy
 
@@ -124,15 +127,15 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 
 ### Themes & Personalization
 
-**172 built-in themes** — 115 static + 57 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more), including a pixel-perfect **mIRC** skin with full Windows-95 window chrome. Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
+**173 built-in themes** — 116 static + 57 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more), including a pixel-perfect **mIRC** skin with full Windows-95 window chrome and a **Discord** theme with its familiar dark UI. Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
 
 <p align="center">
   <a href="https://gh0st68.github.io/CryptIRC/">
-    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 172 live theme previews">
+    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 173 live theme previews">
   </a>
   <br>
   <b><a href="https://gh0st68.github.io/CryptIRC/">🎨 Browse the live Theme Gallery →</a></b><br>
-  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter, and preview all 172</sub>
+  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter, and preview all 173</sub>
 </p>
 
 A taste of the range:
@@ -140,6 +143,7 @@ A taste of the range:
 | Family | Examples |
 |--------|----------|
 | **Editor classics** | Dracula · Monokai · Nord · Gruvbox · One Dark · Catppuccin · Solarized · Tokyo Night |
+| **App-inspired** | Discord · mIRC (full Win95 chrome) |
 | **Neon / cyberpunk** | Cyberpunk · Outrun · Blade Runner · Vaporwave · Hotline Miami · Neon Tokyo |
 | **Terminal / hacker** | Matrix · Hacker · Retro Terminal · Cyberdeck · Firewall |
 | **Nature / seasonal** | Aurora · Snowfall · Cherry Blossom · Ocean · Forest Rain · Northern Lights |
@@ -450,7 +454,7 @@ Accessible from the sidebar gear menu:
 | Panel | Contents |
 |-------|----------|
 | Notifications | Push alerts, desktop popups, sounds, trigger rules, custom highlight words (tag UI), per-network mute |
-| Theme | 172 themes (57 animated), 140 fonts, custom theme editor, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
+| Theme | 173 themes (57 animated), 140 fonts, custom theme editor, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
 | Security | Vault auto-lock timer, message expiry, rate limit, block PMs (+g), auto-rejoin, link previews, spellcheck |
 | Monitor | Nick online/offline tracking with push notifications |
 | Notepad | Private encrypted auto-saving notes |
@@ -464,26 +468,35 @@ Accessible from the sidebar gear menu:
 | Admin | User management, registration settings, link-preview mode (off/whitelist/all), GIF picker (provider/mode/keys), max upload size |
 
 ### Deployment
-- **Single binary** -- one `cargo build` and you're done
+- Two small Rust binaries (web server + always-on IRC daemon) -- one `cargo build` for both
 - Interactive deploy script for Debian/Ubuntu and Arch Linux with Caddy, Postfix, and systemd
 - Automatic HTTPS via Caddy + Let's Encrypt
-- Hardened systemd unit with full sandboxing
+- Hardened systemd units with full sandboxing
+- Routine updates restart only the web server -- IRC connections stay up through them
 
 ## Architecture
+
+The IRC connection itself lives in a small always-on daemon (`irc-core`), separate
+from the web server (`cryptirc`) that does everything else. Routine web-server
+updates and restarts never touch the daemon, so nobody's IRC connection drops.
 
 ```
 Browser (PWA)
   |-- E2E encryption (Signal protocol, Web Crypto API)
   |-- Per-user vault unlock (Argon2id KDF -> AES-256-GCM)
-  '-- WebSocket --> CryptIRC Server (Rust/Axum)
-                      |-- IRC connections (TLS + IRCv3)
+  '-- WebSocket --> cryptirc (Rust/Axum, web server)
                       |-- Per-user encrypted log storage
                       |-- Push notifications (Web Push / VAPID)
                       |-- Pastebin with password protection
                       |-- URL shortener with interstitial page
                       |-- File uploads with metadata stripping
                       |-- Session management
-                      '-- Email verification (Postfix)
+                      |-- Email verification (Postfix)
+                      '-- Unix socket --> irc-core (always-on daemon)
+                                            |-- IRC connections (TLS + IRCv3)
+                                            |-- SASL / registration / CAP negotiation
+                                            |-- Reconnect + backoff
+                                            '-- Survives web server restarts
 ```
 
 ## Tech Stack
@@ -511,13 +524,14 @@ Browser (PWA)
 | `CRYPTIRC_FROM_EMAIL` | `noreply@cryptirc.local` | Sender address for emails |
 | `CRYPTIRC_REGISTRATION` | `open` | Registration mode: `open`, `closed` |
 | `CRYPTIRC_REG_CODE` | (none) | Invite code required for registration |
+| `CRYPTIRC_IPC_SOCK` | `$CRYPTIRC_DATA/irc-core.sock` | Unix socket path between the web server and the `irc-core` daemon |
 | `RUST_LOG` | `info` | Log level |
 
 ## Requirements
 
 - Rust 1.78+
-- Linux (Debian 12 / Ubuntu 22.04+ recommended)
-- A domain name with an A record pointing to your server
+- Linux — Debian 12, Ubuntu 22.04+, or Arch Linux (dedicated installer for each)
+- A domain name with an A record pointing to your server (or a bare IP for a self-signed cert)
 - Ports 80 and 443 open
 
 ## License
