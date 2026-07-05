@@ -60,7 +60,10 @@ if [[ "$SKIP_BACKUP" == "false" ]]; then
     # The backup bundles Argon2 hashes, vaults and admin_settings (reg code) — create it
     # 0600 (umask), not world-readable. And a FAILED backup must ABORT: it's the only
     # safety net before we swap the binary, so continuing would defeat its whole purpose.
-    if (umask 0077; tar czf "$BACKUP_FILE" -C "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")" 2>/dev/null); then
+    # --exclude the irc-core IPC socket: it's a live endpoint, not user data, and
+    # GNU tar exits 1 (not 0) when it has to skip a socket ("socket ignored"),
+    # which this script would otherwise misread as a real backup failure.
+    if (umask 0077; tar czf "$BACKUP_FILE" --exclude='irc-core.sock' -C "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")" 2>/dev/null); then
         BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
         echo -e "  ${GREEN}✓ Backup saved:${NC} $BACKUP_FILE (${BACKUP_SIZE})"
     else

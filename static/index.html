@@ -1973,11 +1973,12 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
 .msgs-inbox-htext{flex:1;min-width:0}
 .msgs-inbox-title{font-weight:800;color:var(--text);font-size:16px;display:flex;align-items:center;gap:7px}
 .msgs-inbox-sub{color:var(--text3);font-size:12px;margin-top:3px}
-.msgs-closeall{flex-shrink:0;background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:8px;padding:8px 13px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;min-height:36px;white-space:nowrap;transition:background .12s,color .12s}
-@media (hover:hover){ .msgs-closeall:hover{background:var(--bg4);color:var(--text)} }
-.msgs-closeall:active{transform:scale(.97)}
-.msgs-closeall:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-@media (max-width:768px){ .msgs-closeall{min-height:40px;padding:9px 14px} }
+.msgs-closeall,.msgs-newmsg{flex-shrink:0;background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:8px;padding:8px 13px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;min-height:36px;white-space:nowrap;transition:background .12s,color .12s}
+.msgs-newmsg{background:var(--accent);color:#001b16;border-color:var(--accent)}
+@media (hover:hover){ .msgs-closeall:hover{background:var(--bg4);color:var(--text)} .msgs-newmsg:hover{filter:brightness(1.08)} }
+.msgs-closeall:active,.msgs-newmsg:active{transform:scale(.97)}
+.msgs-closeall:focus-visible,.msgs-newmsg:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+@media (max-width:768px){ .msgs-closeall,.msgs-newmsg{min-height:40px;padding:9px 14px} }
 .msgs-inbox-empty{padding:38px 26px;text-align:center;color:var(--text3);font-size:13px;line-height:1.6}
 .chat-loading{padding:30px 26px;text-align:center;color:var(--text3);font-size:13px;opacity:.8}
 /* Non-channel views (Messages inbox, Upload Status, DMs) have no member list —
@@ -2013,6 +2014,36 @@ body.no-nicklist #nick-panel{display:none!important}
   .msgs-name{font-size:15px;max-width:48%}
   .msgs-preview{font-size:13px}
   .msgs-inbox-header{padding:14px 14px 10px}
+}
+/* New Message modal — pick anyone seen in a joined channel, any network */
+#newmsg-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;z-index:165;padding:20px}
+#newmsg-overlay.show{display:flex}
+.newmsg-box{background:var(--bg2);border:1px solid var(--border2);border-radius:12px;width:100%;max-width:480px;max-height:min(78vh,78dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6);overflow:hidden}
+.newmsg-header{padding:16px 20px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-shrink:0}
+.newmsg-title{font-family:var(--sans);font-weight:700;font-size:16px;color:var(--text);flex:1;display:flex;align-items:center;gap:7px}
+.newmsg-count{font-size:12px;color:var(--text3);white-space:nowrap}
+.newmsg-close{background:none;border:none;color:var(--text3);font-size:18px;cursor:pointer;padding:8px;border-radius:6px;line-height:1;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center}
+.newmsg-close:hover{color:var(--text);background:var(--bg4)}
+.newmsg-search{margin:0 20px 12px;padding:10px 14px;border-radius:8px;border:1px solid var(--border);background:var(--bg1);color:var(--text);font-family:var(--mono);font-size:16px;width:calc(100% - 40px);box-sizing:border-box;outline:none;flex-shrink:0;-webkit-appearance:none}
+.newmsg-search:focus{border-color:var(--accent)}
+.newmsg-body{flex:1;overflow-y:auto;padding:4px 0 8px;overscroll-behavior:contain}
+.newmsg-row{display:flex;align-items:center;gap:12px;padding:10px 20px;cursor:pointer;border-bottom:1px solid var(--bg3);transition:background .12s}
+.newmsg-row:last-child{border-bottom:none}
+@media (hover:hover){ .newmsg-row:hover{background:var(--bg4)} }
+.newmsg-row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.newmsg-av{flex-shrink:0;width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#001b16;font-weight:800;font-size:15px;display:flex;align-items:center;justify-content:center;text-transform:uppercase}
+.newmsg-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.newmsg-row-top{display:flex;align-items:baseline;gap:7px;min-width:0}
+.newmsg-nick{font-weight:700;color:var(--text);font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:1;min-width:0}
+.newmsg-netbadge{flex-shrink:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;font-size:10px;color:var(--text3);background:var(--bg3);border-radius:4px;padding:1px 6px;white-space:nowrap}
+.newmsg-chans{color:var(--text3);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.newmsg-empty{padding:38px 26px;text-align:center;color:var(--text3);font-size:13px;line-height:1.6}
+@media (max-width:768px){
+  .newmsg-box{max-width:none}
+  .newmsg-row{padding:12px 16px;gap:11px;min-height:52px}
+  .newmsg-av{width:40px;height:40px;font-size:16px}
+  .newmsg-nick{font-size:15px}
+  .newmsg-chans{font-size:12px}
 }
 </style>
 <script>
@@ -2904,6 +2935,19 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div class="chanlist-body" id="chanlist-body">
       <div class="chanlist-loading" id="chanlist-loading">Waiting for server response...</div>
     </div>
+  </div>
+</div>
+
+<!-- ── NEW MESSAGE MODAL ──────── -->
+<div id="newmsg-overlay">
+  <div class="newmsg-box">
+    <div class="newmsg-header">
+      <span class="newmsg-title">✎ New Message</span>
+      <span class="newmsg-count" id="newmsg-count"></span>
+      <button class="newmsg-close" onclick="closeNewMessageModal()" aria-label="Close">&times;</button>
+    </div>
+    <input class="newmsg-search" id="newmsg-search" placeholder="Search people…" oninput="filterNewMessageList()" autocomplete="off">
+    <div class="newmsg-body" id="newmsg-body"></div>
   </div>
 </div>
 

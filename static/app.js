@@ -5699,6 +5699,13 @@ function renderMessagesView(){
   sub.textContent=`${convs.length} conversation${convs.length===1?'':'s'}${totalUnread?` · ${totalUnread} unread`:''}`;
   hLeft.appendChild(title); hLeft.appendChild(sub);
   header.appendChild(hLeft);
+  // New message — compose to anyone visible in a joined channel on any network.
+  const newMsg=document.createElement('button');
+  newMsg.className='msgs-newmsg'; newMsg.type='button';
+  newMsg.textContent='✎ New message'; newMsg.title='Start a new message';
+  newMsg.setAttribute('aria-label','New message');
+  newMsg.onclick=()=>openNewMessageModal();
+  header.appendChild(newMsg);
   // Close-all button — only when there's something to close.
   if(convs.length){
     const closeAll=document.createElement('button');
@@ -5771,6 +5778,88 @@ function renderMessagesView(){
     wrap.appendChild(row);
   }
   area.appendChild(wrap);
+}
+// ─── New Message modal (compose to anyone in any joined channel, any network) ──
+let _newMsgData=[];
+// Build the deduped, sorted people list: every nick seen in every joined channel
+// on every connected network. Deduped per (network, nick) since the same nick on
+// two networks is a different person; a person in several channels on the same
+// network collapses to one row listing all shared channels. Self is excluded.
+function _collectAllNicks(){
+  const byKey=new Map();
+  for(const net of networks){
+    const id=net.config.id;
+    const me=(getNick(id)||'').toLowerCase();
+    for(const ch of (net.channels||[])){
+      for(const raw of (ch.names||[])){
+        const nick=stripPfx(raw);
+        if(!nick||nick.toLowerCase()===me) continue;
+        const key=id+'\x00'+nick.toLowerCase();
+        let e=byKey.get(key);
+        if(!e){
+          e={nick,connId:id,netLabel:net.config.label||net.config.server||'',chans:[]};
+          byKey.set(key,e);
+        }
+        if(!e.chans.includes(ch.name)) e.chans.push(ch.name);
+      }
+    }
+  }
+  return [...byKey.values()].sort((a,b)=>a.nick.localeCompare(b.nick,undefined,{sensitivity:'base'}));
+}
+function openNewMessageModal(){
+  _newMsgData=_collectAllNicks();
+  const ov=document.getElementById('newmsg-overlay');
+  ov.classList.add('show');
+  _overlayOpen('newmsg',closeNewMessageModal);
+  const search=document.getElementById('newmsg-search');
+  search.value='';
+  _renderNewMessageList(_newMsgData);
+  setTimeout(()=>search.focus(),30);
+}
+function closeNewMessageModal(){
+  _overlayClose('newmsg');
+  document.getElementById('newmsg-overlay').classList.remove('show');
+}
+function _newMsgPick(e){
+  closeNewMessageModal();
+  _sidebarActivate(e.connId,e.nick);
+}
+function _renderNewMessageList(data){
+  const body=document.getElementById('newmsg-body');
+  const count=document.getElementById('newmsg-count');
+  const multiNet=networks.length>1;
+  count.textContent=data.length?`${data.length} ${data.length===1?'person':'people'}`:'';
+  if(!data.length){
+    body.innerHTML=`<div class="newmsg-empty">${_newMsgData.length?'No matches.':'Nobody to message yet — join a channel first.'}</div>`;
+    return;
+  }
+  body.innerHTML='';
+  const frag=document.createDocumentFragment();
+  for(const e of data){
+    const row=document.createElement('div');
+    row.className='newmsg-row'; row.setAttribute('role','button'); row.tabIndex=0;
+    row.setAttribute('aria-label','Message '+e.nick+(multiNet?' on '+e.netLabel:''));
+    const initial=(e.nick.charAt(0)||'?').toUpperCase();
+    const av=document.createElement('div'); av.className='newmsg-av'; av.textContent=initial;
+    const info=document.createElement('div'); info.className='newmsg-info';
+    const top=document.createElement('div'); top.className='newmsg-row-top';
+    const nameSpan=document.createElement('span'); nameSpan.className='newmsg-nick'; nameSpan.textContent=e.nick;
+    top.appendChild(nameSpan);
+    if(multiNet){ const netSpan=document.createElement('span'); netSpan.className='newmsg-netbadge'; netSpan.textContent=e.netLabel; top.appendChild(netSpan); }
+    const chans=document.createElement('div'); chans.className='newmsg-chans'; chans.textContent=e.chans.join(', ');
+    info.appendChild(top); info.appendChild(chans);
+    row.appendChild(av); row.appendChild(info);
+    row.onclick=()=>_newMsgPick(e);
+    row.addEventListener('keydown',ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();_newMsgPick(e);}});
+    frag.appendChild(row);
+  }
+  body.appendChild(frag);
+}
+function filterNewMessageList(){
+  const q=document.getElementById('newmsg-search').value.toLowerCase().trim();
+  if(!q){_renderNewMessageList(_newMsgData);return;}
+  const filtered=_newMsgData.filter(e=>e.nick.toLowerCase().includes(q)||e.netLabel.toLowerCase().includes(q)||e.chans.some(c=>c.toLowerCase().includes(q)));
+  _renderNewMessageList(filtered);
 }
 // Called right after the appearance toggle flips msgsTab on/off.
 function _onMsgsTabToggle(){
@@ -13444,7 +13533,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.29';
+const CRYPTIRC_VERSION='0.3.30';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13452,6 +13541,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.30', date:'July 2026', items:[
+    {tag:'new', text:'New message button in the Messages inbox — tap ✎ New message to start a DM with anyone you share a channel with, on any of your connected networks. Search by nick, network, or channel.'},
+  ]},
   {version:'0.3.24', date:'July 2026', items:[
     {tag:'new', text:'Routine updates no longer disconnect you from IRC. Your connection now lives in a small always-on background process, separate from the web server — so when the server gets updated or restarted, you stay connected the whole time instead of seeing a part/rejoin.'},
     {tag:'new', text:'New Discord theme — a familiar dark look for anyone coming from Discord. Pick it in Appearance ▸ Themes.'},
