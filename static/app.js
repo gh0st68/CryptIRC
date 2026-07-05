@@ -3313,7 +3313,9 @@ function updateTopbar(){
     topicMenuBtn.style.display='';
     if(topic){
       topicInline.innerHTML=parseMircColors(topic);
-      topicInline.title=topic;
+      // Native title-attribute tooltips render as plain text (no HTML/color support),
+      // so raw mIRC control bytes would show as garbled boxes on hover — strip them.
+      topicInline.title=_msgsPlain(topic);
       topicInline.style.display='';
       topicSep.style.display='';
       topbarSpacer.style.display='none';
@@ -13439,7 +13441,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.27';
+const CRYPTIRC_VERSION='0.3.28';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
