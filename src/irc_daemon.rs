@@ -166,6 +166,14 @@ pub async fn run_connection<F>(
             }
             Err(e) => {
                 let msg = e.to_string();
+                if msg.starts_with("SASL_FATAL:") {
+                    warn!("[{}] {}", conn_id, msg);
+                    emit(IpcMessage::ConnStatus {
+                        conn_id: conn_id.clone(),
+                        state: ConnLifecycle::Disconnected { reason: msg },
+                    });
+                    return;
+                }
                 if msg.starts_with("SASL_RETRY:") {
                     sasl_failures += 1;
                     if sasl_failures == 1 {
@@ -271,12 +279,11 @@ where
         } else if params.sasl_external {
             // Config asked for SASL EXTERNAL but no identity was resolved — the
             // web side failed to decrypt/find the cert at Dial time. Retrying
-            // won't self-heal (params never change without a fresh Dial), but
-            // we still go through the normal backoff path for now rather than
-            // inventing a separate "terminal, don't retry" signal — a future
-            // phase with real Dial/Attach request-response semantics may want
-            // to short-circuit this case instead.
-            Err(anyhow::anyhow!("SASL_RETRY: client identity missing for SASL EXTERNAL"))
+            // won't self-heal (params never change without a fresh Dial), so
+            // this is fatal: the caller sees "SASL_FATAL:" and disconnects
+            // immediately instead of burning through the normal backoff loop
+            // for a condition that can only be fixed by a fresh Dial anyway.
+            Err(anyhow::anyhow!("SASL_FATAL: client identity missing for SASL EXTERNAL"))
         } else {
             let mut builder = native_tls::TlsConnector::builder();
             if params.tls_accept_invalid_certs {
@@ -329,7 +336,7 @@ where
             echo_message_enabled: c.echo_message_enabled,
         });
     };
-    let fwd = |line: &str| emit(IpcMessage::RawLine { conn_id: conn_id.to_string(), line: line.to_string() });
+    let fwd = |line: &str| emit(IpcMessage::RawLine { conn_id: conn_id.to_string(), line: line.to_string(), replayed: false });
 
     let sasl_method: Option<SaslMethod> = if params.sasl_external {
         Some(SaslMethod::External)
@@ -566,6 +573,24 @@ where
                                     conn.lock().await.send_raw(&format!("CAP REQ :{}\r\n", req_str)).await?;
                                 }
                             }
+                            "DEL" => {
+                                // Server withdrew a cap mid-session (e.g. a services/ircd
+                                // reload). Without this, message_tags/echo_message_enabled
+                                // would stay stuck true forever — SessionSync is
+                                // authoritative on reattach, so a stale true here would
+                                // silently reintroduce the self-echo-message duplication
+                                // bug (or TAGMSG-based typing) via a different trigger
+                                // than the reattach case that motivated tracking them.
+                                info!("[{}] CAP DEL: {}", conn_id, caps);
+                                let mut c = conn.lock().await;
+                                let mut changed = false;
+                                if caps.contains("message-tags") { c.message_tags = false; changed = true; }
+                                if caps.contains("echo-message") { c.echo_message_enabled = false; changed = true; }
+                                // Propagate immediately rather than waiting for the next
+                                // unrelated sync() (JOIN/PART/NICK) — a stale true in the
+                                // meantime is exactly the bug this handler exists to fix.
+                                if changed { sync(&c, registered, true, None); }
+                            }
                             _ => {}
                         }
                         fwd(&line);
@@ -613,7 +638,7 @@ where
                         last_pong = Instant::now();
                         let actual_nick = {
                             let mut c = conn.lock().await;
-                            if let Some(real) = p.params.get(0) {
+                            if let Some(real) = p.params.first() {
                                 if !real.is_empty() && real.as_str() != "*" {
                                     c.nick = strip_crlf(real);
                                 }
@@ -710,7 +735,7 @@ where
                         let who = nick_from_prefix(&p.prefix);
                         let mut c = conn.lock().await;
                         if irc_lower(&who) == irc_lower(&c.nick) {
-                            if let Some(chan) = p.params.get(0) {
+                            if let Some(chan) = p.params.first() {
                                 c.channels.insert(irc_lower(chan));
                                 sync(&c, registered, true, None);
                             }
@@ -722,7 +747,7 @@ where
                         let who = nick_from_prefix(&p.prefix);
                         let mut c = conn.lock().await;
                         if irc_lower(&who) == irc_lower(&c.nick) {
-                            if let Some(chan) = p.params.get(0) {
+                            if let Some(chan) = p.params.first() {
                                 c.channels.remove(&irc_lower(chan));
                                 sync(&c, registered, true, None);
                             }
@@ -734,7 +759,7 @@ where
                         let mut c = conn.lock().await;
                         if let Some(kicked) = p.params.get(1) {
                             if irc_lower(kicked) == irc_lower(&c.nick) {
-                                if let Some(chan) = p.params.get(0) {
+                                if let Some(chan) = p.params.first() {
                                     c.channels.remove(&irc_lower(chan));
                                     sync(&c, registered, true, None);
                                 }
@@ -747,7 +772,7 @@ where
                         let who = nick_from_prefix(&p.prefix);
                         let mut c = conn.lock().await;
                         if irc_lower(&who) == irc_lower(&c.nick) {
-                            if let Some(new_nick) = p.params.get(0) {
+                            if let Some(new_nick) = p.params.first() {
                                 c.nick = strip_crlf(new_nick);
                                 sync(&c, registered, true, None);
                             }

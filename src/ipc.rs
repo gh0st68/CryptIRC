@@ -22,7 +22,7 @@ pub enum IpcMessage {
     /// `reconnect_for_user`. Carries fully-resolved, already-decrypted dial
     /// parameters — see `DialParams`. Rejected as a no-op if the daemon
     /// already owns this conn_id (reattach happens via `Attach`, not `Dial`).
-    Dial { conn_id: String, params: DialParams },
+    Dial { conn_id: String, params: Box<DialParams> },
 
     /// Forward one raw outbound IRC line verbatim. Covers every existing
     /// `send_raw()` call site except the registration burst (PASS/CAP
@@ -39,7 +39,18 @@ pub enum IpcMessage {
     /// One line received from the IRC server, forwarded verbatim (PING is
     /// answered daemon-side and never forwarded). Replayed from the ring
     /// buffer on a fresh `Attach` for any conn_id the daemon still owns.
-    RawLine { conn_id: String, line: String },
+    ///
+    /// `replayed` is true only for a ring-buffer replay (`ipc_server.rs`'s
+    /// `replay_messages`), false for a line forwarded live off the socket.
+    /// The web side re-parses every line through the SAME code paths whether
+    /// it's live or history, but a few of those paths have a side effect that
+    /// is only correct ONCE per real-world event (e.g. logging "you joined" —
+    /// see the JOIN handler in `irc.rs`) and must not re-fire just because a
+    /// SessionSync-then-replay reattach re-shows a line that was already
+    /// processed before the web process restarted. `#[serde(default)]` so an
+    /// old daemon paired with a new web binary degrades to "always live"
+    /// (the pre-fix behavior) instead of failing to deserialize.
+    RawLine { conn_id: String, line: String, #[serde(default)] replayed: bool },
 
     /// Daemon-level connection lifecycle. The web side re-derives its own
     /// `ServerEvent::Connected` from seeing the 001 line in a forwarded

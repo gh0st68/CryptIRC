@@ -56,6 +56,8 @@ pub struct AppState {
     pub conn_owners:         Arc<DashMap<String, String>>,
     /// Set of conn_ids that have been explicitly disconnected (suppresses auto-reconnect)
     pub disconnect_requests: Arc<DashSet<String>>,
+    /// conn_ids that should be dialed as soon as the irc-core IPC channel comes back up.
+    pub pending_dials:       Arc<DashSet<String>>,
     /// JoinHandle of the currently-running connect() task per conn_id.
     /// Aborting this handle kills the reconnect loop deterministically — replaces
     /// the old "set flag + sleep 200ms + clear flag" race that let zombie tasks
@@ -260,6 +262,12 @@ impl AppState {
     pub fn clear_disconnect_request(&self, conn_id: &str) {
         self.disconnect_requests.remove(conn_id);
     }
+    pub fn queue_pending_dial(&self, conn_id: &str) {
+        self.pending_dials.insert(conn_id.to_string());
+    }
+    pub fn clear_pending_dial(&self, conn_id: &str) {
+        self.pending_dials.remove(conn_id);
+    }
     /// Abort and drop the tracked connect() task for this conn_id, if any.
     /// Callers MUST also remove state.connections / state.conn_owners since the
     /// aborted task won't run its cleanup path.
@@ -297,6 +305,7 @@ impl AppState {
             self.connections.remove(cid);
             self.conn_owners.remove(cid);
             self.clear_disconnect_request(cid);
+            self.clear_pending_dial(cid);
         }
         // Delete account data (auth/vault/networks/e2e/logs/sessions).
         self.auth.delete_account(&uname).await;
@@ -888,6 +897,7 @@ async fn main() -> Result<()> {
         connections:         Arc::new(DashMap::new()),
         conn_owners:         Arc::new(DashMap::new()),
         disconnect_requests: Arc::new(DashSet::new()),
+        pending_dials:       Arc::new(DashSet::new()),
         connect_tasks:       Arc::new(DashMap::new()),
         ipc_out:             Arc::new(tokio::sync::Mutex::new(None)),
         crypto, certs, logger, auth, notifier, e2e_store, paste_store, preview_service,
@@ -2608,7 +2618,7 @@ async fn route_news(State(state): State<AppState>, headers: HeaderMap) -> impl I
         let text = String::from_utf8(bytes.to_vec()).ok()?;
         let v: serde_json::Value = serde_json::from_str(&text).ok()?;
         // Accept the site-mirror shape (`posts`) or the legacy `releases` shape.
-        if !(v.get("posts").map_or(false, |x| x.is_array()) || v.get("releases").map_or(false, |x| x.is_array())) { return None; }
+        if !(v.get("posts").is_some_and(|x| x.is_array()) || v.get("releases").is_some_and(|x| x.is_array())) { return None; }
         Some(text)
     }.await;
     match fresh {
@@ -3296,11 +3306,10 @@ async fn handle_command(
                 Some(cfg) => strip_crlf(quit_reason_for(&cfg)),
                 None => DEFAULT_QUIT_MESSAGE.to_string(),
             };
-            // The daemon owns the actual socket now — Drop makes it send QUIT
-            // and stop reconnecting; this side just forgets the local record.
+            state.request_disconnect(&id);
+            state.abort_connect_task(&id);
+            state.clear_pending_dial(&id);
             ipc_client::send_drop(&state, &id, reason).await;
-            state.connections.remove(&id);
-            state.conn_owners.remove(&id);
             // #4: serialize the config-file DELETE behind the SAME per-config lock
             // every save_network writer takes. Without it, a concurrent
             // JoinChannel/PartChannel/SaveChannelOrder/Send/GenerateCert/UpdateNetwork
@@ -3329,6 +3338,8 @@ async fn handle_command(
             // which the daemon's own check-and-insert now prevents more robustly.
             if state.connections.contains_key(&id) { return; }
             if let Some(cfg) = state.get_network_config(&id, username).await {
+                state.clear_disconnect_request(&id);
+                state.clear_pending_dial(&id);
                 state.conn_owners.insert(id.clone(), username.to_string());
                 ipc_client::dial_current(&state, username, cfg).await;
             }
@@ -3339,10 +3350,10 @@ async fn handle_command(
                 Some(cfg) => strip_crlf(quit_reason_for(&cfg)),
                 None => DEFAULT_QUIT_MESSAGE.to_string(),
             };
+            state.request_disconnect(&id);
+            state.abort_connect_task(&id);
+            state.clear_pending_dial(&id);
             ipc_client::send_drop(&state, &id, reason).await;
-            state.connections.remove(&id);
-            state.conn_owners.remove(&id);
-            send(ServerEvent::Disconnected { conn_id: id, reason: "User requested".into() });
         }
         ClientMessage::Send { conn_id, raw } => {
             if !state.owns_conn(username, &conn_id) { return; }
@@ -3360,8 +3371,8 @@ async fn handle_command(
                 // optional IRCv3 @message-tags prefix (and a source prefix) before the verb.
                 let is_tagmsg = {
                     let mut rest = safe.trim_start();
-                    if rest.starts_with('@') { rest = rest.splitn(2, ' ').nth(1).unwrap_or("").trim_start(); }
-                    if rest.starts_with(':') { rest = rest.splitn(2, ' ').nth(1).unwrap_or("").trim_start(); }
+                    if let Some(rest2) = rest.strip_prefix('@') { rest = rest2.splitn(2, ' ').nth(1).unwrap_or("").trim_start(); }
+                    if let Some(rest2) = rest.strip_prefix(':') { rest = rest2.splitn(2, ' ').nth(1).unwrap_or("").trim_start(); }
                     rest.split(' ').next().unwrap_or("").eq_ignore_ascii_case("TAGMSG")
                 };
                 // Silently drop TAGMSG for connections that don't support message-tags
@@ -3390,7 +3401,7 @@ async fn handle_command(
                         if parts.len() >= 3 {
                             let targets = parts[1].to_string();
                             let mut text = parts[2].to_string();
-                            if text.starts_with(':') { text = text[1..].to_string(); }
+                            if let Some(stripped) = text.strip_prefix(':') { text = stripped.to_string(); }
                             let ts = chrono::Utc::now().timestamp();
                             let (kind, clean) = if is_action && text.starts_with("\x01ACTION ") && text.ends_with('\x01') {
                                 (MessageKind::Action, text[8..text.len()-1].to_string())
@@ -4270,7 +4281,7 @@ impl AppState {
             // startup, independent of any user's login timing). Nothing to do;
             // unlike the old per-process model, "connected" can now already be
             // true the very first time a freshly-logged-in session checks.
-            if self.connections.contains_key(&id) { continue; }
+            if self.connections.contains_key(&id) || self.disconnect_requested(&id) { continue; }
             self.conn_owners.insert(id.clone(), username.to_string());
             crate::ipc_client::dial_current(self, username, cfg).await;
         }

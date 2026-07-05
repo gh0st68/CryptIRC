@@ -85,9 +85,9 @@ async fn handle_message(
     out_tx: &mpsc::UnboundedSender<IpcMessage>,
 ) {
     match msg {
-        IpcMessage::RawLine { conn_id, line } => {
+        IpcMessage::RawLine { conn_id, line, replayed } => {
             if let Some((_username, conn)) = ensure_connection_entry(state, &conn_id).await {
-                if let Err(e) = irc::dispatch_line(state, &_username, &conn_id, &conn, &line).await {
+                if let Err(e) = irc::dispatch_line(state, &_username, &conn_id, &conn, &line, replayed).await {
                     warn!("[{}] dispatch_line error: {}", conn_id, e);
                 }
             }
@@ -104,11 +104,29 @@ async fn handle_message(
                         ServerEvent::Connecting { conn_id: conn_id.clone(), server }
                     }
                     ConnLifecycle::Disconnected { reason } => {
-                        conn.lock().await.connected = false;
+                        {
+                            let mut c = conn.lock().await;
+                            c.connected = false;
+                            // Without this, a daemon-internal reconnect (no re-Attach
+                            // involved) that re-registers leaves `registered` stuck
+                            // true from before the drop, so the SessionSync that
+                            // follows sees `registered && !c.registered` = false and
+                            // never re-fires ServerEvent::Connected — anything gated
+                            // on "just (re)connected" goes stale until a manual reload.
+                            c.registered = false;
+                        }
+                        if state.disconnect_requested(&conn_id) {
+                            state.abort_connect_task(&conn_id);
+                            state.connections.remove(&conn_id);
+                            state.conn_owners.remove(&conn_id);
+                            state.clear_disconnect_request(&conn_id);
+                        }
                         ServerEvent::Disconnected { conn_id: conn_id.clone(), reason }
                     }
                     ConnLifecycle::Reconnecting { attempt, delay_secs, reason } => {
-                        conn.lock().await.connected = false;
+                        let mut c = conn.lock().await;
+                        c.connected = false;
+                        c.registered = false;
                         ServerEvent::Reconnecting { conn_id: conn_id.clone(), attempt, delay_secs, reason }
                     }
                 };
@@ -182,9 +200,49 @@ async fn handle_message(
             // sockets, or this is a genuinely stale entry) gets re-Dialed —
             // reusing the exact decrypt-and-resolve path a normal Connect uses.
             for conn_id in expected.difference(seen) {
+                if state.disconnect_requested(conn_id) { continue; }
                 let Some(username) = state.conn_owners.get(conn_id).map(|r| r.clone()) else { continue };
                 let Some(cfg) = state.get_network_config(conn_id, &username).await else { continue };
                 info!("[{}] missing from daemon's Attach reply — re-dialing", conn_id);
+                dial(state, &username, cfg, out_tx).await;
+            }
+            let pending_disconnects: Vec<String> = state.disconnect_requests.iter().map(|e| e.key().clone()).collect();
+            for conn_id in pending_disconnects {
+                if !state.connections.contains_key(&conn_id) {
+                    state.clear_disconnect_request(&conn_id);
+                    continue;
+                }
+                let Some(username) = state.conn_owners.get(&conn_id).map(|r| r.clone()) else { continue };
+                let reason = state
+                    .get_network_config(&conn_id, &username)
+                    .await
+                    .map(|cfg| crate::quit_reason_for(&cfg).to_string())
+                    .unwrap_or_else(|| crate::DEFAULT_QUIT_MESSAGE.to_string());
+                let _ = out_tx.send(IpcMessage::Drop { conn_id: conn_id.clone(), reason: crate::strip_crlf(&reason) });
+            }
+            let pending_dials: Vec<String> = state.pending_dials.iter().map(|e| e.key().clone()).collect();
+            for conn_id in pending_dials {
+                // A Disconnect/RemoveNetwork that landed after this dial was queued
+                // wins — otherwise a Connect/Disconnect race while IPC was down
+                // could re-dial a network the user just asked to drop. Mirrors the
+                // same guard the reconciliation loop above already has.
+                if state.disconnect_requested(&conn_id) {
+                    state.clear_pending_dial(&conn_id);
+                    continue;
+                }
+                if state.connections.contains_key(&conn_id) {
+                    state.clear_pending_dial(&conn_id);
+                    continue;
+                }
+                let Some(username) = state.conn_owners.get(&conn_id).map(|r| r.clone()) else {
+                    state.clear_pending_dial(&conn_id);
+                    continue;
+                };
+                let Some(cfg) = state.get_network_config(&conn_id, &username).await else {
+                    state.clear_pending_dial(&conn_id);
+                    continue;
+                };
+                state.clear_pending_dial(&conn_id);
                 dial(state, &username, cfg, out_tx).await;
             }
         }
@@ -235,7 +293,7 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
 pub async fn dial(state: &AppState, username: &str, cfg: NetworkConfig, out_tx: &mpsc::UnboundedSender<IpcMessage>) {
     let conn_id = cfg.id.clone();
     let params = build_dial_params(state, username, &cfg).await;
-    let _ = out_tx.send(IpcMessage::Dial { conn_id, params });
+    let _ = out_tx.send(IpcMessage::Dial { conn_id, params: Box::new(params) });
 }
 
 /// Send `Drop` for `conn_id` through whatever IPC connection is currently up.
@@ -258,8 +316,14 @@ pub async fn send_drop(state: &AppState, conn_id: &str, reason: String) {
 pub async fn dial_current(state: &AppState, username: &str, cfg: NetworkConfig) {
     let out_tx = state.ipc_out.lock().await.clone();
     match out_tx {
-        Some(tx) => dial(state, username, cfg, &tx).await,
-        None => warn!("[{}] Dial requested but no irc-core connection is up yet", cfg.id),
+        Some(tx) => {
+            state.clear_pending_dial(&cfg.id);
+            dial(state, username, cfg, &tx).await
+        }
+        None => {
+            warn!("[{}] Dial requested but no irc-core connection is up yet — queueing for later", cfg.id);
+            state.queue_pending_dial(&cfg.id);
+        }
     }
 }
 

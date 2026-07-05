@@ -162,12 +162,20 @@ async fn persist_channel_key(state: &AppState, username: &str, conn_id: &str, ch
 /// rather than the daemon inventing custom translations for every piece of
 /// state. `dispatch_line` MAY still send things the daemon does not do:
 /// specifically the self-join NAMES/WHO requests (JOIN arm).
+/// `replayed`: true when `line` came from the daemon's Attach-time ring-buffer
+/// replay rather than live off the socket. Almost every arm treats the two
+/// identically (that's the whole point of re-parsing the same wire content),
+/// but a couple of side effects are only correct once per real-world event —
+/// see the 432/433/436 and JOIN arms — and must not re-fire just because a
+/// reattach re-shows a line the web process already processed before it
+/// restarted.
 pub async fn dispatch_line(
     state: &AppState,
     username: &str,
     conn_id: &str,
     conn: &Arc<Mutex<IrcConnection>>,
     line: &str,
+    replayed: bool,
 ) -> anyhow::Result<()> {
     let p = parse_irc(line);
     // Prefer IRCv3 server-time tag when available
@@ -246,7 +254,14 @@ pub async fn dispatch_line(
         // server's message (e.g. "Nickname is already in use") and keep the user's
         // current nick — NOT silently switch it.
         "432" | "433" | "436" => {
-            if conn.lock().await.registered {
+            // `!replayed` guard: on a reattach, SessionSync sets `registered=true`
+            // BEFORE the ring buffer replays history, so a replayed 432/433/436
+            // from the ORIGINAL registration burst (routine nick-collision retry,
+            // long since resolved) would otherwise take this branch and show a
+            // spurious "Nickname is already in use" error on every reattach even
+            // though nothing is wrong. A live occurrence (real `/nick` collision
+            // after registration) always has `replayed==false`, so it still shows.
+            if !replayed && conn.lock().await.registered {
                 // Show whatever the server said, in the status window (same as the
                 // default numeric handler) instead of auto-changing the nick.
                 let text = if p.params.len() > 1 {
@@ -366,7 +381,11 @@ pub async fn dispatch_line(
             // per-channel log dir on disk. Track whether we accepted this channel so
             // we can skip the NAMES + log bookkeeping when over the cap.
             // `accepted` = this JOIN should be persisted/echoed;
-            // `is_self_join` = it was our own JOIN and we should issue NAMES.
+            // `is_self_join` = it was our own JOIN and we should issue NAMES;
+            // `is_self` = it's our nick regardless of already-tracked status
+            // (used below to suppress a REPLAYED duplicate of our own join log/
+            // event — see the `replayed` check after this block).
+            let is_self = nick == conn.lock().await.nick;
             let (accepted, is_self_join) = {
                 let mut c = conn.lock().await;
                 let chan_key = irc_lower(&channel); // #92
@@ -422,9 +441,21 @@ pub async fn dispatch_line(
                 }
                 conn.lock().await.send_raw(&format!("WHO {}\r\n", strip_crlf(&channel))).await?;
             }
+            // Reattach replays SessionSync (which stubs in every channel the
+            // daemon says we're currently in) BEFORE the ring buffer replays
+            // history — so a replayed copy of our OWN original self-JOIN for a
+            // channel we're still in ALWAYS lands here as "already tracked"
+            // (is_self_join==false), even though it was already logged once
+            // when it first happened live. Suppress just that specific
+            // replay-of-our-own-join duplicate; a genuinely LIVE repeated
+            // self-JOIN (the #43 abuse case above) still logs normally since
+            // `replayed` is false for it, and another user's join replayed
+            // after an outage still logs (that's its first-ever processing,
+            // not a duplicate — this web process was down when it happened).
+            let suppress_replay_dup = replayed && is_self && !is_self_join;
             // Persist for log replay (Lounge-style condense after refresh) —
             // skipped for channels rejected by the cap to bound disk/inode growth.
-            if accepted {
+            if accepted && !suppress_replay_dup {
                 let mut join_text = format!("→ {} joined", nick);
                 if !account.is_empty() && account != "*" { join_text.push_str(&format!(" ({})", account)); }
                 if !realname.is_empty()                  { join_text.push_str(&format!(" — {}", realname)); }
@@ -432,7 +463,7 @@ pub async fn dispatch_line(
             }
             // #43: don't surface a JOIN for a channel we refused to track
             // (a cap-rejected forged self-JOIN) — keep client and server state in sync.
-            if accepted {
+            if accepted && !suppress_replay_dup {
                 send(ServerEvent::IrcJoinEx {
                     conn_id: conn_id.to_string(), nick, channel,
                     account, realname, ts,

@@ -203,8 +203,8 @@ pub fn parse_irc(line: &str) -> IrcLine {
     let mut rest = line;
     // IRCv3 message tags: @key=value;key2=value2
     let mut tags = HashMap::new();
-    if rest.starts_with('@') {
-        let (tag_str, r) = rest[1..].split_once(' ').unwrap_or((&rest[1..], ""));
+    if let Some(rest2) = rest.strip_prefix('@') {
+        let (tag_str, r) = rest2.split_once(' ').unwrap_or((rest2, ""));
         // #91: cap the number of parsed tags. The IRCv3 spec limits a tag section to
         // 8191 bytes; a malicious server could still pack thousands of tiny tags per
         // line to churn allocations. Real servers send a handful.
@@ -222,14 +222,14 @@ pub fn parse_irc(line: &str) -> IrcLine {
         rest = r;
     }
     let mut prefix = None;
-    if rest.starts_with(':') {
-        let (p, r) = rest[1..].split_once(' ').unwrap_or((&rest[1..], ""));
+    if let Some(rest2) = rest.strip_prefix(':') {
+        let (p, r) = rest2.split_once(' ').unwrap_or((rest2, ""));
         prefix = Some(p.to_string()); rest = r;
     }
     let mut params = Vec::new();
     let (cmd_part, mut remaining) = rest.split_once(' ').unwrap_or((rest, ""));
     while !remaining.is_empty() {
-        if remaining.starts_with(':') { params.push(remaining[1..].to_string()); break; }
+        if let Some(rest2) = remaining.strip_prefix(':') { params.push(rest2.to_string()); break; }
         match remaining.split_once(' ') {
             Some((t, r)) => { params.push(t.to_string()); remaining = r; }
             None         => { params.push(remaining.to_string()); break; }

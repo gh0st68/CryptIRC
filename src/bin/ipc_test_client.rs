@@ -58,7 +58,7 @@ async fn main() {
         let json = std::fs::read_to_string(params_path).unwrap_or_else(|e| panic!("read {}: {}", params_path, e));
         let params: DialParams = serde_json::from_str(&json).unwrap_or_else(|e| panic!("parse {}: {}", params_path, e));
         println!(">> Dial {{ conn_id: {:?}, server: {}:{} }}", conn_id, params.server, params.port);
-        out_tx.send(IpcMessage::Dial { conn_id, params }).ok();
+        out_tx.send(IpcMessage::Dial { conn_id, params: Box::new(params) }).ok();
     }
 
     // Simple stdin command loop: "send <conn_id> <line...>" / "drop <conn_id> <reason...>" / "quit"

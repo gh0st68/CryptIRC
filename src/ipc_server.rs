@@ -60,7 +60,7 @@ impl ConnCache {
             echo_message_enabled: self.echo_message_enabled,
         });
         for line in &self.ring {
-            out.push(IpcMessage::RawLine { conn_id: conn_id.to_string(), line: line.clone() });
+            out.push(IpcMessage::RawLine { conn_id: conn_id.to_string(), line: line.clone(), replayed: true });
         }
         out
     }
@@ -143,9 +143,20 @@ async fn accept_client(stream: UnixStream, daemon: Arc<Daemon>) {
         }
     });
 
+    // Gate the reader behind a oneshot so it cannot process even its very
+    // first frame (this client's own `Attach`) until AFTER this client has
+    // been installed as `current_client` below. Without this gate, a
+    // `tokio::spawn`'d reader can get scheduled and start running before the
+    // current_client swap section below runs — a live event racing that
+    // window would resolve `current_client` to the OLD (about-to-be-
+    // superseded) client instead of this one, either misdelivering or
+    // losing it. See `update_cache_and_forward`'s doc comment for the
+    // matching fix on the cache-write side of this same race.
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
     let daemon_for_reader = daemon.clone();
     let out_tx_for_reader = out_tx.clone();
     let reader_task = tokio::spawn(async move {
+        if start_rx.await.is_err() { return; } // accept_client gave up before releasing us
         loop {
             match read_frame(&mut read_half).await {
                 Ok(Some(msg)) => handle_message(msg, &daemon_for_reader, &out_tx_for_reader).await,
@@ -157,12 +168,18 @@ async fn accept_client(stream: UnixStream, daemon: Arc<Daemon>) {
 
     // Supersede any prior client — abort its tasks (closing its socket
     // halves) before installing this one. Held only long enough to swap.
-    let mut current = daemon.current_client.lock().await;
-    if let Some(prev) = current.take() {
-        prev.reader_task.abort();
-        prev.writer_task.abort();
+    {
+        let mut current = daemon.current_client.lock().await;
+        if let Some(prev) = current.take() {
+            prev.reader_task.abort();
+            prev.writer_task.abort();
+        }
+        *current = Some(CurrentClient { out_tx, reader_task, writer_task });
     }
-    *current = Some(CurrentClient { out_tx, reader_task, writer_task });
+    // Only now release the reader — current_client already correctly points
+    // at this client, so its first frame (Attach) and any live event racing
+    // it resolve unambiguously instead of racing the swap above.
+    let _ = start_tx.send(());
 }
 
 async fn handle_message(msg: IpcMessage, daemon: &Arc<Daemon>, out_tx: &mpsc::UnboundedSender<IpcMessage>) {
@@ -187,7 +204,7 @@ async fn handle_message(msg: IpcMessage, daemon: &Arc<Daemon>, out_tx: &mpsc::Un
                 warn!("[{}] Dial ignored — daemon already owns this conn_id (reattach uses Attach, not Dial)", conn_id);
                 return;
             }
-            spawn_connection(daemon.clone(), conn_id, params).await;
+            spawn_connection(daemon.clone(), conn_id, *params).await;
         }
 
         IpcMessage::RawSend { conn_id, line } => {
@@ -248,8 +265,7 @@ async fn spawn_connection(daemon: Arc<Daemon>, conn_id: String, params: DialPara
     let cache_for_consumer = cache.clone();
     tokio::spawn(async move {
         while let Some(msg) = emit_rx.recv().await {
-            update_cache(&cache_for_consumer, &msg).await;
-            daemon_for_consumer.forward_live(msg).await;
+            update_cache_and_forward(&cache_for_consumer, &daemon_for_consumer, msg).await;
         }
     });
 
@@ -262,13 +278,31 @@ async fn spawn_connection(daemon: Arc<Daemon>, conn_id: String, params: DialPara
 }
 
 /// Keep the conn_id's cache in sync with everything the connection task
-/// emits: ring-buffer the forwarded lines, track the last known nick/channel/
-/// lag snapshot, and downgrade connected/registered on any lifecycle event
-/// that means the socket isn't currently up — so a fresh `Attach` mid-outage
-/// reports accurate state instead of a stale "still connected".
-async fn update_cache(cache: &Arc<Mutex<ConnCache>>, msg: &IpcMessage) {
+/// emits (ring-buffer the forwarded lines, track the last known nick/channel/
+/// lag snapshot, downgrade connected/registered on any lifecycle event that
+/// means the socket isn't currently up), THEN forward the message live —
+/// all under the SAME cache-lock hold.
+///
+/// This used to be two separate calls (`update_cache(...).await` then
+/// `daemon.forward_live(msg).await`), each independently locking/unlocking.
+/// That left a window where a concurrent `Attach`'s replay (which also locks
+/// this same cache to build its snapshot, see `replay_messages`) could run
+/// between the two: the line would already be in the ring (so the replay
+/// includes it) AND then also get delivered live — a double delivery to
+/// whichever client the Attach just installed as current. Holding the cache
+/// lock across both steps makes "this line is in the ring" and "this line
+/// was (or wasn't) live-forwarded" a single atomic fact from a concurrent
+/// Attach's point of view: either the whole push-then-forward already
+/// happened before the Attach's replay snapshot (line is in the ring, was
+/// forwarded to whoever was current AT THAT MOMENT — not necessarily this
+/// Attach's new client) or it happens after (line isn't in the replay
+/// snapshot, forward_live's `current_client` lookup — by then already
+/// updated to the new client, since `accept_client` installs it before its
+/// reader can process the `Attach` that triggers this replay — delivers it
+/// live exactly once). Either way, the newly-attached client sees it once.
+async fn update_cache_and_forward(cache: &Arc<Mutex<ConnCache>>, daemon: &Arc<Daemon>, msg: IpcMessage) {
     let mut c = cache.lock().await;
-    match msg {
+    match &msg {
         IpcMessage::RawLine { line, .. } => c.push_line(line.clone()),
         IpcMessage::SessionSync { nick, channels, registered, connected, lag_ms, message_tags, echo_message_enabled, .. } => {
             c.nick = nick.clone();
@@ -288,4 +322,8 @@ async fn update_cache(cache: &Arc<Mutex<ConnCache>>, msg: &IpcMessage) {
         },
         _ => {}
     }
+    // Deliberately still holding `c` (the cache lock) across this send — see
+    // the function doc comment for why that's what closes the race.
+    daemon.forward_live(msg).await;
+    drop(c);
 }
