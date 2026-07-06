@@ -58,18 +58,32 @@ if [[ "$SKIP_BACKUP" == "false" ]]; then
 
     echo -e "${BOLD}Backing up data...${NC}"
     # The backup bundles Argon2 hashes, vaults and admin_settings (reg code) — create it
-    # 0600 (umask), not world-readable. And a FAILED backup must ABORT: it's the only
-    # safety net before we swap the binary, so continuing would defeat its whole purpose.
-    # --exclude the irc-core IPC socket: it's a live endpoint, not user data, and
-    # GNU tar exits 1 (not 0) when it has to skip a socket ("socket ignored"),
-    # which this script would otherwise misread as a real backup failure.
-    if (umask 0077; tar czf "$BACKUP_FILE" --exclude='irc-core.sock' -C "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")" 2>/dev/null); then
+    # 0600 (umask), not world-readable. A genuinely FAILED backup must ABORT: it's the
+    # only safety net before we swap the binary, so continuing would defeat its purpose.
+    #
+    # BUT distinguish tar's exit codes — misreading a benign warning as failure made
+    # a busy server permanently un-updatable:
+    #   0  = clean.
+    #   1  = WARNINGS only: a file changed WHILE being read (a live chat log written
+    #        during the backup — guaranteed on any active server) or a skipped socket
+    #        (the excluded irc-core.sock). The archive is still complete and valid for
+    #        every other file, so this MUST NOT abort.
+    #   2+ = a real fatal error (out of space, missing path, permission) → abort.
+    # We also require the archive to be non-empty (-s) as a floor against a 0-byte/
+    # truncated write that somehow still returned 0/1.
+    # --exclude the irc-core IPC socket: it's a live endpoint, not user data.
+    tar_rc=0
+    (umask 0077; tar czf "$BACKUP_FILE" --exclude='irc-core.sock' \
+        -C "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")" 2>/dev/null) || tar_rc=$?
+    if [[ ( "$tar_rc" -eq 0 || "$tar_rc" -eq 1 ) && -s "$BACKUP_FILE" ]]; then
         BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
         echo -e "  ${GREEN}✓ Backup saved:${NC} $BACKUP_FILE (${BACKUP_SIZE})"
+        [[ "$tar_rc" -eq 1 ]] && echo -e "  ${DIM}(some files changed while being read — normal on a live server; the backup is still complete)${NC}"
     else
         rm -f "$BACKUP_FILE"
-        echo -e "  ${RED}✗ Backup failed — aborting update; nothing was changed.${NC}"
-        echo -e "  ${DIM}Check free space (df -h /var/lib) and that /var/lib/cryptirc exists, then retry.${NC}"
+        echo -e "  ${RED}✗ Backup failed (tar exit ${tar_rc}) — aborting update; nothing was changed.${NC}"
+        echo -e "  ${DIM}Check free space (df -h $(dirname "$DATA_DIR")) and that $DATA_DIR exists, then retry.${NC}"
+        echo -e "  ${DIM}To update without a backup this once: sudo bash deploy/update.sh --no-backup${NC}"
         exit 1
     fi
 
