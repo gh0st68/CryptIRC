@@ -13617,7 +13617,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.39';
+const CRYPTIRC_VERSION='0.3.40';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13625,6 +13625,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.40', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed the new Bots panel not opening when clicked (a missing style rule kept the window hidden). It opens correctly now.'},
+  ]},
   {version:'0.3.39', date:'July 2026', items:[
     {tag:'new', text:'New Bots panel (Settings ▸ Bots): built-in Weather (!w) and Urban Dictionary (!ud) bots that run on the server 24/7 and answer from your nick even when your app is closed. Choose who can use each — everyone, specific nicks/hosts, or private (just you via /w and /ud). Everything is off by default. More bot tools (auto-op/voice, flood & spam protection) coming next.'},
   ]},

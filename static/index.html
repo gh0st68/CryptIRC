@@ -3417,6 +3417,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </div>
 <style>
 #admin-overlay.show{display:flex !important;}
+#bot-overlay.show{display:flex !important;}
 /* ── Admin panel redesign — ops console for an encrypted server ───────── */
 #admin-body{font-family:var(--sans)}
 .adm-stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
@@ -3476,8 +3477,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 .adm-add{display:flex;flex-direction:column;gap:10px}
 .adm-add label{display:block;font-size:10px;color:var(--text3);margin-bottom:4px}
 @media (max-width: 600px) {
-  #admin-overlay > div { width:100% !important;max-width:100% !important;border-radius:0 !important;max-height:100dvh !important;height:100dvh !important;padding-top:var(--sat);padding-bottom:var(--sab);padding-left:var(--sal);padding-right:var(--sar);box-sizing:border-box; }
-  #admin-body { padding:13px !important; }
+  #admin-overlay > div, #bot-overlay > div { width:100% !important;max-width:100% !important;border-radius:0 !important;max-height:100dvh !important;height:100dvh !important;padding-top:var(--sat);padding-bottom:var(--sab);padding-left:var(--sal);padding-right:var(--sar);box-sizing:border-box; }
+  #admin-body, #bot-body { padding:13px !important; }
   .adm-stat { flex-basis:calc(50% - 4px); }
   .adm-row { flex-wrap:wrap; }
   .adm-row .adm-in, .adm-row .adm-sel { flex-basis:100%; }
