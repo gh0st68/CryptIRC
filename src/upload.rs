@@ -262,7 +262,10 @@ pub async fn handle_upload(upload_dir: &str, mut multipart: Multipart, max_bytes
         let is_image     = content_type.starts_with("image/");
 
         return Ok(UploadResult {
-            url: format!("{}/files/{}", std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into()), filename),
+            // trim_end_matches('/') so a root install (CRYPTIRC_BASE_PATH="/")
+            // yields "/files/…" and not "//files/…" — a leading "//" breaks the
+            // router (and the client's /files/→/pub/ rewrite → "//pub/…" 404s).
+            url: format!("{}/files/{}", std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into()).trim_end_matches('/'), filename),
             filename,
             original_name,
             size: data.len(),
@@ -988,9 +991,11 @@ pub async fn finalize_chunked_upload(
     };
 
     let content_type = safe_content_type(&ext).to_string();
+    // trim_end_matches('/') so a root install (CRYPTIRC_BASE_PATH="/") yields
+    // "/files/…" not "//files/…" — see the note at the legacy-upload site above.
     let url = format!(
         "{}/files/{}",
-        std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into()),
+        std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into()).trim_end_matches('/'),
         filename
     );
     let now = chrono::Utc::now().timestamp();
@@ -1225,6 +1230,24 @@ pub fn is_image(filename: &str) -> bool {
         ext.as_str(),
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "avif" | "ico"
         | "heic" | "heif" | "bmp" | "tiff" | "tif"
+    )
+}
+
+/// Media types that are safe to serve from the unauthenticated /pub route so a
+/// copied share link actually loads for anyone (link previews, inline video/audio
+/// players). Kept in lockstep with the client's _PUBLIC_MEDIA_EXTS in app.js and
+/// with the extensions safe_content_type knows. Everything NOT listed here
+/// (documents, archives, text, unknown) stays behind the authenticated /files
+/// route — a leaked UUID for those must not be anonymously fetchable.
+pub fn is_public_media(filename: &str) -> bool {
+    if is_image(filename) { return true; }
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    matches!(
+        ext.as_str(),
+        // video
+        "mp4" | "webm" | "mov" | "avi" | "mkv" | "m4v" | "3gp" | "3g2" | "flv" | "wmv"
+        // audio
+        | "mp3" | "ogg" | "wav" | "flac"
     )
 }
 

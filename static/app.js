@@ -4927,6 +4927,20 @@ function _upcFlagHas(id){ return !!_upcFlagLoad()[id]; }
 function _upcFlagClear(id){ const o=_upcFlagLoad(); if(id in o){ delete o[id]; _upcFlagSave(o); } }
 // Send a completed upload's share link to its source chat as a normal message
 // (mirrors the plain-send path: E2E-encrypts when a session/channel key exists,
+// Extensions the server's /pub route serves publicly (mirror of upload.rs
+// is_public_media). Only these get a /pub/ share link that loads for anyone;
+// any other file keeps its authenticated /files/ URL, because a /pub/ link to a
+// non-media file 404s by design (docs/archives stay behind the auth gate).
+const _PUBLIC_MEDIA_EXTS=/\.(jpe?g|png|gif|webp|avif|ico|heic|heif|bmp|tiff?|mp4|webm|mov|avi|mkv|m4v|3gp|3g2|flv|wmv|mp3|ogg|wav|flac)$/i;
+function _pubShareUrl(r){
+  const isMedia=_PUBLIC_MEDIA_EXTS.test(r.filename||r.original_name||'');
+  let path=isMedia?r.url.replace('/files/','/pub/'):r.url;
+  // Collapse a leading double slash defensively: records minted before the
+  // server base-path fix stored "//files/…" (root install), which would make
+  // origin+path a broken "https://host//…". New records are already single-slash.
+  path='/'+path.replace(/^\/+/,'');
+  return location.origin+path;
+}
 // NEVER falls back to plaintext on a blocked DM session), then jump there.
 async function _autoSendUploadLink(id, rec){
   // Prefer the finalize response passed in by the caller: _uploads[id] can be
@@ -4936,8 +4950,7 @@ async function _autoSendUploadLink(id, rec){
   const conn_id=r.source_conn_id, target=r.source_target;
   if(!conn_id||!target||target==='status') return;
   if(!networks.find(n=>n.config.id===conn_id)){ showToast('Upload done — the original chat is gone; the link is in Upload Status'); return; }
-  const pubUrl=r.url.replace('/files/','/pub/');
-  const shareUrl=`${location.origin}${pubUrl}`;
+  const shareUrl=_pubShareUrl(r);
   const isImg=['jpg','jpeg','png','gif','webp','avif','ico','heic','heif','bmp','tiff','tif'].includes((r.filename||'').split('.').pop().toLowerCase());
   const text=isImg?shareUrl:`${r.original_name}: ${shareUrl}`;
   // Encryption failure of ANY kind (blocked sentinel OR an unexpected throw)
@@ -5283,8 +5296,7 @@ function removeUploadRow(id){
 }
 function copyUploadLink(id){
   const r=_uploads[id]; if(!r||!r.url) return;
-  const pubUrl=r.url.replace('/files/','/pub/');
-  const shareUrl=`${location.origin}${pubUrl}`;
+  const shareUrl=_pubShareUrl(r);
   navigator.clipboard?.writeText(shareUrl).then(()=>showToast('Link copied!')).catch(()=>{
     const t=document.createElement('textarea');t.value=shareUrl;document.body.appendChild(t);t.select();
     try{document.execCommand('copy');}catch(_){} document.body.removeChild(t);showToast('Link copied!');
@@ -5292,8 +5304,7 @@ function copyUploadLink(id){
 }
 function insertUploadLink(id){
   const r=_uploads[id]; if(!r||!r.url) return;
-  const pubUrl=r.url.replace('/files/','/pub/');
-  const shareUrl=`${location.origin}${pubUrl}`;
+  const shareUrl=_pubShareUrl(r);
   const isImg=['jpg','jpeg','png','gif','webp','avif','ico','heic','heif','bmp','tiff','tif'].includes((r.filename||'').split('.').pop().toLowerCase());
   const text=isImg?shareUrl:`${r.original_name}: ${shareUrl}`;
   // Switch to the chat this upload was started in (if still around), then
@@ -5440,7 +5451,10 @@ function _uploadStatusLabel(r){
 // see _uploadRevokePreview for the matching cleanup.
 function _uploadThumbHtml(id, r){
   if(r.status==='done' && (r.content_type||'').startsWith('image/') && r.url){
-    return `<img src="${esc(r.url)}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0">`;
+    // Collapse a leading "//" for old root-install records minted before the
+    // base-path fix (r.url was "//files/…"), so the thumbnail still loads.
+    const src=r.url.replace(/^\/+/,'/');
+    return `<img src="${esc(src)}" style="width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0">`;
   }
   if(r.status!=='done'){
     const job=_uploadJobs[id];
@@ -13587,7 +13601,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.36';
+const CRYPTIRC_VERSION='0.3.37';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13595,6 +13609,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.37', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed shared upload links on self-hosted servers running at a domain root: the link came out with a doubled slash (…//pub/…) and 404’d — copied image/video links now work. Also, video and audio share links now load for everyone (the public link route previously served images only, so shared MP4s/clips 404’d); documents and archives still stay behind the login for privacy.'},
+  ]},
   {version:'0.3.36', date:'July 2026', items:[
     {tag:'fix', text:'Fixed the IRC Oper Panel\'s ban commands against real UnrealIRCd syntax: Z-Line required a bare IP instead of a *@ mask (now fixed), Shun was missing its required + prefix, E-Line was missing its required bantypes parameter, Spamfilter was missing its match-method parameter, and the Spamfilter/Opers-Online/Module-List buttons were sending the wrong STATS letters entirely. Added the missing GZ-Line (global IP ban) commands, and removed the non-functional SANICK button (not a real UnrealIRCd command).'},
   ]},

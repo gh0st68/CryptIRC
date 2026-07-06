@@ -778,7 +778,10 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let data_dir   = std::env::var("CRYPTIRC_DATA").unwrap_or_else(|_| "./data".into());
     let upload_dir = format!("{}/uploads", data_dir);
-    let base_url    = std::env::var("CRYPTIRC_BASE_URL").unwrap_or_else(|_| "http://localhost:9000".into());
+    // trim a trailing slash so every `{base_url}/paste/…`, `{base_url}/s/…` and
+    // email link concatenation can't produce a double slash (`https://host//paste/…`)
+    // when a self-hoster sets CRYPTIRC_BASE_URL with a trailing "/".
+    let base_url    = std::env::var("CRYPTIRC_BASE_URL").unwrap_or_else(|_| "http://localhost:9000".into()).trim_end_matches('/').to_string();
     let from_email  = std::env::var("CRYPTIRC_FROM_EMAIL").unwrap_or_else(|_| "noreply@cryptirc.local".into());
     // Load admin settings from disk (persisted), fall back to env vars
     let admin_settings_path = std::path::PathBuf::from(&data_dir).join("admin_settings.json");
@@ -1193,19 +1196,20 @@ async fn serve_file_public(Path(name): Path<String>, State(state): State<AppStat
     let name: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.').collect();
     if name.contains("..") || name.starts_with('.') { return StatusCode::BAD_REQUEST.into_response(); }
     // #2: the unauthenticated /pub route shares the upload dir with the authenticated
-    // /files route. Restrict /pub to IMAGE content only — non-image uploads (documents,
-    // archives, audio/video attachments) must stay behind the /files auth gate so a
-    // leaked UUID filename can't be fetched anonymously. Images are intentionally public
-    // (link previews / inline embeds rely on it).
-    if !upload::is_image(&name) { return StatusCode::NOT_FOUND.into_response(); }
+    // /files route. Restrict /pub to shareable MEDIA (image + video + audio) so a
+    // copied link actually loads for anyone — link previews and inline video/audio
+    // players rely on this. Everything else (documents, archives, text, unknown) stays
+    // behind the /files auth gate so a leaked UUID filename can't be fetched anonymously.
+    if !upload::is_public_media(&name) { return StatusCode::NOT_FOUND.into_response(); }
     let path = std::path::PathBuf::from(&state.upload_dir).join(&name);
     match tokio::fs::read(&path).await {
         Ok(data) => Response::builder()
             .header(header::CONTENT_TYPE, upload::content_type_for(&name))
             .header(header::CACHE_CONTROL, "public, max-age=86400")
             .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-            .header(HeaderName::from_static("content-disposition"),
-                     if upload::is_image(&name) { "inline" } else { "attachment" })
+            // Media is served inline so it previews/plays in the browser rather than
+            // downloading — everything reaching here is public media (gated above).
+            .header(HeaderName::from_static("content-disposition"), "inline")
             .body(Body::from(data))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
