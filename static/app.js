@@ -995,6 +995,15 @@ function wsend(obj){
 function handleEvent(ev) {
   switch(ev.type){
     case 'auth_required': wsend({type:'auth',token:sessionToken||''}); break;
+    case 'bot_config':
+      try{_botCfg=JSON.parse(ev.config||'{}');}catch(_){_botCfg={};}
+      if(document.getElementById('bot-overlay')?.classList.contains('show')) _renderBotPanel(_botCfg);
+      break;
+    case 'bot_result':
+      // Owner's private /w //ud result — show locally in the active buffer only.
+      if(active&&active.conn_id) sysMsg(active.conn_id,active.target,`🤖 ${ev.text}`,'system');
+      else showToast(ev.text||'');
+      break;
     case 'auth_ok':
       currentUser=ev.username;
       // If idle on reconnect, tell server immediately after auth
@@ -4386,6 +4395,13 @@ async function handleInput(raw){
             addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:msg,kind:'privmsg',encrypted:!!wire});
           } else sysMsg(conn_id,target,`No definition found for "${term}"`,'error');
         }catch(e){sysMsg(conn_id,target,`UD lookup failed — https://www.urbandictionary.com/define.php?term=${encodeURIComponent(term)}`,'error');}
+        break;
+      }
+      case 'W': case 'WEATHER': {
+        // Private weather lookup for the owner — routed through the server (wttr.in
+        // is blocked by the browser CSP, and the server-side path also works 24/7).
+        if(!args.length){sysMsg(conn_id,target,'Usage: /w <zip or city, ST> — e.g. /w 90210','error');break;}
+        wsend({type:'bot_query',bot:'weather',query:args.join(' ')});
         break;
       }
       case 'SHORTEN': {
@@ -13601,7 +13617,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.38';
+const CRYPTIRC_VERSION='0.3.39';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13609,6 +13625,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.39', date:'July 2026', items:[
+    {tag:'new', text:'New Bots panel (Settings ▸ Bots): built-in Weather (!w) and Urban Dictionary (!ud) bots that run on the server 24/7 and answer from your nick even when your app is closed. Choose who can use each — everyone, specific nicks/hosts, or private (just you via /w and /ud). Everything is off by default. More bot tools (auto-op/voice, flood & spam protection) coming next.'},
+  ]},
   {version:'0.3.38', date:'July 2026', items:[
     {tag:'new', text:'Admin panel now has a live Server Status card: CPU load/usage, memory and disk usage bars, plus the live memory footprint of both the crypt (web) server and the irc-core daemon — auto-refreshing. Admins only.'},
   ]},
@@ -14115,6 +14134,74 @@ function renderUserDetail(u){
 }
 
 function closeAdminPanel(){if(window._ssTimer){clearInterval(window._ssTimer);window._ssTimer=null;}closeUserDetail();_overlayClose('adminPanel');document.getElementById('admin-overlay').classList.remove('show');}
+
+// ─── Bots panel ───────────────────────────────────────────────────────────────
+// Server-side bots (Weather via wttr.in, Urban Dictionary). Config is synced to
+// the server (stored server-readable so bots run 24/7, vault-independent). This
+// panel only edits the rules; enforcement runs in the web process. Off by default.
+let _botCfg=null;
+function showBotPanel(){
+  const body=document.getElementById('bot-body');
+  body.innerHTML='<div style="color:var(--text3);text-align:center;padding:24px">Loading…</div>';
+  document.getElementById('bot-overlay').classList.add('show');
+  _overlayOpen('botPanel', closeBotPanel);
+  wsend({type:'load_bot_config'});   // server replies with a bot_config event → _renderBotPanel
+}
+function closeBotPanel(){ _overlayClose('botPanel'); document.getElementById('bot-overlay').classList.remove('show'); }
+function _botDefCard(key,title,emoji,def,dtrig,example){
+  def=def||{}; const acc=def.access||'public'; const trig=def.trigger||dtrig;
+  return `
+   <div class="adm-card">
+    <div class="adm-ct">${emoji} ${title}</div>
+    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${def.enabled?' on':''}" data-bot-enable="${key}" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Public trigger</span><input class="adm-in" data-bot-trigger="${key}" value="${esc(trig)}" placeholder="${dtrig}" style="width:120px;flex:0 0 auto;text-align:center"></div>
+    <div class="adm-hint">Anyone allowed below can type e.g. <b>${esc(trig)} ${example}</b> in a channel you're in and you'll answer.</div>
+    <div class="adm-row"><span class="l">Who can use it</span>
+      <select class="adm-sel" data-bot-access="${key}">
+        <option value="public"${acc==='public'?' selected':''}>Everyone</option>
+        <option value="list"${acc==='list'?' selected':''}>Specific users only</option>
+        <option value="private"${acc==='private'?' selected':''}>Private — just me (/${dtrig.replace(/^!/,'')})</option>
+      </select>
+    </div>
+    <div class="adm-row"><span class="l">Allow nicks</span><input class="adm-in" data-bot-nicks="${key}" value="${esc((def.allow_nicks||[]).join(', '))}" placeholder="nick1, nick2"></div>
+    <div class="adm-row"><span class="l">Allow hosts</span><input class="adm-in" data-bot-hosts="${key}" value="${esc((def.allow_hosts||[]).join(', '))}" placeholder="*!*@*.trusted.host"></div>
+    <div class="adm-hint">“Specific users only” matches these nicks or host masks. Ignored when set to Everyone.</div>
+    <div class="adm-row"><span class="l">Only in channels</span><input class="adm-in" data-bot-chans="${key}" value="${esc((def.channels||[]).join(', '))}" placeholder="#chan1, #chan2 — blank = all"></div>
+   </div>`;
+}
+function _renderBotPanel(cfg){
+  _botCfg=cfg||{};
+  const body=document.getElementById('bot-body'); if(!body) return;
+  body.innerHTML=`
+    <div class="adm-card">
+      <div class="adm-row"><span class="l" style="font-weight:700">Bots master switch</span><button class="appear-toggle${cfg.enabled?' on':''}" id="bot-master" onclick="this.classList.toggle('on')"></button></div>
+      <div class="adm-hint">Bots run on the server 24/7 — replies come from your nick even when your app is closed. Everything stays off until you turn it on. Your own private commands (<b>/w</b>, <b>/ud</b>) always work for you regardless of these settings.</div>
+    </div>
+    ${_botDefCard('weather','Weather','🌦',cfg.weather,'!w','90210')}
+    ${_botDefCard('ud','Urban Dictionary','📖',cfg.ud,'!ud','yeet')}
+    <button class="adm-save" style="width:100%;margin-top:4px" onclick="saveBotConfig()">Save bots</button>`;
+}
+function _readBotDef(key){
+  const g=s=>document.querySelector(`[data-bot-${s}="${key}"]`);
+  const list=v=>(v||'').split(',').map(s=>s.trim()).filter(Boolean);
+  return {
+    enabled: g('enable').classList.contains('on'),
+    trigger: (g('trigger').value||'').trim(),
+    access:  g('access').value,
+    allow_nicks: list(g('nicks').value),
+    allow_hosts: list(g('hosts').value),
+    channels:    list(g('chans').value),
+  };
+}
+function saveBotConfig(){
+  const cfg={
+    enabled: document.getElementById('bot-master').classList.contains('on'),
+    weather: _readBotDef('weather'),
+    ud:      _readBotDef('ud'),
+  };
+  wsend({type:'save_bot_config', config:JSON.stringify(cfg)});
+  showToast('Bots saved');
+}
 
 async function adminSaveSettings(){
   const open=document.getElementById('admin-reg-open').classList.contains('on');

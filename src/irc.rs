@@ -333,6 +333,14 @@ pub async fn dispatch_line(
                     notifier.maybe_notify(&u, &un, &cid, &lbl, &tgt, &frm, &txt, ts).await;
                 });
             }
+            // Server-side bot triggers (!w, !ud, …). Only for LIVE channel messages
+            // from someone else — never on history replay, never our own lines
+            // (those are echo-skipped above anyway). maybe_trigger is a cheap
+            // in-memory check; it spawns its own task for any actual fetch/reply.
+            if !replayed && from != user_nick && display_target.starts_with(['#','&','+','!']) {
+                let full_mask = format!("{}!{}", from, userhost_from_prefix(&p.prefix));
+                crate::bots::maybe_trigger(state, username, conn, &display_target, &from, &full_mask, &clean);
+            }
         }
         "NOTICE" => {
             let from   = nick_from_prefix(&p.prefix);

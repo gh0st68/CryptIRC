@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod auth;
+mod bots;
 mod captcha;
 mod certs;
 mod crypto;
@@ -55,6 +56,9 @@ pub type UserEventMap = Arc<DashMap<String, broadcast::Sender<ServerEvent>>>;
 pub struct AppState {
     pub connections:         Arc<DashMap<String, Arc<Mutex<irc::IrcConnection>>>>,
     pub conn_owners:         Arc<DashMap<String, String>>,
+    /// Per-user server-side bot config (Weather/UD triggers). Server-readable so
+    /// bots run 24/7 regardless of vault state. Keyed by username.
+    pub bots:                Arc<DashMap<String, bots::BotConfig>>,
     /// Set of conn_ids that have been explicitly disconnected (suppresses auto-reconnect)
     pub disconnect_requests: Arc<DashSet<String>>,
     /// conn_ids that should be dialed as soon as the irc-core IPC channel comes back up.
@@ -425,6 +429,11 @@ pub enum ClientMessage {
     LoadAppearance    {},
     SavePreferences   { prefs: String },
     LoadPreferences   {},
+    /// Save/replace this user's server-side bot config (JSON of bots::BotConfig).
+    SaveBotConfig     { config: String },
+    LoadBotConfig     {},
+    /// Owner's private bot lookup (e.g. /w, /ud) — result returns only to them.
+    BotQuery          { bot: String, query: String },
     // Account
     DeleteAccount     { password: String },
     // Monitor push
@@ -534,6 +543,10 @@ pub enum ServerEvent {
     E2EX3DHHeader    { from_nick: String, header: serde_json::Value },
     Appearance       { settings: String },
     Preferences      { prefs: String },
+    /// This user's current bot config (JSON) in response to LoadBotConfig.
+    BotConfig        { config: String },
+    /// Result of an owner's private /bot lookup, shown locally in their UI.
+    BotResult        { bot: String, text: String },
     Notepad          { content: String },
     StatsData        { data: String },
     PasswordSafe     { data: String },
@@ -898,9 +911,15 @@ async fn main() -> Result<()> {
     // It contains /cryptirc asset/WS paths, so it needs the same base-path rewrite.
     let static_app_js   = Arc::new(include_str!("../static/app.js").replace("/cryptirc", bp_trimmed).replace("__CRYPTIRC_BUILD__", option_env!("CRYPTIRC_BUILD").unwrap_or("dev")));
 
+    // Load every user's server-side bot config into memory (read on every channel
+    // message, so it can't be a per-message file read). Server-readable → 24/7.
+    let bots = Arc::new(bots::load_all(&data_dir).await);
+    info!("Loaded bot config for {} user(s)", bots.len());
+
     let state = AppState {
         connections:         Arc::new(DashMap::new()),
         conn_owners:         Arc::new(DashMap::new()),
+        bots,
         disconnect_requests: Arc::new(DashSet::new()),
         pending_dials:       Arc::new(DashSet::new()),
         connect_tasks:       Arc::new(DashMap::new()),
@@ -4029,6 +4048,51 @@ async fn handle_command(
             } else {
                 // Vault locked — return empty so client can proceed with defaults.
                 send(ServerEvent::Preferences { prefs: String::new() });
+            }
+        }
+        ClientMessage::SaveBotConfig { config } => {
+            // Bot config is deliberately NOT vault-encrypted (server-readable so the
+            // bots run 24/7 while the vault is locked). Validate + size-cap, persist
+            // to disk, and refresh the in-memory cache the trigger dispatch reads.
+            if config.len() > 65536 {
+                send(ServerEvent::Error { message: "Bot config too large".into() });
+            } else {
+                match serde_json::from_str::<bots::BotConfig>(&config) {
+                    Ok(cfg) => {
+                        match bots::save(&state.data_dir, username, &cfg).await {
+                            Ok(()) => {
+                                state.bots.insert(username.to_string(), cfg);
+                                // Echo the canonical stored form back to all of this
+                                // user's sessions so every device stays in sync.
+                                if let Some(c) = state.bots.get(username) {
+                                    if let Ok(js) = serde_json::to_string(&*c) {
+                                        state.send_to_user(username, ServerEvent::BotConfig { config: js });
+                                    }
+                                }
+                            }
+                            Err(e) => send(ServerEvent::Error { message: format!("Bot config save failed: {}", e) }),
+                        }
+                    }
+                    Err(e) => send(ServerEvent::Error { message: format!("Bot config invalid: {}", e) }),
+                }
+            }
+        }
+        ClientMessage::LoadBotConfig {} => {
+            let js = state.bots.get(username)
+                .and_then(|c| serde_json::to_string(&*c).ok())
+                .unwrap_or_else(|| "{}".to_string());
+            send(ServerEvent::BotConfig { config: js });
+        }
+        ClientMessage::BotQuery { bot, query } => {
+            // Owner's private lookup (/w, /ud). Bounded query; result returns to the
+            // owner's UI only, never a channel. Works regardless of bot enabled state.
+            let q = query.trim();
+            if q.is_empty() || q.len() > 200 {
+                send(ServerEvent::BotResult { bot: bot.clone(), text: "usage: give a location/term".into() });
+            } else if bot == "weather" || bot == "ud" {
+                bots::run_private_query(&state, username, &bot, q);
+            } else {
+                send(ServerEvent::BotResult { bot, text: "unknown bot".into() });
             }
         }
         ClientMessage::SaveNotepad { content } => {
