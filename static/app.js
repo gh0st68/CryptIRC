@@ -4404,6 +4404,37 @@ async function handleInput(raw){
         wsend({type:'bot_query',bot:'weather',query:args.join(' ')});
         break;
       }
+      case 'WIKI': {
+        if(!args.length){sysMsg(conn_id,target,'Usage: /wiki <topic> — private Wikipedia lookup','error');break;}
+        wsend({type:'bot_query',bot:'wiki',query:args.join(' ')});
+        break;
+      }
+      case 'DEFINE': case 'DICT': {
+        if(!args.length){sysMsg(conn_id,target,'Usage: /define <word> — private dictionary lookup','error');break;}
+        wsend({type:'bot_query',bot:'define',query:args.join(' ')});
+        break;
+      }
+      case 'CRYPTO': case 'PRICE': {
+        if(!args.length){sysMsg(conn_id,target,'Usage: /crypto <coin> — e.g. /crypto btc','error');break;}
+        wsend({type:'bot_query',bot:'crypto',query:args.join(' ')});
+        break;
+      }
+      case 'WTIME': {  // /time is CTCP TIME; use /wtime for the world-time bot
+        if(!args.length){sysMsg(conn_id,target,'Usage: /wtime <place> — e.g. /wtime tokyo','error');break;}
+        wsend({type:'bot_query',bot:'time',query:args.join(' ')});
+        break;
+      }
+      case 'CC': case 'CURRENCY': {
+        if(args.length<3){sysMsg(conn_id,target,'Usage: /cc <amount> <from> <to> — e.g. /cc 100 usd eur','error');break;}
+        wsend({type:'bot_query',bot:'cc',query:args.join(' ')});
+        break;
+      }
+      case 'JOKE':  wsend({type:'bot_query',bot:'joke',query:''}); break;
+      case 'QOTD':  wsend({type:'bot_query',bot:'quote',query:''}); break;   // /quote is an alias of /raw
+      case 'FACT':  wsend({type:'bot_query',bot:'fact',query:''}); break;
+      case 'COIN': case 'FLIP': wsend({type:'bot_query',bot:'coin',query:''}); break;
+      case '8BALL': wsend({type:'bot_query',bot:'eightball',query:args.join(' ')}); break;
+      case 'ROLL':  wsend({type:'bot_query',bot:'roll',query:args.join(' ')}); break;
       case 'SHORTEN': {
         const url=args[0];if(!url||(!url.startsWith('http://')&&!url.startsWith('https://'))){sysMsg(conn_id,target,'Usage: /shorten <url>','error');break;}
         try{
@@ -13617,7 +13648,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.40';
+const CRYPTIRC_VERSION='0.3.42';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13625,6 +13656,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.42', date:'July 2026', items:[
+    {tag:'new', text:'The Bots panel now has 13 bots — all free, no API keys, all off by default, each with its own access controls (everyone / specific nicks+hosts / private): 🌦 Weather (!w), 📖 Urban Dictionary (!ud), 📚 Wikipedia (!wiki), 📗 Dictionary (!define), 🪙 Crypto price (!crypto), 🕐 World Time (!time), 💱 Currency (!cc 100 usd eur), 😂 Dad Joke (!joke), 💬 Quote (!quote), 🧠 Random Fact (!fact), 🎱 Magic 8-Ball (!8ball), 🎲 Dice (!roll 2d6) and 🪙 Coin flip (!coin). Weather now also reports condition, feels-like, humidity, wind, precipitation, pressure, UV and sunrise/sunset. Private owner commands too: /w /wiki /define /crypto /wtime /cc /joke /qotd /fact /8ball /roll /coin.'},
+  ]},
   {version:'0.3.40', date:'July 2026', items:[
     {tag:'fix', text:'Fixed the new Bots panel not opening when clicked (a missing style rule kept the window hidden). It opens correctly now.'},
   ]},
@@ -14158,7 +14192,7 @@ function _botDefCard(key,title,emoji,def,dtrig,example){
     <div class="adm-ct">${emoji} ${title}</div>
     <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${def.enabled?' on':''}" data-bot-enable="${key}" onclick="this.classList.toggle('on')"></button></div>
     <div class="adm-row"><span class="l">Public trigger</span><input class="adm-in" data-bot-trigger="${key}" value="${esc(trig)}" placeholder="${dtrig}" style="width:120px;flex:0 0 auto;text-align:center"></div>
-    <div class="adm-hint">Anyone allowed below can type e.g. <b>${esc(trig)} ${example}</b> in a channel you're in and you'll answer.</div>
+    <div class="adm-hint">Anyone allowed below can type <b>${esc(trig)}${example?' '+esc(example):''}</b> in a channel you're in and you'll answer.</div>
     <div class="adm-row"><span class="l">Who can use it</span>
       <select class="adm-sel" data-bot-access="${key}">
         <option value="public"${acc==='public'?' selected':''}>Everyone</option>
@@ -14182,6 +14216,17 @@ function _renderBotPanel(cfg){
     </div>
     ${_botDefCard('weather','Weather','🌦',cfg.weather,'!w','90210')}
     ${_botDefCard('ud','Urban Dictionary','📖',cfg.ud,'!ud','yeet')}
+    ${_botDefCard('wiki','Wikipedia','📚',cfg.wiki,'!wiki','black holes')}
+    ${_botDefCard('define','Dictionary','📗',cfg.define,'!define','serendipity')}
+    ${_botDefCard('crypto','Crypto Price','🪙',cfg.crypto,'!crypto','btc')}
+    ${_botDefCard('time','World Time','🕐',cfg.time,'!time','tokyo')}
+    ${_botDefCard('cc','Currency','💱',cfg.cc,'!cc','100 usd eur')}
+    ${_botDefCard('joke','Dad Joke','😂',cfg.joke,'!joke','')}
+    ${_botDefCard('quote','Quote','💬',cfg.quote,'!quote','')}
+    ${_botDefCard('fact','Random Fact','🧠',cfg.fact,'!fact','')}
+    ${_botDefCard('eightball','Magic 8-Ball','🎱',cfg.eightball,'!8ball','will it rain?')}
+    ${_botDefCard('roll','Dice Roll','🎲',cfg.roll,'!roll','2d6')}
+    ${_botDefCard('coin','Coin Flip','🪙',cfg.coin,'!coin','')}
     <button class="adm-save" style="width:100%;margin-top:4px" onclick="saveBotConfig()">Save bots</button>`;
 }
 function _readBotDef(key){
@@ -14199,8 +14244,19 @@ function _readBotDef(key){
 function saveBotConfig(){
   const cfg={
     enabled: document.getElementById('bot-master').classList.contains('on'),
-    weather: _readBotDef('weather'),
-    ud:      _readBotDef('ud'),
+    weather:   _readBotDef('weather'),
+    ud:        _readBotDef('ud'),
+    wiki:      _readBotDef('wiki'),
+    define:    _readBotDef('define'),
+    crypto:    _readBotDef('crypto'),
+    time:      _readBotDef('time'),
+    cc:        _readBotDef('cc'),
+    joke:      _readBotDef('joke'),
+    quote:     _readBotDef('quote'),
+    fact:      _readBotDef('fact'),
+    eightball: _readBotDef('eightball'),
+    roll:      _readBotDef('roll'),
+    coin:      _readBotDef('coin'),
   };
   wsend({type:'save_bot_config', config:JSON.stringify(cfg)});
   showToast('Bots saved');

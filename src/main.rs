@@ -4087,9 +4087,13 @@ async fn handle_command(
             // Owner's private lookup (/w, /ud). Bounded query; result returns to the
             // owner's UI only, never a channel. Works regardless of bot enabled state.
             let q = query.trim();
-            if q.is_empty() || q.len() > 200 {
+            // These bots work with no argument (joke/quote/fact/coin/8ball/roll).
+            let no_arg = matches!(bot.as_str(), "joke" | "quote" | "fact" | "coin" | "eightball" | "roll");
+            if q.len() > 200 || (q.is_empty() && !no_arg) {
                 send(ServerEvent::BotResult { bot: bot.clone(), text: "usage: give a location/term".into() });
-            } else if bot == "weather" || bot == "ud" {
+            } else if matches!(bot.as_str(),
+                "weather" | "ud" | "wiki" | "define" | "crypto"
+                | "time" | "cc" | "joke" | "quote" | "fact" | "eightball" | "roll" | "coin") {
                 bots::run_private_query(&state, username, &bot, q);
             } else {
                 send(ServerEvent::BotResult { bot, text: "unknown bot".into() });
