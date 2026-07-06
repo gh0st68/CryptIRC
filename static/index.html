@@ -3419,6 +3419,24 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 .adm-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
 .adm-row .l{font-size:13px;color:var(--text)}
 .adm-hint{font-size:10px;color:var(--text3);margin:-4px 0 10px;line-height:1.45}
+/* ── Admin ▸ Server Status ── */
+.ss-grid{display:flex;flex-direction:column;gap:14px}
+.ss-metric .ss-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:10px}
+.ss-metric .ss-name{font-size:12.5px;color:var(--text);font-weight:600;display:flex;align-items:center;gap:7px}
+.ss-metric .ss-val{font-family:var(--mono);font-size:12px;color:var(--text2);white-space:nowrap}
+.ss-bar{height:8px;border-radius:6px;background:var(--bg3);overflow:hidden;border:1px solid var(--border)}
+.ss-fill{height:100%;border-radius:6px;transition:width .6s cubic-bezier(.4,0,.2,1),background .6s ease}
+.ss-sub{font-size:10px;color:var(--text3);margin-top:5px;font-family:var(--mono);letter-spacing:.01em}
+.ss-procs{display:flex;gap:9px;margin-top:2px}
+.ss-proc{flex:1 1 0;min-width:0;background:linear-gradient(180deg,var(--bg2),var(--bg3));border:1px solid var(--border);border-radius:12px;padding:13px 12px}
+.ss-proc .ss-pn{font-size:9.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-proc .ss-pv{font-family:var(--mono);font-size:21px;font-weight:700;color:var(--accent);margin-top:7px;line-height:1;letter-spacing:-.02em}
+.ss-proc .ss-pm{font-size:9.5px;color:var(--text3);margin-top:4px;font-family:var(--mono)}
+.ss-dot{width:7px;height:7px;border-radius:50%;background:#3fb950;box-shadow:0 0 6px #3fb95099;flex:0 0 auto}
+.ss-dot.off{background:#f85149;box-shadow:0 0 6px #f8514999}
+.ss-chips{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}
+.ss-chip{font-size:10.5px;color:var(--text2);background:var(--bg3);border:1px solid var(--border);border-radius:20px;padding:5px 11px}
+.ss-chip b{color:var(--text);font-family:var(--mono);font-weight:700}
 .adm-in{flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--mono);font-size:13px;padding:9px 11px;outline:none;box-sizing:border-box;transition:border-color .15s}
 .adm-in:focus,.adm-sel:focus{border-color:var(--accent)}
 .adm-sel{flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:8px;outline:none;transition:border-color .15s}

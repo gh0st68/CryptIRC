@@ -35,6 +35,7 @@ mod logs;
 mod notifications;
 mod paste;
 mod preview;
+mod sysstatus;
 mod upload;
 
 use cryptirc::ircproto::strip_crlf;
@@ -1045,6 +1046,7 @@ async fn main() -> Result<()> {
         .route("/auth/lastfm",           post(route_set_lastfm).layer(DefaultBodyLimit::max(4_096)))
         .route("/api/lastfm/np",         get(route_lastfm_np))
         .route("/admin/users",           get(route_admin_users))
+        .route("/admin/status",          get(route_admin_status))
         .route("/admin/user/:username",  axum::routing::delete(route_admin_delete_user))
         .route("/admin/user/:username/disable", post(route_admin_disable_user))
         .route("/admin/user/:username/approve", post(route_admin_approve_user))
@@ -1307,6 +1309,20 @@ async fn route_admin_users(State(state): State<AppState>, headers: HeaderMap) ->
         return StatusCode::FORBIDDEN.into_response();
     }
     Json(state.auth.list_users().await).into_response()
+}
+
+// Read-only host + process metrics for the admin Server Status panel. Admin-gated
+// like the other /admin routes. Reads /proc + statvfs in THIS process only — never
+// contacts or restarts the irc-core daemon (it just reads the daemon's /proc RSS).
+async fn route_admin_status(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(user) = extract_session_user(&state, &headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !state.auth.is_admin(&user).await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let status = sysstatus::collect(&state.data_dir, state.connections.len()).await;
+    Json(status).into_response()
 }
 
 async fn route_admin_delete_user(State(state): State<AppState>, headers: HeaderMap, Path(target): Path<String>) -> impl IntoResponse {

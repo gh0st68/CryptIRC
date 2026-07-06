@@ -13601,7 +13601,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.37';
+const CRYPTIRC_VERSION='0.3.38';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13609,6 +13609,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.38', date:'July 2026', items:[
+    {tag:'new', text:'Admin panel now has a live Server Status card: CPU load/usage, memory and disk usage bars, plus the live memory footprint of both the crypt (web) server and the irc-core daemon — auto-refreshing. Admins only.'},
+  ]},
   {version:'0.3.37', date:'July 2026', items:[
     {tag:'fix', text:'Fixed shared upload links on self-hosted servers running at a domain root: the link came out with a doubled slash (…//pub/…) and 404’d — copied image/video links now work. Also, video and audio share links now load for everyone (the public link route previously served images only, so shared MP4s/clips 404’d); documents and archives still stay behind the login for privacy.'},
   ]},
@@ -13853,6 +13856,73 @@ async function checkAdmin(){
   }catch(e){}
 }
 
+// ── Admin ▸ Server Status ─────────────────────────────────────────────────────
+// Live host + process metrics (CPU/mem/disk + web & irc-core RSS). Fetched from
+// the admin-only /admin/status endpoint (reads /proc + statvfs server-side; never
+// touches the daemon). Auto-refreshes every few seconds while the panel is open.
+function _ssColor(p){ p=p||0; return p<70?'#3fb950':(p<90?'#d29922':'#f85149'); }
+function _ssBar(pct){
+  const p=Math.min(100,Math.max(0,+pct||0));
+  return `<div class="ss-bar"><div class="ss-fill" style="width:${p}%;background:${_ssColor(p)}"></div></div>`;
+}
+function _ssGB(bytes){ return (( +bytes||0)/1073741824).toFixed(1); }
+function _ssMB(kb){ return Math.round((+kb||0)/1024).toLocaleString(); }
+function _ssUptime(s){
+  s=+s||0; const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  if(d>0) return `${d}d ${h}h ${m}m`;
+  if(h>0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+function _ssInnerHtml(st){
+  if(!st) return `<div class="ss-metric"><div class="ss-sub" style="color:var(--text3)">Server status unavailable.</div></div>`;
+  const cpu=st.cpu||{}, mem=st.memory||{}, disk=st.disk||{}, web=st.web||{}, dae=st.daemon||{};
+  const cpuVal = cpu.usage_pct!=null ? `${cpu.usage_pct}%` : `load ${(+cpu.load1||0).toFixed(2)}`;
+  const cpuPct = cpu.usage_pct!=null ? cpu.usage_pct : Math.min(100,(+cpu.load1||0)/Math.max(1,cpu.cores||1)*100);
+  return `
+    <div class="adm-ct">Server status</div>
+    <div class="ss-grid">
+      <div class="ss-metric">
+        <div class="ss-head"><span class="ss-name">⚙️ CPU</span><span class="ss-val">${cpuVal}</span></div>
+        ${_ssBar(cpuPct)}
+        <div class="ss-sub">load ${(+cpu.load1||0).toFixed(2)} · ${(+cpu.load5||0).toFixed(2)} · ${(+cpu.load15||0).toFixed(2)}  —  ${cpu.cores||'?'} cores</div>
+      </div>
+      <div class="ss-metric">
+        <div class="ss-head"><span class="ss-name">🧠 Memory</span><span class="ss-val">${_ssGB((mem.used_kb||0)*1024)} / ${_ssGB((mem.total_kb||0)*1024)} GB</span></div>
+        ${_ssBar(mem.used_pct)}
+        <div class="ss-sub">${mem.used_pct||0}% used · ${_ssGB((mem.available_kb||0)*1024)} GB available</div>
+      </div>
+      <div class="ss-metric">
+        <div class="ss-head"><span class="ss-name">💾 Disk</span><span class="ss-val">${_ssGB(disk.used_bytes)} / ${_ssGB(disk.total_bytes)} GB</span></div>
+        ${_ssBar(disk.used_pct)}
+        <div class="ss-sub">${disk.used_pct||0}% used · ${_ssGB(disk.free_bytes)} GB free</div>
+      </div>
+      <div class="ss-procs">
+        <div class="ss-proc">
+          <div class="ss-pn"><span class="ss-dot${web.running?'':' off'}"></span>Crypt server</div>
+          <div class="ss-pv">${web.rss_kb!=null?_ssMB(web.rss_kb):'—'}<span style="font-size:11px;color:var(--text3);font-weight:600"> MB</span></div>
+          <div class="ss-pm"><span style="color:${web.running?'#3fb950':'#f85149'};font-weight:700">${web.running?'Online':'Offline'}</span>${web.running&&web.uptime_secs!=null?' · up '+_ssUptime(web.uptime_secs):''} · pid ${web.pid||'?'}</div>
+        </div>
+        <div class="ss-proc">
+          <div class="ss-pn"><span class="ss-dot${dae.running?'':' off'}"></span>IRC daemon</div>
+          <div class="ss-pv">${dae.rss_kb!=null?_ssMB(dae.rss_kb):(dae.running?'—':'—')}<span style="font-size:11px;color:var(--text3);font-weight:600">${dae.rss_kb!=null?' MB':''}</span></div>
+          <div class="ss-pm"><span style="color:${dae.running?'#3fb950':'#f85149'};font-weight:700">${dae.running?'Online':'Offline'}</span>${dae.running&&dae.uptime_secs!=null?' · up '+_ssUptime(dae.uptime_secs):''} · ${dae.pid?('pid '+dae.pid):'not found'}</div>
+        </div>
+      </div>
+      <div class="ss-chips">
+        <span class="ss-chip">Host uptime <b>${_ssUptime(st.uptime_secs)}</b></span>
+        <span class="ss-chip">IRC conns <b>${st.irc_connections||0}</b></span>
+        <span class="ss-chip">Version <b>${esc(st.version||'')}</b></span>
+      </div>
+    </div>`;
+}
+async function _ssRefresh(){
+  const card=document.getElementById('ss-card');
+  if(!card){ if(window._ssTimer){clearInterval(window._ssTimer);window._ssTimer=null;} return; }
+  try{
+    const r=await fetch('/cryptirc/admin/status',{headers:{'Authorization':'Bearer '+sessionToken}});
+    if(r.ok){ card.innerHTML=_ssInnerHtml(await r.json()); }
+  }catch(_){}
+}
 async function showAdminPanel(){
   const body=document.getElementById('admin-body');
   body.innerHTML='<div style="color:var(--text3);text-align:center;padding:24px">Loading…</div>';
@@ -13867,6 +13937,8 @@ async function showAdminPanel(){
     const users=ur.ok?await ur.json():[];
     const lpR=await fetch('/cryptirc/admin/link-preview',hdr);
     const lp=lpR.ok?await lpR.json():{mode:'whitelist',whitelist:[]};
+    const stR=await fetch('/cryptirc/admin/status',hdr);
+    const st=stR.ok?await stR.json():null;
     window._adm={users,settings,lp};
 
     const online=users.filter(u=>u.sessions>0).length;
@@ -13879,6 +13951,8 @@ async function showAdminPanel(){
     const lfmPh=settings.lastfm_key_set?`${esc(settings.lastfm_key_masked||'')} — leave blank to keep`:'Paste a Last.fm API key (optional)';
 
     body.innerHTML=`
+      <div class="adm-card" id="ss-card">${_ssInnerHtml(st)}</div>
+
       <div class="adm-stats">
         <div class="adm-stat"><b>${users.length}</b><span>users</span></div>
         <div class="adm-stat"><b>${online}</b><span>online</span></div>
@@ -13970,6 +14044,9 @@ async function showAdminPanel(){
       const u=du && users.find(x=>x.username===du);
       if(u) renderUserDetail(u); else closeUserDetail();
     }
+    // Live-refresh the server-status card while the panel is open (cleared on close).
+    if(window._ssTimer) clearInterval(window._ssTimer);
+    window._ssTimer=setInterval(_ssRefresh,4000);
   }catch(e){
     body.innerHTML='<div style="color:var(--error);padding:24px;text-align:center">Couldn\'t load admin data. Try again.</div>';
   }
@@ -14037,7 +14114,7 @@ function renderUserDetail(u){
     </div>`;
 }
 
-function closeAdminPanel(){closeUserDetail();_overlayClose('adminPanel');document.getElementById('admin-overlay').classList.remove('show');}
+function closeAdminPanel(){if(window._ssTimer){clearInterval(window._ssTimer);window._ssTimer=null;}closeUserDetail();_overlayClose('adminPanel');document.getElementById('admin-overlay').classList.remove('show');}
 
 async function adminSaveSettings(){
   const open=document.getElementById('admin-reg-open').classList.contains('on');
