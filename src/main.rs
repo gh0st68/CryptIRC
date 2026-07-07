@@ -22,6 +22,7 @@ use tokio::sync::{broadcast, Mutex, Semaphore};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+mod ai;
 mod auth;
 mod bots;
 mod captcha;
@@ -432,8 +433,16 @@ pub enum ClientMessage {
     /// Save/replace this user's server-side bot config (JSON of bots::BotConfig).
     SaveBotConfig     { config: String },
     LoadBotConfig     {},
-    /// Owner's private bot lookup (e.g. /w, /ud) — result returns only to them.
-    BotQuery          { bot: String, query: String },
+    /// Owner's private bot lookup (e.g. /w, /ud, /ai) — result returns only to them.
+    /// `conn_id` (optional) is the active connection, so /ai can build IRC awareness.
+    BotQuery          { bot: String, query: String, #[serde(default)] conn_id: String, #[serde(default)] channel: String },
+    /// Save/remove the AI bot's API key for one provider (vault-encrypted at rest).
+    SaveAiKey         { provider: String, key: String },
+    /// Owner directs the AI to act in a channel (/aido) — it may run its safe IRC
+    /// actions there (when commands are enabled) and posts its reply to the channel.
+    AiDo              { conn_id: String, target: String, query: String },
+    /// Owner wipes ALL of this account's AI conversation memory.
+    ClearAiHistory    {},
     // Account
     DeleteAccount     { password: String },
     // Monitor push
@@ -547,6 +556,9 @@ pub enum ServerEvent {
     BotConfig        { config: String },
     /// Result of an owner's private /bot lookup, shown locally in their UI.
     BotResult        { bot: String, text: String },
+    /// Which AI providers currently have a key stored (so the UI shows "key set"),
+    /// sent on bot-config load and after SaveAiKey. Empty while the vault is locked.
+    AiKeysSet        { providers: Vec<String> },
     Notepad          { content: String },
     StatsData        { data: String },
     PasswordSafe     { data: String },
@@ -778,7 +790,7 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
         "default-src 'self'; object-src 'none'; base-uri 'self'; script-src 'self' 'unsafe-inline'; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; \
-         media-src 'self' blob:; \
+         media-src 'self' blob: data: https:; \
          connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com https://api.urbandictionary.com https://api.giphy.com https://tenor.googleapis.com; \
          frame-src https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';"
     ));
@@ -1025,6 +1037,12 @@ async fn main() -> Result<()> {
               // strong_count==1 have no in-flight holder (a live op always holds a
               // clone, so count>=2) and are safe to drop.
               prune_network_config_locks();
+              // Reap stale AI conversation-memory keys (bounded creep, see bots.rs).
+              bots::prune_ai_history();
+              // Reap stale flood-tracker keys + flush stateful bot data (seen tracker
+              // is updated in memory on every message; persist it periodically).
+              bots::prune_flood_tracker();
+              bots::botdata_flush_all(&s.data_dir).await;
           }
       });
     }
@@ -1192,10 +1210,13 @@ async fn serve_sound(Path(name): Path<String>) -> impl IntoResponse {
         "cash-register.mp3" => Some(include_bytes!("../static/sounds/cash-register.mp3")),
         "explosion.mp3"     => Some(include_bytes!("../static/sounds/explosion.mp3")),
         "lightning.mp3"     => Some(include_bytes!("../static/sounds/lightning.mp3")),
+        // The Lounge's notification sound (WAV), bundled as CryptIRC's default.
+        "lounge.wav"        => Some(include_bytes!("../static/sounds/lounge.wav")),
         _ => None,
     };
+    let ct = if name.ends_with(".wav") { "audio/wav" } else { "audio/mpeg" };
     match bytes {
-        Some(b) => ([(header::CONTENT_TYPE, "audio/mpeg"), (header::CACHE_CONTROL, "public, max-age=604800")], b).into_response(),
+        Some(b) => ([(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, "public, max-age=604800")], b).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -4082,21 +4103,102 @@ async fn handle_command(
                 .and_then(|c| serde_json::to_string(&*c).ok())
                 .unwrap_or_else(|| "{}".to_string());
             send(ServerEvent::BotConfig { config: js });
+            // Tell the UI which AI providers already have a key (masked; no key value).
+            let providers = bots::ai_providers_with_keys(&state, username).await;
+            send(ServerEvent::AiKeysSet { providers });
         }
-        ClientMessage::BotQuery { bot, query } => {
+        ClientMessage::AiDo { conn_id, target, query } => {
+            // IDOR guard: this account must OWN the connection it's driving. Without
+            // this, a user could pass another user's conn_id and run the AI (op/kick/
+            // ban/PRIVMSG) through the victim's connection. Matches the Send handler.
+            if !state.owns_conn(username, &conn_id) { return; }
+            let q = query.trim();
+            // Sanitize the target before it reaches any raw IRC line (a WS string can
+            // carry a decoded \r/\n).
+            let target = cryptirc::ircproto::strip_crlf(&target);
+            if target.is_empty() || target.contains(' ') {
+                send(ServerEvent::BotResult { bot: "ai".into(), text: "invalid channel".into() });
+            } else if !target.starts_with(['#','&','+','!']) {
+                send(ServerEvent::BotResult { bot: "ai".into(), text: "/aido must be used in a channel".into() });
+            } else if q.is_empty() {
+                send(ServerEvent::BotResult { bot: "ai".into(), text: "usage: /aido <what to do>".into() });
+            } else if q.len() > 4000 {
+                send(ServerEvent::BotResult { bot: "ai".into(), text: "AI: message too long".into() });
+            } else if let Some(conn) = state.connections.get(&conn_id).map(|c| c.clone()) {
+                // The owner is inherently trusted, so actions are allowed whenever the
+                // commands toggle is on. YOLO (unrestricted raw commands) is ONLY
+                // honored here, on the owner's own /aido input — never channel/DM.
+                let (allow, yolo) = state.bots.get(username)
+                    .map(|c| (c.ai.commands_enabled, c.ai.commands_enabled && c.ai.commands_yolo))
+                    .unwrap_or((false, false));
+                let st = state.clone();
+                let (u, cid, tgt, query) = (username.to_string(), conn_id.clone(), target.clone(), q.to_string());
+                tokio::spawn(async move {
+                    // /aido shares the owner's private AI conversation ("__owner__").
+                    let reply = bots::run_ai_channel(&st, &u, "__owner__", &cid, &conn, &tgt, allow, yolo, &query).await;
+                    if !reply.is_empty() {
+                        let line = format!("PRIVMSG {} :{}\r\n", tgt, reply);
+                        bots::bot_send(&cid, &conn, &line).await;
+                    }
+                });
+            } else {
+                send(ServerEvent::BotResult { bot: "ai".into(), text: "AI: not connected to that network".into() });
+            }
+        }
+        ClientMessage::ClearAiHistory {} => {
+            bots::ai_history_clear(username, None);
+        }
+        ClientMessage::SaveAiKey { provider, key } => {
+            // 32 KB: a plain key is tiny, but the Codex "openai-codex" bundle is a JSON
+            // blob with two JWTs (access + id token), so allow more headroom.
+            if key.len() > 32768 {
+                send(ServerEvent::Error { message: "AI key/token too long".into() });
+            } else {
+                match bots::save_ai_key(&state, username, &provider, &key).await {
+                    Ok(()) => {
+                        let providers = bots::ai_providers_with_keys(&state, username).await;
+                        state.send_to_user(username, ServerEvent::AiKeysSet { providers });
+                    }
+                    Err(e) => send(ServerEvent::Error { message: format!("AI key: {}", e) }),
+                }
+            }
+        }
+        ClientMessage::BotQuery { bot, query, conn_id, channel } => {
             // Owner's private lookup (/w, /ud). Bounded query; result returns to the
             // owner's UI only, never a channel. Works regardless of bot enabled state.
             let q = query.trim();
-            // These bots work with no argument (joke/quote/fact/coin/8ball/roll).
-            let no_arg = matches!(bot.as_str(), "joke" | "quote" | "fact" | "coin" | "eightball" | "roll");
-            if q.len() > 200 || (q.is_empty() && !no_arg) {
-                send(ServerEvent::BotResult { bot: bot.clone(), text: "usage: give a location/term".into() });
-            } else if matches!(bot.as_str(),
-                "weather" | "ud" | "wiki" | "define" | "crypto"
-                | "time" | "cc" | "joke" | "quote" | "fact" | "eightball" | "roll" | "coin") {
-                bots::run_private_query(&state, username, &bot, q);
+            if matches!(bot.as_str(), "quotedb" | "seen" | "tell" | "note") {
+                // Stateful bots the owner drives privately. `channel` is the owner's
+                // active channel (needed by quotedb/tell); the reply returns to their UI.
+                if q.len() > 400 { send(ServerEvent::BotResult { bot, text: "too long".into() }); }
+                else {
+                    let cid = if !conn_id.is_empty() && state.owns_conn(username, &conn_id) { conn_id } else { String::new() };
+                    bots::run_private_stateful(&state, username, &bot, &cid, &channel, q);
+                }
+            } else if bot == "ai" {
+                // AI prompts can be long; allow a bigger cap than the keyless bots.
+                if q.is_empty() {
+                    send(ServerEvent::BotResult { bot, text: "usage: /ai <message>".into() });
+                } else if q.len() > 4000 {
+                    send(ServerEvent::BotResult { bot, text: "AI: message too long".into() });
+                } else {
+                    // Only honor a conn_id the owner actually owns (IDOR guard); else
+                    // fall back to no-awareness chat.
+                    let cid = if !conn_id.is_empty() && state.owns_conn(username, &conn_id) { conn_id } else { String::new() };
+                    bots::run_private_ai(&state, username, q, &cid);
+                }
             } else {
-                send(ServerEvent::BotResult { bot, text: "unknown bot".into() });
+                // These bots work with no argument (joke/quote/fact/coin/8ball/roll).
+                let no_arg = matches!(bot.as_str(), "joke" | "quote" | "fact" | "coin" | "eightball" | "roll");
+                if q.len() > 200 || (q.is_empty() && !no_arg) {
+                    send(ServerEvent::BotResult { bot: bot.clone(), text: "usage: give a location/term".into() });
+                } else if matches!(bot.as_str(),
+                    "weather" | "ud" | "wiki" | "define" | "crypto"
+                    | "time" | "cc" | "joke" | "quote" | "fact" | "eightball" | "roll" | "coin") {
+                    bots::run_private_query(&state, username, &bot, q);
+                } else {
+                    send(ServerEvent::BotResult { bot, text: "unknown bot".into() });
+                }
             }
         }
         ClientMessage::SaveNotepad { content } => {

@@ -1000,9 +1000,13 @@ function handleEvent(ev) {
       if(document.getElementById('bot-overlay')?.classList.contains('show')) _renderBotPanel(_botCfg);
       break;
     case 'bot_result':
-      // Owner's private /w //ud result — show locally in the active buffer only.
+      // Owner's private /w //ud //ai result — show locally in the active buffer only.
       if(active&&active.conn_id) sysMsg(active.conn_id,active.target,`🤖 ${ev.text}`,'system');
       else showToast(ev.text||'');
+      break;
+    case 'ai_keys_set':
+      window._aiKeysSet=ev.providers||[];
+      if(document.getElementById('bot-overlay')?.classList.contains('show')) _aiProviderChange();
       break;
     case 'auth_ok':
       currentUser=ev.username;
@@ -1891,8 +1895,12 @@ let _audioCtx=null,_lastSoundAt=0;
 })();
 // Catalog advertised in the notification-settings dropdown.
 const NOTIF_SOUNDS=[
+  // The Lounge's classic "pop" — CryptIRC's default.
+  {id:'lounge',        label:'Pop — The Lounge (default)'},
+  // Your own uploaded sound / any audio URL.
+  {id:'custom',        label:'Custom (your upload or URL)'},
   // Real samples (CC0 community sources)
-  {id:'water-drop',    label:'Water drop (default)'},
+  {id:'water-drop',    label:'Water drop'},
   {id:'ding',          label:'Ding'},
   {id:'bell',          label:'Bell'},
   {id:'pop',           label:'Pop'},
@@ -1933,6 +1941,15 @@ function _playSample(name){
   if(!a){a=new Audio('sounds/'+name);a.preload='auto';_sampleCache[name]=a;}
   try{a.currentTime=0; const p=a.play(); if(p&&p.catch)p.catch(()=>{});}catch(_){}
 }
+// Play an arbitrary audio URL (custom uploaded/linked notification sound). Cached by
+// URL. CSP media-src allows 'self' (uploaded files) + https:.
+const _urlSoundCache=Object.create(null);
+function _playUrl(url){
+  if(!url) return;
+  let a=_urlSoundCache[url];
+  if(!a){a=new Audio(url);a.preload='auto';a.crossOrigin='anonymous';_urlSoundCache[url]=a;}
+  try{a.currentTime=0; const p=a.play(); if(p&&p.catch)p.catch(()=>{});}catch(_){}
+}
 // Tiny helper: schedule a single oscillator with an exponential gain decay.
 function _tone(offset,freqStart,freqEnd,dur,waveType,gainPeak){
   const t0=_audioCtx.currentTime+offset;
@@ -1948,6 +1965,9 @@ function _tone(offset,freqStart,freqEnd,dur,waveType,gainPeak){
   osc.stop(t0+dur+0.02);
 }
 const SOUND_IMPL={
+  // The Lounge's pop (default) + user custom (uploaded file or URL).
+  'lounge':        ()=>_playSample('lounge.wav'),
+  'custom':        ()=>{ const u=(loadAppearance().notifSoundUrl||'').trim(); if(u){_playUrl(u);} else {_playSample('lounge.wav');} },
   // File-based samples
   'water-drop':    ()=>_playSample('water-drop.mp3'),
   'ding':          ()=>_playSample('ding.mp3'),
@@ -2007,15 +2027,15 @@ function playNotifSound(type){
   try{
     _ensureAudioCtx();
     const cfg=loadAppearance();
-    const id=cfg.notifSound||'water-drop';
-    (SOUND_IMPL[id]||SOUND_IMPL['water-drop'])(type);
+    const id=cfg.notifSound||'lounge';
+    (SOUND_IMPL[id]||SOUND_IMPL['lounge'])(type);
   }catch(e){}
 }
 // Preview bypasses the 500ms throttle so the ▶ button always plays.
 function previewNotifSound(id){
   try{
     _ensureAudioCtx();
-    (SOUND_IMPL[id]||SOUND_IMPL['water-drop'])('pm');
+    (SOUND_IMPL[id]||SOUND_IMPL['lounge'])('pm');
   }catch(e){}
 }
 
@@ -4429,12 +4449,32 @@ async function handleInput(raw){
         wsend({type:'bot_query',bot:'cc',query:args.join(' ')});
         break;
       }
+      case 'AI': {
+        if(!args.length){sysMsg(conn_id,target,'Usage: /ai <message> — private AI chat','error');break;}
+        // Pass the active connection so the AI gets awareness (its nick + channels)
+        // even on the private /ai path, not just /aido.
+        wsend({type:'bot_query',bot:'ai',query:args.join(' '),conn_id:conn_id||''});
+        break;
+      }
+      case 'AIDO': {
+        // Direct the AI to act in THIS channel (it can run its safe IRC actions if
+        // you enabled commands). Reply + actions go to the channel.
+        if(!/^[#&+!]/.test(target||'')){sysMsg(conn_id,target,'Use /aido inside a channel','error');break;}
+        if(!args.length){sysMsg(conn_id,target,'Usage: /aido <what to do> — e.g. /aido op gh0st and set topic to Welcome','error');break;}
+        wsend({type:'ai_do',conn_id,target,query:args.join(' ')});
+        break;
+      }
       case 'JOKE':  wsend({type:'bot_query',bot:'joke',query:''}); break;
       case 'QOTD':  wsend({type:'bot_query',bot:'quote',query:''}); break;   // /quote is an alias of /raw
       case 'FACT':  wsend({type:'bot_query',bot:'fact',query:''}); break;
       case 'COIN': case 'FLIP': wsend({type:'bot_query',bot:'coin',query:''}); break;
       case '8BALL': wsend({type:'bot_query',bot:'eightball',query:args.join(' ')}); break;
       case 'ROLL':  wsend({type:'bot_query',bot:'roll',query:args.join(' ')}); break;
+      // Stateful bots — pass the active channel so /q and /tell know where to act.
+      case 'Q': case 'QUOTEDB': wsend({type:'bot_query',bot:'quotedb',query:args.join(' '),conn_id:conn_id||'',channel:target||''}); break;
+      case 'SEEN':  wsend({type:'bot_query',bot:'seen',query:args.join(' '),conn_id:conn_id||'',channel:target||''}); break;
+      case 'TELL':  wsend({type:'bot_query',bot:'tell',query:args.join(' '),conn_id:conn_id||'',channel:target||''}); break;
+      case 'NOTE': case 'NOTES': wsend({type:'bot_query',bot:'note',query:args.join(' '),conn_id:conn_id||'',channel:target||''}); break;
       case 'SHORTEN': {
         const url=args[0];if(!url||(!url.startsWith('http://')&&!url.startsWith('https://'))){sysMsg(conn_id,target,'Usage: /shorten <url>','error');break;}
         try{
@@ -7220,7 +7260,7 @@ const APPEAR_DEFAULTS={
   theme:'discord', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
   timestamps:true, joinpart:true, statusMsg:'condense', compact:false, coloredNicks:true,
-  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'water-drop', msgGap:4, inputH:36,
+  accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'lounge', notifSoundUrl:'', msgGap:4, inputH:36,
   font:"'DM Sans',sans-serif", linkPreviews:true,
   // Unified "Messages" inbox tab — aggregates every DM/query from all networks
   // into one iMessage-style tab and hides the per-network PM rows. On by default.
@@ -12018,8 +12058,11 @@ async function showNotifModal() {
   const sss=document.getElementById('a-sound-style');
   if(sss){
     sss.innerHTML=NOTIF_SOUNDS.map(s=>`<option value="${esc(s.id)}">${esc(s.label)}</option>`).join('');
-    sss.value=cfg.notifSound||'water-drop';
+    sss.value=cfg.notifSound||'lounge';
   }
+  const surl=document.getElementById('a-sound-url');
+  if(surl) surl.value=cfg.notifSoundUrl||'';
+  _toggleCustomSoundRow((cfg.notifSound||'lounge')==='custom');
   // Diagnostic status
   const ds=document.getElementById('notif-diag-status');
   if(ds){
@@ -12157,11 +12200,36 @@ function saveNotifSoundPrefs(){
   if(smn) cfg.soundMention=smn.classList.contains('on');
   if(dnt) cfg.desktopNotif=dnt.classList.contains('on');
   const sss=document.getElementById('a-sound-style');
-  if(sss) cfg.notifSound=sss.value||'water-drop';
+  if(sss) cfg.notifSound=sss.value||'lounge';
+  const surl=document.getElementById('a-sound-url');
+  if(surl) cfg.notifSoundUrl=(surl.value||'').trim();
+  _toggleCustomSoundRow(cfg.notifSound==='custom');
   saveAppearance(cfg);
   applyThemeCSS(cfg);
   // Preview the newly-selected sound so the user hears it immediately.
   if(sss) previewNotifSound(cfg.notifSound);
+}
+function _toggleCustomSoundRow(show){
+  const r=document.getElementById('a-sound-custom-row');
+  if(r) r.style.display=show?'':'none';
+}
+// Read a chosen audio file into a data: URL and store it as the custom notif sound
+// (client-side only; capped so it doesn't blow out localStorage).
+function pickNotifSoundFile(input){
+  const f=input&&input.files&&input.files[0]; if(!f) return;
+  if(!/^audio\//.test(f.type||'')){ showToast('Please choose an audio file'); return; }
+  if(f.size>512*1024){ showToast('Sound too large — please use a clip under 512 KB'); input.value=''; return; }
+  const rd=new FileReader();
+  rd.onload=()=>{
+    const url=String(rd.result||'');
+    const surl=document.getElementById('a-sound-url'); if(surl) surl.value=url;
+    const sss=document.getElementById('a-sound-style'); if(sss) sss.value='custom';
+    saveNotifSoundPrefs();
+    showToast('Custom sound set: '+(f.name||'upload'));
+  };
+  rd.onerror=()=>showToast("Couldn't read that file");
+  rd.readAsDataURL(f);
+  input.value='';
 }
 
 async function toggleDesktopNotif() {
@@ -13648,7 +13716,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.42';
+const CRYPTIRC_VERSION='0.3.48';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13656,6 +13724,19 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.48', date:'July 2026', items:[
+    {tag:'new', text:'Five new bots: 🗒 Quote DB (!q add … / !q / !q 3), 👀 Seen (!seen nick), ✉️ Tell (!tell nick msg — delivered when they’re next active), 📝 Notes (!note … / !notes), and ❓ Help (!help / !bots, always answered in PM). Private commands too: /q /seen /tell /note.'},
+    {tag:'new', text:'Enforcement upgraded: flood protection (X lines in Y seconds) and a bad-word filter, each with a warn → kick → kick+ban ladder and an exempt list. Plus a new 🌐 IP/Host logger that records joins to your private *ip-log* buffer. All off by default.'},
+    {tag:'new', text:'🔓 Sign in to the AI bot with your ChatGPT subscription (OAuth / Codex) — import your Codex token instead of an API key. (Unofficial; uses your ChatGPT plan outside the Codex app.)'},
+    {tag:'new', text:'Inline media: pasted mp3/ogg/wav/mp4/webm links now play right in chat (external ones are click-to-load for privacy). New notification sounds: The Lounge’s classic “pop” is now the default, and you can upload your own sound or point to any audio URL.'},
+  ]},
+  {version:'0.3.47', date:'July 2026', items:[
+    {tag:'new', text:'The 🤖 AI Chatbot is now a real agent. It always knows who it is (its nick, and — with Full Context on — your channels, topics and members) on every path including /ai. It can join channels and run whois/who/names/list, and the results are fed straight back to it so it actually looks around and then answers, instead of guessing. Added join/part/whois/who/names to its safe actions, plus a strong built-in system prompt so it knows what it can do out of the box.'},
+  ]},
+  {version:'0.3.44', date:'July 2026', items:[
+    {tag:'new', text:'New 🤖 AI Chatbot in the Bots panel: OpenAI/ChatGPT, Anthropic/Claude, xAI/Grok, Google/Gemini, Perplexity, OpenRouter, Groq, Mistral, or your own self-hosted OpenAI-compatible endpoint. Pick provider + model, paste a key (encrypted in your vault), give it a system prompt, and talk to it via a trigger, in DMs, or with /ai. It can optionally see your channels/members, remember each person’s conversation (auto-clearing), and — if you switch it on — run safe IRC actions (op/voice/kick/ban/topic) via /aido. Off by default.'},
+    {tag:'new', text:'Every bot now has an interactive channel picker (pick networks/channels or leave it everywhere) and shows its private /command. New Auto-op / Auto-voice gives status to matching people on join. All bot output is rate-limited server-side so it can’t flood.'},
+  ]},
   {version:'0.3.42', date:'July 2026', items:[
     {tag:'new', text:'The Bots panel now has 13 bots — all free, no API keys, all off by default, each with its own access controls (everyone / specific nicks+hosts / private): 🌦 Weather (!w), 📖 Urban Dictionary (!ud), 📚 Wikipedia (!wiki), 📗 Dictionary (!define), 🪙 Crypto price (!crypto), 🕐 World Time (!time), 💱 Currency (!cc 100 usd eur), 😂 Dad Joke (!joke), 💬 Quote (!quote), 🧠 Random Fact (!fact), 🎱 Magic 8-Ball (!8ball), 🎲 Dice (!roll 2d6) and 🪙 Coin flip (!coin). Weather now also reports condition, feels-like, humidity, wind, precipitation, pressure, UV and sunrise/sunset. Private owner commands too: /w /wiki /define /crypto /wtime /cc /joke /qotd /fact /8ball /roll /coin.'},
   ]},
@@ -14185,6 +14266,39 @@ function showBotPanel(){
   wsend({type:'load_bot_config'});   // server replies with a bot_config event → _renderBotPanel
 }
 function closeBotPanel(){ _overlayClose('botPanel'); document.getElementById('bot-overlay').classList.remove('show'); }
+// Each bot's private owner slash command(s), shown on its card so you know how to
+// use it yourself (the public trigger is configurable above).
+const _BOT_CMDS={weather:'/w',ud:'/ud',wiki:'/wiki',define:'/define or /dict',crypto:'/crypto or /price',time:'/wtime',cc:'/cc or /currency',joke:'/joke',quote:'/qotd',fact:'/fact',eightball:'/8ball',roll:'/roll',coin:'/coin or /flip',quotedb:'/q',seen:'/seen',tell:'/tell',note:'/note',help:'/bots'};
+// Interactive network→channel scope picker for a bot. Scope is a list of entries:
+// "netid␟#chan" (one channel), "netid" (all channels on a network), or empty = all
+// networks/channels. Reads live from the `networks` global (the user's connections).
+function _botScopeHtml(key,def){
+  const scope=(def.channels||[]);
+  const isAll=scope.length===0;
+  const has=v=>scope.includes(v);
+  const nets=(typeof networks!=='undefined'?networks:[]).filter(n=>n&&n.config);
+  const tree=nets.map(net=>{
+    const nid=net.config.id, nlabel=net.config.label||net.config.server||nid;
+    const chans=(net.channels||[]).filter(c=>c&&c.name&&/^[#&+!]/.test(c.name));
+    const chRows=chans.map(c=>{
+      const v=nid+'\x1f'+c.name;
+      return `<label class="bot-sc-chan"><input type="checkbox" data-bot-scope="${key}" value="${esc(v)}" ${has(v)?'checked':''}> ${esc(c.name)}</label>`;
+    }).join('')||`<div class="bot-sc-empty">no channels joined</div>`;
+    return `<div class="bot-sc-net">
+      <label class="bot-sc-nethdr"><input type="checkbox" data-bot-scope="${key}" value="${esc(nid)}" ${has(nid)?'checked':''}> <b>${esc(nlabel)}</b> <span class="bot-sc-dim">— all channels</span></label>
+      <div class="bot-sc-chans">${chRows}</div>
+    </div>`;
+  }).join('')||`<div class="bot-sc-empty">Connect to a network to pick channels.</div>`;
+  return `
+    <div class="adm-row"><span class="l">Channels</span>
+      <label class="bot-sc-all"><input type="checkbox" data-bot-allchans="${key}" ${isAll?'checked':''} onchange="_botToggleAllChans('${key}',this)"> All channels</label>
+    </div>
+    <div class="bot-sc" data-bot-scopewrap="${key}" style="${isAll?'display:none':''}">${tree}</div>`;
+}
+function _botToggleAllChans(key,cb){
+  const wrap=document.querySelector(`[data-bot-scopewrap="${key}"]`);
+  if(wrap) wrap.style.display=cb.checked?'none':'';
+}
 function _botDefCard(key,title,emoji,def,dtrig,example){
   def=def||{}; const acc=def.access||'public'; const trig=def.trigger||dtrig;
   return `
@@ -14192,7 +14306,7 @@ function _botDefCard(key,title,emoji,def,dtrig,example){
     <div class="adm-ct">${emoji} ${title}</div>
     <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${def.enabled?' on':''}" data-bot-enable="${key}" onclick="this.classList.toggle('on')"></button></div>
     <div class="adm-row"><span class="l">Public trigger</span><input class="adm-in" data-bot-trigger="${key}" value="${esc(trig)}" placeholder="${dtrig}" style="width:120px;flex:0 0 auto;text-align:center"></div>
-    <div class="adm-hint">Anyone allowed below can type <b>${esc(trig)}${example?' '+esc(example):''}</b> in a channel you're in and you'll answer.</div>
+    <div class="adm-hint">Public: anyone allowed can type <b>${esc(trig)}${example?' '+esc(example):''}</b> in a channel. Private (just you): <b>${esc(_BOT_CMDS[key]||'—')}</b></div>
     <div class="adm-row"><span class="l">Who can use it</span>
       <select class="adm-sel" data-bot-access="${key}">
         <option value="public"${acc==='public'?' selected':''}>Everyone</option>
@@ -14203,7 +14317,8 @@ function _botDefCard(key,title,emoji,def,dtrig,example){
     <div class="adm-row"><span class="l">Allow nicks</span><input class="adm-in" data-bot-nicks="${key}" value="${esc((def.allow_nicks||[]).join(', '))}" placeholder="nick1, nick2"></div>
     <div class="adm-row"><span class="l">Allow hosts</span><input class="adm-in" data-bot-hosts="${key}" value="${esc((def.allow_hosts||[]).join(', '))}" placeholder="*!*@*.trusted.host"></div>
     <div class="adm-hint">“Specific users only” matches these nicks or host masks. Ignored when set to Everyone.</div>
-    <div class="adm-row"><span class="l">Only in channels</span><input class="adm-in" data-bot-chans="${key}" value="${esc((def.channels||[]).join(', '))}" placeholder="#chan1, #chan2 — blank = all"></div>
+    ${_botScopeHtml(key,def)}
+    <div class="adm-hint">Leave “All channels” on to answer everywhere, or turn it off and tick specific networks/channels.</div>
    </div>`;
 }
 function _renderBotPanel(cfg){
@@ -14214,6 +14329,7 @@ function _renderBotPanel(cfg){
       <div class="adm-row"><span class="l" style="font-weight:700">Bots master switch</span><button class="appear-toggle${cfg.enabled?' on':''}" id="bot-master" onclick="this.classList.toggle('on')"></button></div>
       <div class="adm-hint">Bots run on the server 24/7 — replies come from your nick even when your app is closed. Everything stays off until you turn it on. Your own private commands (<b>/w</b>, <b>/ud</b>) always work for you regardless of these settings.</div>
     </div>
+    ${_aiCard(cfg.ai||{})}
     ${_botDefCard('weather','Weather','🌦',cfg.weather,'!w','90210')}
     ${_botDefCard('ud','Urban Dictionary','📖',cfg.ud,'!ud','yeet')}
     ${_botDefCard('wiki','Wikipedia','📚',cfg.wiki,'!wiki','black holes')}
@@ -14227,18 +14343,192 @@ function _renderBotPanel(cfg){
     ${_botDefCard('eightball','Magic 8-Ball','🎱',cfg.eightball,'!8ball','will it rain?')}
     ${_botDefCard('roll','Dice Roll','🎲',cfg.roll,'!roll','2d6')}
     ${_botDefCard('coin','Coin Flip','🪙',cfg.coin,'!coin','')}
+    ${_botDefCard('quotedb','Quote DB','🗒',cfg.quotedb,'!q','add <text>')}
+    ${_botDefCard('seen','Seen','👀',cfg.seen,'!seen','nick')}
+    ${_botDefCard('tell','Tell (leave a message)','✉️',cfg.tell,'!tell','nick message')}
+    ${_botDefCard('note','Notes','📝',cfg.note,'!note','buy milk')}
+    ${_botDefCard('help','Help / Bot list','❓',cfg.help,'!help','')}
+    ${_iplogCard(cfg.iplog||{})}
+    ${_enforceCard(cfg.enforce||{})}
     <button class="adm-save" style="width:100%;margin-top:4px" onclick="saveBotConfig()">Save bots</button>`;
+  setTimeout(_aiProviderChange,0);   // sync custom-URL row + key status to the selected provider
+}
+function _aiModelHint(p){return ({openai:'gpt-4o-mini',anthropic:'claude-sonnet-4-5',xai:'grok-2-latest',google:'gemini-2.0-flash',perplexity:'sonar',openrouter:'openai/gpt-4o-mini',groq:'llama-3.3-70b-versatile',mistral:'mistral-small-latest','openai-codex':'gpt-5',custom:'model-name'})[p]||'model-name';}
+function _aiCard(ai){
+  ai=ai||{};
+  const prov=ai.provider||'openai';
+  const provs=[['openai','OpenAI (ChatGPT)'],['anthropic','Anthropic (Claude)'],['xai','xAI (Grok)'],['google','Google (Gemini)'],['perplexity','Perplexity'],['openrouter','OpenRouter'],['groq','Groq'],['mistral','Mistral'],['openai-codex','ChatGPT — Sign in (OAuth / Codex)'],['custom','Custom (OpenAI-compatible)']];
+  return `
+   <div class="adm-card">
+    <div class="adm-ct">🤖 AI Chatbot</div>
+    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${ai.enabled?' on':''}" data-ai="enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-hint">Talk to it with the trigger in a channel, or DM you. Private command: <b>/ai &lt;message&gt;</b>. The API key is stored <b>encrypted in your vault</b>, so the AI bot only works while your vault is unlocked.</div>
+    <div class="adm-row"><span class="l">Public trigger</span><input class="adm-in" data-ai="trigger" value="${esc(ai.trigger||'!ai')}" placeholder="!ai" style="width:120px;flex:0 0 auto;text-align:center"></div>
+    <div class="adm-row"><span class="l">Provider</span>
+      <select class="adm-sel" data-ai="provider" onchange="_aiProviderChange()">
+        ${provs.map(([v,l])=>`<option value="${v}"${prov===v?' selected':''}>${esc(l)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="adm-row" data-ai-customrow style="${prov==='custom'?'':'display:none'}"><span class="l">Custom base URL</span><input class="adm-in" data-ai="custom_base" value="${esc(ai.custom_base||'')}" placeholder="https://host/v1"></div>
+    <div class="adm-row"><span class="l">Model</span><input class="adm-in" data-ai="model" value="${esc(ai.model||'')}" placeholder="${esc(_aiModelHint(prov))}"></div>
+    <div class="adm-row" data-ai-keyrow style="${prov==='openai-codex'?'display:none':''}"><span class="l">API key</span><input class="adm-in" type="password" id="ai-key-input" placeholder="paste your API key"></div>
+    <div class="adm-row" data-ai-codexrow style="${prov==='openai-codex'?'align-items:flex-start':'display:none'}"><span class="l">ChatGPT token</span><textarea class="adm-in" id="ai-codex-input" rows="3" style="resize:vertical;font-family:var(--mono,monospace);font-size:11px" placeholder='Paste the JSON from ~/.codex/auth.json (run "codex login" or "npm i -g @openai/codex" first)'></textarea></div>
+    <div class="adm-row"><span class="l"></span><span style="display:flex;gap:8px;align-items:center;flex:0 0 auto"><button class="adm-save" style="padding:6px 12px" onclick="saveAiKey()">${prov==='openai-codex'?'Import token':'Save key'}</button><span id="ai-key-status" style="font-size:11px;color:var(--text3)">no key</span></span></div>
+    <div class="adm-hint" data-ai-codexhint style="${prov==='openai-codex'?'':'display:none'}">🔓 <b>Sign in with your ChatGPT subscription</b> instead of an API key. Install OpenAI's Codex CLI, run <b>codex login</b>, then paste the contents of <b>~/.codex/auth.json</b> here. It's encrypted in your vault. ⚠ This uses your ChatGPT plan outside the Codex app — it's unofficial and OpenAI may rate-limit or block it.</div>
+    <div class="adm-hint" data-ai-keyhint style="${prov==='openai-codex'?'display:none':''}">Keys are per-provider and encrypted in your vault. Leave blank to keep the existing one.</div>
+    <div class="adm-row"><span class="l">Max tokens</span><input class="adm-in" type="number" min="1" max="32000" data-ai="max_tokens" value="${(+ai.max_tokens||500)}" style="width:90px;flex:0 0 auto;text-align:center"></div>
+    <div class="adm-row"><span class="l">Reply in DMs too</span><button class="appear-toggle${ai.respond_pm!==false?' on':''}" data-ai="respond_pm" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Let the AI run IRC commands</span><button class="appear-toggle${ai.commands_enabled?' on':''}" data-ai="commands_enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-hint">⚠ Lets the AI op/voice/kick/ban/topic/invite. Only <b>you</b> (via <b>/aido</b> in a channel) or users on the allow-lists above can make it act — everyone else gets text only. It's limited to safe channel commands (never oper/kill/services/raw).</div>
+    <div class="adm-row"><span class="l" style="color:#f85149">🔥 YOLO — any raw command</span><button class="appear-toggle${ai.commands_yolo?' on':''}" data-ai="commands_yolo" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-hint" style="color:#f85149">☠ Removes ALL restrictions — the AI can run <b>any raw IRC command</b> (including oper/kill/die/services if your account can). For safety this is honored <b>only when YOU drive it via /aido</b> — channel &amp; DM triggers stay on the safe allowlist no matter what, so nobody else can hijack it. Requires “run IRC commands” above. Use at your own risk.</div>
+    <div class="adm-row"><span class="l">Full context (channels + who's in them)</span><button class="appear-toggle${ai.full_context?' on':''}" data-ai="full_context" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-hint">Tells the AI your channels, topics and members (sent to your provider) so it can answer “who’s in #dev?” or “kick the spammer”.</div>
+    <div class="adm-row"><span class="l">Remember history (minutes)</span><input class="adm-in" type="number" min="0" max="1440" data-ai="history_minutes" value="${ai.history_minutes==null?60:(+ai.history_minutes)}" style="width:90px;flex:0 0 auto;text-align:center"></div>
+    <div class="adm-hint">Per-person conversation memory, auto-cleared after this many minutes (0 = off). Anyone can reset theirs by saying “<b>!ai clear</b>”.</div>
+    <div class="adm-row"><span class="l"></span><button class="adm-save" style="padding:6px 12px;flex:0 0 auto;background:var(--bg3);color:var(--text)" onclick="wsend({type:'clear_ai_history'});showToast('AI history cleared')">Clear all AI history</button></div>
+    <div class="adm-row" style="align-items:flex-start"><span class="l">Context</span><textarea class="adm-in" data-ai="context" rows="3" style="resize:vertical;font-family:inherit" placeholder="System prompt — who the bot is and how it should behave">${esc(ai.context||'')}</textarea></div>
+    <div class="adm-row"><span class="l"></span><button class="adm-save" style="padding:6px 12px;flex:0 0 auto;background:var(--bg3);color:var(--text)" onclick="_aiInsertSample()">Insert sample context</button></div>
+    <div class="adm-row"><span class="l">Who can use it</span>
+      <select class="adm-sel" data-ai="access">
+        <option value="public"${(ai.access||'public')==='public'?' selected':''}>Everyone</option>
+        <option value="list"${ai.access==='list'?' selected':''}>Specific users only</option>
+        <option value="private"${ai.access==='private'?' selected':''}>Private — just me (/ai)</option>
+      </select>
+    </div>
+    <div class="adm-row"><span class="l">Allow nicks</span><input class="adm-in" data-ai="allow_nicks" value="${esc((ai.allow_nicks||[]).join(', '))}" placeholder="nick1, nick2"></div>
+    <div class="adm-row"><span class="l">Allow hosts</span><input class="adm-in" data-ai="allow_hosts" value="${esc((ai.allow_hosts||[]).join(', '))}" placeholder="*!*@*.trusted.host"></div>
+    ${_botScopeHtml('ai',ai)}
+   </div>`;
+}
+function _aiProviderChange(){
+  const ps=document.querySelector('[data-ai="provider"]'); if(!ps) return;
+  const prov=ps.value;
+  const codex=prov==='openai-codex';
+  const cr=document.querySelector('[data-ai-customrow]'); if(cr) cr.style.display=prov==='custom'?'':'none';
+  const m=document.querySelector('[data-ai="model"]'); if(m&&!m.value) m.placeholder=_aiModelHint(prov);
+  // Codex uses a token-import textarea instead of the API-key field.
+  const kr=document.querySelector('[data-ai-keyrow]'); if(kr) kr.style.display=codex?'none':'';
+  const cxr=document.querySelector('[data-ai-codexrow]'); if(cxr) cxr.style.display=codex?'':'none';
+  const kh=document.querySelector('[data-ai-keyhint]'); if(kh) kh.style.display=codex?'none':'';
+  const cxh=document.querySelector('[data-ai-codexhint]'); if(cxh) cxh.style.display=codex?'':'none';
+  const keySet=(window._aiKeysSet||[]).includes(prov);
+  const st=document.getElementById('ai-key-status'); if(st){st.textContent=keySet?(codex?'token saved ✓':'key saved ✓'):(codex?'not signed in':'no key');st.style.color=keySet?'#3fb950':'var(--text3)';}
+  const ki=document.getElementById('ai-key-input'); if(ki) ki.placeholder=keySet?'•••••• saved — blank keeps it':'paste your API key';
+}
+function _aiInsertSample(){
+  const t=document.querySelector('[data-ai="context"]');
+  if(t) t.value='You are a friendly, concise assistant in an IRC channel. Answer in 1–2 short lines suitable for chat — be helpful and to the point, and avoid long paragraphs or markdown.';
+}
+function saveAiKey(){
+  const ps=document.querySelector('[data-ai="provider"]'); if(!ps) return;
+  const codex=ps.value==='openai-codex';
+  const el=codex?document.getElementById('ai-codex-input'):document.getElementById('ai-key-input');
+  const key=(el||{}).value||'';
+  if(!key.trim()){showToast(codex?'Paste your ~/.codex/auth.json first':'Enter a key first');return;}
+  if(codex){ try{ JSON.parse(key); }catch(_){ showToast('That doesn’t look like valid JSON — paste the whole auth.json'); return; } }
+  wsend({type:'save_ai_key',provider:ps.value,key});
+  if(el) el.value='';
+  showToast(codex?'Importing ChatGPT token…':'Saving AI key…');
+}
+function _readAiDef(){
+  const g=k=>document.querySelector(`[data-ai="${k}"]`);
+  const val=k=>{const e=g(k);return e?(e.value||''):'';};
+  const on=k=>{const e=g(k);return !!(e&&e.classList&&e.classList.contains('on'));};
+  const list=v=>(v||'').split(',').map(s=>s.trim()).filter(Boolean);
+  const allc=document.querySelector('[data-bot-allchans="ai"]');
+  const channels=(allc&&allc.checked)?[]:[...document.querySelectorAll('[data-bot-scope="ai"]:checked')].map(cb=>cb.value);
+  return {
+    enabled: on('enabled'),
+    trigger: val('trigger').trim(),
+    provider: val('provider'),
+    custom_base: val('custom_base').trim(),
+    model: val('model').trim(),
+    max_tokens: Math.max(1,Math.min(32000, parseInt(val('max_tokens'),10)||500)),
+    respond_pm: on('respond_pm'),
+    commands_enabled: on('commands_enabled'),
+    commands_yolo: on('commands_yolo'),
+    full_context: on('full_context'),
+    history_minutes: Math.max(0,Math.min(1440, parseInt(val('history_minutes'),10)||60)),
+    context: val('context'),
+    access: val('access'),
+    allow_nicks: list(val('allow_nicks')),
+    allow_hosts: list(val('allow_hosts')),
+    channels,
+  };
+}
+function _enforceCard(en){
+  en=en||{};
+  const act=en.action||'kick';
+  return `
+   <div class="adm-card">
+    <div class="adm-ct">🛡 Enforcement — auto-op / flood / word filter</div>
+    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${en.enabled?' on':''}" data-en="enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-hint">When someone joins a channel where you hold ops, automatically give them status; and optionally police flooding &amp; banned words. Use <b>*!*@*</b> to op/voice everyone. Every action is written to your encrypted <b>*bot-audit*</b> log.</div>
+    <div class="adm-row"><span class="l">Auto-op</span><input class="adm-in" data-en="autoop" value="${esc((en.autoop||[]).join(', '))}" placeholder="nick, *!*@*.trusted.host"></div>
+    <div class="adm-row"><span class="l">Auto-voice</span><input class="adm-in" data-en="autovoice" value="${esc((en.autovoice||[]).join(', '))}" placeholder="nick, *!*@* for everyone"></div>
+    <div class="adm-hint">Comma-separated. Each entry is an exact nick or a nick!user@host wildcard mask.</div>
+    <div style="border-top:1px solid var(--bord,#333);margin:10px 0 4px"></div>
+    <div class="adm-row"><span class="l">Flood protection</span><button class="appear-toggle${en.flood_enabled?' on':''}" data-en="flood_enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Max lines</span><input class="adm-in" type="number" min="2" max="50" data-en="flood_lines" value="${en.flood_lines==null?5:(+en.flood_lines)}" style="width:80px;flex:0 0 auto;text-align:center"> <span class="l" style="flex:0 0 auto">in</span> <input class="adm-in" type="number" min="1" max="120" data-en="flood_window" value="${en.flood_window==null?5:(+en.flood_window)}" style="width:80px;flex:0 0 auto;text-align:center"> <span class="l" style="flex:0 0 auto">sec</span></div>
+    <div class="adm-hint">More than this many messages from one person in the window triggers the action below.</div>
+    <div class="adm-row"><span class="l">Bad-word filter</span><button class="appear-toggle${en.badword_enabled?' on':''}" data-en="badword_enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Banned words</span><input class="adm-in" data-en="badwords" value="${esc((en.badwords||[]).join(', '))}" placeholder="word1, phrase two"></div>
+    <div class="adm-hint">Case-insensitive substring match. Comma-separated.</div>
+    <div class="adm-row"><span class="l">Action</span>
+      <select class="adm-sel" data-en="action">
+        <option value="warn"${act==='warn'?' selected':''}>Warn (notice only)</option>
+        <option value="kick"${act==='kick'?' selected':''}>Kick</option>
+        <option value="kickban"${act==='kickban'?' selected':''}>Kick + ban (*!*@host)</option>
+      </select>
+    </div>
+    <div class="adm-row"><span class="l">Exempt nicks/masks</span><input class="adm-in" data-en="exempt" value="${esc((en.exempt||[]).join(', '))}" placeholder="trusted, *!*@*.staff.host"></div>
+    <div class="adm-hint">These are never kicked/banned by flood or word filters. You need ops in the channel for kick/ban to work.</div>
+    ${_botScopeHtml('en',en)}
+   </div>`;
+}
+function _iplogCard(ip){
+  ip=ip||{};
+  return `
+   <div class="adm-card">
+    <div class="adm-ct">🌐 IP / Host logger</div>
+    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${ip.enabled?' on':''}" data-ip="enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-hint">Records every join's <b>nick!user@host</b> to your private, encrypted <b>*ip-log*</b> buffer (open it like any channel window). Only you can see it, and it needs your vault unlocked to write.</div>
+    ${_botScopeHtml('ip',ip)}
+   </div>`;
+}
+function _readIplog(){
+  const on=document.querySelector('[data-ip="enabled"]');
+  const allc=document.querySelector('[data-bot-allchans="ip"]');
+  const channels=(allc&&allc.checked)?[]:[...document.querySelectorAll('[data-bot-scope="ip"]:checked')].map(cb=>cb.value);
+  return { enabled:!!(on&&on.classList.contains('on')), channels };
+}
+function _readEnforce(){
+  const g=k=>document.querySelector(`[data-en="${k}"]`);
+  const on=k=>{const e=g(k);return !!(e&&e.classList&&e.classList.contains('on'));};
+  const list=k=>{const e=g(k);return ((e&&e.value)||'').split(',').map(s=>s.trim()).filter(Boolean);};
+  const num=(k,d)=>{const e=g(k);const v=e?parseInt(e.value):NaN;return isNaN(v)?d:v;};
+  const sel=k=>{const e=g(k);return (e&&e.value)||'';};
+  const allc=document.querySelector('[data-bot-allchans="en"]');
+  const channels=(allc&&allc.checked)?[]:[...document.querySelectorAll('[data-bot-scope="en"]:checked')].map(cb=>cb.value);
+  return { enabled:on('enabled'), autoop:list('autoop'), autovoice:list('autovoice'), channels,
+    flood_enabled:on('flood_enabled'), flood_lines:num('flood_lines',5), flood_window:num('flood_window',5),
+    badword_enabled:on('badword_enabled'), badwords:list('badwords'), action:sel('action')||'kick', exempt:list('exempt') };
 }
 function _readBotDef(key){
   const g=s=>document.querySelector(`[data-bot-${s}="${key}"]`);
   const list=v=>(v||'').split(',').map(s=>s.trim()).filter(Boolean);
+  // Channel scope: "All channels" checked → [] (everywhere); else the ticked
+  // network/channel checkbox values (netid or netid␟#chan).
+  const allc=document.querySelector(`[data-bot-allchans="${key}"]`);
+  const channels=(allc&&allc.checked)?[]:[...document.querySelectorAll(`[data-bot-scope="${key}"]:checked`)].map(cb=>cb.value);
   return {
     enabled: g('enable').classList.contains('on'),
     trigger: (g('trigger').value||'').trim(),
     access:  g('access').value,
     allow_nicks: list(g('nicks').value),
     allow_hosts: list(g('hosts').value),
-    channels:    list(g('chans').value),
+    channels,
   };
 }
 function saveBotConfig(){
@@ -14257,6 +14547,14 @@ function saveBotConfig(){
     eightball: _readBotDef('eightball'),
     roll:      _readBotDef('roll'),
     coin:      _readBotDef('coin'),
+    quotedb:   _readBotDef('quotedb'),
+    seen:      _readBotDef('seen'),
+    tell:      _readBotDef('tell'),
+    note:      _readBotDef('note'),
+    help:      _readBotDef('help'),
+    iplog:     _readIplog(),
+    ai:        _readAiDef(),
+    enforce:   _readEnforce(),
   };
   wsend({type:'save_bot_config', config:JSON.stringify(cfg)});
   showToast('Bots saved');

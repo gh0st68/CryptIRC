@@ -51,14 +51,14 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip_single_frame() {
-        let msg = IpcMessage::RawLine { conn_id: "net1".into(), line: ":server PRIVMSG #chan :hi".into() };
+        let msg = IpcMessage::RawLine { conn_id: "net1".into(), line: ":server PRIVMSG #chan :hi".into(), replayed: false };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).await.unwrap();
 
         let mut cursor = Cursor::new(buf);
         let got = read_frame(&mut cursor).await.unwrap().expect("expected a frame");
         match got {
-            IpcMessage::RawLine { conn_id, line } => {
+            IpcMessage::RawLine { conn_id, line, .. } => {
                 assert_eq!(conn_id, "net1");
                 assert_eq!(line, ":server PRIVMSG #chan :hi");
             }
@@ -98,7 +98,7 @@ mod tests {
 
     #[tokio::test]
     async fn truncated_frame_is_an_error_not_a_clean_eof() {
-        let msg = IpcMessage::RawLine { conn_id: "n".into(), line: "x".into() };
+        let msg = IpcMessage::RawLine { conn_id: "n".into(), line: "x".into(), replayed: false };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).await.unwrap();
         buf.truncate(buf.len() - 1); // chop the last body byte

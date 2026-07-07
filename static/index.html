@@ -2290,6 +2290,14 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <button onclick="previewNotifSound(document.getElementById('a-sound-style').value)" title="Preview" style="padding:4px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">▶</button>
         </div>
       </div>
+      <div id="a-sound-custom-row" style="display:none;margin-top:8px">
+        <div class="notif-sublabel" style="margin-bottom:6px">Custom sound — upload a short audio file, or paste an audio URL (mp3/ogg/wav).</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <input id="a-sound-url" type="text" placeholder="https://example.com/ping.mp3" onchange="saveNotifSoundPrefs()" style="flex:1 1 200px;min-width:160px;padding:4px 8px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)">
+          <button onclick="document.getElementById('a-sound-file').click()" style="padding:4px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">Upload…</button>
+          <input id="a-sound-file" type="file" accept="audio/*" onchange="pickNotifSoundFile(this)" style="display:none">
+        </div>
+      </div>
     </div>
 
     <div class="notif-section">
@@ -3418,6 +3426,17 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 <style>
 #admin-overlay.show{display:flex !important;}
 #bot-overlay.show{display:flex !important;}
+/* Bot channel-scope picker */
+.bot-sc-all{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text);cursor:pointer;white-space:nowrap}
+.bot-sc-all input,.bot-sc-nethdr input,.bot-sc-chan input{accent-color:var(--accent);width:15px;height:15px;flex:0 0 auto;cursor:pointer}
+.bot-sc{margin:0 0 10px;border:1px solid var(--border);border-radius:10px;padding:9px 11px;background:var(--bg2);max-height:230px;overflow-y:auto}
+.bot-sc-net{margin-bottom:9px}
+.bot-sc-net:last-child{margin-bottom:0}
+.bot-sc-nethdr{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text);cursor:pointer;padding:2px 0}
+.bot-sc-dim{color:var(--text3);font-size:11px}
+.bot-sc-chans{display:flex;flex-wrap:wrap;gap:6px 12px;padding:4px 0 2px 22px}
+.bot-sc-chan{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text2);cursor:pointer;font-family:var(--mono)}
+.bot-sc-empty{font-size:11px;color:var(--text3);padding:2px 0 2px 22px}
 /* ── Admin panel redesign — ops console for an encrypted server ───────── */
 #admin-body{font-family:var(--sans)}
 .adm-stats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}

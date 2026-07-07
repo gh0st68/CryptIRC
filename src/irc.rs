@@ -178,6 +178,12 @@ pub async fn dispatch_line(
     replayed: bool,
 ) -> anyhow::Result<()> {
     let p = parse_irc(line);
+    // Feed WHOIS/WHO/NAMES/JOIN/LIST replies to the AI's result-capture when it's
+    // armed (owner /aido agent loop). No-op on the hot path when nothing is armed,
+    // and never on replayed history.
+    if !replayed {
+        crate::bots::ai_capture_feed(conn_id, &p.command, &p.params, line);
+    }
     // Prefer IRCv3 server-time tag when available
     let ts = p.tags.get("time")
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
@@ -337,9 +343,14 @@ pub async fn dispatch_line(
             // from someone else — never on history replay, never our own lines
             // (those are echo-skipped above anyway). maybe_trigger is a cheap
             // in-memory check; it spawns its own task for any actual fetch/reply.
-            if !replayed && from != user_nick && display_target.starts_with(['#','&','+','!']) {
+            if !replayed && from != user_nick {
                 let full_mask = format!("{}!{}", from, userhost_from_prefix(&p.prefix));
-                crate::bots::maybe_trigger(state, username, conn, &display_target, &from, &full_mask, &clean);
+                if display_target.starts_with(['#','&','+','!']) {
+                    crate::bots::maybe_trigger(state, username, conn_id, conn, &display_target, &from, &full_mask, &clean);
+                } else {
+                    // A private message TO us — let the AI bot answer in PM if enabled.
+                    crate::bots::maybe_ai_pm(state, username, conn_id, conn, &from, &full_mask, &clean);
+                }
             }
         }
         "NOTICE" => {
@@ -468,6 +479,14 @@ pub async fn dispatch_line(
                 if !account.is_empty() && account != "*" { join_text.push_str(&format!(" ({})", account)); }
                 if !realname.is_empty()                  { join_text.push_str(&format!(" — {}", realname)); }
                 let _ = state.logger.append(&username, &conn_id, &channel, ts, &nick, &join_text, "join").await;
+            }
+            // Enforcement: auto-op / auto-voice a matching joiner. Live joins only
+            // (not replay), never ourselves. Fires-and-forgets a MODE + audit entry.
+            if accepted && !replayed && !is_self {
+                let mask = format!("{}!{}", nick, userhost_from_prefix(&p.prefix));
+                crate::bots::maybe_automode(state, username, conn_id, conn, &channel, &nick, &mask);
+                // IP/host logging, seen-tracking, pending-tell delivery on join.
+                crate::bots::maybe_join_bots(state, username, conn_id, conn, &channel, &nick, &mask);
             }
             // #43: don't surface a JOIN for a channel we refused to track
             // (a cap-rejected forged self-JOIN) — keep client and server state in sync.

@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "cryptirc"
-version = "0.3.42"
+version = "0.3.48"
 dependencies = [
  "aes-gcm",
  "anyhow",

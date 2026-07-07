@@ -12,7 +12,9 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.3.24-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.3.48-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/%F0%9F%A4%96%20AI-9%20providers%20%2B%20ChatGPT%20OAuth-00d4aa" alt="AI">
+  <img src="https://img.shields.io/badge/bots-19%20built--in-ff8800" alt="Bots">
   <img src="https://img.shields.io/badge/themes-173-9b59ff" alt="Themes">
   <img src="https://img.shields.io/badge/fonts-140-blue" alt="Fonts">
   <img src="https://img.shields.io/badge/commands-100+-red" alt="Commands">
@@ -58,6 +60,23 @@
 CryptIRC is a **self-hosted, encrypted IRC client** that keeps you connected to IRC **24/7** from any device. Your server maintains persistent connections to all your IRC networks — so you never miss a message, even when all your devices are off. When you come back, your full history is waiting, encrypted and synced.
 
 No plugins. No telemetry. No third parties. **You own everything.**
+
+### 🤖 AI Assistant & Bots
+
+CryptIRC ships a full **server-side bot suite** that runs **24/7 on your connection** — even when every device is off — and replies as your own nick. Everything is off until you turn it on, each bot has its own access controls and per-channel scope, and all output is rate-limited server-side so it can't flood.
+
+**The AI chatbot** plugs into *any* major model — **OpenAI/ChatGPT, Anthropic/Claude, xAI/Grok, Google/Gemini, Perplexity, OpenRouter, Groq, Mistral**, or your own self-hosted OpenAI-compatible endpoint — or **sign in with your ChatGPT subscription (OAuth)** instead of pasting an API key. Then:
+
+- **Talk to it** in any channel, in DMs, or privately with `/ai`. Your key is **encrypted in your vault** — nobody else can read it.
+- **It's a real agent, not a parrot.** It knows its own nick and (opt-in) your channels, topics and who's in them — and it can actually *look around*: ask "who's in #dev?" and it runs `names`/`who`/`whois` or joins the channel, reads the result, then answers.
+- **Let it run the channel.** With `/aido` it can op, voice, kick, ban, set the topic and more — bounded to a **safe allowlist** by default (or fully unrestricted **YOLO** mode, owner-only). Every action lands in an encrypted audit log.
+- **Per-person memory** that auto-clears, a strong built-in persona, and a custom system prompt if you want one.
+
+**19 built-in bots**, all free and off by default:
+
+> 🤖 **AI Chatbot** · 🌦 Weather · 📖 Urban Dictionary · 📚 Wikipedia · 📗 Dictionary · 🪙 Crypto price · 🕐 World time · 💱 Currency · 😂 Jokes · 💬 Quotes · 🧠 Facts · 🎱 8-ball · 🎲 Dice · 🪙 Coin flip · 🗒 **Quote DB** · 👀 **Seen** · ✉️ **Tell** (offline messages) · 📝 **Notes** · ❓ **Help**
+
+**Channel protection & moderation** — **auto-op / auto-voice** on join, **flood protection** and a **bad-word filter** with a warn → kick → kick+ban ladder and an exempt list, and an **IP/host logger** that records joins to your private encrypted log. All per-channel, all audited.
 
 ### Available Everywhere
 
