@@ -437,10 +437,11 @@ impl EncryptedLogger {
     async fn resolve_read_dirs(&self, conn_id: &str, target: &str) -> Result<Vec<PathBuf>> {
         let logs_root = PathBuf::from(&self.data_dir).join("logs");
         let mut dirs: Vec<PathBuf> = Vec::new();
+        let enc_conn   = encode_path_component(conn_id)?;
+        let enc_target = encode_path_component(target)?;
+        let conn_dir   = logs_root.join(&enc_conn);
         // New scheme (what we write today).
-        let new_dir = logs_root
-            .join(encode_path_component(conn_id)?)
-            .join(encode_path_component(target)?);
+        let new_dir = conn_dir.join(&enc_target);
         if tokio::fs::metadata(&new_dir).await.is_ok() {
             dirs.push(new_dir.clone());
         }
@@ -452,6 +453,28 @@ impl EncryptedLogger {
             let legacy_dir = logs_root.join(lc).join(lt);
             if legacy_dir != new_dir && tokio::fs::metadata(&legacy_dir).await.is_ok() {
                 dirs.push(legacy_dir);
+            }
+        }
+        // Case-insensitive sibling dirs. IRC channel AND nick names are case-insensitive,
+        // but historically we wrote the display-case dir — so one channel's history can be
+        // split across e.g. `_23Channel` (canonical, holds PRIVMSGs echoed by the server)
+        // and `_23channel` (holds JOIN/QUIT logged under the as-joined case), and one
+        // query across `Bob`/`bob`. Merge every sibling whose encoded name is a case
+        // variant of the target's. Safe because case variants of the SAME IRC entity share
+        // identical special-char escapes (only letters differ), so an ASCII-case-insensitive
+        // compare of the encoded names matches exactly the same-entity dirs. Per-file AAD
+        // (see read_tail, derived from each file's ACTUAL dir) decrypts each dir correctly,
+        // so this is purely additive — it never renames/moves data.
+        if let Ok(mut rd) = tokio::fs::read_dir(&conn_dir).await {
+            while let Ok(Some(e)) = rd.next_entry().await {
+                let name = e.file_name();
+                let Some(name_s) = name.to_str() else { continue };
+                if name_s.eq_ignore_ascii_case(&enc_target) && name_s != enc_target {
+                    if e.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+                        let p = e.path();
+                        if !dirs.contains(&p) { dirs.push(p); }
+                    }
+                }
             }
         }
         Ok(dirs)
@@ -579,8 +602,12 @@ impl EncryptedLogger {
                 }
             }
         }
-        // collected is newest-first; reverse to chronological order.
-        collected.reverse();
+        // Order by the monotonic per-message id (ts tiebreak). A plain reverse() was
+        // only correct when every line came from one dir in file order; now that a
+        // channel's lines can be MERGED from case-variant/legacy sibling dirs whose
+        // files share the same date, same-day lines must be interleaved by id, not
+        // grouped by directory. ids are per-user monotonic, so this is chronological.
+        collected.sort_by(|a, b| a.id.cmp(&b.id).then(a.ts.cmp(&b.ts)));
         Ok(collected)
     }
 
@@ -621,7 +648,9 @@ impl EncryptedLogger {
                 }
             }
         }
-        collected.reverse();
+        // Chronological by id (ts tiebreak) — merged case-variant/legacy sibling dirs
+        // can interleave same-date lines, so file order isn't chronological. See read_tail.
+        collected.sort_by(|a, b| a.id.cmp(&b.id).then(a.ts.cmp(&b.ts)));
         Ok(collected)
     }
 

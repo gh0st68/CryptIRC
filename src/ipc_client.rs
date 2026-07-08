@@ -170,11 +170,18 @@ async fn handle_message(
                     // just the same commands a manual /names would send.
                     for chan in &channels {
                         let key = cryptirc::ircproto::irc_lower(chan);
-                        if !c.channels.contains_key(&key) {
-                            c.channels.insert(key, crate::irc::ChannelState {
-                                name: chan.clone(), topic: String::new(), names: vec![], key: None,
-                            });
-                            resync.push(chan.clone());
+                        match c.channels.get(&key) {
+                            None => {
+                                c.channels.insert(key, crate::irc::ChannelState {
+                                    name: chan.clone(), topic: String::new(), names: vec![], key: None,
+                                });
+                                resync.push(chan.clone());
+                            }
+                            // Tracked but memberless — a ring-replayed JOIN recreated the
+                            // stub, or a prior resync's NAMES reply was lost. Refresh it so
+                            // the user list isn't left permanently empty.
+                            Some(ch) if ch.names.is_empty() => resync.push(chan.clone()),
+                            Some(_) => {}
                         }
                     }
                 }
@@ -186,10 +193,27 @@ async fn handle_message(
                 if let Some(ms) = lag_ms {
                     state.send_to_user(&username, ServerEvent::LagUpdate { conn_id: conn_id.clone(), ms });
                 }
-                for chan in resync {
-                    let mut c = conn.lock().await;
-                    let _ = c.send_raw(&format!("NAMES {}\r\n", chan)).await;
-                    let _ = c.send_raw(&format!("TOPIC {}\r\n", chan)).await;
+                // Rebuild member lists + topics WITHOUT flooding the server. The old code
+                // sent NAMES+TOPIC for EVERY channel in one tight loop; on a reattach with
+                // many channels (a routine cryptirc.service restart) that 2xN-command burst
+                // tripped the IRC server's flood protection, which dropped/deferred the
+                // excess so SOME channels never got their NAMES reply and were left with an
+                // empty user list. Pace it in a background task — NAMES first (the visible
+                // member list), TOPICs after — one command per tick so the server answers
+                // every one. The task holds a clone of `conn`; if the connection drops
+                // meanwhile, send_raw just errors harmlessly.
+                if !resync.is_empty() {
+                    let conn2 = conn.clone();
+                    tokio::spawn(async move {
+                        for chan in &resync {
+                            { let _ = conn2.lock().await.send_raw(&format!("NAMES {}\r\n", chan)).await; }
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        }
+                        for chan in &resync {
+                            { let _ = conn2.lock().await.send_raw(&format!("TOPIC {}\r\n", chan)).await; }
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        }
+                    });
                 }
             }
         }

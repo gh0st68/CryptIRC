@@ -1388,7 +1388,7 @@ function handleEvent(ev) {
       if(ev.realname) joinMsg += ` — ${ev.realname}`;
       sysMsg(ev.conn_id,ev.channel,joinMsg,'join',{ts:ev.ts,from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
       const jNet=networks.find(n=>n.config.id===ev.conn_id);
-      const jCh=jNet?.channels?.find(c=>c.name===ev.channel);
+      const jCh=jNet?.channels?.find(c=>_sameChan(c.name,ev.channel));
       if(jCh&&!jCh.names.some(n=>stripPfx(n)===ev.nick)) jCh.names.push(ev.nick);
       // Only a SELF-join changes the sidebar (a new channel row). Another user
       // joining doesn't alter any sidebar row, so skip the full rebuild (it was a
@@ -1407,11 +1407,11 @@ function handleEvent(ev) {
     case 'irc_part': {
       sysMsg(ev.conn_id,ev.channel,`← ${ev.nick} left${ev.reason?' ('+ev.reason+')':''}`,'part',{ts:ev.ts,from:ev.nick,self:ev.nick===getNick(ev.conn_id),subject:ev.nick});
       const pNet=networks.find(n=>n.config.id===ev.conn_id);
-      const pCh=pNet?.channels?.find(c=>c.name===ev.channel);
+      const pCh=pNet?.channels?.find(c=>_sameChan(c.name,ev.channel));
       if(pCh) pCh.names=pCh.names.filter(n=>stripPfx(n)!==ev.nick);
       // If WE parted, remove channel and switch away
       if(ev.nick===getNick(ev.conn_id)){
-        if(pNet) pNet.channels=pNet.channels.filter(c=>c.name!==ev.channel);
+        if(pNet) pNet.channels=pNet.channels.filter(c=>!_sameChan(c.name,ev.channel));
         // Keep buffer so history loads when rejoined
         unreadClear(bk(ev.conn_id,ev.channel));
         mentionUnread.delete(bk(ev.conn_id,ev.channel));
@@ -1420,7 +1420,7 @@ function handleEvent(ev) {
         const newFavs=favs.filter(f=>!(f.conn_id===ev.conn_id&&f.target===ev.channel));
         if(newFavs.length!==favs.length) saveFavorites(newFavs);
         if(isActive(ev.conn_id,ev.channel)){
-          const altCh=pNet?.channels?.find(c=>c.name!==ev.channel);
+          const altCh=pNet?.channels?.find(c=>!_sameChan(c.name,ev.channel));
           setActive(ev.conn_id,altCh?altCh.name:'status');
         }
       }
@@ -1433,11 +1433,14 @@ function handleEvent(ev) {
     }
     case 'irc_quit': {
       const net=networks.find(n=>n.config.id===ev.conn_id);
-      const quitChans=(net?.channels||[]).filter(ch=>ch.names.some(n=>stripPfx(n)===ev.nick));
+      // IRC nicks are case-insensitive — match members case-insensitively so a quit
+      // never falls through to the status window on a nick-case drift.
+      const _qn=String(ev.nick||'').toLowerCase();
+      const quitChans=(net?.channels||[]).filter(ch=>ch.names.some(n=>stripPfx(n).toLowerCase()===_qn));
       const quitSelf=ev.nick===getNick(ev.conn_id);
       for(const ch of quitChans){
         sysMsg(ev.conn_id,ch.name,`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{ts:ev.ts,from:ev.nick,self:quitSelf,subject:ev.nick});
-        ch.names=ch.names.filter(n=>stripPfx(n)!==ev.nick);
+        ch.names=ch.names.filter(n=>stripPfx(n).toLowerCase()!==_qn);
         refreshUserCount(ev.conn_id,ch.name);
       }
       if(!quitChans.length) sysMsg(ev.conn_id,'status',`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{ts:ev.ts,from:ev.nick,self:quitSelf,subject:ev.nick});
@@ -1451,11 +1454,13 @@ function handleEvent(ev) {
     }
     case 'irc_nick': {
       const nNet=networks.find(n=>n.config.id===ev.conn_id);
-      const nickChans=(nNet?.channels||[]).filter(ch=>ch.names.some(n=>stripPfx(n)===ev.old||stripPfx(n)===ev.new));
+      // Case-insensitive member match (IRC nicks are case-insensitive).
+      const _no=String(ev.old||'').toLowerCase(),_nw=String(ev.new||'').toLowerCase();
+      const nickChans=(nNet?.channels||[]).filter(ch=>ch.names.some(n=>{const s=stripPfx(n).toLowerCase();return s===_no||s===_nw;}));
       const nickSelf=(ev.old===getNick(ev.conn_id)||ev.new===getNick(ev.conn_id));
       for(const ch of nickChans){
         sysMsg(ev.conn_id,ch.name,`• ${ev.old} is now known as ${ev.new}`,'nick',{ts:ev.ts,from:ev.new,self:nickSelf,subject:ev.new,subject2:ev.old});
-        ch.names=ch.names.map(n=>{const pfx=n.match(/^[@+~&%]*/)[0];return stripPfx(n)===ev.old?pfx+ev.new:n;});
+        ch.names=ch.names.map(n=>{const pfx=n.match(/^[@+~&%]*/)[0];return stripPfx(n).toLowerCase()===_no?pfx+ev.new:n;});
         refreshUserCount(ev.conn_id,ch.name);
       }
       if(!nickChans.length) sysMsg(ev.conn_id,'status',`• ${ev.old} is now known as ${ev.new}`,'nick',{ts:ev.ts,from:ev.new,self:nickSelf,subject:ev.new,subject2:ev.old});
@@ -1475,7 +1480,7 @@ function handleEvent(ev) {
         sysMsg(ev.conn_id,ev.channel,`Topic: ${ev.topic}${ev.set_by?' ('+ev.set_by+')':''}`, 'topic');
         const tNet=networks.find(n=>n.config.id===ev.conn_id);
         if(tNet){
-          const tCh=tNet.channels.find(c=>c.name===ev.channel);
+          const tCh=tNet.channels.find(c=>_sameChan(c.name,ev.channel));
           if(tCh) tCh.topic=ev.topic;
           else tNet.channels.push({name:ev.channel,topic:ev.topic,names:[]});
         }
@@ -1505,7 +1510,7 @@ function handleEvent(ev) {
       sysMsg(ev.conn_id,ev.target,modeDisplay,'mode',{ts:ev.ts,from:modeSetter||'*',self:modeSetter===getNick(ev.conn_id),rawModes:rawModes,subject:modeSetter||''});
       // Update nick prefixes in names list when channel modes change
       const mNet=networks.find(n=>n.config.id===ev.conn_id);
-      const mCh=mNet?.channels?.find(c=>c.name===ev.target);
+      const mCh=mNet?.channels?.find(c=>_sameChan(c.name,ev.target));
       if(mCh){
         const modeMap={o:'@',v:'+',h:'%',a:'&',q:'~'};
         const parts=rawModes.split(' ');
@@ -1561,7 +1566,7 @@ function handleEvent(ev) {
       else delete window._awayNicks[awayKey];
       // Re-render nick panel if active channel contains this nick
       if(aNet&&active&&active.conn_id===ev.conn_id){
-        const actCh=aNet.channels.find(c=>c.name===active.target);
+        const actCh=aNet.channels.find(c=>_sameChan(c.name,active.target));
         if(actCh&&actCh.names.some(n=>stripPfx(n)===ev.nick)){
           renderNickPanel(actCh.names);
         }
@@ -1580,7 +1585,7 @@ function handleEvent(ev) {
       // from the JOIN echo. Match exactly first, then fall back to a case-fold
       // compare so the away graying still applies (mirrors the backend irc_lower fix).
       const _snChanLc=String(ev.channel||'').toLowerCase();
-      const snCh=snNet.channels.find(c=>c.name===ev.channel)||snNet.channels.find(c=>String(c.name||'').toLowerCase()===_snChanLc);
+      const snCh=snNet.channels.find(c=>_sameChan(c.name,ev.channel))||snNet.channels.find(c=>String(c.name||'').toLowerCase()===_snChanLc);
       if(!snCh) break;
       const awaySet=new Set((ev.away_nicks||[]).map(x=>x.toLowerCase()));
       let changed=false;
@@ -1832,6 +1837,13 @@ function handleEvent(ev) {
 
 // ─── Buffer helpers ────────────────────────────────────────────────────────────
 function bk(c,t){return `${c}/${t.toLowerCase()}`;}
+// IRC channel names are case-insensitive. Channel ROWS (net.channels objects) must be
+// matched case-insensitively, or a channel whose server-canonical case differs from the
+// case we joined it as (e.g. #Channel vs #channel, common via bouncers) gets split into
+// two rows — one empty (drives an empty user list) + one populated (a doubled sidebar
+// entry). Buffer/log keys (bk, get_logs, display_target) are a SEPARATE axis and stay
+// as-is (bk already lowercases). See the mirror of this at irc_away_snapshot.
+function _sameChan(a,b){return typeof a==="string"&&typeof b==="string"&&a.toLowerCase()===b.toLowerCase();}
 // User-intent join tracking: only auto-switch the active view to channels the
 // user explicitly joined (/join, /cycle, channel list, join button, kick-rejoin).
 // The server's reconnect auto-rejoin emits irc_join with NO preceding
@@ -2659,7 +2671,7 @@ function updateNick(conn_id,nick){
 function updateNames(conn_id,channel,names){
   const net=networks.find(n=>n.config.id===conn_id);
   if(!net)return;
-  const ch=net.channels.find(c=>c.name===channel);
+  const ch=net.channels.find(c=>_sameChan(c.name,channel));
   if(ch){ch.names=names;}
   else{net.channels.push({name:channel,topic:'',names});}
   if(isActive(conn_id,channel)){renderNickPanel(names);updateTopbar();}
@@ -3103,7 +3115,7 @@ function buildRow(msg){
   let userPfx='';
   if(isChat&&active&&(active.target.startsWith('#')||active.target.startsWith('&'))){
     const _net=networks.find(n=>n.config.id===active.conn_id);
-    const _ch=_net?.channels?.find(c=>c.name===active.target);
+    const _ch=_net?.channels?.find(c=>_sameChan(c.name,active.target));
     if(_ch){const entry=(_ch.names||[]).find(n=>stripPfx(n)===msg.from);if(entry){let pi=0;while(pi<entry.length&&'~&@%+'.includes(entry[pi]))pi++;if(pi>0)userPfx=entry[0];}}
   }
   const pfxHtml=userPfx?`<span class="nick-pfx${'~&@'.includes(userPfx)?' op':''}">${userPfx}</span>`:'';
@@ -3337,7 +3349,7 @@ function updateTopbar(){
   document.getElementById('chan-title').textContent=active.target;
   document.getElementById('chan-title').style.color='var(--text)';
   if(net){
-    const ch=net.channels.find(c=>c.name===active.target);
+    const ch=net.channels.find(c=>_sameChan(c.name,active.target));
     const topic=ch?.topic||'';
     topicMenuBtn.style.display='';
     if(topic){
@@ -4019,7 +4031,7 @@ async function handleInput(raw){
       case 'MDOP': case 'MASSDEOP': case 'DROP': {
         const self=getNick(conn_id);
         const net=networks.find(n=>n.config.id===conn_id);
-        const ch=net?.channels?.find(c=>c.name===target);
+        const ch=net?.channels?.find(c=>_sameChan(c.name,target));
         if(!ch){sysMsg(conn_id,target,'Not in a channel','error');break;}
         let count=0;
         // #43: derive each user's status from the LEADING prefix run only (the chars
@@ -4784,7 +4796,7 @@ function _tabPlaceCursorEnd(inp){ try{ inp.setSelectionRange(inp.value.length, i
 function tabComplete(inp){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
-  const ch=net?.channels?.find(c=>c.name===active.target);
+  const ch=net?.channels?.find(c=>_sameChan(c.name,active.target));
   if(!ch)return;
   const now=Date.now();
   const val=inp.value;
@@ -6031,7 +6043,7 @@ function _onMsgsTabToggle(){
 function refreshUserCount(connId,channel){
   if(!active||active.conn_id!==connId||typeof channel!=='string'||active.target.toLowerCase()!==channel.toLowerCase())return;
   const net=networks.find(n=>n.config.id===connId);
-  const ch=net?.channels?.find(c=>c.name===channel);
+  const ch=net?.channels?.find(c=>_sameChan(c.name,channel));
   document.getElementById('usercount').textContent=ch?`${ch.names.length} users`:'';
   renderNickPanel(ch?.names||[]);
 }
@@ -11592,7 +11604,7 @@ let nickCtx=null;
 function getMyPrefix(conn_id,channel){
   const net=networks.find(n=>n.config.id===conn_id);
   if(!net)return '';
-  const ch=net.channels.find(c=>c.name===channel);
+  const ch=net.channels.find(c=>_sameChan(c.name,channel));
   if(!ch)return '';
   const myNick=getNick(conn_id).toLowerCase();
   const entry=ch.names.find(n=>stripPfx(n).toLowerCase()===myNick);
@@ -11820,7 +11832,7 @@ async function leaveCurrentChannel(){
 function viewFullTopic(){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
-  const ch=net?.channels?.find(c=>c.name===active.target);
+  const ch=net?.channels?.find(c=>_sameChan(c.name,active.target));
   const topic=ch?.topic;
   if(!topic){showToast('No topic set');return;}
   let ov=document.getElementById('topic-overlay');
@@ -11925,7 +11937,7 @@ function customAlert(message){
 async function editTopic(){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
-  const ch=net?.channels?.find(c=>c.name===active.target);
+  const ch=net?.channels?.find(c=>_sameChan(c.name,active.target));
   const current=ch?.topic||'';
   const newTopic=await customPrompt('Edit topic for '+active.target+':',current);
   if(newTopic===null)return;
@@ -11938,7 +11950,7 @@ async function promptJoinChannel(conn_id){
 function copyTopic(){
   if(!active)return;
   const net=networks.find(n=>n.config.id===active.conn_id);
-  const ch=net?.channels?.find(c=>c.name===active.target);
+  const ch=net?.channels?.find(c=>_sameChan(c.name,active.target));
   const topic=ch?.topic||'';
   if(!topic){showToast('No topic set');return;}
   navigator.clipboard?.writeText(topic).then(()=>showToast('Topic copied'));
@@ -12563,7 +12575,7 @@ function batchMode(conn_id, channel, modeChar, nicks) {
 
 function getChannelNicksByTarget(conn_id, channel) {
   const net = networks.find(n => n.config.id === conn_id);
-  const ch  = net?.channels?.find(c => c.name === channel);
+  const ch  = net?.channels?.find(c=>_sameChan(c.name,channel));
   if (!ch) return [];
   // Return bare nicks (strip prefix)
   return ch.names.map(n => stripPfx(n));
@@ -12571,7 +12583,7 @@ function getChannelNicksByTarget(conn_id, channel) {
 
 function getChannelOps(conn_id, channel) {
   const net = networks.find(n => n.config.id === conn_id);
-  const ch  = net?.channels?.find(c => c.name === channel);
+  const ch  = net?.channels?.find(c=>_sameChan(c.name,channel));
   if (!ch) return [];
   return ch.names.filter(n => n.startsWith('@')).map(n => stripPfx(n));
 }
@@ -12579,7 +12591,7 @@ function getChannelOps(conn_id, channel) {
 function getChannelNonOps(conn_id, channel) {
   const self = getNick(conn_id);
   const net  = networks.find(n => n.config.id === conn_id);
-  const ch   = net?.channels?.find(c => c.name === channel);
+  const ch   = net?.channels?.find(c=>_sameChan(c.name,channel));
   if (!ch) return [];
   return ch.names
     .filter(n => !n.startsWith('@') && !n.startsWith('~') && !n.startsWith('&'))
@@ -12589,7 +12601,7 @@ function getChannelNonOps(conn_id, channel) {
 
 function getChannelVoiced(conn_id, channel) {
   const net = networks.find(n => n.config.id === conn_id);
-  const ch  = net?.channels?.find(c => c.name === channel);
+  const ch  = net?.channels?.find(c=>_sameChan(c.name,channel));
   if (!ch) return [];
   return ch.names.filter(n => n.startsWith('+')).map(n => stripPfx(n));
 }
@@ -12597,7 +12609,7 @@ function getChannelVoiced(conn_id, channel) {
 function getChannelNonVoiced(conn_id, channel) {
   const self = getNick(conn_id);
   const net  = networks.find(n => n.config.id === conn_id);
-  const ch   = net?.channels?.find(c => c.name === channel);
+  const ch   = net?.channels?.find(c=>_sameChan(c.name,channel));
   if (!ch) return [];
   // Non-voiced = no + prefix AND no op/owner prefix (they already have >= voice)
   return ch.names
@@ -13716,7 +13728,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.48';
+const CRYPTIRC_VERSION='0.3.52';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13724,6 +13736,18 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.3.52', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed the user list staying empty for channels whose name is stored in a different capitalization than you typed it (e.g. #channel vs #Channel). The NAMES reply is now matched case-insensitively, and an empty reply can no longer wipe out a channel’s member list.'},
+  ]},
+  {version:'0.3.51', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed some channels showing an empty user list after a reconnect or a server update. The client now rebuilds member lists at a paced rate instead of one big burst (which the IRC server’s flood protection was silently dropping for busy accounts), and automatically re-requests any channel that comes back empty.'},
+  ]},
+  {version:'0.3.50', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed missing chat history and quits landing in the wrong window for channels whose capitalization differs from how you typed them (e.g. #channel vs #Channel). History logged under either capitalization is now merged and shown together, and join/quit/nick events are matched case-insensitively so they appear in the channel rather than the server tab.'},
+  ]},
+  {version:'0.3.49', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed the user list showing empty (and the channel appearing twice in the sidebar) for a channel whose capitalization differs from how you typed it — e.g. joining #channel when it was registered as #Channel. Channel names are now matched case-insensitively everywhere, so one channel is always one row with the correct member list.'},
+  ]},
   {version:'0.3.48', date:'July 2026', items:[
     {tag:'new', text:'Five new bots: 🗒 Quote DB (!q add … / !q / !q 3), 👀 Seen (!seen nick), ✉️ Tell (!tell nick msg — delivered when they’re next active), 📝 Notes (!note … / !notes), and ❓ Help (!help / !bots, always answered in PM). Private commands too: /q /seen /tell /note.'},
     {tag:'new', text:'Enforcement upgraded: flood protection (X lines in Y seconds) and a bad-word filter, each with a warn → kick → kick+ban ladder and an exempt list. Plus a new 🌐 IP/Host logger that records joins to your private *ip-log* buffer. All off by default.'},
@@ -15275,7 +15299,7 @@ function renderStatusText(msg){
 function highlightNicks(html){
   if(!active)return html;
   const net=networks.find(n=>n.config.id===active.conn_id);
-  const ch=net?.channels?.find(c=>c.name===active.target);
+  const ch=net?.channels?.find(c=>_sameChan(c.name,active.target));
   if(!ch||!ch.names||!ch.names.length)return html;
   const nicks=ch.names.map(n=>stripPfx(n)).filter(n=>n.length>1);
   if(!nicks.length)return html;

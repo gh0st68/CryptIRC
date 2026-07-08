@@ -511,8 +511,10 @@ pub async fn dispatch_line(
             let reason = p.params.get(0).cloned().unwrap_or_default();
             let affected: Vec<String> = {
                 let mut c = conn.lock().await;
-                let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == nick)).map(|(_, ch)| ch.name.clone()).collect();
-                for ch in c.channels.values_mut() { ch.names.retain(|n| strip_pfx(n) != nick); }
+                // IRC nicks are case-insensitive — match members case-insensitively so a
+                // QUIT is logged to the shared channel(s), not misfiled to the status buffer.
+                let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n).eq_ignore_ascii_case(&nick))).map(|(_, ch)| ch.name.clone()).collect();
+                for ch in c.channels.values_mut() { ch.names.retain(|n| !strip_pfx(n).eq_ignore_ascii_case(&nick)); }
                 chans
             };
             let quit_text = if reason.is_empty() { format!("⊗ {} quit", nick) } else { format!("⊗ {} quit ({})", nick, reason) };
@@ -532,7 +534,7 @@ pub async fn dispatch_line(
             let src_userhost = userhost_from_prefix(&p.prefix);
             let affected: Vec<String> = {
                 let mut c = conn.lock().await;
-                let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n) == old)).map(|(_, ch)| ch.name.clone()).collect();
+                let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n).eq_ignore_ascii_case(&old))).map(|(_, ch)| ch.name.clone()).collect();
                 // #30: only adopt a self-NICK into our authoritative nick when the
                 // source fully identifies us — its user@host matches the one we recorded
                 // (from self-JOIN/CHGHOST). Before we have learned our own user@host
@@ -548,7 +550,7 @@ pub async fn dispatch_line(
                 }
                 for ch in c.channels.values_mut() {
                     for n in ch.names.iter_mut() {
-                        if strip_pfx(n) == old {
+                        if strip_pfx(n).eq_ignore_ascii_case(&old) {
                             let pfx: String = n.chars().take_while(|c| "@+~&%".contains(*c)).collect();
                             *n = format!("{}{}", pfx, new);
                         }
@@ -779,7 +781,13 @@ pub async fn dispatch_line(
                         else { s.to_string() }
                     })
                     .collect();
-                let entry = c.names_buf.entry(channel).or_default();
+                // Key the buffer by the case-folded channel name. IRC channels are
+                // case-insensitive, and a server can echo a DIFFERENT case in the 353
+                // (canonical, e.g. #Channel) than in the terminating 366 (whatever case
+                // the NAMES query used, e.g. #channel from a case-folded resync request).
+                // Keying by raw case meant the 366 remove missed the buffered names and
+                // clobbered the real member list to empty — see the matching 366 arm.
+                let entry = c.names_buf.entry(irc_lower(&channel)).or_default();
                 for n in names {
                     if entry.len() < NAMES_BUF_MAX_PER_CHAN { entry.push(n); }
                 }
@@ -787,12 +795,20 @@ pub async fn dispatch_line(
         }
         "366" => {
             let channel = p.params.get(1).cloned().unwrap_or_default();
-            let names   = { conn.lock().await.names_buf.remove(&channel).unwrap_or_default() };
-            // #28: gate forged 366 for untracked channels (see TOPIC arm). The names_buf
-            // remove above still runs so buffered names for a dropped channel are freed.
-            let tracked = { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.names = names.clone(); true } else { false } };
-            if tracked {
-                send(ServerEvent::IrcNames { conn_id: conn_id.to_string(), channel, names });
+            // Case-folded lookup so a 366 whose channel case differs from the 353's
+            // (see the 353 arm) still finds the buffered names.
+            let names   = { conn.lock().await.names_buf.remove(&irc_lower(&channel)).unwrap_or_default() };
+            // An EMPTY NAMES reply for a channel we're in is spurious — you're always a
+            // member of your own channels, so a real reply has >=1 entry. An empty 366
+            // comes from a duplicate/overlapping NAMES request whose buffer was already
+            // flushed (or an odd server). Never let it clobber the populated member list
+            // (web-side ch.names OR the client, via an emitted empty IrcNames). Skip it.
+            if !names.is_empty() {
+                // #28: gate forged 366 for untracked channels (see TOPIC arm).
+                let tracked = { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.names = names.clone(); true } else { false } };
+                if tracked {
+                    send(ServerEvent::IrcNames { conn_id: conn_id.to_string(), channel, names });
+                }
             }
         }
         "MODE" => {

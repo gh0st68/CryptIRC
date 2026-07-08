@@ -1,6 +1,6 @@
 [package]
 name = "cryptirc"
-version = "0.3.48"
+version = "0.3.52"
 edition = "2021"
 
 [dependencies]
