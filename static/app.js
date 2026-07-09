@@ -1311,16 +1311,39 @@ function handleEvent(ev) {
         const _msgKind = _isHostChange ? 'chghost' : (ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg');
         // Server/system notices (from '*') are never real mentions — skip detection so
         // they don't turn channels red or spam the Mentions panel.
-        const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts);
+        // B2: suppress the mentions-inbox/badge SIDE EFFECT only for DETERMINISTIC ring
+        // replay (ev.replayed) — a daemon reattach must not re-inject already-seen mentions.
+        // We deliberately do NOT also key off `age>60`: that compares the server-time tag
+        // to the BROWSER clock, so a user whose clock runs fast (no NTP / sleep-wake drift)
+        // — or a slow relay — would have every LIVE mention look old and get silently
+        // dropped from the inbox/badge, which is far worse than re-raising an already-seen
+        // one. (Genuine ZNC-bouncer playback mentions may re-appear on reconnect; that's the
+        // accepted lesser evil.) `mentioned` is still computed for highlight rendering.
+        const _recordMention = !ev.replayed;
+        const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts,_recordMention);
         // ZNC playback detection — batch old messages silently
         const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null};
-        if(zncDetectBatch(ev.conn_id,ev.target,zncMsg)){
+        // Daemon ring-buffer replay (a cryptirc.service restart reattaching to the
+        // live daemon) sets ev.replayed — a DETERMINISTIC signal to take the silent
+        // path (render to scrollback, dedup, but no notification/unread/sound),
+        // covering the recent-message case the age>60 heuristic below misses. Still
+        // call zncDetectBatch (don't short-circuit) so its playback-summary side
+        // effect is preserved for genuine bouncer playback.
+        const _isReplayBatch = zncDetectBatch(ev.conn_id,ev.target,zncMsg);
+        if(ev.replayed || _isReplayBatch){
           // Filter ignored users in ZNC batch path too
           if(isIgnored(ev.from, ev.prefix)) return;
           // Still add to buffer but don't trigger notifications/sounds — dedup by msg_id + fuzzy
           const _zbuf=getBuf(ev.conn_id,ev.target);
           let _zdup=false;
-          const _zts=Math.max(0,_zbuf.length-30);
+          // B1: daemon ring-replay lines carry msg_id=0 (log-append is skipped on replay),
+          // so the whole-buffer id scan below can't fire for them — scan the ENTIRE buffer
+          // fuzzily for a replayed line instead of only the last 30 rows. Otherwise a line
+          // whose original sits >30 rows back duplicates in scrollback on every restart.
+          // Safe: a replayed line's original is already in the buffer, so a whole-buffer
+          // fuzzy match is that original (not a distinct message). The age>60 ZNC path keeps
+          // the 30-row window (its lines carry real ids handled by the id scan above).
+          const _zts=ev.replayed?0:Math.max(0,_zbuf.length-30);
           // id match: scan the WHOLE buffer (ZNC/bouncer replay can re-deliver a
           // line whose original is far from the tail). Fuzzy match below stays
           // windowed so genuinely repeated identical text isn't wrongly dropped.
@@ -5026,14 +5049,12 @@ function _upcFlagHas(id){ return !!_upcFlagLoad()[id]; }
 function _upcFlagClear(id){ const o=_upcFlagLoad(); if(id in o){ delete o[id]; _upcFlagSave(o); } }
 // Send a completed upload's share link to its source chat as a normal message
 // (mirrors the plain-send path: E2E-encrypts when a session/channel key exists,
-// Extensions the server's /pub route serves publicly (mirror of upload.rs
-// is_public_media). Only these get a /pub/ share link that loads for anyone;
-// any other file keeps its authenticated /files/ URL, because a /pub/ link to a
-// non-media file 404s by design (docs/archives stay behind the auth gate).
-const _PUBLIC_MEDIA_EXTS=/\.(jpe?g|png|gif|webp|avif|ico|heic|heif|bmp|tiff?|mp4|webm|mov|avi|mkv|m4v|3gp|3g2|flv|wmv|mp3|ogg|wav|flac)$/i;
+// v0.4.0: EVERY upload is shareable by its unguessable-UUID link, so all files use the
+// public /pub/ route — the auth'd /files/ route 401s when opened outside the app. The
+// server now returns /pub/ URLs directly; the replace() still upgrades any older /files/
+// record so its shared link works too.
 function _pubShareUrl(r){
-  const isMedia=_PUBLIC_MEDIA_EXTS.test(r.filename||r.original_name||'');
-  let path=isMedia?r.url.replace('/files/','/pub/'):r.url;
+  let path=(r.url||'').replace('/files/','/pub/');
   // Collapse a leading double slash defensively: records minted before the
   // server base-path fix stored "//files/…" (root install), which would make
   // origin+path a broken "https://host//…". New records are already single-slash.
@@ -13728,7 +13749,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.3.52';
+const CRYPTIRC_VERSION='0.4.0';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13736,6 +13757,10 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.4.0', date:'July 2026', items:[
+    {tag:'fix', text:'Shared upload links now work outside the app. Copy the link to any image, PDF, video, audio clip or file you uploaded and it opens for anyone you send it to — previously documents 401’d behind the login and only some media loaded. Images/PDFs/video/audio preview inline; other files download. (For safety, files that could run code in the browser are always downloaded, never rendered.)'},
+    {tag:'fix', text:'Reliability overhaul of the always-on connection daemon — the piece that holds your IRC links open so app updates don’t drop you. Hardened end-to-end against stalls, floods and edge cases, with a systemd watchdog that auto-recovers a wedged daemon and reconnect backoff that waits longer each try (up to 5 minutes) but never gives up. Your sessions stay put across updates.'},
+  ]},
   {version:'0.3.52', date:'July 2026', items:[
     {tag:'fix', text:'Fixed the user list staying empty for channels whose name is stored in a different capitalization than you typed it (e.g. #channel vs #Channel). The NAMES reply is now matched case-insensitively, and an empty reply can no longer wipe out a channel’s member list.'},
   ]},
@@ -15015,7 +15040,12 @@ let mentionsList=[];
 try{mentionsList=JSON.parse(localStorage.getItem('cryptirc_mentions')||'[]');}catch(e){}
 function saveMentions(){try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));localStorage.setItem('cryptirc_mentions_ts',String(Date.now()));}catch(e){} savePrefsToServer();}
 function getHighlightWords(){try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}}
-function checkMention(conn_id,target,from,text,ts){
+function checkMention(conn_id,target,from,text,ts,record){
+  // B2: `record` (default true) gates the SIDE EFFECT (adding to the Mentions inbox +
+  // raising the badge). Replayed ring history / ZNC playback pass record=false so an
+  // already-seen mention isn't re-injected + the badge isn't falsely re-raised on every
+  // reconnect — while still returning `mentioned` so the line still renders highlighted.
+  if(record===undefined)record=true;
   if(!currentUser)return false;
   const nick=getNick(conn_id);
   const t=text.toLowerCase();
@@ -15028,7 +15058,7 @@ function checkMention(conn_id,target,from,text,ts){
   const isChan=target&&(target.startsWith('#')||target.startsWith('&')||target.startsWith('+')||target.startsWith('!'));
   // A muted channel (or muted network) must NOT light the Notices inbox / mentions
   // badge — muting means no alert of any kind for that channel.
-  if(mentioned && isChan && !_isBufMuted(conn_id,target)){
+  if(mentioned && isChan && !_isBufMuted(conn_id,target) && record){
     const net=networks.find(x=>x.config.id===conn_id);
     mentionsList.unshift({type:'mention',conn_id,target,from,text,ts,network:net?.config.label||net?.config.server||conn_id});
     if(mentionsList.length>100)mentionsList.length=100;
@@ -15322,7 +15352,10 @@ function linkify(s){return s.replace(/(https?:\/\/[^\s<>"]+)/g,(m,url)=>{
   // '&amp;' into '&amp;amp;', corrupting multi-param query strings (e.g. a YouTube
   // ?v=..&t=.. link). appendFileToken is now a pass-through (F8), so no raw
   // fragment is appended that would still need escaping.
-  const href=url.includes('/files/')?appendFileToken(url):url;
+  // Upgrade our OWN /files/ upload links to the public /pub/ route so they open outside the
+  // app too (the auth'd /files/ route 401s externally). Same-origin only — never rewrite a
+  // foreign site's /files/ path. New uploads already post /pub/ URLs; this catches old ones.
+  const href=(url.includes('/files/')&&isSameOriginUrl(url))?url.replace('/files/','/pub/'):url;
   return `<a href="${href}" target="_blank" rel="noopener noreferrer">${url}</a>`;
 });}
 function nickHash(n){let h=0;for(const c of(n||''))h=(h*31+c.charCodeAt(0))&0xffffffff;return Math.abs(h)%10;}

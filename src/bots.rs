@@ -256,8 +256,22 @@ fn ai_capture_next_token() -> u64 {
 
 /// Begin a capture run for `conn_id`. Returns the token used to poll/take it.
 fn ai_capture_arm(conn_id: &str) -> u64 {
+    /// Ceiling on outstanding capture tokens. Every armed token is normally taken
+    /// (`ai_capture_take`) when the AI result loop finishes, but a panic between arm
+    /// and take would leak one forever with no reaper. Tokens are monotonic, so if we
+    /// ever exceed this ceiling we evict the oldest (lowest-token) entries — a real
+    /// workload (owner AI agent-mode requests) never approaches it.
+    const AI_CAPTURE_MAX: usize = 256;
+    let cap = ai_capture();
+    if cap.len() >= AI_CAPTURE_MAX {
+        let mut toks: Vec<u64> = cap.iter().map(|e| *e.key()).collect();
+        toks.sort_unstable();
+        for old in toks.into_iter().take(cap.len() - AI_CAPTURE_MAX + 1) {
+            cap.remove(&old);
+        }
+    }
     let tok = ai_capture_next_token();
-    ai_capture().insert(tok, (conn_id.to_string(), Arc::new(std::sync::Mutex::new(Vec::new()))));
+    cap.insert(tok, (conn_id.to_string(), Arc::new(std::sync::Mutex::new(Vec::new()))));
     tok
 }
 
@@ -916,6 +930,29 @@ fn cooldown_ok(username: &str, bot: &str) -> bool {
         }
         Entry::Vacant(e) => { e.insert(now); true }
     }
+}
+
+/// Drop long-expired cooldown entries. Each key is a distinct `username:bot`
+/// pair; the value is the last-trigger unix time, dead weight once it's well past
+/// COOLDOWN_SECS. The key SET grows with every distinct (user, bot) that ever
+/// fires, so without this it accretes for the process's whole (multi-year) life.
+/// Hourly window (>> COOLDOWN_SECS) so a live cooldown is never dropped early.
+pub fn prune_cooldowns() {
+    let now = chrono::Utc::now().timestamp();
+    cooldowns().retain(|_, v| now - *v < 3600);
+}
+
+/// Drop per-connection send-pacer gates whose connection has been idle for over an
+/// hour (a removed network / long-gone conn_id). Bounded by live connections in
+/// practice, but a process that churns through many conn_ids over years would
+/// otherwise retain one gate each forever. `try_lock` so an in-flight `bot_send`
+/// is never disturbed — a locked gate is by definition active, so keep it.
+pub fn prune_bot_send_gates() {
+    let now = chrono::Utc::now().timestamp_millis();
+    bot_send_gates().retain(|_, gate| match gate.try_lock() {
+        Ok(last) => now - *last < 3_600_000,
+        Err(_) => true,
+    });
 }
 
 // ── External fetchers (keyless public APIs) ──────────────────────────────────

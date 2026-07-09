@@ -5,41 +5,90 @@
 //! Frame = 4-byte big-endian length prefix + that many bytes of JSON body.
 
 use crate::ipc::IpcMessage;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Generous vs. `ircproto::MAX_IRC_LINE_LEN` (8192) — a `RawLine`/`RawSend`
-/// frame is one IRC line plus JSON envelope overhead, so this is nowhere near
-/// the ceiling for legitimate traffic. Bounds a malformed/adversarial length
-/// prefix from driving an unbounded allocation on either end of the socket.
-pub const MAX_FRAME_LEN: u32 = 1 << 20; // 1 MiB
+/// 64 KiB — generous vs. `ircproto::MAX_IRC_LINE_LEN` (8192): a `RawLine`/`RawSend`
+/// frame is one IRC line plus JSON envelope, plus headroom for the largest
+/// `SessionSync` snapshot. Tightened from 1 MiB so a malformed/adversarial length
+/// prefix can't force a large speculative allocation on either end of the socket.
+pub const MAX_FRAME_LEN: u32 = 64 * 1024;
 
-/// Serialize `msg` and write it as one length-prefixed frame. Flushes so the
-/// frame is actually on the wire before returning (both ends read frame-by-frame).
+/// A single frame write must never wedge the caller forever. A peer that stops
+/// reading (crashed mid-frame, SIGSTOP'd, kernel buffer full) makes `write_all`
+/// block indefinitely — in a never-restart daemon that stalls every branch of the
+/// select! loop. A timeout turns "stuck peer" into "dead connection, close it."
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Once a length prefix declares N body bytes, they must arrive promptly. This
+/// bounds the "declare a big body then withhold it" reader-pin. (The length prefix
+/// itself is NOT timed — an idle-but-alive peer legitimately sends nothing.)
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Serialize `msg` and write it as one length-prefixed frame, flushed. Never
+/// panics (a frozen binary must not die on its own send path) and never blocks
+/// forever (bounded by `WRITE_TIMEOUT`).
 pub async fn write_frame<W: AsyncWriteExt + Unpin>(w: &mut W, msg: &IpcMessage) -> std::io::Result<()> {
-    let body = serde_json::to_vec(msg).expect("IpcMessage always serializes");
+    // Every current IpcMessage variant is infallibly serializable (string-keyed
+    // maps only), so this is a latent-only guard today — but the alternative is a
+    // bare panic on the send path if a future field ever isn't. Drop the frame,
+    // never crash.
+    let body = match serde_json::to_vec(msg) {
+        Ok(b) => b,
+        Err(e) => { tracing::error!("ipc: dropping unserializable frame: {}", e); return Ok(()); }
+    };
+    // Symmetric with read_frame's MAX_FRAME_LEN check: NEVER emit a frame the peer is
+    // guaranteed to reject. read_frame treats an oversized length prefix as a fatal read
+    // error → the peer tears the connection down → on reattach the SAME oversized frame
+    // (e.g. a SessionSync whose channel list is pathologically large — a hostile server
+    // spoofing self-JOINs with huge names) rebuilds first → permanent teardown loop.
+    // Drop it loudly instead; the stream stays healthy and the next message (or a fresh
+    // SessionSync after the next membership change) recovers.
+    if body.len() > MAX_FRAME_LEN as usize {
+        tracing::error!("ipc: dropping oversized frame ({} bytes > {} max) — not sending", body.len(), MAX_FRAME_LEN);
+        return Ok(());
+    }
     let len = body.len() as u32;
-    w.write_all(&len.to_be_bytes()).await?;
-    w.write_all(&body).await?;
-    w.flush().await
+    let fut = async {
+        w.write_all(&len.to_be_bytes()).await?;
+        w.write_all(&body).await?;
+        w.flush().await
+    };
+    match tokio::time::timeout(WRITE_TIMEOUT, fut).await {
+        Ok(res) => res,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "ipc write timed out")),
+    }
 }
 
 /// Read one length-prefixed frame and deserialize it. Returns `Ok(None)` on a
-/// clean EOF at the length-prefix boundary (the other end closed the
-/// connection); returns `Err` for a truncated frame, an oversized length
-/// prefix, or a body that fails to deserialize as `IpcMessage`.
+/// clean EOF at the length-prefix boundary (peer closed); `Err` for a truncated /
+/// oversized / slow / malformed frame.
 pub async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<Option<IpcMessage>> {
-    let mut len_buf = [0u8; 4];
-    match r.read_exact(&mut len_buf).await {
+    // First prefix byte is UNTIMED: an idle-but-alive peer legitimately sends nothing
+    // for long stretches, and a clean close at this exact boundary is EOF → Ok(None).
+    let mut first = [0u8; 1];
+    match r.read_exact(&mut first).await {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    let len = u32::from_be_bytes(len_buf);
+    // Once the first byte has arrived, the peer has COMMITTED to a frame; the remaining
+    // 3 prefix bytes must arrive promptly. Without this bound a partial-prefix stall (a
+    // wedged / SIGSTOP'd writer that sent 1-3 bytes then froze) would pin this reader
+    // task forever — the length-prefix read used to be fully untimed.
+    let mut rest = [0u8; 3];
+    match tokio::time::timeout(BODY_READ_TIMEOUT, r.read_exact(&mut rest)).await {
+        Ok(res) => { res?; }
+        Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "ipc length-prefix read timed out")),
+    }
+    let len = u32::from_be_bytes([first[0], rest[0], rest[1], rest[2]]);
     if len > MAX_FRAME_LEN {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "IPC frame too large"));
     }
     let mut body = vec![0u8; len as usize];
-    r.read_exact(&mut body).await?;
+    match tokio::time::timeout(BODY_READ_TIMEOUT, r.read_exact(&mut body)).await {
+        Ok(res) => { res?; }
+        Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "ipc body read timed out")),
+    }
     serde_json::from_slice(&body).map(Some).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 

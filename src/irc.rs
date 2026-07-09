@@ -22,7 +22,7 @@ use cryptirc::ircproto::{
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 /// S3: maximum total channels in names_buf
-const NAMES_BUF_MAX_CHANNELS: usize = 512;
+pub(crate) const NAMES_BUF_MAX_CHANNELS: usize = 512;
 /// S3: maximum entries per channel in names_buf
 const NAMES_BUF_MAX_PER_CHAN: usize = 4096;
 /// #43: cap the number of channels a single connection will track. A malicious
@@ -189,7 +189,19 @@ pub async fn dispatch_line(
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
         .map(|dt| dt.timestamp())
         .unwrap_or_else(|| chrono::Utc::now().timestamp());
-    let send = |evt: ServerEvent| state.send_to_user(username, evt);
+    let send = |evt: ServerEvent| {
+        // Stamp the dispatch-level replay flag onto every forwarded chat message
+        // so the browser can deterministically silence notifications/unread for
+        // ring-buffer history. Every construction site below passes a `false`
+        // placeholder; this is the single source of truth. (Live lines →
+        // replayed=false, ring-replay lines → replayed=true.)
+        let evt = match evt {
+            ServerEvent::IrcMessage { conn_id, from, target, text, ts, kind, msg_id, prefix, .. } =>
+                ServerEvent::IrcMessage { conn_id, from, target, text, ts, kind, msg_id, prefix, replayed },
+            other => other,
+        };
+        state.send_to_user(username, evt)
+    };
 
     match p.command.as_str() {
 
@@ -278,7 +290,7 @@ pub async fn dispatch_line(
                     p.command.clone()
                 };
                 if !text.is_empty() {
-                    send(ServerEvent::IrcMessage {
+                    send(ServerEvent::IrcMessage { replayed: false,
                         conn_id: conn_id.to_string(),
                         from: nick_from_prefix(&p.prefix),
                         target: "status".to_string(),
@@ -322,8 +334,12 @@ pub async fn dispatch_line(
             } else { (MessageKind::Privmsg, text) };
             // Route PMs to sender's nick, not our own nick
             let display_target = if target.starts_with(['#','&','+','!']) { target.clone() } else { from.clone() };
-            let msg_id = state.logger.append(username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await;
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind, msg_id, prefix: p.prefix.clone() });
+            // I1: never re-append replayed ring history to the on-disk log — it already
+            // exists, and re-appending mints a fresh msg_id per unlocked re-Attach →
+            // duplicate chat on the next page load + unbounded log growth. On replay,
+            // msg_id 0 (the frontend routes replayed events through its silent/dedup path).
+            let msg_id = if !replayed { state.logger.append(username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await } else { 0 };
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind, msg_id, prefix: p.prefix.clone() });
             // Push notification for DMs and mentions — only if no active (non-idle) sessions
             // Fires when: no WS connected at all, OR all connected sessions are idle (20m timeout)
             if from != user_nick && (state.user_events.get(username).map_or(true, |tx| tx.receiver_count() == 0) || state.user_is_idle(username)) {
@@ -380,8 +396,8 @@ pub async fn dispatch_line(
             } else {
                 from.clone() // Incoming NOTICE — route to sender's nick
             };
-            let msg_id = state.logger.append(username, conn_id, &display_target, ts, &from, &text, "notice").await;
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from, target: display_target, text, ts, kind: MessageKind::Notice, msg_id, prefix: None });
+            let msg_id = if !replayed { state.logger.append(username, conn_id, &display_target, ts, &from, &text, "notice").await } else { 0 };
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from, target: display_target, text, ts, kind: MessageKind::Notice, msg_id, prefix: None });
         }
 
         "JOIN" => {
@@ -503,7 +519,7 @@ pub async fn dispatch_line(
             let reason  = p.params.get(1).cloned().unwrap_or_default();
             { let mut c = conn.lock().await; let k = irc_lower(&channel); if nick == c.nick { c.channels.remove(&k); } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| strip_pfx(n) != nick); } }
             let part_text = if reason.is_empty() { format!("← {} left", nick) } else { format!("← {} left ({})", nick, reason) };
-            let _ = state.logger.append(&username, &conn_id, &channel, ts, &nick, &part_text, "part").await;
+            if !replayed { let _ = state.logger.append(&username, &conn_id, &channel, ts, &nick, &part_text, "part").await; }
             send(ServerEvent::IrcPart { conn_id: conn_id.to_string(), nick, channel, reason, ts });
         }
         "QUIT" => {
@@ -519,10 +535,10 @@ pub async fn dispatch_line(
             };
             let quit_text = if reason.is_empty() { format!("⊗ {} quit", nick) } else { format!("⊗ {} quit ({})", nick, reason) };
             if affected.is_empty() {
-                let _ = state.logger.append(&username, &conn_id, "status", ts, &nick, &quit_text, "quit").await;
+                if !replayed { let _ = state.logger.append(&username, &conn_id, "status", ts, &nick, &quit_text, "quit").await; }
             } else {
                 for ch in &affected {
-                    let _ = state.logger.append(&username, &conn_id, ch, ts, &nick, &quit_text, "quit").await;
+                    if !replayed { let _ = state.logger.append(&username, &conn_id, ch, ts, &nick, &quit_text, "quit").await; }
                 }
             }
             send(ServerEvent::IrcQuit { conn_id: conn_id.to_string(), nick, reason, ts });
@@ -560,10 +576,10 @@ pub async fn dispatch_line(
             };
             let nick_text = format!("• {} is now known as {}", old, new);
             if affected.is_empty() {
-                let _ = state.logger.append(&username, &conn_id, "status", ts, &new, &nick_text, "nick").await;
+                if !replayed { let _ = state.logger.append(&username, &conn_id, "status", ts, &new, &nick_text, "nick").await; }
             } else {
                 for ch in &affected {
-                    let _ = state.logger.append(&username, &conn_id, ch, ts, &new, &nick_text, "nick").await;
+                    if !replayed { let _ = state.logger.append(&username, &conn_id, ch, ts, &new, &nick_text, "nick").await; }
                 }
             }
             send(ServerEvent::IrcNick { conn_id: conn_id.to_string(), old, new, ts });
@@ -585,7 +601,7 @@ pub async fn dispatch_line(
                 .collect();
             drop(c);
             for ch in &chans {
-                send(ServerEvent::IrcMessage {
+                send(ServerEvent::IrcMessage { replayed: false,
                     conn_id: conn_id.to_string(), from: "*".into(), target: ch.clone(),
                     text: format!("*** {} has changed hostname to {}", nick, new_host),
                     ts, kind: MessageKind::Notice, msg_id: 0,
@@ -593,7 +609,7 @@ pub async fn dispatch_line(
                 });
             }
             if chans.is_empty() {
-                send(ServerEvent::IrcMessage {
+                send(ServerEvent::IrcMessage { replayed: false,
                     conn_id: conn_id.to_string(), from: "*".into(), target: "status".into(),
                     text: format!("*** {} has changed hostname to {}", nick, new_host),
                     ts, kind: MessageKind::Notice, msg_id: 0,
@@ -611,7 +627,7 @@ pub async fn dispatch_line(
             } else {
                 ("back", format!("{} is back", nick))
             };
-            let _ = state.logger.append(&username, &conn_id, "status", ts, &nick, &log_text, kind_str).await;
+            if !replayed { let _ = state.logger.append(&username, &conn_id, "status", ts, &nick, &log_text, kind_str).await; }
             send(ServerEvent::IrcAway {
                 conn_id: conn_id.to_string(), nick: nick.clone(),
                 away: is_away, message: message.clone(), ts,
@@ -684,7 +700,7 @@ pub async fn dispatch_line(
             let description = p.params.last().cloned().unwrap_or_default();
             let level = p.command.as_str();
             let msg = format!("[{}] {} {} — {}: {}", level, command, code, context, description);
-            send(ServerEvent::IrcMessage {
+            send(ServerEvent::IrcMessage { replayed: false,
                 conn_id: conn_id.to_string(), from: "*".into(),
                 target: "status".into(), text: msg, ts,
                 kind: MessageKind::Notice, msg_id: 0,
@@ -718,7 +734,7 @@ pub async fn dispatch_line(
         // 732 RPL_MONLIST, 733 RPL_ENDOFMONLIST — just pass through
         "732" | "733" => {
             let text = params_from(&p.params, 1); // #19: guard against <1 param
-            send(ServerEvent::IrcMessage {
+            send(ServerEvent::IrcMessage { replayed: false,
                 conn_id: conn_id.to_string(), from: "*".into(),
                 target: "status".into(), text, ts,
                 kind: MessageKind::Notice, msg_id: 0,
@@ -728,7 +744,7 @@ pub async fn dispatch_line(
         // 734 ERR_MONLISTFULL
         "734" => {
             let text = p.params.last().cloned().unwrap_or("Monitor list full".into());
-            send(ServerEvent::IrcMessage {
+            send(ServerEvent::IrcMessage { replayed: false,
                 conn_id: conn_id.to_string(), from: "*".into(),
                 target: "status".into(), text, ts,
                 kind: MessageKind::Notice, msg_id: 0,
@@ -743,7 +759,7 @@ pub async fn dispatch_line(
             let reason  = p.params.get(2).cloned().unwrap_or_default();
             { let mut c = conn.lock().await; let k = irc_lower(&channel); if kicked == c.nick { c.channels.remove(&k); } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| strip_pfx(n) != kicked); } }
             let kick_text = if reason.is_empty() { format!("✗ {} kicked by {}", kicked, by) } else { format!("✗ {} kicked by {} ({})", kicked, by, reason) };
-            let _ = state.logger.append(&username, &conn_id, &channel, ts, &kicked, &kick_text, "kick").await;
+            if !replayed { let _ = state.logger.append(&username, &conn_id, &channel, ts, &kicked, &kick_text, "kick").await; }
             send(ServerEvent::IrcKick { conn_id: conn_id.to_string(), channel, kicked, by, reason, ts });
         }
         "TOPIC" => {
@@ -906,7 +922,7 @@ pub async fn dispatch_line(
                 format!("MODE {}", modes)
             };
             let log_from: String = if setter.is_empty() || setter.contains('.') { "*".into() } else { setter.clone() };
-            let _ = state.logger.append(&username, &conn_id, &display_target, ts, &log_from, &log_text, "mode").await;
+            if !replayed { let _ = state.logger.append(&username, &conn_id, &display_target, ts, &log_from, &log_text, "mode").await; }
             send(ServerEvent::IrcMode { conn_id: conn_id.to_string(), target: display_target, modes: display, ts });
         }
         // 311-318 = WHOIS replies — route to nick's query buffer
@@ -915,17 +931,17 @@ pub async fn dispatch_line(
             let user = p.params.get(2).cloned().unwrap_or_default();
             let host = p.params.get(3).cloned().unwrap_or_default();
             let real = p.params.get(5).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("{}!{}@{} ({})", p.params.get(1).cloned().unwrap_or_default(), user, host, real), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("{}!{}@{} ({})", p.params.get(1).cloned().unwrap_or_default(), user, host, real), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "312" => { // RPL_WHOISSERVER
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let text = params_from(&p.params, 2); // #19: guard against <2 params
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Server: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Server: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "313" => { // RPL_WHOISOPERATOR
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let text = p.params.get(2).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "317" => { // RPL_WHOISIDLE
             let nick = p.params.get(1).cloned().unwrap_or_default();
@@ -933,61 +949,61 @@ pub async fn dispatch_line(
             let signon: i64 = p.params.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
             let idle_str = if idle >= 3600 { format!("{}h {}m {}s", idle/3600, (idle%3600)/60, idle%60) } else if idle >= 60 { format!("{}m {}s", idle/60, idle%60) } else { format!("{}s", idle) };
             let signon_str = chrono::DateTime::from_timestamp(signon, 0).map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Idle: {} | Signon: {}", idle_str, signon_str), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Idle: {} | Signon: {}", idle_str, signon_str), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "318" => { // RPL_ENDOFWHOIS
             let nick = p.params.get(1).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "End of WHOIS".into(), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "End of WHOIS".into(), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "319" => { // RPL_WHOISCHANNELS
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let chans = p.params.get(2).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Channels: {}", chans), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Channels: {}", chans), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "330" => { // RPL_WHOISACCOUNT (logged in as)
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let account = p.params.get(2).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Logged in as: {}", account), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Logged in as: {}", account), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "338" => { // RPL_WHOISACTUALLY (actual host/IP)
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let text = params_from(&p.params, 2); // #19: guard against <2 params
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Actually: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Actually: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "671" => { // RPL_WHOISSECURE
             let nick = p.params.get(1).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "Using secure connection (TLS)".into(), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: "Using secure connection (TLS)".into(), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         // Additional WHOIS numerics — route to nick's query buffer
         "301" => { // RPL_AWAY
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let msg = p.params.get(2).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Away: {}", msg), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Away: {}", msg), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "307" => { // RPL_WHOISREGNICK
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let text = p.params.get(2).cloned().unwrap_or("is a registered nick".into());
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "378" => { // RPL_WHOISHOST (connecting from)
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let text = p.params.get(2).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "379" => { // RPL_WHOISMODES
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let text = p.params.get(2).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "320" => { // RPL_WHOISSPECIAL (identified, bot, etc)
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let text = p.params.get(2).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text, ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         "275" | "276" => { // RPL_WHOISCERTFP — TLS certificate fingerprint
             let nick = p.params.get(1).cloned().unwrap_or_default();
             let text = p.params.get(2).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage { conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Certificate: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "*".into(), target: nick, text: format!("Certificate: {}", text), ts, kind: MessageKind::Notice, msg_id: 0, prefix: None });
         }
         // 367 = RPL_BANLIST — one entry in the ban list
         // 367 = RPL_BANLIST, 348 = RPL_EXCEPTLIST, 346 = RPL_INVITELIST (invex).
@@ -1027,7 +1043,7 @@ pub async fn dispatch_line(
             let server = p.params.get(1).cloned().unwrap_or_default();
             let hub = p.params.get(2).cloned().unwrap_or_default();
             let info = p.params.get(3).cloned().unwrap_or_default();
-            send(ServerEvent::IrcMessage {
+            send(ServerEvent::IrcMessage { replayed: false,
                 conn_id: conn_id.to_string(), from: "links".into(),
                 target: "status".into(),
                 text: format!("\x02{}\x02 → {} ({})", server, hub, info),
@@ -1037,7 +1053,7 @@ pub async fn dispatch_line(
         }
         // 365 = RPL_ENDOFLINKS
         "365" => {
-            send(ServerEvent::IrcMessage {
+            send(ServerEvent::IrcMessage { replayed: false,
                 conn_id: conn_id.to_string(), from: "links".into(),
                 target: "status".into(),
                 text: "End of /LINKS".into(),
@@ -1093,7 +1109,7 @@ pub async fn dispatch_line(
                 format!("Channel created: {}", dt)
             } else { raw_ts.to_string() };
             let display_target = if chan.starts_with(['#','&','+','!']) { chan } else { "status".to_string() };
-            send(ServerEvent::IrcMessage {
+            send(ServerEvent::IrcMessage { replayed: false,
                 conn_id: conn_id.to_string(), from: "*".into(),
                 target: display_target, text, ts,
                 kind: MessageKind::Notice, msg_id: 0, prefix: None,
@@ -1104,7 +1120,7 @@ pub async fn dispatch_line(
             let chan = p.params.get(1).cloned().unwrap_or_default();
             let reason = p.params.get(2).cloned().unwrap_or("No such channel".into());
             let display_target = if chan.starts_with(['#','&','+','!']) { chan } else { "status".to_string() };
-            send(ServerEvent::IrcMessage {
+            send(ServerEvent::IrcMessage { replayed: false,
                 conn_id: conn_id.to_string(), from: "*".into(),
                 target: display_target, text: reason, ts,
                 kind: MessageKind::Notice, msg_id: 0, prefix: None,
@@ -1134,8 +1150,8 @@ pub async fn dispatch_line(
             if !is_pending {
                 let text = if p.params.len() > 1 { p.params[1..].join(" ") } else { String::new() };
                 if !text.is_empty() {
-                    let msg_id = state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await;
-                    send(ServerEvent::IrcMessage {
+                    let msg_id = if !replayed { state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await } else { 0 };
+                    send(ServerEvent::IrcMessage { replayed: false,
                         conn_id: conn_id.to_string(), from: "*".into(),
                         target: "status".into(), text, ts,
                         kind: MessageKind::Notice, msg_id, prefix: None,
@@ -1170,8 +1186,8 @@ pub async fn dispatch_line(
             if !was_auto {
                 let text = if p.params.len() > 1 { p.params[1..].join(" ") } else { String::new() };
                 if !text.is_empty() {
-                    let msg_id = state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await;
-                    send(ServerEvent::IrcMessage {
+                    let msg_id = if !replayed { state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await } else { 0 };
+                    send(ServerEvent::IrcMessage { replayed: false,
                         conn_id: conn_id.to_string(), from: "*".into(),
                         target: "status".into(), text, ts,
                         kind: MessageKind::Notice, msg_id, prefix: None,
@@ -1187,8 +1203,8 @@ pub async fn dispatch_line(
                 p.params.join(" ")
             };
             if !text.is_empty() {
-                let msg_id = state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await;
-                send(ServerEvent::IrcMessage {
+                let msg_id = if !replayed { state.logger.append(username, conn_id, "status", ts, "*", &text, "notice").await } else { 0 };
+                send(ServerEvent::IrcMessage { replayed: false,
                     conn_id: conn_id.to_string(),
                     from: "*".to_string(),
                     target: "status".to_string(),
@@ -1210,7 +1226,7 @@ pub async fn dispatch_line(
                 p.command.clone()
             };
             if !text.is_empty() {
-                send(ServerEvent::IrcMessage {
+                send(ServerEvent::IrcMessage { replayed: false,
                     conn_id: conn_id.to_string(),
                     from: nick_from_prefix(&p.prefix),
                     target: "status".to_string(),

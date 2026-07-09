@@ -26,11 +26,26 @@ Wants=network-online.target
 # but this daemon crashing/restarting must never cascade-stop the web
 # service, and vice versa. Lifecycle-decoupling is the entire point.
 Before=cryptirc.service
-StartLimitIntervalSec=60
-StartLimitBurst=5
+# NEVER latch into a permanent `failed` state. The old StartLimitIntervalSec=60 +
+# StartLimitBurst=5 meant 5 fast crashes (RestartSec=5 → ~25s, inside the 60s window)
+# would burn all tokens and leave the daemon dead until a human ran `reset-failed`.
+# On a never-touch box that is the exact catastrophe this deployment exists to avoid.
+# `=0` disables the rate limiter → systemd retries forever; a manual `systemctl stop`
+# still stops it cleanly, so this is safe.
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+# Type=notify so the daemon can drive the systemd WATCHDOG (see WatchdogSec below) —
+# the ONLY backstop for a hung-but-alive daemon (write-stall, dial-stall, a deadlock),
+# and it cannot be retrofitted after the binary is frozen.
+Type=notify
+NotifyAccess=main
+# If the daemon stops sending WATCHDOG=1 keepalives for this long, systemd kills and
+# restarts it. The daemon heartbeats only while the async RUNTIME is demonstrably
+# responsive (its watchdog task is scheduled AND the central lock is acquirable), so a
+# wedged executor / all-threads-blocked / deadlock is caught here. Per-loop logic hangs
+# are designed out upstream with hard timeouts. Heartbeat cadence is ~WatchdogSec/3.
+WatchdogSec=60
 User=cryptirc
 Group=cryptirc
 WorkingDirectory=/opt/cryptirc
@@ -43,9 +58,17 @@ ExecStop=/bin/kill -s TERM $MAINPID
 TimeoutStopSec=30
 KillMode=mixed
 
-# Restart policy — always restart on crash, but not if we stop it intentionally
-Restart=on-failure
+# Restart policy — always restart (a patiently-retrying daemon beats a permanently-dead
+# one). `Restart=always` does NOT restart on a clean `systemctl stop`, so intentional
+# stops still work. Paired with StartLimitIntervalSec=0 above → truly never gives up.
+Restart=always
 RestartSec=5
+
+# Resource ceilings so a runaway (leaked FDs, a memory-accreting bug over years of
+# uptime) fails FAST into a clean restart instead of the OS-OOM-killer lottery that
+# could take neighbouring services with it.
+MemoryMax=512M
+TasksMax=256
 
 # Files/dirs the daemon creates (the IPC socket) default to 0600/0700.
 UMask=0077
@@ -81,8 +104,10 @@ ProtectKernelTunables=true
 ProtectControlGroups=true
 ProtectHostname=true
 
-# One process, few sockets — the web service's higher limits don't apply.
-LimitNOFILE=4096
+# Generous FD headroom. Real usage is tiny (a few dozen IRC sockets + one IPC client),
+# but a transient FD spike must never trip EMFILE and cascade through accept(). Well
+# above any realistic need so the accept loop's error-swallowing is belt-and-suspenders.
+LimitNOFILE=16384
 LimitNPROC=64
 
 [Install]

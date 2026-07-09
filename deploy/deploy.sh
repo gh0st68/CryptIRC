@@ -18,9 +18,9 @@ set -euo pipefail
 # to a file/tee or when NO_COLOR is set, so logs stay clean and nothing breaks.
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
-    GREY='\033[0;90m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'; FANCY=true
+    GREY='\033[0;90m'; WHITE='\033[1;37m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'; FANCY=true
 else
-    RED=''; GREEN=''; YELLOW=''; CYAN=''; GREY=''
+    RED=''; GREEN=''; YELLOW=''; CYAN=''; GREY=''; WHITE=''
     BOLD=''; DIM=''; NC=''; FANCY=false
 fi
 # The spinner hides the cursor — guarantee it comes back on any exit.
@@ -40,7 +40,7 @@ hr() {
 # A unicode progress bar: progressbar CURRENT TOTAL  (green=done, grey=remaining)
 progressbar() {
     local cur="$1" tot="$2" width=22 i filled out=""
-    filled=$(( cur * width / tot )); (( filled > width )) && filled=width
+    filled=$(( cur * width / tot )); (( filled > width )) && filled=$width
     out="${GREEN}"
     for ((i=0; i<width; i++)); do
         (( i == filled )) && out+="${GREY}"
@@ -63,8 +63,28 @@ step() {
     hr
 }
 
+# A little ghost that flies across the screen once, just for fun. Auto-skipped when
+# not on a real terminal (FANCY=false) or when CRYPTIRC_NO_GHOST=1 — keeps CI/piped
+# install logs clean and never blocks an unattended run.
+ghostfly() {
+    [[ "$FANCY" == true && "${CRYPTIRC_NO_GHOST:-}" != "1" ]] || return 0
+    local cols i trail=". · ∴ ~"
+    cols=$(tput cols 2>/dev/null || echo 70); (( cols > 70 )) && cols=70; (( cols < 20 )) && cols=20
+    printf '\033[?25l'
+    for ((i=0; i<=cols-6; i+=2)); do
+        printf "\r%*s${DIM}${CYAN}%s${NC} ${WHITE}${BOLD}.-.${NC}"  "$i" "" "$trail"
+        printf "\n%*s      ${WHITE}${BOLD}(o o)${NC}"               "$i" ""
+        printf "\n%*s      ${WHITE}${BOLD} \\~/ ${NC}"              "$i" ""
+        sleep 0.018 || true
+        printf "\033[2A"   # cursor up 2 lines for the next frame
+    done
+    printf "\033[2B\r%*s\r" "$cols" ""   # settle below the ghost + clear the line
+    printf '\033[?25h'
+}
+
 # Big ASCII wordmark shown once at the top.
 logo() {
+    ghostfly
     echo ""
     printf "%b" "${CYAN}${BOLD}"
     cat <<'ART'
@@ -76,7 +96,8 @@ logo() {
              |___/|_|
 ART
     printf "%b" "${NC}"
-    echo -e "       ${DIM}🔒 End-to-end encrypted IRC client${NC}   ${GREY}v0.6${NC}"
+    echo -e "       ${DIM}🔒 End-to-end encrypted IRC client${NC}   ${GREY}v${VERSION:-?}${NC}"
+    echo -e "       ${CYAN}${BOLD}developed by gh0st${NC}  ${DIM}·${NC}  ${CYAN}irc.twistednet.org${NC}  ${DIM}·${NC}  ${CYAN}#twisted #dev${NC}"
 }
 
 # Animated spinner frames for run() (array → locale-safe with multibyte glyphs).
@@ -121,14 +142,30 @@ run() {
 }
 
 # ── Helpers: address classification ───────────────────────────────────────────
-is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
-is_ipv6() { [[ "$1" == *:* ]]; }
+is_ipv4() {
+    [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local o                                   # each octet must be 0–255 (rejects 999.x etc)
+    for o in "${BASH_REMATCH[@]:1:4}"; do (( 10#$o <= 255 )) || return 1; done   # 10# = force base-10 (avoid octal on leading 0)
+    return 0
+}
+# Must be ONLY hex digits + colons (and contain a colon) — so a hostport like "host:8080"
+# is not mis-classified as an IPv6 literal and pushed down the self-signed path.
+is_ipv6() { [[ "$1" == *:* && "$1" =~ ^[0-9a-fA-F:]+$ ]]; }
 is_ip()   { is_ipv4 "$1" || is_ipv6 "$1"; }
 # Host as it must appear in a URL / Caddy site address (IPv6 needs [brackets]).
 url_host() { if is_ipv6 "$1"; then echo "[$1]"; else echo "$1"; fi; }
 
 # ── Must be root ──────────────────────────────────────────────────────────────
 [[ $EUID -eq 0 ]] || die "This script must be run as root:  sudo bash deploy/deploy.sh"
+
+# ── Locate the repo + read the REAL version ───────────────────────────────────
+# This script lives in <repo>/deploy/, so the repo is one level up. Read the version
+# straight from Cargo.toml (source of truth) instead of a hardcoded string. `|| true`
+# keeps the pipeline from tripping `set -e`/`pipefail` if the line is ever absent.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+read_version() { grep -m1 '^version[[:space:]]*=' "$REPO_DIR/Cargo.toml" 2>/dev/null | cut -d'"' -f2 || true; }
+VERSION="$(read_version)"; [[ -n "$VERSION" ]] || VERSION="?"
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 logo
@@ -223,19 +260,22 @@ if [[ "$SELF_SIGNED" == false ]]; then
     resolve_dns() {   # resolve_dns A|AAAA <domain> — dig → host → getent, family-aware
         local rtype="$1" dom="$2" r=""
         if command -v dig &>/dev/null; then
-            r=$(dig +short "$rtype" "$dom" 2>/dev/null | grep -E '^[0-9a-fA-F.:]+$' | head -1)
+            # `|| true`: with `set -e`+`pipefail`, a no-match `grep` exits 1 and would
+            # abort the WHOLE installer here (bare `r=$(...)` assignment propagates it).
+            # A domain with an A record but no AAAA is normal, not an error.
+            r=$(dig +short "$rtype" "$dom" 2>/dev/null | grep -E '^[0-9a-fA-F.:]+$' | head -1 || true)
         fi
         if [[ -z "$r" ]] && command -v host &>/dev/null; then
             if [[ "$rtype" == "AAAA" ]]; then
-                r=$(host -t AAAA "$dom" 2>/dev/null | grep -E 'has IPv6 address' | head -1 | awk '{print $NF}')
+                r=$(host -t AAAA "$dom" 2>/dev/null | grep -E 'has IPv6 address' | head -1 | awk '{print $NF}' || true)
             else
-                r=$(host -t A "$dom" 2>/dev/null | grep -E 'has address' | head -1 | awk '{print $NF}')
+                r=$(host -t A "$dom" 2>/dev/null | grep -E 'has address' | head -1 | awk '{print $NF}' || true)
             fi
         fi
         if [[ -z "$r" ]]; then
             # getent doesn't distinguish families in its output — only trust it
             # for whichever family its result actually looks like.
-            local g; g=$(getent hosts "$dom" 2>/dev/null | awk '{print $1}' | head -1)
+            local g; g=$(getent hosts "$dom" 2>/dev/null | awk '{print $1}' | head -1 || true)
             [[ "$rtype" == "AAAA" ]] && is_ipv6 "$g" && r="$g"
             [[ "$rtype" == "A" ]] && is_ipv4 "$g" && r="$g"
         fi
@@ -354,9 +394,16 @@ run "Installing system packages" apt-get install -y --no-install-recommends \
     openssl libssl-dev python3 python3-pip dnsutils ffmpeg gnupg \
     debian-keyring debian-archive-keyring apt-transport-https
 
-# argon2 (used by adduser.sh)
+# argon2 (used by adduser.sh to hash the admin/user passwords)
 pip3 install argon2-cffi --quiet --break-system-packages 2>/dev/null \
     || pip3 install argon2-cffi --quiet 2>/dev/null || true
+# Verify it's actually importable NOW — otherwise the failure is invisible until the
+# operator first runs adduser.sh (which does `from argon2 import PasswordHasher`) and
+# can't create a single account. Warn loudly rather than discover it later.
+if ! python3 -c 'import argon2' 2>/dev/null; then
+    warn "Python 'argon2-cffi' is not importable — creating accounts (adduser.sh) will FAIL until it's installed."
+    echo -e "  ${DIM}Fix: pip3 install argon2-cffi --break-system-packages   (or your distro's python3-argon2 / python-argon2-cffi package)${NC}"
+fi
 
 if [[ "$ENABLE_EMAIL" == true ]]; then
     run "Installing Postfix" apt-get install -y postfix
@@ -452,9 +499,21 @@ chown caddy:caddy /var/log/caddy 2>/dev/null || true
 # ── Step 5: build ─────────────────────────────────────────────────────────────
 step "[5/6] Building CryptIRC"
 echo -e "  ${DIM}First build takes 3-5 minutes. Please wait.${NC}\n"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$SCRIPT_DIR")"
-cd "$REPO_DIR"
+cd "$REPO_DIR"       # SCRIPT_DIR/REPO_DIR were resolved up top (for the version banner)
+# Pull the latest from GitHub so a fresh install always builds CURRENT code (best-effort:
+# not a git checkout, or can't fast-forward → fall back to the code already on disk). Then
+# re-read the version in case the pull advanced it, so the "live" banner reflects what we built.
+if [[ -d "$REPO_DIR/.git" ]] && command -v git >/dev/null 2>&1; then
+    # -c safe.directory=$REPO_DIR: this runs as ROOT (sudo) over a checkout usually owned by
+    # the human who cloned it — without this, git 2.35.2+ refuses with "dubious ownership" and
+    # the pull would ALWAYS fail. Scoped to this repo only (no global git config mutation).
+    if git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" pull --ff-only >"$RUN_LOG" 2>&1; then
+        ok "Pulled latest from GitHub ($(git -c safe.directory="$REPO_DIR" -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo '?'))"
+    else
+        warn "git pull couldn't fast-forward — building the existing checkout (may not be newest). See $RUN_LOG"
+    fi
+    _v="$(read_version)"; [[ -n "$_v" ]] && VERSION="$_v"
+fi
 # $HOME is root's home under sudo, but cargo may instead live under a human
 # dev account's home (installed directly via rustup, not by this script).
 # rustup's own env script isn't self-locating (trusts $HOME internally, so
@@ -615,11 +674,21 @@ Description=irc-core — persistent IRC connection daemon for CryptIRC
 After=network-online.target
 Wants=network-online.target
 Before=cryptirc.service
-StartLimitIntervalSec=60
-StartLimitBurst=5
+# NEVER latch into a permanent 'failed' state: StartLimitIntervalSec=0 disables the rate
+# limiter so systemd retries forever (a manual 'systemctl stop' still stops it cleanly).
+# The old =60 + Burst=5 meant 5 fast crashes (~25s) left the daemon dead until a human ran
+# 'reset-failed' — the exact catastrophe the never-restart design exists to avoid.
+# MUST stay in parity with deploy/irc-core.service (update.sh --restart-daemon reinstalls
+# that canonical unit); a weaker unit here silently downgrades every FRESH install.
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+# Type=notify + WatchdogSec: the daemon drives the systemd watchdog — the only backstop for
+# a hung-but-alive daemon (write/dial stall, deadlock). src/ipc_server.rs sends READY=1 +
+# WATCHDOG=1 keepalives; this cannot be retrofitted once the binary is frozen.
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
 User=$SERVICE_USER
 Group=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR
@@ -627,8 +696,14 @@ ExecStart=$INSTALL_DIR/irc_core
 ExecStop=/bin/kill -s TERM \$MAINPID
 TimeoutStopSec=30
 KillMode=mixed
-Restart=on-failure
+# Restart=always (not on-failure) + RestartSec=5: a patiently-retrying daemon beats a dead
+# one; a clean 'systemctl stop' still stops it. Paired with StartLimitIntervalSec=0 above.
+Restart=always
 RestartSec=5
+# Resource ceilings so a runaway (leaked FDs, memory accretion over years) fails FAST into a
+# clean restart instead of the OS-OOM lottery that could take neighbouring services with it.
+MemoryMax=512M
+TasksMax=256
 UMask=0077
 
 Environment=CRYPTIRC_DATA=$DATA_DIR
@@ -654,7 +729,7 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
 ProtectHostname=true
-LimitNOFILE=4096
+LimitNOFILE=16384
 LimitNPROC=64
 
 [Install]
@@ -866,7 +941,7 @@ rm -f "$RUN_LOG" 2>/dev/null || true
 echo ""
 echo -e "${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
 if [[ "$SERVICE_OK" == true ]]; then
-echo -e "${CYAN}║${NC}  ${GREEN}✓ CryptIRC is live!${NC}"
+echo -e "${CYAN}║${NC}  ${GREEN}✓ CryptIRC v${VERSION:-?} is live!${NC}"
 else
 echo -e "${CYAN}║${NC}  ${YELLOW}⚠ Installed — but the service isn't running yet.${NC}"
 echo -e "${CYAN}║${NC}  ${DIM}Check: journalctl -u cryptirc -n 50 --no-pager${NC}"
@@ -874,6 +949,15 @@ fi
 echo -e "${CYAN}╠══════════════════════════════════════════════════════╣${NC}"
 echo -e "${CYAN}║${NC}  ${BOLD}URL${NC}: ${GREEN}https://${URL_HOST}${NC}"
 [[ -n "$URL_HOST2" ]] && echo -e "${CYAN}║${NC}       ${GREEN}https://${URL_HOST2}${NC}"
+# In domain mode, `caddy validate` only checked config SYNTAX — the Let's Encrypt cert is
+# issued in the background and needs DNS actually pointing here. Probe the real HTTPS
+# endpoint (validating the cert, resolved to localhost) so we never claim "live" while
+# every browser would get a TLS error. Non-fatal + informational — issuance is automatic.
+if [[ "$SELF_SIGNED" == false ]] && command -v curl >/dev/null 2>&1 \
+   && ! curl -s --resolve "${DOMAIN}:443:127.0.0.1" -o /dev/null --max-time 6 "https://${DOMAIN}/" 2>/dev/null; then
+    echo -e "${CYAN}║${NC}  ${YELLOW}TLS cert not being served yet${NC} ${DIM}— Let's Encrypt issues once DNS points here.${NC}"
+    echo -e "${CYAN}║${NC}  ${DIM}First issuance can take ~1 min · watch:  journalctl -u caddy -f${NC}"
+fi
 if [[ "$SELF_SIGNED" == true ]]; then
 echo -e "${CYAN}║${NC}  ${YELLOW}Self-signed cert:${NC} your browser shows a one-time warning."
 echo -e "${CYAN}║${NC}  ${DIM}Click \"Advanced\" → \"Proceed\" — that's expected & safe.${NC}"

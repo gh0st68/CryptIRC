@@ -262,10 +262,12 @@ pub async fn handle_upload(upload_dir: &str, mut multipart: Multipart, max_bytes
         let is_image     = content_type.starts_with("image/");
 
         return Ok(UploadResult {
-            // trim_end_matches('/') so a root install (CRYPTIRC_BASE_PATH="/")
-            // yields "/files/…" and not "//files/…" — a leading "//" breaks the
-            // router (and the client's /files/→/pub/ rewrite → "//pub/…" 404s).
-            url: format!("{}/files/{}", std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into()).trim_end_matches('/'), filename),
+            // Hand back the PUBLIC /pub/ URL so a copied/shared link works outside the app
+            // (the /files/ route is auth-gated → 401 externally). All uploads are shareable
+            // by their unguessable UUID; see serve_file_public for the XSS-safe serving.
+            // trim_end_matches('/') so a root install (CRYPTIRC_BASE_PATH="/") yields
+            // "/pub/…" and not "//pub/…" — a leading "//" breaks the router.
+            url: format!("{}/pub/{}", std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into()).trim_end_matches('/'), filename),
             filename,
             original_name,
             size: data.len(),

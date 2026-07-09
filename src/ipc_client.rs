@@ -114,6 +114,12 @@ async fn handle_message(
                             // never re-fires ServerEvent::Connected — anything gated
                             // on "just (re)connected" goes stale until a manual reload.
                             c.registered = false;
+                            // Drop in-flight WHO bookkeeping: the socket that owed us a
+                            // 315 ENDOFWHO is gone, so those entries would never clear
+                            // and would suppress a genuine post-reconnect /who. The
+                            // reconnect's SessionSync re-seeds who_pending for the
+                            // channels it resyncs.
+                            c.who_pending.clear();
                         }
                         if state.disconnect_requested(&conn_id) {
                             state.abort_connect_task(&conn_id);
@@ -127,6 +133,10 @@ async fn handle_message(
                         let mut c = conn.lock().await;
                         c.connected = false;
                         c.registered = false;
+                        // Same rationale as the Disconnected arm: the old socket's
+                        // outstanding WHOs will never be answered, so clear the pending
+                        // set rather than let stale keys block future auto-WHOs.
+                        c.who_pending.clear();
                         ServerEvent::Reconnecting { conn_id: conn_id.clone(), attempt, delay_secs, reason }
                     }
                 };
@@ -134,7 +144,7 @@ async fn handle_message(
             }
         }
 
-        IpcMessage::SessionSync { conn_id, nick, channels, registered, connected, lag_ms, message_tags, echo_message_enabled } => {
+        IpcMessage::SessionSync { conn_id, nick, channels, registered, connected, lag_ms, message_tags, echo_message_enabled, self_userhost } => {
             seen.insert(conn_id.clone());
             if let Some((username, conn)) = ensure_connection_entry(state, &conn_id).await {
                 let mut resync: Vec<String> = Vec::new();
@@ -162,6 +172,14 @@ async fn handle_message(
                     // be re-derived by reparsing a forwarded RawLine alone.
                     c.message_tags = message_tags;
                     c.echo_message_enabled = echo_message_enabled;
+                    // Re-arm the forged-NICK spoof guard (#30) after a re-Attach: a
+                    // fresh IrcConnection starts with an empty self_userhost and would
+                    // otherwise never learn it (no self-JOIN fires on reattach). Only
+                    // adopt a non-empty value so an old daemon (sends "") can't wipe a
+                    // userhost the web side already learned by reparsing.
+                    if !self_userhost.is_empty() {
+                        c.self_userhost = self_userhost.clone();
+                    }
                     // Rebuild any channel the daemon says we're in but this
                     // (freshly (re)hydrated) web process doesn't have yet —
                     // insert a stub and queue a NAMES/TOPIC resync for it. This
@@ -170,18 +188,29 @@ async fn handle_message(
                     // just the same commands a manual /names would send.
                     for chan in &channels {
                         let key = cryptirc::ircproto::irc_lower(chan);
-                        match c.channels.get(&key) {
+                        let need_resync = match c.channels.get(&key) {
                             None => {
-                                c.channels.insert(key, crate::irc::ChannelState {
+                                c.channels.insert(key.clone(), crate::irc::ChannelState {
                                     name: chan.clone(), topic: String::new(), names: vec![], key: None,
                                 });
-                                resync.push(chan.clone());
+                                true
                             }
                             // Tracked but memberless — a ring-replayed JOIN recreated the
                             // stub, or a prior resync's NAMES reply was lost. Refresh it so
                             // the user list isn't left permanently empty.
-                            Some(ch) if ch.names.is_empty() => resync.push(chan.clone()),
-                            Some(_) => {}
+                            Some(ch) if ch.names.is_empty() => true,
+                            Some(_) => false,
+                        };
+                        if need_resync {
+                            resync.push(chan.clone());
+                            // Seed who_pending so the resync WHO reply is consumed silently
+                            // (not dumped to the status buffer), bounded exactly like the
+                            // self-JOIN path so a hostile server can't grow it without limit.
+                            if c.who_pending.len() < crate::irc::NAMES_BUF_MAX_CHANNELS
+                                || c.who_pending.contains(&key)
+                            {
+                                c.who_pending.insert(key);
+                            }
                         }
                     }
                 }
@@ -205,8 +234,22 @@ async fn handle_message(
                 if !resync.is_empty() {
                     let conn2 = conn.clone();
                     tokio::spawn(async move {
+                        // NAMES first (the visible member list), then WHO (away/account
+                        // state the nick panel shows), then channel MODE (+ key, feeds the
+                        // modes dialog), then TOPIC. All paced one-per-tick so a many-channel
+                        // reattach never trips server flood protection. WHO replies are
+                        // consumed silently — who_pending was seeded for each `resync`
+                        // channel in the locked block above, matching the self-JOIN path.
                         for chan in &resync {
                             { let _ = conn2.lock().await.send_raw(&format!("NAMES {}\r\n", chan)).await; }
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        }
+                        for chan in &resync {
+                            { let _ = conn2.lock().await.send_raw(&format!("WHO {}\r\n", chan)).await; }
+                            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        }
+                        for chan in &resync {
+                            { let _ = conn2.lock().await.send_raw(&format!("MODE {}\r\n", chan)).await; }
                             tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                         }
                         for chan in &resync {
@@ -226,7 +269,29 @@ async fn handle_message(
             for conn_id in expected.difference(seen) {
                 if state.disconnect_requested(conn_id) { continue; }
                 let Some(username) = state.conn_owners.get(conn_id).map(|r| r.clone()) else { continue };
+                // I2: with a LOCKED vault, get_network_config returns secrets still
+                // `enc:`-prefixed; re-dialing now would connect UNAUTHENTICATED (and, absent
+                // the build_dial_params guard, leak ciphertext). Drop the now-dead entry
+                // (the daemon no longer owns it) and defer — reconnect_for_user re-dials on
+                // the next vault unlock (it re-seeds conn_owners + dials conns not already
+                // live). Leaving it in `connections` would BOTH falsely show it connected
+                // AND make reconnect_for_user skip it (its contains_key guard) → stranded.
+                if !state.crypto.is_unlocked(&username).await {
+                    state.connections.remove(conn_id);
+                    state.send_to_user(&username, ServerEvent::Disconnected {
+                        conn_id: conn_id.clone(),
+                        reason: "Daemon restarted — unlock the vault to reconnect".into(),
+                    });
+                    continue;
+                }
                 let Some(cfg) = state.get_network_config(conn_id, &username).await else { continue };
+                // I5: respect an intentional auto_reconnect=false — the daemon may have
+                // cleanly stopped this conn; reconciliation must not revive a connection the
+                // user configured not to auto-reconnect.
+                if !cfg.auto_reconnect {
+                    state.connections.remove(conn_id);
+                    continue;
+                }
                 info!("[{}] missing from daemon's Attach reply — re-dialing", conn_id);
                 dial(state, &username, cfg, out_tx).await;
             }
@@ -236,7 +301,27 @@ async fn handle_message(
                     state.clear_disconnect_request(&conn_id);
                     continue;
                 }
-                let Some(username) = state.conn_owners.get(&conn_id).map(|r| r.clone()) else { continue };
+                let owner = state.conn_owners.get(&conn_id).map(|r| r.clone());
+                // C1: if the daemon did NOT report this conn_id in the Attach we just
+                // finished, it restarted / lost the socket — there is no live connection to
+                // QUIT. Sending a Drop the daemon can't act on yields no Disconnected echo,
+                // so the entry would be STRANDED forever in connections/conn_owners/
+                // disconnect_requests (Connect + reconnect_for_user both short-circuit on
+                // it, the owner-gated pruner won't reap it, and the UI shows it falsely
+                // connected). The user asked to disconnect and the socket is already gone —
+                // satisfy the disconnect locally instead. Mirrors loop 1's seen-reconcile.
+                if !seen.contains(&conn_id) {
+                    state.abort_connect_task(&conn_id);
+                    state.connections.remove(&conn_id);
+                    state.conn_owners.remove(&conn_id);
+                    state.clear_disconnect_request(&conn_id);
+                    state.clear_pending_dial(&conn_id);
+                    if let Some(u) = owner {
+                        state.send_to_user(&u, ServerEvent::Disconnected { conn_id: conn_id.clone(), reason: "Disconnected".into() });
+                    }
+                    continue;
+                }
+                let Some(username) = owner else { continue };
                 let reason = state
                     .get_network_config(&conn_id, &username)
                     .await
@@ -271,8 +356,23 @@ async fn handle_message(
             }
         }
 
-        // Web → daemon variants; the client never receives its own outbound messages.
-        IpcMessage::Attach {} | IpcMessage::Dial { .. } | IpcMessage::RawSend { .. } | IpcMessage::Drop { .. } => {}
+        // Daemon → web version handshake. Logged so a mismatch between a frozen
+        // daemon and a newer web binary is visible in the journal; behavior stays
+        // additive/tolerant either way (see the ipc.rs SCHEMA LAW comment).
+        IpcMessage::Hello { proto_version } => {
+            if proto_version != cryptirc::ipc::IPC_PROTO_VERSION {
+                warn!("daemon IPC proto v{} != web v{} — running in compatibility mode", proto_version, cryptirc::ipc::IPC_PROTO_VERSION);
+            } else {
+                info!("daemon IPC proto v{} negotiated", proto_version);
+            }
+        }
+
+        // Web → daemon variants; the client never receives its own outbound
+        // messages. `DaemonControl` is web-originated too. `Unknown` is the
+        // forward-compat catch-all for a variant a future peer added — ignore
+        // rather than ever tear the connection down over it.
+        IpcMessage::Attach {} | IpcMessage::Dial { .. } | IpcMessage::RawSend { .. }
+        | IpcMessage::Drop { .. } | IpcMessage::DaemonControl { .. } | IpcMessage::Unknown => {}
     }
 }
 
@@ -381,6 +481,32 @@ async fn build_dial_params(state: &AppState, username: &str, cfg: &NetworkConfig
         None => None,
     };
 
+    // I2 defense-in-depth: NEVER forward an `enc:`-prefixed secret to the IRC server.
+    // `get_network_config` leaves secrets `enc:`-prefixed when the vault is locked
+    // (undecryptable); sending that ciphertext as PASS / SASL / oper / nickserv would
+    // leak an AEAD blob to the server operator and break auth. Drop each such field to
+    // None (+ warn), exactly like the client-cert branch degrades on decrypt failure.
+    let deny_enc = |v: &Option<String>, what: &str| -> Option<String> {
+        match v {
+            Some(s) if s.starts_with("enc:") => {
+                warn!("[{}] {} still encrypted (vault locked) — omitting from dial", cfg.id, what);
+                None
+            }
+            other => other.clone(),
+        }
+    };
+    let password = deny_enc(&cfg.password, "server password");
+    let oper_pass = deny_enc(&cfg.oper_pass, "oper password");
+    let nickserv_pass = deny_enc(&cfg.nickserv_pass, "nickserv password");
+    let sasl_plain = cfg.sasl_plain.as_ref().and_then(|s: &SaslConfig| {
+        if s.password.starts_with("enc:") {
+            warn!("[{}] SASL password still encrypted (vault locked) — omitting SASL PLAIN from dial", cfg.id);
+            None
+        } else {
+            Some(SaslParams { account: s.account.clone(), password: s.password.clone() })
+        }
+    });
+
     DialParams {
         server: cfg.server.clone(),
         port: cfg.port,
@@ -389,16 +515,13 @@ async fn build_dial_params(state: &AppState, username: &str, cfg: &NetworkConfig
         nick: cfg.nick.clone(),
         username: cfg.username.clone(),
         realname: cfg.realname.clone(),
-        password: cfg.password.clone(),
-        sasl_plain: cfg.sasl_plain.as_ref().map(|s: &SaslConfig| SaslParams {
-            account: s.account.clone(),
-            password: s.password.clone(),
-        }),
+        password,
+        sasl_plain,
         sasl_external: cfg.sasl_external,
         client_identity,
         oper_login: cfg.oper_login.clone(),
-        oper_pass: cfg.oper_pass.clone(),
-        nickserv_pass: cfg.nickserv_pass.clone(),
+        oper_pass,
+        nickserv_pass,
         auto_identify: cfg.auto_identify,
         auto_join: cfg.auto_join.clone(),
         channel_keys: cfg.channel_keys.clone(),

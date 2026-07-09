@@ -26,6 +26,7 @@ use crate::ircproto::{
     CappedLine, MAX_IRC_LINE_LEN,
 };
 use anyhow::Result;
+use rand::Rng;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::{
@@ -41,14 +42,104 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 const PONG_TIMEOUT: Duration = Duration::from_secs(90);
 const RECONNECT_BASE: Duration = Duration::from_secs(5);
 const RECONNECT_MAX: Duration = Duration::from_secs(300);
+/// A clean server-close resets the backoff to RECONNECT_BASE (fast reconnect) ONLY if the
+/// connection was up at least this long — a genuine drop / server restart. A shorter-lived
+/// clean close is treated as a connect/close FLAP (k-line, rejected unregistered
+/// connection) and keeps escalating toward RECONNECT_MAX instead of hammering the server
+/// every RECONNECT_BASE.
+const STABLE_CONNECTION: Duration = Duration::from_secs(60);
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_NICK_RETRIES: u32 = 5;
 const MAX_SASL_RETRIES: u32 = 3;
+/// Bound on TCP connect + TLS handshake. A SYN black-hole or a server that
+/// finishes TCP then stalls the handshake must NOT suspend the dial forever
+/// (no reconnect would ever fire). On elapse we fall into the normal backoff.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound on a single outbound socket write+flush. See `DaemonConn::send_raw` — a
+/// zero-window/stalled peer must never suspend a write forever and freeze the loop.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Absolute deadline to reach registration (001). Pre-001 the PONG heartbeat is
+/// gated off, and READ_TIMEOUT resets per line — so a slow-drip server (endless
+/// CAP LS `*`, SASL stall) could otherwise pin a connection pre-registered
+/// forever. One deadline closes the whole class.
+const REG_TIMEOUT: Duration = Duration::from_secs(75);
 /// #45 (carried over): minimum interval between automatic CTCP replies.
 const CTCP_REPLY_MIN_INTERVAL: Duration = Duration::from_secs(2);
 /// #31 (carried over): inbound line rate limit (token bucket).
 const INBOUND_RATE_BURST: f64 = 1024.0;
 const INBOUND_RATE_REFILL: f64 = 64.0;
+/// Cap on how many channels the daemon will track for re-join (a hostile server
+/// can spoof self-JOIN prefixes to force unlimited distinct channels).
+const MAX_TRACKED_CHANNELS: usize = 512;
+/// Cap on a tracked channel-NAME's length (real CHANNELLEN is ~50). Combined with
+/// `is_trackable_channel`'s char filter (below), a tracked name serializes 1:1 in the
+/// SessionSync JSON, so MAX_TRACKED_CHANNELS × this bounds the frame to ~52 KB < the
+/// 64 KiB MAX_FRAME_LEN. Capping raw length ALONE is not enough — `"`/`\`/control bytes
+/// escape to 2-6 JSON bytes each, so a hostile server could otherwise 2-6× the size past
+/// the frame cap and permanently silence the daemon→web state channel.
+const MAX_CHANNEL_NAME_LEN: usize = 100;
+/// Cap on a learned `self_userhost` (also serialized in every SessionSync — same frame-
+/// bloat concern). A real user@host is well under this.
+const MAX_USERHOST_LEN: usize = 128;
+
+/// A channel name we'll TRACK (for SessionSync + reconnect re-join) must be sane:
+/// channel-prefixed, length-bounded, and free of bytes that aren't valid in a channel
+/// (space/comma/control) or that would BLOAT the JSON-serialized SessionSync (`"`, `\`,
+/// and control chars escape to 2-6 bytes). Everything that passes here serializes 1:1,
+/// making the SessionSync frame size provably bounded regardless of a hostile server's
+/// spoofed self-JOIN names. Untrackable names are still forwarded as raw lines.
+fn is_trackable_channel(name: &str) -> bool {
+    if name.is_empty() || name.len() > MAX_CHANNEL_NAME_LEN { return false; }
+    if !matches!(name.as_bytes()[0], b'#' | b'&' | b'+' | b'!') { return false; }
+    // > 0x20 rejects control bytes AND space; multibyte UTF-8 (>= 0x80) passes and
+    // serializes 1:1. Reject the JSON-escaping / channel-illegal bytes explicitly.
+    name.bytes().all(|b| b > 0x20 && b != b'"' && b != b'\\' && b != b',')
+}
+
+/// Bound + sanitize a learned `self_userhost` before storing it. Returns None if it's
+/// implausible (empty, too long, or contains JSON-escaping/control bytes) so the caller
+/// keeps the previous value rather than poisoning every SessionSync.
+fn clean_userhost(uh: &str) -> Option<String> {
+    let uh = strip_crlf(uh);
+    if uh.is_empty() || uh.len() > MAX_USERHOST_LEN { return None; }
+    // > 0x20 (not >=): reject control bytes AND space AND DEL uniformly, matching
+    // is_trackable_channel. A real user@host never contains any of those.
+    if !uh.bytes().all(|b| b > 0x20 && b != b'"' && b != b'\\') { return None; }
+    Some(uh)
+}
+
+/// Enable TCP keepalive so a silently-dead peer (NAT rebind, midpoint failure)
+/// is detected by the OS even if the app-level PING path is wedged. Best-effort.
+fn enable_keepalive(tcp: &TcpStream) {
+    let sock = socket2::SockRef::from(tcp);
+    let ka = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(15));
+    let _ = sock.set_tcp_keepalive(&ka);
+}
+
+/// Decorrelate a backoff delay with ±50% jitter so a network blip that drops many
+/// connections at once doesn't make them all re-dial in lockstep (a self-inflicted
+/// thundering-herd reconnect storm against a recovering server).
+fn jitter(d: Duration) -> Duration {
+    let f = rand::thread_rng().gen_range(0.5_f64..1.5_f64);
+    d.mul_f64(f)
+}
+
+/// Defense-in-depth CRLF sanitization for a web-originated raw line before it hits
+/// the IRC socket. The web is TRUSTED to have stripped interior CR/LF, but the
+/// daemon is the last line of defense and can never be patched — so re-enforce it
+/// here. COLLAPSE semantics (mirrors `strip_crlf`): strip every CR/LF/NUL across
+/// the whole payload, then terminate with exactly ONE CRLF. An injected interior
+/// newline is folded into the surrounding text (`"hi\r\nJOIN #evil"` → the literal
+/// bytes `"hiJOIN #evil"` in one PRIVMSG), never re-framed into a second executable
+/// command — that is the whole point, and splitting-then-reterminating would do the
+/// opposite. Trailing bytes are preserved (IRC trailing params are byte-exact); an
+/// all-control-char line collapses to empty and is dropped.
+fn sanitize_outbound(line: &str) -> String {
+    let clean: String = line.chars().filter(|&c| c != '\r' && c != '\n' && c != '\0').collect();
+    if clean.is_empty() { String::new() } else { format!("{}\r\n", clean) }
+}
 
 /// A command routed in from the IPC server for a specific conn_id — the
 /// inbound half that lets a running connection be driven from outside (the
@@ -60,6 +151,12 @@ pub enum DaemonCmd {
     /// User explicitly disconnected this conn_id. Sends QUIT and stops the
     /// reconnect loop — no further attempts until a fresh `Dial` arrives.
     Drop(String),
+    /// Force-cycle the live socket (drop it and let the reconnect loop redial).
+    /// A future control lever; reuses the same DialParams (for a fresh cert use a
+    /// full re-Dial instead — see ipc_server's Dial-replace).
+    Reconnect,
+    /// Undo an auto-SASL-disable for this session so the next attempt re-tries SASL.
+    RearmSasl,
 }
 
 enum SaslMethod {
@@ -91,13 +188,37 @@ struct DaemonConn {
     /// suppression / TAGMSG support until a real reconnect happens.
     message_tags: bool,
     echo_message_enabled: bool,
+    /// Our own `user@host` as the server sees it, learned from the self-JOIN
+    /// prefix (extended-join gives it directly) and updated on CHGHOST. Forwarded
+    /// in every SessionSync so a re-`Attach`'d web process can re-arm its forged-
+    /// `NICK` spoof guard (#30) without waiting for a self-JOIN that a reattach
+    /// never produces.
+    self_userhost: String,
 }
 
 impl DaemonConn {
     async fn send_raw(&mut self, line: &str) -> Result<()> {
-        self.writer.write_all(line.as_bytes()).await?;
-        self.writer.flush().await?;
-        Ok(())
+        // BOUNDED write. This is the one await in a connection's whole lifetime that
+        // is otherwise unbounded: a peer that stalls its receive window (zero-window
+        // advertiser, a wedged bouncer between us and the network) makes write_all()
+        // suspend forever — TCP's persist timer probes a zero window indefinitely and
+        // never errors, and TCP keepalive can't rescue it because there IS data in
+        // flight. Because send_raw runs inside a select! branch BODY (PING reply, PONG,
+        // heartbeat, JOIN burst…), a blocked write freezes the entire loop: the
+        // PONG-timeout liveness check never runs, so the task hangs and leaks its
+        // socket for the life of a never-restarted daemon. On elapse we error out so the
+        // normal reconnect/backoff path fires. Untimed reads are fine (idle is legit);
+        // an untimed WRITE is not.
+        let w = &mut self.writer;
+        let bytes = line.as_bytes();
+        match tokio::time::timeout(WRITE_TIMEOUT, async move {
+            w.write_all(bytes).await?;
+            w.flush().await
+        }).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(e.into()),
+            Err(_) => Err(anyhow::anyhow!("socket write timed out")),
+        }
     }
 }
 
@@ -111,7 +232,7 @@ pub async fn run_connection<F>(
     conn_id: String,
     mut params: DialParams,
     emit: F,
-    mut cmd_rx: mpsc::UnboundedReceiver<DaemonCmd>,
+    mut cmd_rx: mpsc::Receiver<DaemonCmd>,
 ) where
     F: Fn(IpcMessage) + Send + Sync + Clone + 'static,
 {
@@ -119,9 +240,14 @@ pub async fn run_connection<F>(
     let mut attempt = 0u32;
     let mut sasl_failures = 0u32;
     let original_sasl_external = params.sasl_external;
+    // Channels the daemon has joined, persisted ACROSS its own reconnects so a
+    // ping-timeout/netsplit re-join restores EVERY channel — not just auto_join
+    // (findings #3/#8: a manually-joined channel was silently dropped on a
+    // daemon-internal reconnect). run_loop seeds from + updates this set.
+    let mut persistent_channels: HashSet<String> = HashSet::new();
 
     loop {
-        attempt += 1;
+        attempt = attempt.saturating_add(1);
         info!(
             "[{}] Connect attempt {} → {}:{} (sasl_external={})",
             conn_id, attempt, params.server, params.port, params.sasl_external
@@ -132,7 +258,26 @@ pub async fn run_connection<F>(
         });
 
         let mut stopped = false;
-        let result = do_connect(&conn_id, &params, &emit, &mut cmd_rx, &mut stopped).await;
+        let mut registered_ok = false;
+        // do_connect runs the dial + read loop until the socket closes, so its elapsed
+        // time is this connection attempt's lifetime — used below to tell a genuine drop
+        // (up a while → reconnect fast) from a connect/close FLAP (up briefly → keep
+        // backing off) so a rejecting server isn't hammered every RECONNECT_BASE.
+        // NOTE: this INCLUDES dial time (≤ CONNECT_TIMEOUT for TCP + TLS). The
+        // misclassification is one-directional and benign: only a pathological ~60s slow
+        // dial followed by an instant clean close could read as "stable" — and even then
+        // the ~60s dial itself paces the retry, so it never becomes a tight hammer. A real
+        // flap dials in milliseconds; a genuine long session is never misread as a flap.
+        let attempt_start = Instant::now();
+        let result = do_connect(&conn_id, &params, &emit, &mut cmd_rx, &mut stopped, &mut registered_ok, &mut persistent_channels).await;
+        let uptime = attempt_start.elapsed();
+        // If this attempt reached registration, the connection genuinely worked —
+        // reset the SASL-failure counter and re-arm SASL for next time (W5: an
+        // auto-disable must not persist forever across later error-path reconnects).
+        if registered_ok {
+            sasl_failures = 0;
+            params.sasl_external = original_sasl_external;
+        }
 
         if stopped {
             info!("[{}] Drop requested, stopping reconnect loop", conn_id);
@@ -158,11 +303,35 @@ pub async fn run_connection<F>(
 
         match result {
             Ok(_) => {
-                warn!("[{}] Server closed connection. Reconnecting in {:?}", conn_id, RECONNECT_BASE);
-                delay = RECONNECT_BASE;
-                attempt = 0;
-                sasl_failures = 0;
-                params.sasl_external = original_sasl_external;
+                // Clean server close. Only reset the backoff to base (fast reconnect) if the
+                // connection was up a real while — a genuine drop / server restart / netsplit,
+                // where you WANT to come back quickly. If the server instead accepted us and
+                // immediately closed (a k-line, a rejected unregistered connection — a
+                // "connect/close flap"), resetting would hammer it every RECONNECT_BASE
+                // forever. In that case do NOT reset: let the backoff keep climbing
+                // 5→10→20→…→RECONNECT_MAX (5 min) and hold there, retrying forever — never
+                // gives up, never spins.
+                let reason = if uptime >= STABLE_CONNECTION {
+                    warn!("[{}] Server closed a stable connection (up {:?}). Reconnecting in {:?}", conn_id, uptime, RECONNECT_BASE);
+                    delay = RECONNECT_BASE;
+                    attempt = 0;
+                    sasl_failures = 0;
+                    params.sasl_external = original_sasl_external;
+                    "Server closed the connection".to_string()
+                } else {
+                    warn!("[{}] Server closed connection after only {:?} (flap) — escalating backoff, reconnecting in {:?}", conn_id, uptime, delay);
+                    "Server keeps closing the connection".to_string()
+                };
+                // Surface the (possibly escalating) backoff to the web, same as the Err path
+                // — otherwise a clean-close flap silently loops with no status for the user.
+                emit(IpcMessage::ConnStatus {
+                    conn_id: conn_id.clone(),
+                    state: ConnLifecycle::Reconnecting {
+                        attempt,
+                        delay_secs: delay.as_secs(),
+                        reason,
+                    },
+                });
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -206,9 +375,11 @@ pub async fn run_connection<F>(
         }
 
         // Let a Drop arriving DURING the backoff wait interrupt it immediately
-        // instead of waiting out the full delay before honoring it.
+        // instead of waiting out the full delay before honoring it. The sleep is
+        // JITTERED (±50%) so many connections dropped by one network blip don't
+        // re-dial in lockstep (thundering-herd reconnect storm).
         tokio::select! {
-            _ = sleep(delay) => {}
+            _ = sleep(jitter(delay)) => {}
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(DaemonCmd::Drop(reason)) => {
@@ -219,15 +390,24 @@ pub async fn run_connection<F>(
                         });
                         return;
                     }
-                    // No live connection to send to while backing off; drop silently.
-                    Some(DaemonCmd::RawSend(_)) => {}
+                    // Reconnect now — skip the rest of the backoff wait.
+                    Some(DaemonCmd::Reconnect) => { info!("[{}] Reconnect during backoff", conn_id); }
+                    // Re-arm SASL for the next attempt.
+                    Some(DaemonCmd::RearmSasl) => { params.sasl_external = original_sasl_external; sasl_failures = 0; }
+                    // No live connection to send to while backing off — the line can't go
+                    // out. F2: log it (not silent). The web-side connected-check already
+                    // told the user "not connected"; this makes the drop observable here.
+                    Some(DaemonCmd::RawSend(_)) => {
+                        warn!("[{}] dropping web RawSend — connection is down (reconnecting)", conn_id);
+                    }
                     // Sender side gone (server task exited) — nothing more will
                     // ever arrive for this conn_id; stop rather than spin forever.
                     None => return,
                 }
             }
         }
-        delay = (delay * 2).min(RECONNECT_MAX);
+        // Overflow-safe doubling (never panic even in a debug build).
+        delay = delay.checked_mul(2).unwrap_or(RECONNECT_MAX).min(RECONNECT_MAX);
     }
 }
 
@@ -237,22 +417,29 @@ async fn do_connect<F>(
     conn_id: &str,
     params: &DialParams,
     emit: &F,
-    cmd_rx: &mut mpsc::UnboundedReceiver<DaemonCmd>,
+    cmd_rx: &mut mpsc::Receiver<DaemonCmd>,
     stopped: &mut bool,
+    registered_out: &mut bool,
+    persistent_channels: &mut HashSet<String>,
 ) -> Result<()>
 where
     F: Fn(IpcMessage) + Send + Sync + Clone + 'static,
 {
     let addr = format!("{}:{}", params.server, params.port);
-    let tcp = TcpStream::connect(&addr).await?;
-    tcp.set_nodelay(true)?;
+    // TCP connect, bounded + nodelay + keepalive. Connected ONCE per path (the old
+    // code dialed upfront then dropped-and-redialed for the client-cert path, which
+    // re-resolved DNS and could land on a different, dead round-robin address).
+    let dial_tcp = || async {
+        let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr)).await
+            .map_err(|_| anyhow::anyhow!("TCP connect timed out"))??;
+        tcp.set_nodelay(true)?;
+        enable_keepalive(&tcp);
+        Ok::<TcpStream, anyhow::Error>(tcp)
+    };
 
     if params.tls {
         if let Some(ClientIdentity { cert_pem, key_pem }) = &params.client_identity {
-            // Client cert path: openssl directly, TLS 1.3 post-handshake auth
-            // (matches irc.rs's do_connect exactly, minus the CertStore/vault
-            // lookup — the PEM bytes already arrived decrypted in DialParams).
-            drop(tcp);
+            // Client cert path: openssl directly, TLS 1.3 post-handshake auth.
             let mut ssl_builder = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls_client())?;
             if params.tls_accept_invalid_certs {
                 ssl_builder.set_verify(openssl::ssl::SslVerifyMode::NONE);
@@ -269,33 +456,31 @@ where
             ssl_builder.set_private_key(&pkey)?;
             unsafe { openssl_sys::SSL_CTX_set_post_handshake_auth(ssl_builder.as_ptr() as *mut _, 1); }
             let connector = ssl_builder.build();
-            let tcp2 = TcpStream::connect(&addr).await?;
-            tcp2.set_nodelay(true)?;
+            let tcp = dial_tcp().await?;
             let ssl = connector.configure()?.into_ssl(&params.server)?;
-            let mut stream = tokio_openssl::SslStream::new(ssl, tcp2)?;
-            std::pin::Pin::new(&mut stream).connect().await?;
+            let mut stream = tokio_openssl::SslStream::new(ssl, tcp)?;
+            timeout(CONNECT_TIMEOUT, std::pin::Pin::new(&mut stream).connect()).await
+                .map_err(|_| anyhow::anyhow!("TLS handshake timed out"))??;
             info!("[{}] TLS connected with client cert (post-handshake auth enabled)", conn_id);
-            run_loop(conn_id, params, emit, stream, cmd_rx, stopped).await
+            run_loop(conn_id, params, emit, stream, cmd_rx, stopped, registered_out, persistent_channels).await
         } else if params.sasl_external {
-            // Config asked for SASL EXTERNAL but no identity was resolved — the
-            // web side failed to decrypt/find the cert at Dial time. Retrying
-            // won't self-heal (params never change without a fresh Dial), so
-            // this is fatal: the caller sees "SASL_FATAL:" and disconnects
-            // immediately instead of burning through the normal backoff loop
-            // for a condition that can only be fixed by a fresh Dial anyway.
+            // Config asked for SASL EXTERNAL but no identity was resolved — fatal
+            // (params never change without a fresh Dial). No connect wasted.
             Err(anyhow::anyhow!("SASL_FATAL: client identity missing for SASL EXTERNAL"))
         } else {
             let mut builder = native_tls::TlsConnector::builder();
             if params.tls_accept_invalid_certs {
                 builder.danger_accept_invalid_certs(true);
             }
-            let tls = tokio_native_tls::TlsConnector::from(builder.build()?)
-                .connect(&params.server, tcp)
-                .await?;
-            run_loop(conn_id, params, emit, tls, cmd_rx, stopped).await
+            let tcp = dial_tcp().await?;
+            let tls = timeout(CONNECT_TIMEOUT, tokio_native_tls::TlsConnector::from(builder.build()?)
+                .connect(&params.server, tcp)).await
+                .map_err(|_| anyhow::anyhow!("TLS handshake timed out"))??;
+            run_loop(conn_id, params, emit, tls, cmd_rx, stopped, registered_out, persistent_channels).await
         }
     } else {
-        run_loop(conn_id, params, emit, tcp, cmd_rx, stopped).await
+        let tcp = dial_tcp().await?;
+        run_loop(conn_id, params, emit, tcp, cmd_rx, stopped, registered_out, persistent_channels).await
     }
 }
 
@@ -308,8 +493,10 @@ async fn run_loop<S, F>(
     params: &DialParams,
     emit: &F,
     stream: S,
-    cmd_rx: &mut mpsc::UnboundedReceiver<DaemonCmd>,
+    cmd_rx: &mut mpsc::Receiver<DaemonCmd>,
     stopped: &mut bool,
+    registered_out: &mut bool,
+    persistent_channels: &mut HashSet<String>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -322,6 +509,7 @@ where
         writer: Box::new(write_half),
         message_tags: false,
         echo_message_enabled: false,
+        self_userhost: String::new(),
     }));
 
     let sync = |c: &DaemonConn, registered: bool, connected: bool, lag_ms: Option<u64>| {
@@ -334,6 +522,7 @@ where
             lag_ms,
             message_tags: c.message_tags,
             echo_message_enabled: c.echo_message_enabled,
+            self_userhost: c.self_userhost.clone(),
         });
     };
     let fwd = |line: &str| emit(IpcMessage::RawLine { conn_id: conn_id.to_string(), line: line.to_string(), replayed: false });
@@ -354,6 +543,9 @@ where
     let mut sasl_state = SaslState::Idle;
     let mut available_caps: Vec<String> = Vec::new();
     let mut last_pong = Instant::now();
+    // Set when a heartbeat PING is outstanding; cleared by any PONG in our private
+    // `hb-<ts>` namespace (see the PONG handler). A foreign PONG can't clear it, so it
+    // can't mask a real timeout.
     let mut ping_out = false;
     let mut nick_retries = 0u32;
     let mut last_ctcp_reply: Option<Instant> = None;
@@ -361,6 +553,11 @@ where
     let efnet = params.label.to_lowercase().contains("efnet") || params.server.to_lowercase().contains("efnet");
     if efnet {
         info!("[{}] EFnet detected (label='{}' server='{}') — IRCv3 caps disabled", conn_id, params.label, params.server);
+        // EFnet skips CAP LS entirely, so SASL is never negotiated even if configured.
+        // Surface that instead of silently registering unauthenticated.
+        if use_sasl {
+            warn!("[{}] SASL configured but SKIPPED — EFnet-style network has CAP/SASL disabled; registering unauthenticated", conn_id);
+        }
     }
     {
         let mut c = conn.lock().await;
@@ -382,13 +579,29 @@ where
     let mut ping_ticker = tokio::time::interval(PING_INTERVAL);
     let mut inbound_tokens: f64 = INBOUND_RATE_BURST;
     let mut inbound_refill_at = Instant::now();
-    // Once cmd_rx closes (all senders dropped), `.recv()` resolves to `None`
-    // IMMEDIATELY on every poll — without this guard the select! below would
-    // busy-spin that branch forever instead of blocking on the others.
-    let mut cmd_closed = false;
+    // Absolute deadline to reach 001. The per-line READ_TIMEOUT resets on every
+    // byte, and the heartbeat is gated off pre-registration — so a server that
+    // slow-drips CAP/SASL forever would otherwise pin this task un-registered
+    // with no reconnect ever firing. Disarmed the instant we register.
+    let reg_timer = sleep(REG_TIMEOUT);
+    tokio::pin!(reg_timer);
 
     loop {
         tokio::select! {
+            _ = &mut reg_timer, if !registered => {
+                // If we stalled specifically DURING the SASL exchange (we sent CAP REQ
+                // :sasl or AUTHENTICATE and the server then went silent — never a 903
+                // success nor a 90x failure), classify this as a SASL retry. Otherwise
+                // it never matches the `SASL_RETRY:` prefix in run_connection, so the
+                // 3-strikes auto-disable never engages and the connection cycles forever
+                // un-registered instead of falling back to unauthenticated registration
+                // (the same recovery the explicit-904 path already gets).
+                if use_sasl && matches!(sasl_state, SaslState::CapReqSent | SaslState::AuthenticateSent) {
+                    return Err(anyhow::anyhow!("SASL_RETRY: registration stalled during SASL handshake"));
+                }
+                return Err(anyhow::anyhow!("registration timeout — no 001 within {}s", REG_TIMEOUT.as_secs()));
+            }
+
             _ = ping_ticker.tick() => {
                 if ping_out && last_pong.elapsed() > PONG_TIMEOUT {
                     warn!("[{}] PONG timeout, triggering reconnect", conn_id);
@@ -402,21 +615,47 @@ where
             }
 
             // Inbound control from the IPC server (web-originated Send/Disconnect).
-            // Guarded by `!cmd_closed` so a closed channel stops being polled
-            // instead of resolving to None on every loop iteration.
-            cmd = cmd_rx.recv(), if !cmd_closed => {
+            // A closed channel resolves to `None` exactly once and the None arm
+            // returns, so there's no busy-spin to guard against.
+            cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(DaemonCmd::RawSend(line)) => {
-                        conn.lock().await.send_raw(&line).await?;
+                        // Defense-in-depth: the web is trusted to have stripped
+                        // interior CR/LF, but the daemon is the last barrier before
+                        // the socket and can never be patched — re-enforce it here so
+                        // command injection is structurally impossible at the boundary.
+                        conn.lock().await.send_raw(&sanitize_outbound(&line)).await?;
                     }
                     Some(DaemonCmd::Drop(reason)) => {
                         let _ = conn.lock().await.send_raw(&format!("QUIT :{}\r\n", strip_crlf(&reason))).await;
                         *stopped = true;
                         return Ok(());
                     }
-                    // Sender side gone — server task exited; stop polling this
-                    // branch but keep running the connection itself.
-                    None => { cmd_closed = true; }
+                    // Cycle the socket: clean-return so run_connection re-dials
+                    // (fast base backoff) and re-joins every persistent channel.
+                    Some(DaemonCmd::Reconnect) => {
+                        info!("[{}] Reconnect requested — cycling socket", conn_id);
+                        let _ = conn.lock().await.send_raw("QUIT :reconnecting\r\n").await;
+                        return Ok(());
+                    }
+                    // SASL is negotiated at connect; a live re-arm only matters on the
+                    // NEXT dial (run_connection restores params.sasl_external there).
+                    Some(DaemonCmd::RearmSasl) => {
+                        info!("[{}] RearmSasl noted (takes effect on next reconnect)", conn_id);
+                    }
+                    // Every sender dropped: the daemon removed this conn_id's entry (a
+                    // Drop handler or a Dial-replace), possibly AFTER shedding a
+                    // full-queue Drop command. The connection must NEVER outlive its
+                    // command channel — otherwise it's an un-droppable, un-redialable
+                    // zombie socket that leaks against MemoryMax/LimitNOFILE forever on a
+                    // daemon that never restarts. Send a best-effort QUIT and stop for
+                    // good (stopped=true → run_connection does not reconnect it).
+                    None => {
+                        info!("[{}] Command channel closed — tearing down connection", conn_id);
+                        let _ = conn.lock().await.send_raw("QUIT :connection closed\r\n").await;
+                        *stopped = true;
+                        return Ok(());
+                    }
                 }
             }
 
@@ -462,9 +701,18 @@ where
                     }
                     "PONG" => {
                         let tok = p.params.last().cloned().unwrap_or_default();
+                        // Any PONG proves the server→us path is alive; refresh the
+                        // liveness clock unconditionally.
                         last_pong = Instant::now();
-                        ping_out = false;
+                        // Clear the outstanding heartbeat for ANY token in our private
+                        // `hb-<ts>` namespace (no other sender emits it). Matching the
+                        // namespace rather than the exact latest token still ignores a
+                        // foreign PONG (e.g. a web-issued /PING via RawSend) so it can't
+                        // mask a real timeout — yet tolerates a lost/reordered reply to
+                        // the most recent ping instead of stranding ping_out=true until
+                        // an exact match that may never come.
                         if let Some(sent) = tok.strip_prefix("hb-").and_then(|s| s.parse::<u64>().ok()) {
+                            ping_out = false;
                             let ms = (chrono::Utc::now().timestamp_millis() as u64).saturating_sub(sent);
                             let c = conn.lock().await;
                             sync(&c, registered, true, Some(ms));
@@ -635,6 +883,9 @@ where
                         // #29 (carried over): idempotent — ignore a replayed 001.
                         if registered { fwd(&line); continue; }
                         registered = true;
+                        // Tell run_connection this attempt genuinely reached the
+                        // network — it uses this to reset SASL-failure state / re-arm.
+                        *registered_out = true;
                         last_pong = Instant::now();
                         let actual_nick = {
                             let mut c = conn.lock().await;
@@ -694,6 +945,8 @@ where
                                 conn.lock().await.send_raw(&format!("{}\r\n", to_send)).await?;
                             }
                         }
+                        let auto_lc: HashSet<String> =
+                            params.auto_join.iter().map(|c| irc_lower(c)).collect();
                         for ch in &params.auto_join {
                             let safe = strip_crlf(ch);
                             if !safe.is_empty() {
@@ -705,6 +958,22 @@ where
                                 };
                                 conn.lock().await.send_raw(&cmd).await?;
                             }
+                        }
+                        // Re-join channels we were in during the PREVIOUS session that
+                        // aren't in auto_join (findings #3/#8: a manually-joined channel
+                        // was silently dropped whenever the daemon reconnected on its own
+                        // — ping timeout, netsplit — because only auto_join was re-sent).
+                        // `persistent_channels` survives across do_connect() calls.
+                        for lc in persistent_channels.iter() {
+                            if auto_lc.contains(lc) { continue; }
+                            let safe = strip_crlf(lc);
+                            if safe.is_empty() { continue; }
+                            let cmd = if let Some(key) = params.channel_keys.get(lc) {
+                                format!("JOIN {} {}\r\n", safe, strip_crlf(key))
+                            } else {
+                                format!("JOIN {}\r\n", safe)
+                            };
+                            conn.lock().await.send_raw(&cmd).await?;
                         }
                         {
                             let c = conn.lock().await;
@@ -733,39 +1002,86 @@ where
 
                     "JOIN" => {
                         let who = nick_from_prefix(&p.prefix);
-                        let mut c = conn.lock().await;
-                        if irc_lower(&who) == irc_lower(&c.nick) {
-                            if let Some(chan) = p.params.first() {
-                                c.channels.insert(irc_lower(chan));
-                                sync(&c, registered, true, None);
-                            }
-                        }
-                        drop(c);
-                        fwd(&line);
-                    }
-                    "PART" => {
-                        let who = nick_from_prefix(&p.prefix);
-                        let mut c = conn.lock().await;
-                        if irc_lower(&who) == irc_lower(&c.nick) {
-                            if let Some(chan) = p.params.first() {
-                                c.channels.remove(&irc_lower(chan));
-                                sync(&c, registered, true, None);
-                            }
-                        }
-                        drop(c);
-                        fwd(&line);
-                    }
-                    "KICK" => {
-                        let mut c = conn.lock().await;
-                        if let Some(kicked) = p.params.get(1) {
-                            if irc_lower(kicked) == irc_lower(&c.nick) {
+                        let mut joined: Option<String> = None;
+                        {
+                            let mut c = conn.lock().await;
+                            if irc_lower(&who) == irc_lower(&c.nick) {
+                                // extended-join carries our own user@host in the prefix —
+                                // learn it so SessionSync can re-arm the web spoof guard.
+                                if let Some(uh) = p.prefix.as_deref()
+                                    .and_then(|pre| pre.split_once('!'))
+                                    .map(|(_, uh)| uh)
+                                {
+                                    // Bound + sanitize before storing (serialized in every
+                                    // SessionSync — see clean_userhost): a hostile server can't
+                                    // poison the state channel with a giant/escaping userhost.
+                                    if uh.contains('@') {
+                                        if let Some(u) = clean_userhost(uh) { c.self_userhost = u; }
+                                    }
+                                }
                                 if let Some(chan) = p.params.first() {
-                                    c.channels.remove(&irc_lower(chan));
+                                    // Only TRACK a syntactically sane, JSON-1:1-serializable
+                                    // channel name (see is_trackable_channel). A hostile server
+                                    // controls the JOIN prefix, so a spoofed self-JOIN with a
+                                    // giant or `"`/control-filled name would otherwise bloat the
+                                    // SessionSync past MAX_FRAME_LEN — write_frame then drops it on
+                                    // BOTH live and replay paths, silencing the daemon→web state
+                                    // channel PERMANENTLY. Untrackable names are still forwarded
+                                    // as the raw line below; they just aren't tracked/re-joined.
+                                    if is_trackable_channel(chan) {
+                                        let lc = irc_lower(chan);
+                                        // Cap membership count too; a real client never nears it.
+                                        if c.channels.len() < MAX_TRACKED_CHANNELS || c.channels.contains(&lc) {
+                                            c.channels.insert(lc.clone());
+                                        }
+                                        joined = Some(lc);
+                                    }
                                     sync(&c, registered, true, None);
                                 }
                             }
                         }
-                        drop(c);
+                        if let Some(lc) = joined {
+                            // Bounded: a hostile server can't force unbounded growth by
+                            // spoofing self-JOIN prefixes to arbitrary channel names.
+                            if persistent_channels.len() < MAX_TRACKED_CHANNELS {
+                                persistent_channels.insert(lc);
+                            }
+                        }
+                        fwd(&line);
+                    }
+                    "PART" => {
+                        let who = nick_from_prefix(&p.prefix);
+                        let mut parted: Option<String> = None;
+                        {
+                            let mut c = conn.lock().await;
+                            if irc_lower(&who) == irc_lower(&c.nick) {
+                                if let Some(chan) = p.params.first() {
+                                    let lc = irc_lower(chan);
+                                    c.channels.remove(&lc);
+                                    sync(&c, registered, true, None);
+                                    parted = Some(lc);
+                                }
+                            }
+                        }
+                        if let Some(lc) = parted { persistent_channels.remove(&lc); }
+                        fwd(&line);
+                    }
+                    "KICK" => {
+                        let mut kicked_from: Option<String> = None;
+                        {
+                            let mut c = conn.lock().await;
+                            if let Some(kicked) = p.params.get(1) {
+                                if irc_lower(kicked) == irc_lower(&c.nick) {
+                                    if let Some(chan) = p.params.first() {
+                                        let lc = irc_lower(chan);
+                                        c.channels.remove(&lc);
+                                        sync(&c, registered, true, None);
+                                        kicked_from = Some(lc);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(lc) = kicked_from { persistent_channels.remove(&lc); }
                         fwd(&line);
                     }
                     "NICK" => {
@@ -775,6 +1091,23 @@ where
                             if let Some(new_nick) = p.params.first() {
                                 c.nick = strip_crlf(new_nick);
                                 sync(&c, registered, true, None);
+                            }
+                        }
+                        drop(c);
+                        fwd(&line);
+                    }
+                    "CHGHOST" => {
+                        // Server changed our user@host mid-session — keep the learned
+                        // value fresh so the web spoof guard stays accurate after reattach.
+                        let who = nick_from_prefix(&p.prefix);
+                        let mut c = conn.lock().await;
+                        if irc_lower(&who) == irc_lower(&c.nick) {
+                            if let (Some(u), Some(h)) = (p.params.first(), p.params.get(1)) {
+                                // Bound + sanitize (serialized in every SessionSync).
+                                if let Some(uh) = clean_userhost(&format!("{}@{}", u, h)) {
+                                    c.self_userhost = uh;
+                                    sync(&c, registered, true, None);
+                                }
                             }
                         }
                         drop(c);
@@ -810,5 +1143,69 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trackable_channel_filter() {
+        assert!(is_trackable_channel("#chan"));
+        assert!(is_trackable_channel("&local"));
+        assert!(is_trackable_channel("#Über")); // multibyte UTF-8 ok (serializes 1:1)
+        assert!(!is_trackable_channel(""));
+        assert!(!is_trackable_channel("nochanprefix"));
+        assert!(!is_trackable_channel("#with\"quote"));
+        assert!(!is_trackable_channel("#with\\backslash"));
+        assert!(!is_trackable_channel("#with space"));
+        assert!(!is_trackable_channel("#with,comma"));
+        assert!(!is_trackable_channel("#with\u{01}ctrl"));
+        assert!(!is_trackable_channel(&format!("#{}", "x".repeat(MAX_CHANNEL_NAME_LEN))));
+    }
+
+    #[test]
+    fn clean_userhost_filter() {
+        assert_eq!(clean_userhost("user@host.example"), Some("user@host.example".to_string()));
+        assert!(clean_userhost("").is_none());
+        assert!(clean_userhost(&format!("u@{}", "h".repeat(MAX_USERHOST_LEN))).is_none());
+        assert!(clean_userhost("u@ho\"st").is_none());
+        assert!(clean_userhost("u@ho\u{01}st").is_none());
+    }
+
+    /// The whole point of Byzantine-1: a WORST-CASE SessionSync — MAX_TRACKED_CHANNELS
+    /// names each at MAX_CHANNEL_NAME_LEN, plus a max-length userhost/nick — must still
+    /// serialize UNDER MAX_FRAME_LEN, so no hostile server can spoof self-JOINs to silence
+    /// the state channel. All fields here pass the is_trackable_channel/clean_userhost
+    /// filters, so they serialize 1:1 (no JSON escaping bloat).
+    #[test]
+    fn worst_case_sessionsync_fits_frame() {
+        let channels: Vec<String> = (0..MAX_TRACKED_CHANNELS)
+            .map(|i| {
+                let mut s = format!("#{:07}", i);
+                while s.len() < MAX_CHANNEL_NAME_LEN { s.push('x'); }
+                s.truncate(MAX_CHANNEL_NAME_LEN);
+                assert!(is_trackable_channel(&s));
+                s
+            })
+            .collect();
+        let msg = crate::ipc::IpcMessage::SessionSync {
+            conn_id: "c".repeat(36),
+            nick: "n".repeat(32),
+            channels,
+            registered: true,
+            connected: true,
+            lag_ms: Some(u64::MAX),
+            message_tags: true,
+            echo_message_enabled: true,
+            self_userhost: clean_userhost(&format!("user@{}", "h".repeat(MAX_USERHOST_LEN - 5))).unwrap(),
+        };
+        let body = serde_json::to_vec(&msg).unwrap();
+        assert!(
+            body.len() < crate::ipc_framing::MAX_FRAME_LEN as usize,
+            "worst-case SessionSync serialized to {} bytes, must be < MAX_FRAME_LEN ({})",
+            body.len(), crate::ipc_framing::MAX_FRAME_LEN
+        );
     }
 }

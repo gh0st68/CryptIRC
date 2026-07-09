@@ -5,6 +5,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// IPC protocol version. The daemon announces this in `Hello` so a newer web
+/// binary can learn what a FROZEN daemon supports and gate its own behavior.
+/// SCHEMA LAW (the daemon is byte-frozen for years): only ever ADD message
+/// variants and ADD `#[serde(default)]` fields — never change a field's meaning
+/// or type. Unknown variants deserialize to `Unknown` (ignored) and unknown
+/// fields are ignored, so a newer web binary is always safe against this daemon.
+pub const IPC_PROTO_VERSION: u32 = 1;
+
 /// Every message on the wire carries this envelope. `conn_id` is the routing
 /// key (matches the web side's existing conn_id); `Attach` is the one message
 /// with no meaningful conn_id.
@@ -17,11 +25,15 @@ pub enum IpcMessage {
     /// the daemon replies with one SessionSync per conn_id it currently owns.
     Attach {},
 
-    /// Start owning a brand-new connection. Only sent from the two call sites
-    /// that today call `irc::connect()`: the `Connect` handler and
+    /// Start owning a connection. Sent from the `Connect` handler and
     /// `reconnect_for_user`. Carries fully-resolved, already-decrypted dial
-    /// parameters — see `DialParams`. Rejected as a no-op if the daemon
-    /// already owns this conn_id (reattach happens via `Attach`, not `Dial`).
+    /// parameters — see `DialParams`. (I3) If the daemon ALREADY owns this conn_id
+    /// the Dial REPLACES it — the old task is dropped (its socket QUIT) and a fresh
+    /// one spawned; this is the client-cert-renewal path (see ipc_server's Dial
+    /// handler). It is NOT a daemon-side no-op. Safety against bouncing a healthy
+    /// connection lives on the WEB side, which guards on `connections.contains_key`
+    /// before issuing a Dial for an already-live conn (see main.rs Connect). Reattach
+    /// after a web-process restart happens via `Attach`, never `Dial`.
     Dial { conn_id: String, params: Box<DialParams> },
 
     /// Forward one raw outbound IRC line verbatim. Covers every existing
@@ -94,7 +106,35 @@ pub enum IpcMessage {
         message_tags: bool,
         #[serde(default)]
         echo_message_enabled: bool,
+        /// The daemon's learned self `user@host` for this connection (from the
+        /// self-JOIN / CHGHOST / accepted self-NICK). A freshly-reattached web
+        /// process otherwise starts with this empty, silently disabling its
+        /// forged-`NICK` spoof guard (`#30`) until the next self-JOIN — which a
+        /// reattach never triggers. `#[serde(default)]` = "" for old daemons.
+        #[serde(default)]
+        self_userhost: String,
     },
+
+    // ── Future-proofing (v1+) — kept additive so a byte-frozen daemon tolerates
+    // anything a newer web binary sends. ─────────────────────────────────────
+    /// Version handshake. The daemon sends this right after a web `Attach` (and a
+    /// web client MAY send its own on connect). Lets a newer web binary discover
+    /// the frozen daemon's capabilities instead of assuming.
+    Hello { proto_version: u32 },
+
+    /// Reserved out-of-band control channel (web → daemon) for future knobs that
+    /// must not require a daemon schema change. The frozen daemon handles the
+    /// verbs it knows and IGNORES the rest (logged), so a newer web binary can
+    /// issue a verb this daemon predates without breaking anything. Known verbs
+    /// today: `reconnect` (cycle a conn's socket), `rearm_sasl` (undo an auto-SASL-disable).
+    DaemonControl { conn_id: String, verb: String, #[serde(default)] args: Vec<String> },
+
+    /// Catch-all for any `type` this (frozen) daemon has never seen — a message
+    /// variant added by a future web binary. Deserializes here instead of failing
+    /// the whole frame, so the connection is never torn down over an unknown
+    /// message. Handlers ignore it.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,7 +147,17 @@ pub enum ConnLifecycle {
 /// Fully-resolved, already-decrypted dial parameters. Every field here is
 /// exactly what `do_connect()`/`run_loop()` read out of `NetworkConfig` +
 /// vault-decrypted cert material today — nothing new is decided daemon-side.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// SCHEMA LAW (I4): the fields below are FROZEN. Any field added in a FUTURE version
+/// MUST carry `#[serde(default)]`. `DialParams` travels web→daemon, so an OLDER web
+/// binary won't send a newer field — without a default the daemon's serde decode
+/// fails, drops the client, and it reconnects re-sending the same undecodable Dial =
+/// crash-loop. (Unlike the additive `IpcMessage` enum, whose `#[serde(other)]`
+/// tolerates the unknown; a missing REQUIRED struct field has no such escape.)
+/// `Debug` is hand-REDACTED below (fix 7) so an accidental `{:?}` — including via
+/// `IpcMessage`'s derived Debug, which boxes this — never dumps password / SASL /
+/// oper / nickserv secrets or PEM keys to the journal.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DialParams {
     pub server: String,
     pub port: u16,
@@ -136,14 +186,100 @@ pub struct DialParams {
     pub auto_reconnect: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SaslParams {
     pub account: String,
     pub password: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ClientIdentity {
     pub cert_pem: String,
     pub key_pem: String,
+}
+
+// ── Hand-redacted Debug for the secret-bearing structs (fix 7) ────────────────
+// These derive everything EXCEPT Debug; the impls below never render a credential
+// or PEM key. This also makes `IpcMessage::Dial`'s derived Debug safe, since it
+// boxes a `DialParams`.
+impl std::fmt::Debug for SaslParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaslParams").field("account", &self.account).field("password", &"<redacted>").finish()
+    }
+}
+impl std::fmt::Debug for ClientIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientIdentity").field("cert_pem", &"<redacted>").field("key_pem", &"<redacted>").finish()
+    }
+}
+impl std::fmt::Debug for DialParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DialParams")
+            .field("server", &self.server)
+            .field("port", &self.port)
+            .field("tls", &self.tls)
+            .field("nick", &self.nick)
+            .field("username", &self.username)
+            .field("sasl_external", &self.sasl_external)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("sasl_plain", &self.sasl_plain.as_ref().map(|_| "<redacted>"))
+            .field("oper_login", &self.oper_login)
+            .field("oper_pass", &self.oper_pass.as_ref().map(|_| "<redacted>"))
+            .field("nickserv_pass", &self.nickserv_pass.as_ref().map(|_| "<redacted>"))
+            .field("client_identity", &self.client_identity.as_ref().map(|_| "<redacted>"))
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_params() -> DialParams {
+        DialParams {
+            server: "irc.example.org".into(), port: 6697, tls: true,
+            tls_accept_invalid_certs: false, nick: "n".into(), username: "u".into(),
+            realname: "r".into(), password: Some("hunter2".into()),
+            sasl_plain: Some(SaslParams { account: "acct".into(), password: "saslpw".into() }),
+            sasl_external: false,
+            client_identity: Some(ClientIdentity { cert_pem: "CERTPEM".into(), key_pem: "PRIVKEYPEM".into() }),
+            oper_login: None, oper_pass: Some("operpw".into()), nickserv_pass: Some("nspw".into()),
+            auto_identify: false, auto_join: vec![], channel_keys: HashMap::new(),
+            perform_commands: vec![], disabled_caps: vec![], label: "l".into(), auto_reconnect: true,
+        }
+    }
+
+    // I4: a newer web binary that adds a field the frozen daemon predates must still
+    // decode (no `deny_unknown_fields`) — the daemon ignores what it doesn't know.
+    #[test]
+    fn dialparams_tolerates_unknown_fields() {
+        let j = r#"{"type":"dial","conn_id":"n","params":{
+            "server":"x","port":6697,"tls":true,"tls_accept_invalid_certs":false,
+            "nick":"n","username":"u","realname":"r","password":null,"sasl_plain":null,
+            "sasl_external":false,"client_identity":null,"oper_login":null,"oper_pass":null,
+            "nickserv_pass":null,"auto_identify":false,"auto_join":[],"channel_keys":{},
+            "perform_commands":[],"disabled_caps":[],"label":"l","auto_reconnect":true,
+            "some_future_field":123}}"#;
+        let msg: IpcMessage = serde_json::from_str(j).expect("unknown field must be ignored, not fail");
+        assert!(matches!(msg, IpcMessage::Dial { .. }));
+    }
+
+    // Forward-compat: an unknown message `type` must map to Unknown, never error.
+    #[test]
+    fn unknown_message_type_becomes_unknown() {
+        let msg: IpcMessage = serde_json::from_str(r#"{"type":"future_variant","foo":1}"#).unwrap();
+        assert!(matches!(msg, IpcMessage::Unknown));
+    }
+
+    // fix 7: Debug must never render a credential or PEM key, including via the
+    // enclosing IpcMessage's derived Debug (which boxes DialParams).
+    #[test]
+    fn debug_redacts_all_secrets() {
+        let secrets = ["hunter2", "saslpw", "CERTPEM", "PRIVKEYPEM", "operpw", "nspw"];
+        let direct = format!("{:?}", sample_params());
+        for s in secrets { assert!(!direct.contains(s), "DialParams Debug leaked {s}"); }
+        let wrapped = format!("{:?}", IpcMessage::Dial { conn_id: "n".into(), params: Box::new(sample_params()) });
+        for s in secrets { assert!(!wrapped.contains(s), "IpcMessage Debug leaked {s}"); }
+    }
 }

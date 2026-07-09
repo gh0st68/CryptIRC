@@ -199,6 +199,35 @@ impl AppState {
         }
     }
 
+    /// Defensive backstop enforcing the invariant that every `connections` entry has a
+    /// matching `conn_owners` record. A connection with no owner is unroutable —
+    /// `ensure_connection_entry` resolves the owner first and returns None, and Attach
+    /// reconciliation can't re-Dial it — so it would linger uselessly for the process's
+    /// whole life. The known leak paths are all fixed at the source (RemoveNetwork and
+    /// account teardown remove both maps together; the daemon's Disconnected echo does
+    /// too), and creation always establishes `conn_owners` before `connections`, so in
+    /// practice this fires only on the sub-microsecond gap between two adjacent DashMap
+    /// ops or on some future bug that breaks the invariant — cheap, safe insurance
+    /// either way. It deliberately does NOT reap the reverse: a `conn_owners` entry with
+    /// no connection is a normal not-currently-connected network (conn_owners is seeded
+    /// from disk for EVERY config at startup) and must be kept.
+    pub fn prune_orphan_conn_maps(&self) {
+        let orphans: Vec<String> = self.connections.iter()
+            .map(|e| e.key().clone())
+            .filter(|cid| !self.conn_owners.contains_key(cid))
+            .collect();
+        for cid in orphans {
+            // Re-check owner-absence under the shard lock so a concurrent AddNetwork /
+            // re-Dial that just (re)established the owner isn't clobbered.
+            let removed = self.connections.remove_if(&cid, |_, _| !self.conn_owners.contains_key(&cid)).is_some();
+            if removed {
+                self.abort_connect_task(&cid);
+                self.clear_pending_dial(&cid);
+                self.clear_disconnect_request(&cid);
+            }
+        }
+    }
+
     /// #106: Drop per-user active-session counters that are back at zero so the
     /// active_sessions map doesn't retain one entry per username forever.
     pub fn prune_idle_active_sessions(&self) {
@@ -481,7 +510,16 @@ pub enum ServerEvent {
     /// base64-encoded. The client uses it to encrypt/decrypt private E2E key blobs.
     VaultUnlocked    { e2e_enc_key: String },
     VaultError       { message: String },
-    IrcMessage       { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind, msg_id: u64, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String> },
+    /// `replayed` = true when this message was re-emitted from the daemon's
+    /// Attach-time ring-buffer replay (a `cryptirc.service` restart reattaching to
+    /// the still-live daemon), NOT received live. The browser renders it into
+    /// scrollback either way but deterministically suppresses desktop
+    /// notifications + unread badges for replayed history, instead of relying on
+    /// the age>60s ZNC-playback heuristic (which misses recent replayed lines).
+    /// Stamped centrally by `dispatch_line`'s `send` closure. `#[serde(default)]`
+    /// so it's absent-safe. `skip_serializing_if` keeps live traffic byte-identical
+    /// on the wire (the common case emits nothing).
+    IrcMessage       { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind, msg_id: u64, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] replayed: bool },
     /// Echo of user's own sent message — for multi-device sync
     IrcEcho          { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind, msg_id: u64 },
     IrcJoin          { conn_id: String, nick: String,  channel: String, ts: i64 },
@@ -1042,6 +1080,14 @@ async fn main() -> Result<()> {
               // Reap stale flood-tracker keys + flush stateful bot data (seen tracker
               // is updated in memory on every message; persist it periodically).
               bots::prune_flood_tracker();
+              // Reap expired command-cooldown keys and idle per-connection bot send
+              // gates (both static maps that otherwise accrete over the process's life).
+              bots::prune_cooldowns();
+              bots::prune_bot_send_gates();
+              // Defensive backstop: reap any `connections` entry left without a
+              // `conn_owners` record (an unroutable half-entry). Known leak paths are
+              // fixed at the source; this just enforces the invariant hourly.
+              s.prune_orphan_conn_maps();
               bots::botdata_flush_all(&s.data_dir).await;
           }
       });
@@ -1237,21 +1283,22 @@ async fn serve_font(Path(name): Path<String>) -> impl IntoResponse {
 async fn serve_file_public(Path(name): Path<String>, State(state): State<AppState>) -> impl IntoResponse {
     let name: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.').collect();
     if name.contains("..") || name.starts_with('.') { return StatusCode::BAD_REQUEST.into_response(); }
-    // #2: the unauthenticated /pub route shares the upload dir with the authenticated
-    // /files route. Restrict /pub to shareable MEDIA (image + video + audio) so a
-    // copied link actually loads for anyone — link previews and inline video/audio
-    // players rely on this. Everything else (documents, archives, text, unknown) stays
-    // behind the /files auth gate so a leaked UUID filename can't be fetched anonymously.
-    if !upload::is_public_media(&name) { return StatusCode::NOT_FOUND.into_response(); }
+    // The unauthenticated /pub route serves EVERY upload by its unguessable-UUID filename —
+    // an "anyone with the link" share model (like Slack/Discord CDN links) so a copied link
+    // loads for anyone, in-app or not. XSS-safe: content_type_for is an ALLOWLIST — only
+    // image/video/audio/pdf/text get a real inline type; anything unknown (.html/.svg/.js/…)
+    // falls through to application/octet-stream, which with X-Content-Type-Options:nosniff the
+    // browser DOWNLOADS instead of executing in our origin. Media + PDF preview inline;
+    // everything else is sent as an attachment (download) rather than rendered.
     let path = std::path::PathBuf::from(&state.upload_dir).join(&name);
+    let inline = upload::is_public_media(&name) || name.to_lowercase().ends_with(".pdf");
     match tokio::fs::read(&path).await {
         Ok(data) => Response::builder()
             .header(header::CONTENT_TYPE, upload::content_type_for(&name))
             .header(header::CACHE_CONTROL, "public, max-age=86400")
             .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-            // Media is served inline so it previews/plays in the browser rather than
-            // downloading — everything reaching here is public media (gated above).
-            .header(HeaderName::from_static("content-disposition"), "inline")
+            .header(HeaderName::from_static("content-disposition"),
+                     if inline { "inline" } else { "attachment" })
             .body(Body::from(data))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
@@ -3370,20 +3417,26 @@ async fn handle_command(
             state.request_disconnect(&id);
             state.abort_connect_task(&id);
             state.clear_pending_dial(&id);
-            ipc_client::send_drop(&state, &id, reason).await;
-            // #4: serialize the config-file DELETE behind the SAME per-config lock
-            // every save_network writer takes. Without it, a concurrent
-            // JoinChannel/PartChannel/SaveChannelOrder/Send/GenerateCert/UpdateNetwork
-            // for this id (from another socket of the same user) can interleave
-            // get_network_config (read) → remove_network (this delete) → save_network
-            // (write), RESURRECTING the just-removed network's <id>.json on disk. The
-            // resurrected file reappears in user_network_states and is auto-reconnected
-            // by reconnect_for_user on the next vault unlock. Holding the lock across
-            // the delete makes delete and save mutually exclusive.
+            // #4 + C-1: hold the per-config lock across the file DELETE **and** the in-memory
+            // map removals **and** the Drop send — one critical section. #4 (the file half):
+            // without the lock a concurrent Join/Part/Update/Send/GenerateCert for this id
+            // could interleave get_network_config→delete→save_network and RESURRECT the
+            // <id>.json on disk. C-1 (the map half, the round-3 finding): the eager map
+            // removals used to sit OUTSIDE this lock, so a two-tab Connect could resolve its
+            // get_network_config (file still present) and then, after our delete+removal,
+            // re-insert conn_owners + Dial a live socket for a network with no config — an
+            // invisible, un-reapable, credential-bearing orphan. Connect now takes the same
+            // lock and re-reads the config inside it, so it sees None. send_drop is inside
+            // the lock and AFTER the delete, so a Connect that won the lock first (and
+            // already sent its Dial) is followed by our Drop → daemon ends disconnected.
             {
                 let _cfg_lock = network_config_lock(username, &id);
                 let _cfg_guard = _cfg_lock.lock().await;
                 state.remove_network(&id, username).await;
+                ipc_client::send_drop(&state, &id, reason).await;
+                state.connections.remove(&id);
+                state.conn_owners.remove(&id);
+                state.clear_disconnect_request(&id);
             }
             send(ServerEvent::State {
                 networks: state.user_network_states(username).await,
@@ -3392,11 +3445,23 @@ async fn handle_command(
         }
         ClientMessage::Connect { id } => {
             if !state.owns_network(username, &id).await { return; }
-            // The daemon's Dial is atomically rejected if it already owns this
-            // conn_id (see ipc_server.rs), so an already-live (or mid-backoff)
-            // network just no-ops here instead of the old force-kill-and-restart
-            // dance — that dance existed to prevent ghost/duplicate connections,
-            // which the daemon's own check-and-insert now prevents more robustly.
+            // (I3) An already-live network no-ops here PURELY because of the web-side
+            // `connections.contains_key` guard below — NOT because the daemon rejects a
+            // duplicate Dial. A Dial for an already-owned conn_id actually REPLACES it
+            // daemon-side (drops the live socket + redials — that's the cert-renewal
+            // path), so this guard is what prevents bouncing a healthy connection. It
+            // also supersedes the old force-kill-and-restart dance against ghost/
+            // duplicate connections, which spawn_connection's check-and-insert prevents.
+            if state.connections.contains_key(&id) { return; }
+            // C-1/I-1: serialize this Connect's map mutations + Dial under the per-config
+            // lock so they're atomic vs a concurrent two-tab RemoveNetwork (delete + map
+            // removal) or Disconnect (disconnect-flag set + Drop). Re-read the config INSIDE
+            // the lock — a RemoveNetwork that won the lock first deleted it → we see None →
+            // bail (no in-memory resurrection of a removed network). Whichever of
+            // Connect/Disconnect/RemoveNetwork acquires the lock LAST wins deterministically
+            // (no partial interleave), and the daemon receives their Dial/Drop in that order.
+            let _cfg_lock = network_config_lock(username, &id);
+            let _cfg_guard = _cfg_lock.lock().await;
             if state.connections.contains_key(&id) { return; }
             if let Some(cfg) = state.get_network_config(&id, username).await {
                 state.clear_disconnect_request(&id);
@@ -3411,6 +3476,12 @@ async fn handle_command(
                 Some(cfg) => strip_crlf(quit_reason_for(&cfg)),
                 None => DEFAULT_QUIT_MESSAGE.to_string(),
             };
+            // I-1: serialize under the same per-config lock so the disconnect-flag set +
+            // Drop are atomic vs a concurrent two-tab Connect (which clears the flag + Dials)
+            // — otherwise the flag-clear and flag-set race and the daemon can be left holding
+            // a socket the web thinks is disconnected (or vice versa).
+            let _cfg_lock = network_config_lock(username, &id);
+            let _cfg_guard = _cfg_lock.lock().await;
             state.request_disconnect(&id);
             state.abort_connect_task(&id);
             state.clear_pending_dial(&id);
@@ -3449,10 +3520,30 @@ async fn handle_command(
                 info!("[{}] SEND ({}B): {}", conn_id, safe.len(), redact_for_log(&safe));
                 let mut c = conn.lock().await;
                 let nick = c.nick.clone();
+                // F2: capture the connection's live state under the same lock as the send.
+                // If it isn't registered/connected, the daemon drops this RawSend (it's in
+                // reconnect/backoff), so we must NOT log + IrcEcho the message as sent — that
+                // false confirmation is the one direction with no ring recovery.
+                let connected = c.connected && c.registered;
                 let _ = c.send_raw(&format!("{}\r\n", safe)).await;
                 drop(c);
-                // Broadcast PRIVMSG/NOTICE to all user sessions so other devices see them
-                if !is_tagmsg {
+                if !connected {
+                    // Tell the user (once, to status) instead of silently pretending it sent.
+                    state.send_to_user(username, ServerEvent::IrcMessage {
+                        replayed: false,
+                        conn_id: conn_id.clone(),
+                        from: "*".into(),
+                        target: "status".into(),
+                        text: "⚠ Not connected — your message was not sent (reconnecting…)".into(),
+                        ts: chrono::Utc::now().timestamp(),
+                        kind: MessageKind::Notice,
+                        msg_id: 0,
+                        prefix: None,
+                    });
+                }
+                // Broadcast PRIVMSG/NOTICE to all user sessions so other devices see them —
+                // ONLY when the line actually went to IRC (see F2 above).
+                if !is_tagmsg && connected {
                     let upper = safe.to_uppercase();
                     let is_privmsg = upper.starts_with("PRIVMSG ");
                     let is_notice_out = upper.starts_with("NOTICE ");
@@ -4473,8 +4564,20 @@ impl AppState {
             // unlike the old per-process model, "connected" can now already be
             // true the very first time a freshly-logged-in session checks.
             if self.connections.contains_key(&id) || self.disconnect_requested(&id) { continue; }
+            // C-1 completion: this is the FOURTH mutator of conn_owners + Dial (after
+            // Connect/Disconnect/RemoveNetwork). Take the SAME per-config lock and re-read
+            // the config INSIDE it, so a two-tab UnlockVault(this) + RemoveNetwork(id) race
+            // can't re-insert conn_owners + Dial a live socket for a network whose config
+            // was just deleted — the exact orphan C-1 prevents, reached via the reconnect
+            // path instead of Connect. A RemoveNetwork that won the lock first → the fresh
+            // get_network_config returns None → we skip. (Sole caller holds no lock across
+            // this; dial_current never re-acquires the config lock → no deadlock.)
+            let _cfg_lock = network_config_lock(username, &id);
+            let _cfg_guard = _cfg_lock.lock().await;
+            if self.connections.contains_key(&id) || self.disconnect_requested(&id) { continue; }
+            let Some(fresh) = self.get_network_config(&id, username).await else { continue };
             self.conn_owners.insert(id.clone(), username.to_string());
-            crate::ipc_client::dial_current(self, username, cfg).await;
+            crate::ipc_client::dial_current(self, username, fresh).await;
         }
     }
 
