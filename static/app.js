@@ -1288,7 +1288,9 @@ function handleEvent(ev) {
         if (plaintext === null && !encrypted && _txt.startsWith('[e2ex3dh]')) return;
         const displayText = plaintext !== null ? plaintext : ev.text;
         // Block PMs if enabled — per-network settings with global fallback; allow list bypasses
-        const _isDmIncoming=ev.target!=='status'&&!ev.target.startsWith('#')&&!ev.target.startsWith('&')&&ev.from!==getNick(ev.conn_id)&&ev.from!=='*';
+        // All four channel prefixes (#&+!) — matches addMessage's isDM; previously missed
+        // +/! so IRCnet-style channels could be misclassified as DMs by the paths below.
+        const _isDmIncoming=ev.target!=='status'&&!/^[#&+!]/.test(ev.target)&&ev.from!==getNick(ev.conn_id)&&ev.from!=='*';
         if(_isDmIncoming){
           const _pm=getPmSettings(ev.conn_id);
           if(_pm.enabled&&!isPmAllowedFor(ev.conn_id,ev.from)){
@@ -1350,7 +1352,27 @@ function handleEvent(ev) {
         // covering the recent-message case the age>60 heuristic below misses. Still
         // call zncDetectBatch (don't short-circuit) so its playback-summary side
         // effect is preserved for genuine bouncer playback.
-        const _isReplayBatch = zncDetectBatch(ev.conn_id,ev.target,zncMsg);
+        // Incoming DMs are EXEMPT from the age>60 ZNC-playback heuristic: a backgrounded
+        // PWA / suspended tab delivers queued events minutes late, so a genuinely fresh
+        // PM routinely arrives with age>60 — classifying it as "playback" sent it down
+        // the silent branch, which never created the conversation row → a first message
+        // from someone was COMPLETELY invisible (no Messages entry, no badge, no sound;
+        // RAM-only line lost on reload). Late first-delivery DMs must take the normal
+        // path (row + unread + notify). ONE exception keeps genuine ZNC re-delivery
+        // quiet: if a fuzzy-identical line (ts|from|text — msg_ids differ per delivery,
+        // the daemon mints a fresh id on every log append) is already buffered, this is
+        // a REPLAYED copy, not a first delivery → silent branch (its dedup drops the
+        // dupe, and it still ensures the conversation row below). Channels keep the
+        // heuristic; deterministic daemon replay still takes ev.replayed below.
+        let _dmReplayDup=false;
+        if(_isDmIncoming && !ev.replayed && (Date.now()/1000-(ev.ts||0))>60){
+          const _db=getBuf(ev.conn_id,ev.target);
+          const _dfk=(ev.ts)+'|'+ev.from+'|'+String(displayText||'').slice(0,50);
+          for(let _di=Math.max(0,_db.length-30);_di<_db.length;_di++){
+            if(_db[_di].ts+'|'+_db[_di].from+'|'+(_db[_di].text||'').slice(0,50)===_dfk){_dmReplayDup=true;break;}
+          }
+        }
+        const _isReplayBatch = _isDmIncoming ? _dmReplayDup : zncDetectBatch(ev.conn_id,ev.target,zncMsg);
         if(ev.replayed || _isReplayBatch){
           // Filter ignored users in ZNC batch path too
           if(isIgnored(ev.from, ev.prefix)) return;
@@ -1388,6 +1410,23 @@ function handleEvent(ev) {
             trackStat(ev.conn_id,ev.target,ev.from);
           }
           if(!_zdup&&isActive(ev.conn_id,ev.target))appendMsgRow(zncMsg);
+          // A replayed DM must still SURFACE its conversation (row in the sidebar +
+          // Messages inbox) even though it stays silent (no unread/sound): a browser
+          // that reconnects across a web restart may receive a brand-new PM ONLY as
+          // ring replay — without this the buffered line was unreachable (no row =
+          // not listed anywhere). Mirrors addMessage's isDM logic incl. the
+          // closed-query rule (only a genuinely NEWER message reopens a closed PM).
+          if(_isDmIncoming){
+            const _rlc=ev.target.toLowerCase(), _rck=ev.conn_id+'|'+_rlc, _rClosedTs=closedQueries[_rck];
+            if(!(_rClosedTs && (zncMsg.ts||0)<=_rClosedTs)){
+              if(_rClosedTs) clearQueryClosed(ev.conn_id,_rlc);
+              if(!queryBufs[ev.conn_id])queryBufs[ev.conn_id]=new Map();
+              const _rNew=!queryBufs[ev.conn_id].has(_rlc);
+              queryBufs[ev.conn_id].set(_rlc, ev.target);
+              saveQueryBufs();
+              if(_rNew){ renderSidebar(); if(isMessagesActive()) renderMessagesView(); }
+            }
+          }
           return;
         }
         addMessage(ev.conn_id, ev.target, {
@@ -10737,11 +10776,8 @@ function restorePreferences(p){
       }
     }
     if(p.inputHistory) inputHistory=p.inputHistory;
-    if(p.queries){
-      const localTs=parseInt(localStorage.getItem('cryptirc_queries_ts')||'0');
-      const serverTs=p._queriesTs||0;
-      if(localTs<=serverTs){for(const[c,entries] of Object.entries(p.queries))queryBufs[c]=new Map(entries);}
-    }
+    // (p.queries union-merge moved BELOW the closedQueries merge — it must see the
+    // freshest closed-set so it never re-adds a conversation this device closed.)
     if(p.closedQueries){
       const localTs=parseInt(localStorage.getItem('cryptirc_closed_queries_ts')||'0');
       const serverTs=p._closedQueriesTs||0;
@@ -10758,6 +10794,38 @@ function restorePreferences(p){
         // persist the deduped open-query list so a hard reload before the next WS sync
         // doesn't resurrect the closed PM from stale localStorage
         if(_deduped) saveQueryBufs();
+      }
+    }
+    if(p.queries){
+      // UNION-merge, never replace. The old whole-map last-writer-wins overwrite
+      // (gated on _queriesTs, which every navigation re-stamps via saveQueryBufs)
+      // let any device that MISSED a fresh conversation delete its row network-wide
+      // on its next unrelated sync — a brand-new PM's row existed on exactly one
+      // device, so it was routinely wiped. Adding rows is always safe; REMOVALS
+      // propagate exclusively via closedQueries (merged just ABOVE — order matters:
+      // the union consults the freshest closed-set), and any key in the LOCAL
+      // closedQueries is skipped so a stale sender's snapshot can't resurrect a PM
+      // this device closed (a genuine remote reopen ships a newer closedQueries
+      // WITHOUT the key, which the merge above adopts first → row lands correctly).
+      // Persist locally WITHOUT re-broadcasting (like the unread merge above) — a
+      // no-op union on the echo round-trip converges instead of storming.
+      let _qAdded=false;
+      for(const[c,entries] of Object.entries(p.queries)){
+        if(!Array.isArray(entries)) continue;
+        if(!queryBufs[c])queryBufs[c]=new Map();
+        for(const e of entries){
+          if(!Array.isArray(e)||typeof e[0]!=='string'||!e[0]) continue;   // tolerate corrupt blob entries
+          if(closedQueries[c+'|'+e[0]]!=null) continue;                     // locally-closed stays closed
+          if(!queryBufs[c].has(e[0])){ queryBufs[c].set(e[0], (typeof e[1]==='string'&&e[1])?e[1]:e[0]); _qAdded=true; }
+        }
+      }
+      if(_qAdded){
+        try{
+          const obj={};for(const[cid,m] of Object.entries(queryBufs))obj[cid]=[...m.entries()];
+          localStorage.setItem('cryptirc_queries',JSON.stringify(obj));
+        }catch(e){}
+        renderSidebar();
+        if(isMessagesActive()) renderMessagesView();
       }
     }
     if(p.lastActive) localStorage.setItem('cryptirc_active',JSON.stringify(p.lastActive));
@@ -10904,8 +10972,13 @@ function closeAllPMs(conn_id){
     delete buffers[bk(conn_id,lc)];
     adoptUnreadAsOf(bk(conn_id,lc));   // closing = dismissed → horizon must pass the stamp
     unreadClear(bk(conn_id,lc));
+    // Removals propagate ONLY via closedQueries under the union queries-sync —
+    // without this marker every other device (and the next incoming snapshot)
+    // would simply re-add the rows, making "Close All PMs" undo itself.
+    markQueryClosed(conn_id,lc);
   }
   queryBufs[conn_id]=new Map();
+  saveQueryBufs(); saveUnread();
   if(active&&active.conn_id===conn_id&&!active.target.startsWith('#')&&active.target!=='status') setActive(conn_id,'status');
   renderSidebar();
 }
@@ -13773,7 +13846,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.4.1';
+const CRYPTIRC_VERSION='0.4.2';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13781,6 +13854,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.4.2', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed new private messages sometimes never showing up in Messages. A PM delivered late — e.g. while the app was in the background on your phone — was mistaken for old bouncer playback and silently buffered without ever creating the conversation, so a first message from someone could be completely invisible. Late-arriving DMs now always surface with the proper badge and sound, replayed DMs still create their conversation row, and the conversation list now merges across your devices instead of one device being able to wipe a fresh conversation for all of them.'},
+  ]},
   {version:'0.4.1', date:'July 2026', items:[
     {tag:'fix', text:'Fixed a channel stubbornly re-marking itself unread after you’d already read it. A stale unread record synced from another device (stamped with a wall-clock time instead of a real message time) could never be beaten by actually reading the channel, so it resurrected the badge on every sync — forever. Opening a conversation now advances your read marker past the badge’s own stamp, which purges the stale record from every device automatically.'},
   ]},
