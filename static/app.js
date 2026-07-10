@@ -77,6 +77,27 @@ function saveUnread(){
 // `unreadAsOf` (its freshness timestamp) never drift apart.
 function unreadInc(key,ts){ unread.set(key,(unread.get(key)||0)+1); unreadAsOf.set(key,Math.max(unreadAsOf.get(key)||0,ts||Math.floor(Date.now()/1000))); }
 function unreadClear(key){ unread.delete(key); unreadAsOf.delete(key); }
+// Dismissing a badge BY OPENING/CLOSING its conversation means the user has dealt with
+// everything the badge represented — adopt the badge's own freshness stamp into the
+// read horizon (monotonic), not just the newest buffered message ts (renderChat's
+// advance). Without this, an unread entry whose `unreadAsOf` was minted from a WALL
+// CLOCK — the one-time pre-sync migration seed above, unreadInc's ts-less fallback, or
+// a fast-clocked device — is IMMORTAL while the channel is quiet: reading advances
+// lastRead only to the newest real message ts (< the stamp), so the cross-device merge
+// gate (msgTs > lastRead) re-accepts the entry from every other device's whole-snapshot
+// prefs flush, and the self-heal (asOf <= lastRead) can never fire anywhere → the badge
+// "keeps coming back" forever on one specific conversation. Adopting the stamp makes
+// this open's prefs flush carry a horizon ≥ the stamp, so every device's self-heal
+// purges its copy the moment that flush lands. Call BEFORE unreadClear (it reads the map).
+function adoptUnreadAsOf(key){
+  try{
+    const asOf=unreadAsOf.get(key)||0;
+    if(asOf>0){
+      const lrk='cryptirc_lastread_'+key;
+      if(asOf>parseFloat(localStorage.getItem(lrk)||'0')) localStorage.setItem(lrk,String(asOf));
+    }
+  }catch(e){}
+}
 // All `cryptirc_lastread_<key>` timestamps currently known on this device —
 // the per-conversation "read up through" horizon, gathered for sync.
 function _allLastReadTs(){
@@ -2747,6 +2768,7 @@ function setActive(conn_id,target){
     _lastMsgId[_historyView.bk]=0;
     _historyView=null;
   }
+  adoptUnreadAsOf(bk(conn_id,target));   // kill immortal wall-clock-stamped badges (see helper)
   unreadClear(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
   clearNoticesForTarget(conn_id,target);
   // Persist active view and open queries — skipped in detached mode so the
@@ -10880,6 +10902,7 @@ function closeAllPMs(conn_id){
   if(!queryBufs[conn_id])return;
   for(const [lc] of queryBufs[conn_id]){
     delete buffers[bk(conn_id,lc)];
+    adoptUnreadAsOf(bk(conn_id,lc));   // closing = dismissed → horizon must pass the stamp
     unreadClear(bk(conn_id,lc));
   }
   queryBufs[conn_id]=new Map();
@@ -10890,6 +10913,7 @@ function closeQuery(conn_id,lc){
   lc=String(lc).toLowerCase();
   if(queryBufs[conn_id])queryBufs[conn_id].delete(lc);
   // Keep buffer so history reloads when reopened, just clear unread
+  adoptUnreadAsOf(bk(conn_id,lc));   // closing = dismissed → horizon must pass the stamp
   unreadClear(bk(conn_id,lc));
   mentionUnread.delete(bk(conn_id,lc));
   markQueryClosed(conn_id,lc);          // remember it's closed so replays don't reopen it
@@ -13749,7 +13773,7 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.4.0';
+const CRYPTIRC_VERSION='0.4.1';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.
@@ -13757,6 +13781,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.4.1', date:'July 2026', items:[
+    {tag:'fix', text:'Fixed a channel stubbornly re-marking itself unread after you’d already read it. A stale unread record synced from another device (stamped with a wall-clock time instead of a real message time) could never be beaten by actually reading the channel, so it resurrected the badge on every sync — forever. Opening a conversation now advances your read marker past the badge’s own stamp, which purges the stale record from every device automatically.'},
+  ]},
   {version:'0.4.0', date:'July 2026', items:[
     {tag:'fix', text:'Shared upload links now work outside the app. Copy the link to any image, PDF, video, audio clip or file you uploaded and it opens for anyone you send it to — previously documents 401’d behind the login and only some media loaded. Images/PDFs/video/audio preview inline; other files download. (For safety, files that could run code in the browser are always downloaded, never rendered.)'},
     {tag:'fix', text:'Reliability overhaul of the always-on connection daemon — the piece that holds your IRC links open so app updates don’t drop you. Hardened end-to-end against stalls, floods and edge cases, with a systemd watchdog that auto-recovers a wedged daemon and reconnect backoff that waits longer each try (up to 5 minutes) but never gives up. Your sessions stay put across updates.'},
