@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.3.48-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.4.2-brightgreen" alt="Version">
   <img src="https://img.shields.io/badge/%F0%9F%A4%96%20AI-9%20providers%20%2B%20ChatGPT%20OAuth-00d4aa" alt="AI">
   <img src="https://img.shields.io/badge/bots-19%20built--in-ff8800" alt="Bots">
   <img src="https://img.shields.io/badge/themes-173-9b59ff" alt="Themes">

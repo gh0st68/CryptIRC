@@ -39,6 +39,8 @@ mod paste;
 mod preview;
 mod sysstatus;
 mod upload;
+#[cfg(test)]
+mod version_sync;
 
 use cryptirc::ircproto::strip_crlf;
 
@@ -959,7 +961,12 @@ async fn main() -> Result<()> {
     let static_sw       = Arc::new(include_str!("../static/sw.js").replace("/cryptirc", bp_trimmed));
     // app.js holds the main frontend script (extracted verbatim from index.html).
     // It contains /cryptirc asset/WS paths, so it needs the same base-path rewrite.
-    let static_app_js   = Arc::new(include_str!("../static/app.js").replace("/cryptirc", bp_trimmed).replace("__CRYPTIRC_BUILD__", option_env!("CRYPTIRC_BUILD").unwrap_or("dev")));
+    let static_app_js   = Arc::new(render_app_js(
+        include_str!("../static/app.js"),
+        bp_trimmed,
+        option_env!("CRYPTIRC_BUILD").unwrap_or("dev"),
+        env!("CARGO_PKG_VERSION"),
+    ));
 
     // Load every user's server-side bot config into memory (read on every channel
     // message, so it can't be a per-message file read). Server-readable → 24/7.
@@ -1200,7 +1207,7 @@ async fn main() -> Result<()> {
 
     let port: u16 = std::env::var("CRYPTIRC_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(9001);
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    info!("CryptIRC v0.3 listening on http://{}", addr);
+    info!("CryptIRC v{} listening on http://{}", env!("CARGO_PKG_VERSION"), addr);
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app).await?;
     Ok(())
 }
@@ -5014,6 +5021,17 @@ fn html_escape(s: &str) -> String {
      .replace('"', "&#34;").replace('\'', "&#39;")
 }
 
+/// Template the served `app.js`: rewrite the `/cryptirc` base path, and substitute the
+/// `__CRYPTIRC_BUILD__` / `__CRYPTIRC_VERSION__` placeholders. `version` is always
+/// `env!("CARGO_PKG_VERSION")` at the one real call site — Cargo.toml's `[package].version`
+/// is the sole human-edited version number in the project; the served JS never hardcodes
+/// its own copy. Pulled out of `main()` so this substitution logic is unit-testable.
+fn render_app_js(raw: &str, base_path_trimmed: &str, build: &str, version: &str) -> String {
+    raw.replace("/cryptirc", base_path_trimmed)
+        .replace("__CRYPTIRC_BUILD__", build)
+        .replace("__CRYPTIRC_VERSION__", version)
+}
+
 /// Escape a string for safe embedding inside a JavaScript string literal (double-quoted).
 /// Prevents injection in `<script>` blocks where HTML entities are NOT decoded.
 fn js_escape(s: &str) -> String {
@@ -5033,4 +5051,34 @@ fn js_escape(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod app_js_template_tests {
+    use super::render_app_js;
+
+    #[test]
+    fn substitutes_build_and_version_placeholders() {
+        let raw = "const CRYPTIRC_VERSION='__CRYPTIRC_VERSION__';const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';";
+        let out = render_app_js(raw, "", "abc1234", "0.4.3");
+        assert_eq!(out, "const CRYPTIRC_VERSION='0.4.3';const CRYPTIRC_BUILD='abc1234';");
+    }
+
+    #[test]
+    fn served_app_js_version_matches_cargo_toml() {
+        // The real embedded app.js source, templated exactly as `main()` does —
+        // catches a future edit that reintroduces a hardcoded version literal
+        // (the whole point of this fix: Cargo.toml is the ONLY place a human
+        // edits the version).
+        let out = render_app_js(include_str!("../static/app.js"), "/cryptirc", "dev", env!("CARGO_PKG_VERSION"));
+        let needle = format!("const CRYPTIRC_VERSION='{}';", env!("CARGO_PKG_VERSION"));
+        assert!(out.contains(&needle), "expected {:?} in rendered app.js", needle);
+        assert!(!out.contains("__CRYPTIRC_VERSION__"), "version placeholder left un-substituted");
+    }
+
+    #[test]
+    fn rewrites_base_path() {
+        let out = render_app_js("fetch('/cryptirc/api')", "/custom", "dev", "0.4.3");
+        assert_eq!(out, "fetch('/custom/api')");
+    }
 }

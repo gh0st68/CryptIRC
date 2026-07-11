@@ -23,7 +23,24 @@ pub enum IpcMessage {
     /// Sent once, immediately after the web process establishes (or
     /// re-establishes) the IPC connection. Carries nothing conn_id-specific;
     /// the daemon replies with one SessionSync per conn_id it currently owns.
-    Attach {},
+    ///
+    /// `version`/`build` are the SENDING web binary's own `CARGO_PKG_VERSION` /
+    /// `CRYPTIRC_BUILD` (see `ipc_client::handle_connection`) — additive fields
+    /// (I4-style `#[serde(default)]`) so a pre-this-fix web binary (which sends
+    /// bare `{"type":"attach"}`) still decodes against a patched daemon (both
+    /// default to `""`), and a patched web binary still decodes against an
+    /// old/frozen daemon that ignores the extra fields. The daemon caches the
+    /// latest non-empty value (`ipc_server::Daemon::web_version`) and prefers it
+    /// over its own compiled-in version when answering CTCP VERSION — see
+    /// `WebVersionCell`. This is what lets a web-only redeploy (which always
+    /// re-Attaches on restart) correct the daemon's CTCP reply without the
+    /// long-running daemon itself being restarted.
+    Attach {
+        #[serde(default)]
+        version: String,
+        #[serde(default)]
+        build: String,
+    },
 
     /// Start owning a connection. Sent from the `Connect` handler and
     /// `reconnect_for_user`. Carries fully-resolved, already-decrypted dial
@@ -186,6 +203,36 @@ pub struct DialParams {
     pub auto_reconnect: bool,
 }
 
+/// Shared, lock-guarded holder for the most recently `Attach`-announced web
+/// binary `(version, build)`. Lives here (not in `ipc_server`) purely to avoid
+/// a dependency cycle: `ipc_server` (writer, on every `Attach`) and
+/// `irc_daemon` (reader, for CTCP VERSION) both already depend on this module,
+/// and neither should depend on the other's private types. A plain
+/// `std::sync::Mutex` is enough — the critical section is a single clone, held
+/// across no `.await` point, so it can never contend with the async runtime.
+#[derive(Default)]
+pub struct WebVersionCell(std::sync::Mutex<Option<(String, String)>>);
+
+impl WebVersionCell {
+    /// Record a freshly-Attached web binary's version/build. Never overwrites
+    /// with a blank value — an `Attach` from a pre-fix web binary (empty
+    /// `#[serde(default)]` fields) must not erase a previously known-good
+    /// version the daemon is still correctly serving.
+    pub fn set(&self, version: String, build: String) {
+        if version.is_empty() {
+            return;
+        }
+        *self.0.lock().unwrap() = Some((version, build));
+    }
+
+    /// The last-announced `(version, build)`, or `None` if no web binary has
+    /// ever Attached with one (fresh daemon start, or every web peer so far
+    /// predates this fix) — callers fall back to their own compiled version.
+    pub fn get(&self) -> Option<(String, String)> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SaslParams {
     pub account: String,
@@ -281,5 +328,57 @@ mod tests {
         for s in secrets { assert!(!direct.contains(s), "DialParams Debug leaked {s}"); }
         let wrapped = format!("{:?}", IpcMessage::Dial { conn_id: "n".into(), params: Box::new(sample_params()) });
         for s in secrets { assert!(!wrapped.contains(s), "IpcMessage Debug leaked {s}"); }
+    }
+
+    // A pre-fix web binary sends bare `{"type":"attach"}` — a patched daemon must
+    // still decode it (version/build default to "") instead of failing the frame.
+    #[test]
+    fn attach_tolerates_missing_version_fields() {
+        let msg: IpcMessage = serde_json::from_str(r#"{"type":"attach"}"#).unwrap();
+        match msg {
+            IpcMessage::Attach { version, build } => {
+                assert_eq!(version, "");
+                assert_eq!(build, "");
+            }
+            other => panic!("unexpected variant: {:?}", other),
+        }
+    }
+
+    // A patched web binary's Attach carries its version/build.
+    #[test]
+    fn attach_decodes_version_fields() {
+        let msg: IpcMessage = serde_json::from_str(
+            r#"{"type":"attach","version":"0.4.3","build":"abc1234"}"#,
+        ).unwrap();
+        match msg {
+            IpcMessage::Attach { version, build } => {
+                assert_eq!(version, "0.4.3");
+                assert_eq!(build, "abc1234");
+            }
+            other => panic!("unexpected variant: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn web_version_cell_defaults_to_none() {
+        let cell = WebVersionCell::default();
+        assert_eq!(cell.get(), None);
+    }
+
+    #[test]
+    fn web_version_cell_set_then_get_roundtrips() {
+        let cell = WebVersionCell::default();
+        cell.set("0.4.3".into(), "abc1234".into());
+        assert_eq!(cell.get(), Some(("0.4.3".into(), "abc1234".into())));
+    }
+
+    #[test]
+    fn web_version_cell_ignores_blank_version() {
+        // A pre-fix Attach (defaulted-empty fields) must never clobber a
+        // previously learned good version — see `WebVersionCell::set`'s doc.
+        let cell = WebVersionCell::default();
+        cell.set("0.4.3".into(), "abc1234".into());
+        cell.set("".into(), "".into());
+        assert_eq!(cell.get(), Some(("0.4.3".into(), "abc1234".into())));
     }
 }

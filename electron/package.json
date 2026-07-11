@@ -1,6 +1,6 @@
 {
   "name": "cryptirc",
-  "version": "0.3.4",
+  "version": "0.4.2",
   "description": "CryptIRC — Encrypted IRC Client",
   "main": "main.js",
   "author": "gh0st",
@@ -40,7 +40,13 @@
     },
     "mac": {
       "target": [
-        { "target": "zip", "arch": ["x64", "arm64"] }
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ],
       "icon": "icons/icon.png",
       "category": "public.app-category.social-networking"

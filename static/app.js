@@ -13846,7 +13846,9 @@ function showHelpPanel(){
 function closeHelpPanel(){_overlayClose('helpPanel');document.getElementById('help-overlay').classList.remove('show');}
 
 // ─── What's New / changelog ────────────────────────────────────────────────
-const CRYPTIRC_VERSION='0.4.2';
+// Derived from Cargo.toml's [package].version — the ONLY human-edited version
+// number in the whole project — and substituted at serve time (see main.rs).
+const CRYPTIRC_VERSION='__CRYPTIRC_VERSION__';
 // Build stamp (git short SHA, +'-dirty' if built with uncommitted changes). The
 // placeholder is replaced at serve time by the Rust build (see build.rs / main.rs).
 // If served un-replaced (still starts with '_'), the pill shows just the version.

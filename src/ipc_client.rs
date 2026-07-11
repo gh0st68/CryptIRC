@@ -64,7 +64,14 @@ async fn handle_connection(stream: UnixStream, state: &AppState) -> anyhow::Resu
     let expected: HashSet<String> = state.connections.iter().map(|e| e.key().clone()).collect();
     let mut seen: HashSet<String> = HashSet::new();
 
-    out_tx.send(IpcMessage::Attach {}).ok();
+    // Announce our own compiled version/build every (re)connect — the daemon caches
+    // this and prefers it for CTCP VERSION over its own (possibly stale, since it's
+    // intentionally not restarted on a routine web-only redeploy) compiled-in
+    // version. See `ipc::WebVersionCell` / `ipc::IpcMessage::Attach`.
+    out_tx.send(IpcMessage::Attach {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        build: option_env!("CRYPTIRC_BUILD").unwrap_or("dev").to_string(),
+    }).ok();
 
     let result = loop {
         match read_frame(&mut read_half).await {
@@ -371,7 +378,7 @@ async fn handle_message(
         // messages. `DaemonControl` is web-originated too. `Unknown` is the
         // forward-compat catch-all for a variant a future peer added — ignore
         // rather than ever tear the connection down over it.
-        IpcMessage::Attach {} | IpcMessage::Dial { .. } | IpcMessage::RawSend { .. }
+        IpcMessage::Attach { .. } | IpcMessage::Dial { .. } | IpcMessage::RawSend { .. }
         | IpcMessage::Drop { .. } | IpcMessage::DaemonControl { .. } | IpcMessage::Unknown => {}
     }
 }

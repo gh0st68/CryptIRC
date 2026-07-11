@@ -118,7 +118,7 @@ mod tests {
     #[tokio::test]
     async fn round_trip_multiple_frames_in_sequence() {
         let msgs = vec![
-            IpcMessage::Attach {},
+            IpcMessage::Attach { version: "0.4.3".into(), build: "abc1234".into() },
             IpcMessage::ConnStatus { conn_id: "n".into(), state: ConnLifecycle::Connecting },
             IpcMessage::Drop { conn_id: "n".into(), reason: "bye".into() },
         ];

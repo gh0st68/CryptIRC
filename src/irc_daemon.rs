@@ -20,7 +20,7 @@
 //! — rebuilt web-side via a NAMES/TOPIC resync burst on reattach), and channel
 //! auto-rejoin key persistence (needs the vault/filesystem, stays web-only).
 
-use crate::ipc::{ClientIdentity, ConnLifecycle, DialParams, IpcMessage};
+use crate::ipc::{ClientIdentity, ConnLifecycle, DialParams, IpcMessage, WebVersionCell};
 use crate::ircproto::{
     irc_lower, nick_from_prefix, parse_irc, read_capped_line, strip_crlf, truncate_chars,
     CappedLine, MAX_IRC_LINE_LEN,
@@ -141,6 +141,19 @@ fn sanitize_outbound(line: &str) -> String {
     if clean.is_empty() { String::new() } else { format!("{}\r\n", clean) }
 }
 
+/// Resolve the `(version, build)` a CTCP VERSION reply should quote: prefer the
+/// last web-Attach-announced value (kept current across a web-only redeploy
+/// with no daemon restart — see `WebVersionCell`), falling back to this
+/// (possibly stale, since the daemon is intentionally not restarted on a
+/// routine redeploy) binary's own compiled-in version if no web binary has
+/// Attached yet.
+fn resolve_ctcp_version(web_version: &WebVersionCell) -> (String, String) {
+    web_version.get().unwrap_or_else(|| (
+        env!("CARGO_PKG_VERSION").to_string(),
+        option_env!("CRYPTIRC_BUILD").unwrap_or("dev").to_string(),
+    ))
+}
+
 /// A command routed in from the IPC server for a specific conn_id — the
 /// inbound half that lets a running connection be driven from outside (the
 /// web process, via the daemon's IPC dispatch).
@@ -233,6 +246,7 @@ pub async fn run_connection<F>(
     mut params: DialParams,
     emit: F,
     mut cmd_rx: mpsc::Receiver<DaemonCmd>,
+    web_version: Arc<WebVersionCell>,
 ) where
     F: Fn(IpcMessage) + Send + Sync + Clone + 'static,
 {
@@ -269,7 +283,7 @@ pub async fn run_connection<F>(
         // the ~60s dial itself paces the retry, so it never becomes a tight hammer. A real
         // flap dials in milliseconds; a genuine long session is never misread as a flap.
         let attempt_start = Instant::now();
-        let result = do_connect(&conn_id, &params, &emit, &mut cmd_rx, &mut stopped, &mut registered_ok, &mut persistent_channels).await;
+        let result = do_connect(&conn_id, &params, &emit, &mut cmd_rx, &mut stopped, &mut registered_ok, &mut persistent_channels, &web_version).await;
         let uptime = attempt_start.elapsed();
         // If this attempt reached registration, the connection genuinely worked —
         // reset the SASL-failure counter and re-arm SASL for next time (W5: an
@@ -421,6 +435,7 @@ async fn do_connect<F>(
     stopped: &mut bool,
     registered_out: &mut bool,
     persistent_channels: &mut HashSet<String>,
+    web_version: &Arc<WebVersionCell>,
 ) -> Result<()>
 where
     F: Fn(IpcMessage) + Send + Sync + Clone + 'static,
@@ -462,7 +477,7 @@ where
             timeout(CONNECT_TIMEOUT, std::pin::Pin::new(&mut stream).connect()).await
                 .map_err(|_| anyhow::anyhow!("TLS handshake timed out"))??;
             info!("[{}] TLS connected with client cert (post-handshake auth enabled)", conn_id);
-            run_loop(conn_id, params, emit, stream, cmd_rx, stopped, registered_out, persistent_channels).await
+            run_loop(conn_id, params, emit, stream, cmd_rx, stopped, registered_out, persistent_channels, web_version).await
         } else if params.sasl_external {
             // Config asked for SASL EXTERNAL but no identity was resolved — fatal
             // (params never change without a fresh Dial). No connect wasted.
@@ -476,11 +491,11 @@ where
             let tls = timeout(CONNECT_TIMEOUT, tokio_native_tls::TlsConnector::from(builder.build()?)
                 .connect(&params.server, tcp)).await
                 .map_err(|_| anyhow::anyhow!("TLS handshake timed out"))??;
-            run_loop(conn_id, params, emit, tls, cmd_rx, stopped, registered_out, persistent_channels).await
+            run_loop(conn_id, params, emit, tls, cmd_rx, stopped, registered_out, persistent_channels, web_version).await
         }
     } else {
         let tcp = dial_tcp().await?;
-        run_loop(conn_id, params, emit, tcp, cmd_rx, stopped, registered_out, persistent_channels).await
+        run_loop(conn_id, params, emit, tcp, cmd_rx, stopped, registered_out, persistent_channels, web_version).await
     }
 }
 
@@ -497,6 +512,7 @@ async fn run_loop<S, F>(
     stopped: &mut bool,
     registered_out: &mut bool,
     persistent_channels: &mut HashSet<String>,
+    web_version: &Arc<WebVersionCell>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -1126,11 +1142,12 @@ where
                             let allow = last_ctcp_reply.map_or(true, |t| now.duration_since(t) >= CTCP_REPLY_MIN_INTERVAL);
                             if allow {
                                 last_ctcp_reply = Some(now);
+                                let (ver, build) = resolve_ctcp_version(web_version);
                                 conn.lock().await.send_raw(&format!(
                                     "NOTICE {} :\x01VERSION CryptIRC v{} · {} - Made by gh0st - Visit irc.twistednet.org #dev #twisted\x01\r\n",
                                     strip_crlf(&from),
-                                    env!("CARGO_PKG_VERSION"),
-                                    option_env!("CRYPTIRC_BUILD").unwrap_or("dev"),
+                                    ver,
+                                    build,
                                 )).await?;
                             }
                         }
@@ -1172,6 +1189,29 @@ mod tests {
         assert!(clean_userhost(&format!("u@{}", "h".repeat(MAX_USERHOST_LEN))).is_none());
         assert!(clean_userhost("u@ho\"st").is_none());
         assert!(clean_userhost("u@ho\u{01}st").is_none());
+    }
+
+    // A fresh daemon (no web has Attached yet) must fall back to its own compiled
+    // version — never send an empty/garbage CTCP VERSION reply.
+    #[test]
+    fn ctcp_version_falls_back_to_compiled_when_no_web_attach() {
+        let cell = WebVersionCell::default();
+        let (ver, build) = resolve_ctcp_version(&cell);
+        assert_eq!(ver, env!("CARGO_PKG_VERSION"));
+        assert_eq!(build, option_env!("CRYPTIRC_BUILD").unwrap_or("dev"));
+    }
+
+    // The whole point of this fix: once a web binary has Attached with its own
+    // version, CTCP VERSION must quote THAT — not the daemon's own (possibly
+    // stale, since it isn't restarted for a routine web-only redeploy) compiled
+    // version.
+    #[test]
+    fn ctcp_version_prefers_web_announced_version() {
+        let cell = WebVersionCell::default();
+        cell.set("9.9.9".into(), "deadbee".into());
+        let (ver, build) = resolve_ctcp_version(&cell);
+        assert_eq!(ver, "9.9.9");
+        assert_eq!(build, "deadbee");
     }
 
     /// The whole point of Byzantine-1: a WORST-CASE SessionSync — MAX_TRACKED_CHANNELS

@@ -7,7 +7,7 @@
 //! a bounded ring buffer of recent `RawLine`s) so a freshly-attached client
 //! can be caught up immediately without waiting for new server traffic.
 
-use crate::ipc::{ConnLifecycle, DialParams, IpcMessage, IPC_PROTO_VERSION};
+use crate::ipc::{ConnLifecycle, DialParams, IpcMessage, WebVersionCell, IPC_PROTO_VERSION};
 use crate::ipc_framing::{read_frame, write_frame};
 use crate::irc_daemon::{run_connection, DaemonCmd};
 use anyhow::Result;
@@ -190,11 +190,16 @@ struct CurrentClient {
 pub struct Daemon {
     conns: DashMap<String, ConnHandle>,
     current_client: Mutex<Option<CurrentClient>>,
+    /// Latest web-Attach-announced `(version, build)` — see `WebVersionCell`.
+    /// `Arc`-wrapped (rather than a bare field) so `spawn_connection` can hand
+    /// `run_connection` its own cheap handle without threading the whole
+    /// `Daemon` type into `irc_daemon` (which would create a dependency cycle).
+    web_version: Arc<WebVersionCell>,
 }
 
 impl Daemon {
     fn new() -> Self {
-        Self { conns: DashMap::new(), current_client: Mutex::new(None) }
+        Self { conns: DashMap::new(), current_client: Mutex::new(None), web_version: Arc::new(WebVersionCell::default()) }
     }
 
     /// Best-effort forward to whichever client is CURRENTLY attached (looked
@@ -416,8 +421,12 @@ async fn accept_client(stream: UnixStream, daemon: Arc<Daemon>) {
 
 async fn handle_message(msg: IpcMessage, daemon: &Arc<Daemon>, out_tx: &mpsc::Sender<IpcMessage>) {
     match msg {
-        IpcMessage::Attach {} => {
+        IpcMessage::Attach { version, build } => {
             info!("Attach received — replaying {} known connection(s)", daemon.conns.len());
+            // Cache the announcing web binary's version/build for future CTCP VERSION
+            // replies (a no-op if both are empty — a pre-fix web binary's Attach; see
+            // `WebVersionCell::set`).
+            daemon.web_version.set(version, build);
             // Version handshake first, so a newer web binary can learn what this
             // (possibly frozen) daemon supports.
             let _ = out_tx.send(IpcMessage::Hello { proto_version: IPC_PROTO_VERSION }).await;
@@ -584,9 +593,10 @@ async fn spawn_connection(daemon: Arc<Daemon>, conn_id: String, params: DialPara
     // removes the (token-matched) entry and notifies the web — no orphaned zombie conn.
     let run_daemon = daemon.clone();
     let run_conn_id = conn_id.clone();
+    let web_version = daemon.web_version.clone();
     let run_handle = tokio::spawn(async move {
         let _guard = ConnGuard { daemon: run_daemon, conn_id: run_conn_id.clone(), token };
-        run_connection(run_conn_id, params, emit, cmd_rx).await;
+        run_connection(run_conn_id, params, emit, cmd_rx, web_version).await;
     });
 
     // Emit consumer. Holds AbortOnDrop(run_handle): if this consumer ever exits — both
