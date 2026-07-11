@@ -744,6 +744,7 @@ function connectWs() {
     // sets prevents a stale key from making jumpToMessage's tick wait forever,
     // which showed up as "clicking a notification sometimes doesn't jump".
     _pendingLogs.clear(); _pendingSyncs.clear();
+    _msgsPreviewAsked.clear(); // new connection → one fresh preview attempt per conversation
   };
   ws.onmessage=e=>{_lastWsActivity=Date.now();_rxBytes+=(e.data||'').length;_rxCount++;flashLed('rx');updateStarfieldTitle();try{handleEvent(JSON.parse(e.data));}catch(err){console.error('WS parse error:',err);}};
   ws.onclose=()=>{_rateQueue=[];if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}const d=Math.min(1000*Math.pow(2,_wsRetries),60000);setTimeout(connectWs,d+Math.random()*1000);_wsRetries++;};
@@ -797,6 +798,11 @@ window.addEventListener('popstate', () => {
 function _syncActiveChannel(){
   if(!sessionToken||!ws||ws.readyState!==1)return;
   if(!active?.conn_id||!active?.target||active.target==='status')return;
+  // Pseudo-views (Messages inbox / Uploads) are not IRC buffers: the server drops
+  // their get_logs without replying (owns_network fails), stranding a junk
+  // _pendingLogs key until the next reconnect — and this path fires every 5s AND
+  // on every click/touch while the view is open.
+  if(isMessagesConn(active.conn_id)||isUploadsConn(active.conn_id))return;
   const _sk=bk(active.conn_id,active.target),_lid=_lastMsgId[_sk];
   if(_lid>0) wsend({type:'sync',conn_id:active.conn_id,target:active.target,after_id:_lid});
   else wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:50});
@@ -844,8 +850,10 @@ function _onResume(){
         }
       }
     }
-    // Sync active channel with full fallback if no lastId
-    if(active?.conn_id && active?.target){
+    // Sync active channel with full fallback if no lastId. Pseudo-views (Messages
+    // inbox / Uploads) are skipped: they're not IRC buffers, and their get_logs is
+    // silently dropped server-side (no reply), stranding a junk _pendingLogs key.
+    if(active?.conn_id && active?.target && !isMessagesConn(active.conn_id) && !isUploadsConn(active.conn_id)){
       const k=bk(active.conn_id,active.target);
       const lastId=_lastMsgId[k];
       if(!lastId){
@@ -954,6 +962,19 @@ function updateStarfieldTitle(){
 // response was dropped (must be abandoned, not waited on forever).
 const _pendingLogs=new Map();
 const _pendingSyncs=new Set();
+// Messages-inbox preview fetches already ANSWERED this connection (same key shape
+// as _pendingLogs). A conversation whose get_logs comes back with ZERO lines (no
+// readable log: union-merged row whose lowercased display misses the case-sensitive
+// server log file, /query with no messages yet, cleared logs, …) must not be asked
+// again by the next render: the empty log_lines reply re-rendered the inbox, the
+// re-render re-sent get_logs (its _pendingLogs key was consumed by the reply), and
+// the cycle spun at WS round-trip cadence — the Messages window flickered violently
+// and row clicks died (the row was rebuilt between pointerdown and pointerup).
+// Cleared on reconnect beside _pendingLogs so every fresh connection retries once,
+// and on the locked→unlocked vault transition (vault_unlocked/state handlers):
+// attempts made while locked only ever saw empty replies and must retry once the
+// logs actually decrypt.
+const _msgsPreviewAsked=new Set();
 // Set true by prependLogs around its "load older" renderChat so the read-horizon
 // advance in renderChat is skipped for that off-bottom render (F30-followup).
 let _suppressLastReadAdvance=false;
@@ -1058,8 +1079,17 @@ function handleEvent(ev) {
     // auth_failed swaps back to the login screen without a reload — same PWA-banner
     // teardown as doLogout, so the banner can't linger over (or pop up on) it.
     case 'auth_failed': hideBootSplash(); sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break;
-    case 'vault_unlocked':
-      document.getElementById('vault-overlay').classList.remove('show'); renderSidebar();
+    case 'vault_unlocked': {
+      // Locked→unlocked transition (overlay still up ⇒ we were locked): Messages
+      // preview get_logs sent while locked got EMPTY log_lines replies (read_logs
+      // can't decrypt → unwrap_or_default) and burned their once-per-connection
+      // _msgsPreviewAsked slot. Logs decrypt now — forget those attempts and, if
+      // the inbox is open, repaint so previews actually re-fetch. Cross-session
+      // unlocks arrive as State{vault_unlocked:true} instead (vault_unlocked goes
+      // only to the unlocking socket) — the 'state' case has the same reset.
+      const _vo=document.getElementById('vault-overlay');
+      if(_vo.classList.contains('show')){ _msgsPreviewAsked.clear(); if(isMessagesActive()) _scheduleMessagesRender(); }
+      _vo.classList.remove('show'); renderSidebar();
       {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
       if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key);
       if(!_chanStatsLoaded) loadStatsFromServer();
@@ -1070,11 +1100,23 @@ function handleEvent(ev) {
       // Note: log loading is handled by the 'state' event handler which fires
       // before vault_unlocked — no need to request logs here (avoids double delivery)
       break;
+    }
     case 'vault_error': document.getElementById('vault-err').textContent=ev.message; break;
     case 'state':
       networks=ev.networks||[];
       if(!ev.vault_unlocked) document.getElementById('vault-overlay').classList.add('show');
-      else { document.getElementById('vault-overlay').classList.remove('show'); const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';} if(!_chanStatsLoaded)loadStatsFromServer(); }
+      else {
+        const _vo=document.getElementById('vault-overlay');
+        // Unlock observed via State only (cross-session unlock: the vault_unlocked
+        // event goes solely to the unlocking socket). Same preview-guard reset as
+        // the 'vault_unlocked' case: attempts burned by empty replies while locked
+        // must retry now that logs decrypt. On the unlocking socket vault_unlocked
+        // already ran and removed .show, so this doesn't double-fire.
+        if(_vo.classList.contains('show')){ _msgsPreviewAsked.clear(); if(isMessagesActive()) _scheduleMessagesRender(); }
+        _vo.classList.remove('show');
+        const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}
+        if(!_chanStatsLoaded)loadStatsFromServer();
+      }
       renderSidebar();
       // Detached-mode auto-activation: force the requested target; ignore any
       // saved last-active so the popup always lands on the chat it was opened for.
@@ -1117,8 +1159,11 @@ function handleEvent(ev) {
               wsend({type:'get_logs',conn_id:net.config.id,target:ch.name,limit:200});
           }
         }
-        // Also load for active if it's a PM (not in channels list)
-        if(active&&getBuf(active.conn_id,active.target).length===0)
+        // Also load for active if it's a PM (not in channels list). Pseudo-views
+        // (Messages inbox / Uploads) are skipped: their buffer is always empty, and
+        // the server drops their get_logs without replying (owns_network fails), so
+        // every state event would strand a junk _pendingLogs key until reconnect.
+        if(active&&!isMessagesConn(active.conn_id)&&!isUploadsConn(active.conn_id)&&getBuf(active.conn_id,active.target).length===0)
           wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
       }
       // Drain any pending notification-click nav now that networks are loaded
@@ -2476,11 +2521,14 @@ async function prependLogs(conn_id,target,lines){
         area.scrollTop=newHeight-oldHeight;
       });
     }
-  } else if(isMessagesActive() && _isDMTarget(target)){
+  } else if(unique.length>0 && isMessagesActive() && _isDMTarget(target)){
     // A preview-only fetch (see renderMessagesView) landed while the inbox is
     // open — redraw so the new preview text/time appear without needing to
-    // open the conversation.
-    renderMessagesView();
+    // open the conversation. Only when the buffer actually CHANGED: an empty
+    // reply must not re-render (that render re-sent the same get_logs — the
+    // fetch↔render flicker loop), and the preview computed from an unchanged
+    // buffer is already on screen. Coalesced so a burst of replies paints once.
+    _scheduleMessagesRender();
   }
 }
 async function appendSyncLines(conn_id,target,lines){
@@ -5917,6 +5965,17 @@ function closeAllMessages(){
   if(isMessagesActive()) renderMessagesView();
   return n;
 }
+// Coalesce inbox repaints triggered by log_lines bursts: opening the inbox fires
+// one preview fetch per conversation, and the replies land back-to-back — painting
+// once per batch instead of one full innerHTML rebuild per reply kills the visible
+// flash storm on open (mirrors _sidebarRenderTimer). isMessagesActive() must be
+// re-checked at fire time: the user may have navigated away by then, and
+// renderMessagesView unconditionally overwrites #chat-area.
+let _msgsRenderTimer=0;
+function _scheduleMessagesRender(){
+  if(_msgsRenderTimer) return;
+  _msgsRenderTimer=setTimeout(()=>{ _msgsRenderTimer=0; if(isMessagesActive()) renderMessagesView(); },0);
+}
 function renderMessagesView(){
   const area=document.getElementById('chat-area');
   area.style.display='block';
@@ -5936,8 +5995,14 @@ function renderMessagesView(){
     // get_logs read is case-sensitive, so a lowercased target reads an empty file and
     // the preview stays blank until the conversation is opened (which uses c.display).
     // Key the dedup guard on the same string wsend registers in _pendingLogs.
-    if(_pendingLogs.has(c.conn_id+'/'+c.display)) continue;
-    wsend({type:'get_logs',conn_id:c.conn_id,target:c.display,limit:1});
+    const _pk=c.conn_id+'/'+c.display;
+    if(_pendingLogs.has(_pk)) continue;
+    // One attempt per conversation per connection: an EMPTY reply consumes the
+    // _pendingLogs key, so without this memory the next render re-sent the same
+    // get_logs forever (the fetch↔render flicker loop — see _msgsPreviewAsked).
+    // Mark only on a successful send so an offline render doesn't burn the attempt.
+    if(_msgsPreviewAsked.has(_pk)) continue;
+    if(wsend({type:'get_logs',conn_id:c.conn_id,target:c.display,limit:1})) _msgsPreviewAsked.add(_pk);
   }
   const totalUnread=convs.reduce((a,c)=>a+(c.unread||0),0);
   const header=document.createElement('div');
