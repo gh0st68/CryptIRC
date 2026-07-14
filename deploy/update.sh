@@ -90,6 +90,12 @@ BACKUP_DIR="/var/lib/cryptirc-backups"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Fingerprint the copy of this script that is RUNNING, before the pull below
+# can swap the file at this path (git replaces by rename, so the running
+# interpreter safely keeps executing its old inode). Compared after the pull
+# by the "Self-update handoff" block.
+SELF_SHA_AT_START=$(sha256sum "$SCRIPT_DIR/update.sh" 2>/dev/null | awk '{print $1}' || true)
+
 SKIP_BACKUP=false
 RESTART_DAEMON=false
 NO_GHOST=false
@@ -181,6 +187,27 @@ GIT_PULL_OK=true
 git -c safe.directory="$REPO_DIR" pull --ff-only 2>&1 || { GIT_PULL_OK=false; echo -e "  ${YELLOW}⚠ git pull failed — building from the EXISTING checkout; this may NOT be the latest code${NC}"; }
 _git_after=$(git -c safe.directory="$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')
 echo ""
+
+# ── Self-update handoff ───────────────────────────────────────────────────────
+# Operators launch the update.sh that shipped with their PREVIOUS checkout — a
+# script that by definition knows nothing about migrations added after it. That
+# exact gap once shipped a web-only update across the 0.3.24 daemon split: the
+# pre-split update.sh swapped the web binary, never installed irc-core.service,
+# and left the site up with every user's IRC dead while the web process silently
+# retried a socket nobody serves. If the pull changed THIS script, hand execution
+# to the new copy (exactly once — the env guard stops any loop) so migrations
+# always come from the version that ships with the code being deployed.
+# Re-running from the top is safe: backup, pull, and dep checks are idempotent,
+# and nothing state-changing (build/swap/restart) has happened yet. exec skips
+# the EXIT trap by design — CRYPTIRC_STOPPED_BY_US can't be true this early.
+if [[ "${CRYPTIRC_UPDATE_HANDOFF:-}" != "1" && "$GIT_PULL_OK" == "true" && -n "$SELF_SHA_AT_START" ]]; then
+    _self_sha_now=$(sha256sum "$SCRIPT_DIR/update.sh" 2>/dev/null | awk '{print $1}' || true)
+    if [[ -n "$_self_sha_now" && "$_self_sha_now" != "$SELF_SHA_AT_START" ]]; then
+        echo -e "  ${YELLOW}update.sh itself changed in this pull — handing off to the new version…${NC}"
+        export CRYPTIRC_UPDATE_HANDOFF=1
+        exec bash "$SCRIPT_DIR/update.sh" "$@"
+    fi
+fi
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 # ── Auto-install build dependencies ──────────────────────────────────────────
