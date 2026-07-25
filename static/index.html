@@ -928,6 +928,9 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 
 .msg-row:hover { background:rgba(255,255,255,.03); }
 .msg-ts { color:var(--text3); font-size:11px; width:72px; flex-shrink:0; text-align:right; padding-right:8px; }
+/* A custom timestamp format can be much longer than "2:30pm"; let the column
+   grow instead of wrapping inside its fixed 72px and doubling the row height. */
+body.ts-custom .msg-ts { width:auto; min-width:72px; white-space:nowrap; }
 .msg-nick { width:auto; max-width:120px; flex-shrink:0; text-align:right; padding-right:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; cursor:pointer; }
 .msg-nick:hover { text-decoration:underline; }
 .msg-body { flex:1; min-width:0; word-break:break-word; overflow-wrap:anywhere; }
@@ -2650,6 +2653,26 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <span class="appear-label">Show timestamps</span>
           <button class="appear-toggle" id="a-timestamps" onclick="this.classList.toggle('on');applyAppearance()"></button>
+        </div>
+        <div class="appear-row">
+          <span class="appear-label">Custom timestamp format</span>
+          <button class="appear-toggle" id="a-ts-custom" onclick="_toggleTsCustom(this)"></button>
+        </div>
+        <div class="appear-row" id="a-ts-format-row" style="display:none">
+          <span class="appear-label">Format
+            <span style="display:block;font-size:10px;color:var(--text3);line-height:1.5;margin-top:2px">
+              %H 00-23 · %I 01-12 · %M min · %S sec · %P am/pm · %p AM/PM<br>
+              %Y %m %d date · %a %b names · %Z zone · %% literal %<br>
+              prefix a code with - to drop padding: %-l = 2, %l = " 2"
+            </span>
+          </span>
+          <input id="a-ts-format" type="text" spellcheck="false" autocomplete="off" maxlength="64" placeholder="%-l:%M%P"
+                 style="width:auto;min-width:120px;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)"
+                 oninput="_updateTsPreview()" onchange="applyAppearance()">
+        </div>
+        <div class="appear-row" id="a-ts-preview-row" style="display:none">
+          <span class="appear-label">Preview</span>
+          <span id="a-ts-preview" style="font-family:var(--mono);font-size:12px;color:var(--accent)"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Status messages</span>

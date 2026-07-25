@@ -3161,10 +3161,162 @@ function _condenseSummary(c0){
   const last=out.pop();
   return out.join(', ')+', and '+last;
 }
+// ── Message timestamp formatting ─────────────────────────────────────────────
+// By default timestamps use the built-in look (12-hour "2:30pm", or bracketed
+// 24-hour under the mIRC theme). Users can opt in to their own strftime-style
+// format under Appearance ▸ Display ▸ Custom timestamp format — empty means off,
+// so nothing changes for anyone who doesn't go looking for it.
+// Code set follows https://cinnamon-spices.linuxmint.com/strftime.php
+const _TS_DAYS=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const _TS_MONS=['January','February','March','April','May','June','July','August','September','October','November','December'];
+const TS_FORMAT_MAX=64;
+let _tsFormat='';   // sanitized active format; '' = built-in look
+function _tsPad2(n){return String(n).padStart(2,'0');}
+// Strip control characters and cap the length. The format string can arrive from
+// a synced preferences blob, and the formatted result is interpolated into row
+// markup, so it must not be able to carry newlines or run away in length.
+function _sanitizeTsFormat(f){
+  // Only a string can switch this on. A synced blob carrying a number, array
+  // or object would otherwise stringify into a "format" and silently change
+  // everyone's timestamps — the one thing this feature must never do.
+  if(typeof f!=='string') return '';
+  // Trim so an all-whitespace value reads as "off" rather than blanking every
+  // timestamp, and cap by code point so the slice can't split a surrogate pair.
+  // Also drop bidi overrides/isolates: harmless to the sinks (all escaped or
+  // textContent) but they would visually scramble every chat row.
+  const clean=f.replace(/[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g,'').trim();
+  return [...clean].slice(0,TS_FORMAT_MAX).join('');
+}
+// Day of year, 0-based. Both endpoints are normalized to local midnight so a DST
+// transition in between can't shift the difference across a day boundary.
+function _tsDayOfYear(d){
+  const start=new Date(d.getFullYear(),0,1);
+  const cur=new Date(d.getFullYear(),d.getMonth(),d.getDate());
+  return Math.round((cur-start)/86400000);
+}
+// Week of year. Days before the first Sunday (%U) or Monday (%W) are week 00.
+function _tsWeek(d,mondayBased){
+  const dow=mondayBased?((d.getDay()+6)%7):d.getDay();
+  return Math.floor((_tsDayOfYear(d)+7-dow)/7);
+}
+let _tsZoneFmt;   // built once: a fresh Intl.DateTimeFormat per row is ~200ms/1000 rows
+function _tsZone(d){
+  try{
+    if(!_tsZoneFmt) _tsZoneFmt=new Intl.DateTimeFormat(undefined,{timeZoneName:'short'});
+    const p=_tsZoneFmt.formatToParts(d);
+    const z=p.find(x=>x.type==='timeZoneName');
+    if(z&&z.value) return z.value;
+  }catch(e){}
+  const m=String(d).match(/\(([^)]+)\)/);
+  return m?m[1]:'';
+}
+function _strftime(fmt,d){
+  // Accepts an optional padding flag between the % and the code, as GNU
+  // strftime does: `-` none, `_` spaces, `0` zeros. This is what lets someone
+  // write `%-l:%M%P` for the app's own default look — plain `%l` is
+  // space-padded by the strftime standard (" 2" not "2").
+  // An unrecognized code is left as typed so a typo is visible rather than silent.
+  return String(fmt).replace(/%([-_0]?)(.)/g,(whole,flag,c)=>{
+    const pad=(v,width,dflt)=>{
+      const ch = flag==='-' ? '' : flag==='_' ? ' ' : flag==='0' ? '0' : dflt;
+      const s=String(v);
+      return ch ? s.padStart(width,ch) : s;
+    };
+    switch(c){
+      case 'a': return _TS_DAYS[d.getDay()].slice(0,3);
+      case 'A': return _TS_DAYS[d.getDay()];
+      case 'b': return _TS_MONS[d.getMonth()].slice(0,3);
+      case 'B': return _TS_MONS[d.getMonth()];
+      case 'd': return pad(d.getDate(),2,'0');
+      case 'e': return pad(d.getDate(),2,' ');
+      case 'j': return pad(_tsDayOfYear(d)+1,3,'0');
+      case 'm': return pad(d.getMonth()+1,2,'0');
+      case 'U': return pad(_tsWeek(d,false),2,'0');
+      case 'W': return pad(_tsWeek(d,true),2,'0');
+      case 'w': return String(d.getDay());
+      case 'x': return d.toLocaleDateString();
+      case 'y': return pad(d.getFullYear()%100,2,'0');
+      case 'Y': return String(d.getFullYear());
+      case 'H': return pad(d.getHours(),2,'0');
+      case 'I': return pad(d.getHours()%12||12,2,'0');
+      case 'l': return pad(d.getHours()%12||12,2,' ');
+      case 'M': return pad(d.getMinutes(),2,'0');
+      // Message timestamps carry whole seconds, so the sub-second part is zero.
+      case 'N': return String(d.getMilliseconds()).padStart(3,'0')+'000000';
+      case 'P': return d.getHours()<12?'am':'pm';
+      case 'p': return d.getHours()<12?'AM':'PM';
+      case 'S': return pad(d.getSeconds(),2,'0');
+      case 'X': return d.toLocaleTimeString();
+      case 'Z': return _tsZone(d);
+      case 'c': return d.toLocaleString();
+      case '%': return '%';
+      default:  return whole;
+    }
+  });
+}
+// The one place a message timestamp becomes text. When no custom format is set
+// each caller must fall back to EXACTLY what it rendered before, and the three
+// call sites did not agree — so `mode` selects the original behaviour:
+//   'row'    chat row: bracketed 24h under the mIRC theme, else the 12h look
+//   'plain'  condensed status summary: always the 12h look
+//   'locale' Messages inbox + mentions: the browser's locale time, which is
+//            24-hour in most of the world. Collapsing this into the 12h look
+//            would change timestamps for users who never opted in.
+function _fmtMsgTs(ts,mode){
+  const t=new Date(ts*1000);
+  if(_tsFormat) return _strftime(_tsFormat,t);
+  if(mode==='locale') return t.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+  if(mode==='row'&&document.documentElement.dataset.theme==='mirc')
+    return `[${_tsPad2(t.getHours())}:${_tsPad2(t.getMinutes())}]`;
+  return `${t.getHours()%12||12}:${_tsPad2(t.getMinutes())}${t.getHours()<12?'am':'pm'}`;
+}
+// Appearance-panel wiring for the format box. The toggle is pure UI sugar: it
+// seeds the field with the built-in look so there is something to edit, and
+// clears it to turn the feature back off.
+function _toggleTsCustom(btn){
+  btn.classList.toggle('on');
+  const inp=document.getElementById('a-ts-format');
+  if(inp){
+    // Seeded with the format that reproduces the standard chat row exactly.
+    // (Under the mIRC theme, or in a 24-hour locale's inbox, this IS a visible
+    // change — the live preview is right there, and it is opt-in.)
+    if(btn.classList.contains('on')){ if(!inp.value.trim()) inp.value='%-l:%M%P'; }
+    else inp.value='';
+  }
+  _syncTsRows();
+  applyAppearance();
+  if(inp&&btn.classList.contains('on')) inp.focus();
+}
+function _syncTsRows(){
+  const on=!!document.getElementById('a-ts-custom')?.classList.contains('on');
+  const r1=document.getElementById('a-ts-format-row');
+  const r2=document.getElementById('a-ts-preview-row');
+  if(r1) r1.style.display=on?'':'none';
+  if(r2) r2.style.display=on?'':'none';
+  _updateTsPreview();
+}
+function _updateTsPreview(){
+  const p=document.getElementById('a-ts-preview');
+  if(!p) return;
+  const f=_sanitizeTsFormat(document.getElementById('a-ts-format')?.value||'');
+  // textContent — never let a format string become markup.
+  p.textContent=f?_strftime(f,new Date()):'';
+  // Keep the toggle honest if the user empties the field by hand — but never
+  // while they are typing in it, or clearing the box to retype would hide the
+  // very row being edited.
+  const inp=document.getElementById('a-ts-format');
+  const btn=document.getElementById('a-ts-custom');
+  if(btn && !f && btn.classList.contains('on') && document.activeElement!==inp){
+    btn.classList.remove('on');
+    const r1=document.getElementById('a-ts-format-row'), r2=document.getElementById('a-ts-preview-row');
+    if(r1) r1.style.display='none';
+    if(r2) r2.style.display='none';
+  }
+}
 function _scWriteSummary(row){
   const lastTs=row._scLastTs;
   let tsTxt='';
-  if(lastTs){const t=new Date(lastTs*1000);const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';tsTxt=`${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}`;}
+  if(lastTs) tsTxt=_fmtMsgTs(lastTs,'plain');
   const tsEl=row.querySelector('.sc-summary .msg-ts');
   if(tsEl) tsEl.textContent=tsTxt;
   const txtEl=row.querySelector('.sc-summary .sc-summary-text');
@@ -3236,12 +3388,9 @@ function buildRow(msg){
   const row=document.createElement('div'); row.className=`msg-row row-${msg.kind}`; row.dataset.ts=msg.ts; row.dataset.from=msg.from||''; row.dataset.fp=_msgFp(msg);
   if(msg.self) row.dataset.self='1';
   if(msg.mentioned) row.dataset.mentioned='1';
-  const t=new Date(msg.ts*1000);
-  const h=t.getHours(),hr=h%12||12,ampm=h<12?'am':'pm';
-  // mIRC theme: classic 24-hour bracketed [HH:MM] timestamp; every other theme keeps 12h.
-  const ts=(document.documentElement.dataset.theme==='mirc')
-    ?`[${h.toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}]`
-    :`${hr}:${t.getMinutes().toString().padStart(2,'0')}${ampm}`;
+  // Built-in look, or the user's own strftime format if they set one. Escaped
+  // because it lands in innerHTML below and the format string is user/synced input.
+  const ts=esc(_fmtMsgTs(msg.ts,'row'));
   const isChat=msg.kind==='privmsg'||msg.kind==='action';
   const isSelf=isChat&&active&&msg.from===getNick(active.conn_id);
   const nc=isChat?(isSelf?'nc-self':`nc${nickHash(msg.from)}`):'';
@@ -5896,7 +6045,9 @@ function _msgsPlain(s){
 function _msgsTime(ts){
   if(!ts) return '';
   const d=new Date(ts*1000), now=new Date();
-  if(d.toDateString()===now.toDateString()) return d.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+  // Today's conversations show a time (so they follow a custom timestamp format);
+  // older ones keep showing a date, which a time format can't express.
+  if(d.toDateString()===now.toDateString()) return _fmtMsgTs(ts,'locale');
   return d.toLocaleDateString([],{month:'numeric',day:'numeric'});
 }
 // Build the sorted conversation list across all networks (most-recent first).
@@ -7428,6 +7579,9 @@ const APPEAR_DEFAULTS={
   theme:'discord', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
   timestamps:true, joinpart:true, statusMsg:'condense', compact:false, coloredNicks:true,
+  // Optional strftime-style timestamp format. '' = off, use the built-in look.
+  // Opt-in only: nothing changes unless the user sets one (Appearance ▸ Display).
+  tsFormat:'',
   accent:'#00d4aa', accent2:'#0099ff', brightness:100, nickList:true, spellcheck:true, soundPM:true, soundMention:true, desktopNotif:true, notifSound:'lounge', notifSoundUrl:'', msgGap:4, inputH:36,
   font:"'DM Sans',sans-serif", linkPreviews:true,
   // Unified "Messages" inbox tab — aggregates every DM/query from all networks
@@ -7526,6 +7680,8 @@ function applyAppearance(){
     nickPanelW: +el('a-nickpanel-w').value||prev.nickPanelW||160,
     lineHeight: +el('a-line-height').value||prev.lineHeight||1.55,
     timestamps: el('a-timestamps').classList.contains('on'),
+    // Cleared by the toggle when switched off, so an empty box means "off".
+    tsFormat:   _sanitizeTsFormat(el('a-ts-format') ? el('a-ts-format').value : prev.tsFormat),
     joinpart:   true,
     statusMsg:  el('a-statusmsg').value||'condense',
     compact:    el('a-compact').classList.contains('on'),
@@ -7785,6 +7941,43 @@ function applyThemeCSS(cfg){
   if(window.CryptIRCFish){ _fishOn(cfg.fish) ? window.CryptIRCFish.enable() : window.CryptIRCFish.disable(); }
   if(window.CryptIRCAlien){ _alienOn(cfg.alien) ? window.CryptIRCAlien.enable() : window.CryptIRCAlien.disable(); }
   _applyBarButtons(cfg);
+  _applyTsFormat(cfg);
+}
+// Adopt the saved timestamp format. Lives here rather than in applyAppearance so
+// it also takes effect on boot and on a cross-device settings sync, not just
+// when the Appearance panel is touched. Repaints only on an actual change, so
+// the many other applyThemeCSS callers (resize, theme switch) cost nothing.
+function _applyTsFormat(cfg){
+  const next=_sanitizeTsFormat((cfg||loadAppearance()).tsFormat);
+  if(next===_tsFormat) return;
+  _tsFormat=next;
+  try{ document.body.classList.toggle('ts-custom',!!_tsFormat); }catch(e){}
+  _updateTsPreview();
+  // Already-rendered rows hold their old text. Repaint them in place rather than
+  // calling renderChat(): a full re-render advances the last-read horizon and
+  // scrolls to the bottom, which would yank a device that is merely receiving
+  // this setting from another one.
+  try{
+    if(typeof isMessagesActive==='function' && isMessagesActive()){
+      if(typeof renderMessagesView==='function') renderMessagesView();
+    } else {
+      _repaintTimestamps();
+    }
+  }catch(e){}
+}
+// Rewrite the visible timestamp text without touching scroll position, the
+// unread horizon, or any row's identity.
+function _repaintTimestamps(){
+  // .status-condensed carries _scLastTs; .msg-row carries dataset.ts. Both must
+  // be in the selector or condensed summaries keep a stale timestamp.
+  const rows=document.querySelectorAll('#chat-area .msg-row, #chat-area .status-condensed');
+  for(const row of rows){
+    if(row._scLastTs){ try{ _scWriteSummary(row); }catch(e){} continue; }
+    const ts=+row.dataset.ts;
+    if(!ts) continue;
+    const el=row.querySelector('.msg-ts');
+    if(el) el.textContent=_fmtMsgTs(ts,'row');   // textContent: never markup
+  }
 }
 // Show/hide chat-bar buttons per platform via generated media-query CSS (no JS
 // resize handling needed; updates live on rotate/resize). Defaults = all shown.
@@ -8242,6 +8435,14 @@ function populateAppearanceModal(cfg){
   el('a-input-h').value=cfg.inputH!=null?cfg.inputH:36;
   el('a-input-h-val').textContent=(cfg.inputH!=null?cfg.inputH:36)+'px';
   cfg.timestamps ? el('a-timestamps').classList.add('on') : el('a-timestamps').classList.remove('on');
+  // Custom timestamp format: the toggle is derived from whether a format is set,
+  // so the saved string stays the single source of truth.
+  {
+    const _tf=_sanitizeTsFormat(cfg.tsFormat);
+    if(el('a-ts-format')) el('a-ts-format').value=_tf;
+    if(el('a-ts-custom')) _tf ? el('a-ts-custom').classList.add('on') : el('a-ts-custom').classList.remove('on');
+    _syncTsRows();
+  }
   el('a-statusmsg').value=cfg.statusMsg||'condense';
   cfg.compact ? el('a-compact').classList.add('on') : el('a-compact').classList.remove('on');
   cfg.coloredNicks!==false ? el('a-colorednicks').classList.add('on') : el('a-colorednicks').classList.remove('on');
@@ -13975,6 +14176,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.4.5', date:'July 2026', items:[
+    {tag:'new', text:'You can now choose your own timestamp format. Appearance ▸ Display ▸ Custom timestamp format lets you write a format string — 24-hour (%H:%M), 12-hour with uppercase AM/PM (%I:%M %p), seconds, the date, the day name, your timezone, whatever you like — with a live preview as you type. Off by default: leave it alone and timestamps look exactly as they always have.'},
+  ]},
   {version:'0.4.4', date:'July 2026', items:[
     {tag:'fix', text:'Photos no longer upload sideways. Phone cameras store a picture the way the sensor saw it plus a note saying which way up it goes, and our privacy scrub — which removes GPS, timestamps and camera details from everything you upload — was removing that note too. The rotation is now preserved (and only the rotation); everything private still gets stripped.'},
     {tag:'fix', text:'Fixed the GIF picker coming up empty until you reloaded the page. If the app couldn’t reach the server for its GIF settings when you signed in, it assumed no GIF service was available and never checked again for the rest of the session. It now re-checks when you open the picker, and tells you when it’s a connection problem instead of claiming no API key is set.'},
@@ -15422,7 +15626,7 @@ function renderMentionsList(){
   el.innerHTML='';
   for(const m of mentionsList){
     const d=document.createElement('div');d.className='mention-item';
-    const time=new Date(m.ts*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+    const time=esc(_fmtMsgTs(m.ts,'locale')); // esc: lands in innerHTML below
     const isPm=m.type==='pm';
     const meta=isPm
       ? `✉ PM from ${esc(m.from)} · ${esc(m.network)} · ${time}`
