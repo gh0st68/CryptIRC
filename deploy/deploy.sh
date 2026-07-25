@@ -916,16 +916,11 @@ if [[ "$INTERACTIVE" == true ]]; then
             # Pass the password via env (NOT argv) so it never shows in ps / /proc.
             if CRYPTIRC_NEW_PASS="$NEW_PASS" bash "$REPO_DIR/adduser.sh" "$NEW_USER" "$NEW_EMAIL" >"$RUN_LOG" 2>&1; then
                 ok "User '${NEW_USER}' created"
-                USER_FILE="$DATA_DIR/users/$(echo "$NEW_USER" | tr '[:upper:]' '[:lower:]').json"
-                if [[ -f "$USER_FILE" ]] && CRYPTIRC_USER_FILE="$USER_FILE" python3 - <<'PY' 2>/dev/null
-import json, os
-p = os.environ['CRYPTIRC_USER_FILE']
-with open(p) as f: d = json.load(f)
-d['admin'] = True
-with open(p, 'w') as f: json.dump(d, f, indent=2)
-PY
+                # Hand off to makeadmin.sh rather than rewriting the record inline:
+                # it validates the name, writes atomically and preserves owner/mode.
+                if CRYPTIRC_DATA="$DATA_DIR" bash "$REPO_DIR/makeadmin.sh" "$NEW_USER" >/dev/null 2>&1
                 then ok "${NEW_USER} is now an admin"
-                else warn "Created the user, but couldn't set admin — do it later in Settings ▸ Admin."
+                else warn "Created the user, but couldn't set admin. Nothing in the app can grant it — run:  sudo CRYPTIRC_DATA=$DATA_DIR bash makeadmin.sh ${NEW_USER}"
                 fi
             else
                 warn "Couldn't create the user. Try:  sudo CRYPTIRC_NEW_PASS=... bash adduser.sh ${NEW_USER} ${NEW_EMAIL}"
@@ -975,6 +970,10 @@ else
 echo -e "${CYAN}║${NC}  Registration: ${GREEN}Invite only${NC}"
 echo -e "${CYAN}║${NC}  Add users: ${DIM}sudo CRYPTIRC_NEW_PASS=pw bash adduser.sh <user> [email]${NC}"
 fi
+# Outside the branch on purpose: an open-registration install is exactly where
+# somebody signs up in the browser and then has no way into the admin panel.
+echo -e "${CYAN}║${NC}  Make admin: ${DIM}sudo bash makeadmin.sh <user>${NC}"
+
 echo -e "${CYAN}║${NC}"
 if [[ "$ENABLE_EMAIL" == true ]]; then
 echo -e "${CYAN}║${NC}  ${YELLOW}Email${NC}${DIM} can spam-folder until you set up SPF/DKIM/PTR (see notes above).${NC}"

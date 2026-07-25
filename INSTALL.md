@@ -257,14 +257,23 @@ sudo CRYPTIRC_NEW_PASS=mypassword bash adduser.sh myusername
 Make them admin:
 
 ```bash
-USER_FILE="/var/lib/cryptirc/users/myusername.json"
-python3 -c "
-import json
-with open('$USER_FILE','r') as f: d=json.load(f)
-d['admin']=True
-with open('$USER_FILE','w') as f: json.dump(d,f,indent=2)
-"
+sudo bash makeadmin.sh myusername
 ```
+
+A fresh install has no admins and there is no in-app way to create one, so this
+step is what unlocks the Admin panel. It takes effect immediately — nothing to
+restart — though the browser tab needs a reload before the Admin entry appears
+in Settings.
+
+Other things the script does:
+
+```bash
+sudo bash makeadmin.sh --list             # who exists, and who is an admin
+sudo bash makeadmin.sh --revoke someone   # take admin away
+```
+
+It refuses to remove the last admin (that would lock everyone out of the panel
+with no way back in) unless you add `--force`.
 
 ### Step 9: Visit Your Instance
 

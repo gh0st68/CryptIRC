@@ -28,8 +28,47 @@ set -euo pipefail
 
 DATA_DIR="${CRYPTIRC_DATA:-/var/lib/cryptirc}"
 
+# ── Look & feel ───────────────────────────────────────────────────────────────
+# Full styling + animation on a real terminal; auto-disabled when output is piped
+# or NO_COLOR is set, so a captured generated password stays clean. Everything
+# below goes to stderr for the same reason — stdout carries only the result.
+if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+    GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
+    WHITE='\033[1;37m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'; FANCY=true
+else
+    GREEN=''; YELLOW=''; CYAN=''; WHITE=''; BOLD=''; DIM=''; NC=''; FANCY=false
+fi
+# The animation hides the cursor — guarantee it comes back on any exit.
+[[ "$FANCY" == true ]] && trap 'printf "\033[?25h" >&2 2>/dev/null || true' EXIT
+
+# A ghost drifts across the terminal. Purely decorative, interactive-only, and
+# skippable with CRYPTIRC_NO_GHOST=1 — same gate the installer uses.
+ghostfly() {
+    [[ "$FANCY" == true && "${CRYPTIRC_NO_GHOST:-}" != "1" ]] || return 0
+    local cols i trail=". · ∴ ~"
+    cols=$(tput cols 2>/dev/null || echo 70); (( cols > 70 )) && cols=70; (( cols < 20 )) && cols=20
+    printf '\033[?25l' >&2
+    for ((i=0; i<=cols-6; i+=2)); do
+        printf "\r%*s${DIM}${CYAN}%s${NC} ${WHITE}${BOLD}.-.${NC}"  "$i" "" "$trail" >&2
+        printf "\n%*s      ${WHITE}${BOLD}(o o)${NC}"               "$i" "" >&2
+        printf "\n%*s      ${WHITE}${BOLD} \\~/ ${NC}"              "$i" "" >&2
+        sleep 0.018 || true
+        printf "\033[2A" >&2   # cursor up 2 lines for the next frame
+    done
+    printf "\033[2B\r%*s\r" "$cols" "" >&2   # settle below the ghost + clear the line
+    printf '\033[?25h' >&2
+}
+
+banner() {
+    [[ "$FANCY" == true ]] || return 0
+    ghostfly
+    echo -e "  ${CYAN}${BOLD}CryptIRC${NC} ${DIM}·${NC} ${WHITE}${BOLD}password reset${NC}" >&2
+    echo -e "  ${DIM}developed by gh0st  ·  irc.twistednet.org  ·  #twisted #dev${NC}" >&2
+    echo >&2
+}
+
 usage() {
-    sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-1}"
 }
 
@@ -64,11 +103,17 @@ if [[ -n "$USERNAME" ]]; then
     USERNAME=$(printf '%s' "$USERNAME" | tr '[:upper:]' '[:lower:]')
     # Mirror src/auth.rs is_safe_username(): [a-z0-9_-], 3-32 chars (post-lowercase).
     # Rejecting anything else is also what makes the path join below traversal-safe.
-    if [[ ! "$USERNAME" =~ ^[a-z0-9_-]{3,32}$ ]]; then
+    # LC_ALL=C matters: under a UTF-8 locale glibc's collation makes [a-z] match
+    # accented letters, so 'alícé' would sail through and we'd claim success for a
+    # record register() can never create. LANG=C also makes ${#...} count bytes,
+    # matching the byte length src/auth.rs checks.
+    if ! LC_ALL=C bash -c '[[ "$1" =~ ^[a-z0-9_-]{3,32}$ ]]' _ "$USERNAME"; then
         echo "Error: invalid username (3-32 chars; letters, numbers, _ and - only)" >&2
         exit 1
     fi
 fi
+
+banner
 
 # ─── --check: read-only diagnosis ───────────────────────────────────────────
 if [[ "$MODE" == check ]]; then
@@ -253,16 +298,16 @@ if was_unverified:
 PY
 
 if [[ "$MODE" == verify ]]; then
-    echo "Account '$USERNAME' marked verified — password unchanged; they can log in with"
-    echo "the password they already know."
+    echo -e "  ${GREEN}✓${NC} Account ${BOLD}$USERNAME${NC} marked verified — password unchanged; they can" >&2
+    echo -e "    log in with the password they already know." >&2
 else
-    echo "Password reset for '$USERNAME'."
+    echo -e "  ${GREEN}✓${NC} Password reset for ${BOLD}$USERNAME${NC}." >&2
     if [[ $GENERATE -eq 1 ]]; then
-        echo "Generated password (shown once, stored nowhere else):"
+        echo -e "  ${YELLOW}Generated password${NC} ${DIM}(shown once, stored nowhere else)${NC}:" >&2
         printf '  %s\n' "$PASSWORD"
     fi
 fi
-echo
-echo "Note: sessions live in the web daemon's memory — anyone already logged in as"
-echo "'$USERNAME' stays logged in until their session idles out or the service is"
-echo "restarted (sudo systemctl restart cryptirc — that drops ALL users' sessions)."
+echo >&2
+echo -e "  ${DIM}Sessions live in the web daemon's memory — anyone already logged in as${NC}" >&2
+echo -e "  ${DIM}'$USERNAME' stays logged in until their session idles out or the service is${NC}" >&2
+echo -e "  ${DIM}restarted (sudo systemctl restart cryptirc — that drops ALL users' sessions).${NC}" >&2
