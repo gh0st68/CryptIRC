@@ -1418,8 +1418,19 @@ async fn strip_image_metadata_exiftool_path(
         None => anyhow::bail!("Invalid temp path"),
     };
 
+    // `-all=` drops Orientation along with everything else, which leaves phone
+    // photos displayed sideways (the sensor frame is stored as-captured and the
+    // rotation lives only in that tag). Copy it back from the source afterwards;
+    // every other tag — GPS, timestamps, camera serial — still goes.
+    //
+    // Must be `-EXIF:Orientation`, not bare `-Orientation`: for a container with
+    // nowhere native to put it (GIF) the unqualified form makes exiftool fall
+    // back to writing an XMP packet, which stamps our exiftool version into the
+    // file and pads it by ~2KB. Qualifying the group makes exiftool decline
+    // instead, so those formats come out exactly as they did before — no loss,
+    // since nothing renders orientation from a GIF anyway.
     let mut cmd = Command::new("exiftool");
-    cmd.args(["-all=", "-overwrite_original", out_str])
+    cmd.args(["-all=", "-tagsfromfile", "@", "-EXIF:Orientation", "-overwrite_original", out_str])
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -1480,6 +1491,168 @@ async fn strip_image_metadata_exiftool(data: &[u8], ext: &str) -> Result<Vec<u8>
     }
 }
 
+/// Read the EXIF `Orientation` (tag 0x0112) out of a JPEG's APP1 segment.
+///
+/// Phone cameras store the sensor frame as-captured and record how to rotate it
+/// for display in this one tag. Stripping APP1 wholesale (which is what we want
+/// for GPS/timestamps/camera serial) therefore also lays every portrait photo on
+/// its side. We read the value here so `strip_jpeg_metadata` can re-emit it from
+/// bytes we build ourselves — no attacker-controlled EXIF is ever copied through.
+///
+/// Returns None unless a well-formed value in 2..=8 is present; 1 means "already
+/// upright", which needs no segment at all.
+fn jpeg_exif_orientation(data: &[u8]) -> Option<u16> {
+    let mut i = 2usize;
+    while i + 3 < data.len() {
+        if data[i] != 0xFF {
+            return None;
+        }
+        let marker = data[i + 1];
+        // Start of scan / end of image: past the headers, nothing left to find.
+        if marker == 0xDA || marker == 0xD9 {
+            return None;
+        }
+        // Standalone markers carry no length field.
+        if (0xD0..=0xD7).contains(&marker) || marker == 0xD8 || marker == 0x01 {
+            i += 2;
+            continue;
+        }
+        let seg_len = ((data[i + 2] as usize) << 8) | (data[i + 3] as usize);
+        if seg_len < 2 || i + 2 + seg_len > data.len() {
+            return None;
+        }
+        if marker == 0xE1 {
+            if let Some(o) = exif_orientation_from_app1(&data[i + 4..i + 2 + seg_len]) {
+                return Some(o);
+            }
+        }
+        i += 2 + seg_len;
+    }
+    None
+}
+
+/// Parse `Orientation` out of an APP1 payload (`"Exif\0\0"` + TIFF block).
+/// Every offset is bounds-checked against the payload; a malformed or hostile
+/// block yields None rather than panicking.
+fn exif_orientation_from_app1(payload: &[u8]) -> Option<u16> {
+    if payload.len() < 14 || &payload[..6] != b"Exif\0\0" {
+        return None;
+    }
+    exif_orientation_from_tiff(&payload[6..])
+}
+
+/// Parse `Orientation` out of a bare TIFF block — the APP1 payload minus its
+/// `"Exif\0\0"` prefix, which is also exactly what a PNG `eXIf` chunk holds.
+fn exif_orientation_from_tiff(t: &[u8]) -> Option<u16> {
+    if t.len() < 8 {
+        return None;
+    }
+    let be = match &t[..2] {
+        b"MM" => true,
+        b"II" => false,
+        _ => return None,
+    };
+    let rd16 = |b: &[u8]| if be { u16::from_be_bytes([b[0], b[1]]) } else { u16::from_le_bytes([b[0], b[1]]) };
+    let rd32 = |b: &[u8]| {
+        if be { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) } else { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) }
+    };
+    if rd16(&t[2..4]) != 42 {
+        return None;
+    }
+    let ifd0 = rd32(&t[4..8]) as usize;
+    if ifd0 < 8 || ifd0.checked_add(2)? > t.len() {
+        return None;
+    }
+    let entries = rd16(&t[ifd0..ifd0 + 2]) as usize;
+    for e in 0..entries {
+        // Each IFD entry is exactly 12 bytes: tag, type, count, value/offset.
+        let off = ifd0.checked_add(2)?.checked_add(e.checked_mul(12)?)?;
+        if off.checked_add(12)? > t.len() {
+            return None;
+        }
+        if rd16(&t[off..off + 2]) == 0x0112 {
+            // SHORT, count 1 — anything else is not a orientation we understand.
+            if rd16(&t[off + 2..off + 4]) != 3 || rd32(&t[off + 4..off + 8]) != 1 {
+                return None;
+            }
+            let v = rd16(&t[off + 8..off + 10]);
+            return if (2..=8).contains(&v) { Some(v) } else { None };
+        }
+    }
+    None
+}
+
+/// Build a canonical 36-byte APP1 segment carrying ONLY `Orientation`.
+/// Fixed layout, generated here rather than copied from the upload, so the
+/// re-added segment cannot smuggle anything back in.
+fn orientation_app1_segment(orientation: u16) -> [u8; 36] {
+    let mut s = [0u8; 36];
+    s[0..4].copy_from_slice(&[0xFF, 0xE1, 0x00, 0x22]); // APP1, segment length 34
+    s[4..10].copy_from_slice(b"Exif\0\0");
+    // Big-endian TIFF header, IFD0 at offset 8.
+    s[10..18].copy_from_slice(&[b'M', b'M', 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08]);
+    s[18..20].copy_from_slice(&[0x00, 0x01]); // exactly one IFD0 entry
+    s[20..22].copy_from_slice(&[0x01, 0x12]); // tag 0x0112 = Orientation
+    s[22..24].copy_from_slice(&[0x00, 0x03]); // type 3 = SHORT
+    s[24..28].copy_from_slice(&[0x00, 0x00, 0x00, 0x01]); // count 1
+    s[28..30].copy_from_slice(&orientation.to_be_bytes()); // value, left-aligned
+    // s[30..32] value padding, s[32..36] next-IFD offset — both already zero.
+    s
+}
+
+/// Read `Orientation` from a PNG's `eXIf` chunk, which the stripper removes
+/// along with the rest of the metadata (see `orientation_exif_chunk`).
+fn png_exif_orientation(data: &[u8]) -> Option<u16> {
+    const PNG_SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if data.len() < 8 || data[..8] != PNG_SIG {
+        return None;
+    }
+    let mut i = 8usize;
+    while i + 12 <= data.len() {
+        let len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+        let ctype = &data[i + 4..i + 8];
+        let total = len.checked_add(12)?;
+        if i + total > data.len() {
+            return None;
+        }
+        if ctype == b"eXIf" {
+            return exif_orientation_from_tiff(&data[i + 8..i + 8 + len]);
+        }
+        if ctype == b"IEND" {
+            return None;
+        }
+        i += total;
+    }
+    None
+}
+
+/// CRC-32 (IEEE, reflected) — PNG chunks carry one. Bitwise rather than
+/// table-driven: this runs once per upload over ~30 bytes.
+fn png_crc32(bytes: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// Build a PNG `eXIf` chunk holding ONLY `Orientation`, reusing the same
+/// canonical TIFF block the JPEG path emits (bytes 10.. of the APP1 segment).
+fn orientation_exif_chunk(orientation: u16) -> Vec<u8> {
+    let seg = orientation_app1_segment(orientation);
+    let tiff = &seg[10..]; // 26-byte TIFF block, no "Exif\0\0" prefix
+    let mut chunk = Vec::with_capacity(12 + tiff.len());
+    chunk.extend_from_slice(&(tiff.len() as u32).to_be_bytes());
+    chunk.extend_from_slice(b"eXIf");
+    chunk.extend_from_slice(tiff);
+    let crc = png_crc32(&chunk[4..]); // CRC covers chunk type + data
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    chunk
+}
+
 /// #88: on any malformed/truncated structure this now returns Err so the upload
 /// is rejected rather than stored with EXIF/GPS intact or truncated.
 fn strip_jpeg_metadata(data: &[u8]) -> Result<Vec<u8>> {
@@ -1494,6 +1667,13 @@ fn strip_jpeg_metadata(data: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(data.len());
     out.push(0xFF);
     out.push(0xD8); // SOI
+
+    // Everything below strips APP1, which is where the display orientation lives.
+    // Re-emit just that one value from a segment we construct ourselves, so
+    // portrait photos stay upright without carrying any of the original EXIF.
+    if let Some(o) = jpeg_exif_orientation(data) {
+        out.extend_from_slice(&orientation_app1_segment(o));
+    }
 
     let mut i = 2;
     let mut saw_sos = false;
@@ -1622,6 +1802,11 @@ fn strip_png_metadata(data: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(data.len());
     out.extend_from_slice(&PNG_SIG);
 
+    // eXIf goes out with the rest of the metadata below; keep just the display
+    // orientation so a rotated PNG doesn't end up on its side.
+    let orientation = png_exif_orientation(data);
+    let mut wrote_orientation = false;
+
     let mut i = 8;
     let mut saw_iend = false;
     while i + 12 <= data.len() {
@@ -1638,6 +1823,15 @@ fn strip_png_metadata(data: &[u8]) -> Result<Vec<u8>> {
 
         if keep_chunks.iter().any(|k| *k == chunk_type) {
             out.extend_from_slice(&data[i..i + total]);
+            // Must land before IDAT to be valid; straight after IHDR is simplest.
+            // Only after the FIRST IHDR — a malformed input with two of them
+            // would otherwise get two eXIf chunks, which the spec forbids.
+            if chunk_type == b"IHDR" && !wrote_orientation {
+                if let Some(o) = orientation {
+                    out.extend_from_slice(&orientation_exif_chunk(o));
+                }
+                wrote_orientation = true;
+            }
         }
 
         // IEND is always last
@@ -1653,4 +1847,278 @@ fn strip_png_metadata(data: &[u8]) -> Result<Vec<u8>> {
         anyhow::bail!("Corrupt image (incomplete PNG)");
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod orientation_tests {
+    use super::*;
+
+    /// Minimal but real JPEG: SOI, an APP1 holding one IFD0 Orientation entry,
+    /// a token SOF/SOS pair, EOI. `be` picks the TIFF byte order.
+    fn jpeg_with_orientation(orientation: u16, be: bool) -> Vec<u8> {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(if be { b"MM" } else { b"II" });
+        let w16 = |v: u16| if be { v.to_be_bytes() } else { v.to_le_bytes() };
+        let w32 = |v: u32| if be { v.to_be_bytes() } else { v.to_le_bytes() };
+        tiff.extend_from_slice(&w16(42));
+        tiff.extend_from_slice(&w32(8)); // IFD0 offset
+        tiff.extend_from_slice(&w16(1)); // one entry
+        tiff.extend_from_slice(&w16(0x0112)); // Orientation
+        tiff.extend_from_slice(&w16(3)); // SHORT
+        tiff.extend_from_slice(&w32(1)); // count
+        tiff.extend_from_slice(&w16(orientation));
+        tiff.extend_from_slice(&[0, 0]); // value padding
+        tiff.extend_from_slice(&w32(0)); // no next IFD
+
+        let mut payload = b"Exif\0\0".to_vec();
+        payload.extend_from_slice(&tiff);
+
+        let mut out = vec![0xFF, 0xD8];
+        let seg_len = (payload.len() + 2) as u16;
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&seg_len.to_be_bytes());
+        out.extend_from_slice(&payload);
+        out.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0, 1, 0, 1, 1, 1, 0x11, 0]); // SOF0
+        out.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]); // SOS
+        out.extend_from_slice(&[0x00]); // one byte of scan data
+        out.extend_from_slice(&[0xFF, 0xD9]); // EOI
+        out
+    }
+
+    #[test]
+    fn reads_orientation_both_byte_orders() {
+        for be in [true, false] {
+            for o in 2..=8u16 {
+                assert_eq!(jpeg_exif_orientation(&jpeg_with_orientation(o, be)), Some(o), "be={be} o={o}");
+            }
+        }
+    }
+
+    #[test]
+    fn ignores_upright_and_out_of_range() {
+        // 1 = already upright: nothing worth re-emitting.
+        assert_eq!(jpeg_exif_orientation(&jpeg_with_orientation(1, true)), None);
+        assert_eq!(jpeg_exif_orientation(&jpeg_with_orientation(9, true)), None);
+        assert_eq!(jpeg_exif_orientation(&jpeg_with_orientation(0, true)), None);
+    }
+
+    #[test]
+    fn survives_the_strip_that_used_to_destroy_it() {
+        // The actual bug: stripping APP1 laid portrait photos on their side.
+        let src = jpeg_with_orientation(6, true);
+        let stripped = strip_jpeg_metadata(&src).expect("strip should succeed");
+        assert_eq!(jpeg_exif_orientation(&stripped), Some(6));
+        // ...and the re-emitted segment is our own fixed 36 bytes, not the original.
+        assert_eq!(&stripped[2..38], &orientation_app1_segment(6)[..]);
+    }
+
+    #[test]
+    fn strip_drops_other_exif_while_keeping_orientation() {
+        let mut src = jpeg_with_orientation(8, true);
+        // Splice in a second APP1 (pretend GPS blob) plus a COM comment.
+        let junk_at = 2;
+        // Segment length counts the 2 length bytes plus the payload.
+        let mut junk = vec![0xFF, 0xE1, 0x00, 0x08];
+        junk.extend_from_slice(b"SECRET"); // 6-byte payload → length 8
+        junk.extend_from_slice(&[0xFF, 0xFE, 0x00, 0x08]);
+        junk.extend_from_slice(b"COMMEN"); // 6-byte COM payload → length 8
+        src.splice(junk_at..junk_at, junk);
+
+        let stripped = strip_jpeg_metadata(&src).expect("strip should succeed");
+        assert_eq!(jpeg_exif_orientation(&stripped), Some(8), "orientation kept");
+        assert!(!stripped.windows(6).any(|w| w == b"SECRET"), "foreign APP1 payload must still be stripped");
+        assert!(!stripped.windows(6).any(|w| w == b"COMMEN"), "COM comment must still be stripped");
+        let app1_markers = stripped.windows(2).filter(|w| w == b"\xFF\xE1").count();
+        assert_eq!(app1_markers, 1, "exactly one APP1 (ours) survives");
+    }
+
+    #[test]
+    fn malformed_exif_never_panics() {
+        let cases: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0xFF, 0xD8],
+            vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x02],
+            vec![0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF, b'E', b'x', b'i', b'f', 0, 0],
+            {
+                // Exif header, then a TIFF block claiming a huge IFD entry count.
+                let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x18];
+                v.extend_from_slice(b"Exif\0\0");
+                v.extend_from_slice(&[b'M', b'M', 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08, 0xFF, 0xFF]);
+                v
+            },
+            {
+                // IFD0 offset points past the end of the block.
+                let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x10];
+                v.extend_from_slice(b"Exif\0\0");
+                v.extend_from_slice(&[b'I', b'I', 42, 0x00, 0xFF, 0xFF, 0xFF, 0x7F]);
+                v
+            },
+        ];
+        for c in cases {
+            let _ = jpeg_exif_orientation(&c); // must not panic
+        }
+    }
+
+    #[test]
+    fn jpeg_without_exif_is_byte_identical_to_before() {
+        // The "add nothing when there is nothing to add" property — the JPEG
+        // counterpart of png_without_exif_is_byte_identical_to_before.
+        let mut v = vec![0xFF, 0xD8];
+        v.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x10]); // APP0/JFIF
+        v.extend_from_slice(b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00");
+        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0, 1, 0, 1, 1, 1, 0x11, 0]);
+        v.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+        v.extend_from_slice(&[0x00]);
+        v.extend_from_slice(&[0xFF, 0xD9]);
+        let out = strip_jpeg_metadata(&v).expect("strip should succeed");
+        assert_eq!(out, v, "a JPEG with no EXIF must pass through unchanged");
+    }
+
+    #[test]
+    fn jfif_app0_survives_orientation_insert() {
+        // Inserting our APP1 must not cost the JFIF header.
+        let mut src = jpeg_with_orientation(6, true);
+        let app0: Vec<u8> = {
+            let mut a = vec![0xFF, 0xE0, 0x00, 0x10];
+            a.extend_from_slice(b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00");
+            a
+        };
+        src.splice(2..2, app0);
+        let out = strip_jpeg_metadata(&src).expect("strip should succeed");
+        assert!(out.windows(4).any(|w| w == b"JFIF"), "JFIF APP0 must survive");
+        assert_eq!(jpeg_exif_orientation(&out), Some(6));
+    }
+
+    #[test]
+    fn orientation_survives_alongside_trailing_polyglot_strip() {
+        // #35 (trailing bytes after EOI are dropped) must still hold with the
+        // orientation segment in play.
+        let mut src = jpeg_with_orientation(3, true);
+        src.extend_from_slice(b"TRAILINGSECRET");
+        let out = strip_jpeg_metadata(&src).expect("strip should succeed");
+        assert_eq!(jpeg_exif_orientation(&out), Some(3));
+        assert!(!out.windows(14).any(|w| w == b"TRAILINGSECRET"), "trailing data must be dropped");
+    }
+
+    #[test]
+    fn xmp_only_app1_yields_no_orientation_segment() {
+        // An APP1 that is XMP rather than Exif must not produce a segment.
+        let mut v = vec![0xFF, 0xD8];
+        let payload = b"http://ns.adobe.com/xap/1.0/\0<x:xmpmeta/>";
+        let seg_len = (payload.len() + 2) as u16;
+        v.extend_from_slice(&[0xFF, 0xE1]);
+        v.extend_from_slice(&seg_len.to_be_bytes());
+        v.extend_from_slice(payload);
+        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0, 1, 0, 1, 1, 1, 0x11, 0]);
+        v.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+        v.extend_from_slice(&[0x00, 0xFF, 0xD9]);
+        assert_eq!(jpeg_exif_orientation(&v), None);
+        let out = strip_jpeg_metadata(&v).expect("strip should succeed");
+        assert!(!out.windows(2).any(|w| w == b"\xFF\xE1"), "no APP1 should be emitted");
+    }
+
+    #[test]
+    fn segment_is_well_formed() {
+        let s = orientation_app1_segment(6);
+        assert_eq!(s.len(), 36);
+        assert_eq!(&s[0..2], &[0xFF, 0xE1]);
+        // Declared length covers everything after the 2 marker bytes.
+        assert_eq!(u16::from_be_bytes([s[2], s[3]]) as usize, s.len() - 2);
+        assert_eq!(&s[4..10], b"Exif\0\0");
+        // Round-trips through our own parser.
+        assert_eq!(exif_orientation_from_app1(&s[4..]), Some(6));
+    }
+}
+
+#[cfg(test)]
+mod png_orientation_tests {
+    use super::*;
+
+    const SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    fn chunk(ctype: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut c = Vec::new();
+        c.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        c.extend_from_slice(ctype);
+        c.extend_from_slice(data);
+        let crc = png_crc32(&c[4..]);
+        c.extend_from_slice(&crc.to_be_bytes());
+        c
+    }
+
+    /// PNG with an eXIf chunk (orientation), a tEXt comment, and the required
+    /// IHDR/IDAT/IEND scaffolding.
+    fn png_with_orientation(o: u16) -> Vec<u8> {
+        let seg = orientation_app1_segment(o);
+        let mut v = SIG.to_vec();
+        v.extend_from_slice(&chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
+        v.extend_from_slice(&chunk(b"eXIf", &seg[10..]));
+        v.extend_from_slice(&chunk(b"tEXt", b"Comment\0SECRET-PNG"));
+        v.extend_from_slice(&chunk(b"IDAT", &[0x78, 0x9C, 0x63, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01]));
+        v.extend_from_slice(&chunk(b"IEND", &[]));
+        v
+    }
+
+    #[test]
+    fn crc32_matches_known_vector() {
+        // Standard CRC-32/IEEE check value for "123456789".
+        assert_eq!(png_crc32(b"123456789"), 0xCBF4_3926);
+    }
+
+    #[test]
+    fn orientation_survives_png_strip_but_comment_does_not() {
+        for o in 2..=8u16 {
+            let src = png_with_orientation(o);
+            assert_eq!(png_exif_orientation(&src), Some(o), "fixture readable");
+            let out = strip_png_metadata(&src).expect("strip should succeed");
+            assert_eq!(png_exif_orientation(&out), Some(o), "orientation kept (o={o})");
+            assert!(!out.windows(6).any(|w| w == b"SECRET"), "tEXt comment must be stripped");
+        }
+    }
+
+    #[test]
+    fn emitted_chunk_is_structurally_valid() {
+        let c = orientation_exif_chunk(6);
+        let len = u32::from_be_bytes([c[0], c[1], c[2], c[3]]) as usize;
+        assert_eq!(&c[4..8], b"eXIf");
+        assert_eq!(len, c.len() - 12, "declared length matches payload");
+        // CRC must verify over type + data, as any PNG decoder will check.
+        let crc = u32::from_be_bytes([c[c.len() - 4], c[c.len() - 3], c[c.len() - 2], c[c.len() - 1]]);
+        assert_eq!(crc, png_crc32(&c[4..c.len() - 4]));
+        assert_eq!(exif_orientation_from_tiff(&c[8..c.len() - 4]), Some(6));
+    }
+
+    #[test]
+    fn png_without_exif_is_byte_identical_to_before() {
+        // No eXIf → we must add nothing at all.
+        let mut v = SIG.to_vec();
+        v.extend_from_slice(&chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
+        v.extend_from_slice(&chunk(b"IDAT", &[0x78, 0x9C, 0x63, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01]));
+        v.extend_from_slice(&chunk(b"IEND", &[]));
+        let out = strip_png_metadata(&v).expect("strip should succeed");
+        assert_eq!(out, v);
+    }
+
+    #[test]
+    fn malformed_png_never_panics() {
+        let cases: Vec<Vec<u8>> = vec![
+            vec![],
+            SIG.to_vec(),
+            {
+                let mut v = SIG.to_vec();
+                v.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // absurd chunk length
+                v.extend_from_slice(b"eXIf");
+                v
+            },
+            {
+                let mut v = SIG.to_vec();
+                v.extend_from_slice(&chunk(b"eXIf", &[0x00])); // truncated TIFF block
+                v
+            },
+        ];
+        for c in cases {
+            let _ = png_exif_orientation(&c);
+            let _ = strip_png_metadata(&c);
+        }
+    }
 }

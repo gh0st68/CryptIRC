@@ -745,6 +745,9 @@ function connectWs() {
     // which showed up as "clicking a notification sometimes doesn't jump".
     _pendingLogs.clear(); _pendingSyncs.clear();
     _msgsPreviewAsked.clear(); // new connection → one fresh preview attempt per conversation
+    // If the GIF settings never loaded (offline at login, transient failure),
+    // a regained connection is a good moment to try again. No-op once loaded.
+    if(!_gifCfgOk) _loadGifConfig();
   };
   ws.onmessage=e=>{_lastWsActivity=Date.now();_rxBytes+=(e.data||'').length;_rxCount++;flashLed('rx');updateStarfieldTitle();try{handleEvent(JSON.parse(e.data));}catch(err){console.error('WS parse error:',err);}};
   ws.onclose=()=>{_rateQueue=[];if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}const d=Math.min(1000*Math.pow(2,_wsRetries),60000);setTimeout(connectWs,d+Math.random()*1000);_wsRetries++;};
@@ -4453,6 +4456,10 @@ async function handleInput(raw){
           flushPrefsToServer();
           sysMsg(conn_id,target,`GIF rating filter set to ${r} (synced).`,'system');break;
         }
+        // Same stale-config trap the picker guards against: on a shared-key
+        // server /api/gif/config is the ONLY thing that says a source exists,
+        // so make sure it has actually been read before reporting anything.
+        if(!_gifCfgOk) await _loadGifConfig();
         // ── Off (admin-disabled) ────────────────────────────────────────────
         if(_gifCfg.mode==='off'){
           sysMsg(conn_id,target,'GIFs are disabled on this server.','error');break;
@@ -4467,7 +4474,9 @@ async function handleInput(raw){
         // ── Default: search and send top match ───────────────────────────
         const q=args.join(' ').trim();
         if(!_gifHasSource()){
-          if(_gifProvider()==='tenor') sysMsg(conn_id,target,'No Tenor key set. Run /gif key YOUR_KEY first (free from Google Cloud → Tenor API).','error');
+          // Don't blame a missing key when we simply couldn't reach the server.
+          if(!_gifCfgOk) sysMsg(conn_id,target,'Couldn’t load GIF settings from the server — check your connection and try again.','error');
+          else if(_gifProvider()==='tenor') sysMsg(conn_id,target,'No Tenor key set. Run /gif key YOUR_KEY first (free from Google Cloud → Tenor API).','error');
           else sysMsg(conn_id,target,'No Giphy key set. Run /gif key YOUR_KEY first (free at developers.giphy.com → Create App → API).','error');
           break;
         }
@@ -9148,15 +9157,42 @@ function _giphyRating(){return localStorage.getItem('cryptirc_giphy_rating')||'p
 function _giphyMaskKey(k){if(!k)return '(none)';if(k.length<8)return k[0]+'…';return k.slice(0,4)+'…'+k.slice(-2);}
 // True if the active provider has a usable source right now (personal key OR shared proxy).
 function _gifHasSource(){return !!_giphyKey()||(_gifCfg.mode==='server'&&_gifCfg.server_available);}
-async function _loadGifConfig(){
-  if(!sessionToken)return;
-  try{
-    const r=await fetch('/cryptirc/api/gif/config',{headers:{'Authorization':'Bearer '+sessionToken}});
-    if(r.ok){const d=await r.json();
-      _gifCfg={provider:(d.provider==='tenor'?'tenor':'giphy'),
-               mode:(['off','user','server'].includes(d.mode)?d.mode:'user'),
-               server_available:!!d.server_available};}
-  }catch(e){}
+// Has /api/gif/config ever been read successfully? On a server-key deployment
+// this is the ONLY thing that tells the client a GIF source exists (users have
+// no personal key), so a single failed/slow fetch used to leave the picker
+// insisting "No API key set" for the whole session — reloading the page was the
+// only cure. Track success so the picker can re-check lazily and self-heal.
+let _gifCfgOk=false;
+let _gifCfgInflight=null;   // dedupes concurrent loads
+// Resolves true once the config is known. Pass force=true to re-read a config
+// that already loaded (admin just changed it).
+async function _loadGifConfig(force){
+  if(!sessionToken)return false;
+  if(_gifCfgOk&&!force)return true;
+  // force must bypass this too, or an admin saving settings while any load is
+  // in flight silently re-uses the older request's result.
+  if(_gifCfgInflight&&!force)return _gifCfgInflight;
+  const p=(async()=>{
+    try{
+      // Bound the request the same way the /auth/me verify is bounded: a
+      // stalled-but-open connection (captive portal, dead TCP) would otherwise
+      // hang here for minutes, and every retry would re-attach to this same
+      // dead promise instead of ever showing the error state.
+      const _ac=new AbortController(); const _t=setTimeout(()=>_ac.abort(),8000);
+      let r; try{ r=await fetch('/cryptirc/api/gif/config',{headers:{'Authorization':'Bearer '+sessionToken},signal:_ac.signal}); } finally { clearTimeout(_t); }
+      if(r.ok){const d=await r.json();
+        _gifCfg={provider:(d.provider==='tenor'?'tenor':'giphy'),
+                 mode:(['off','user','server'].includes(d.mode)?d.mode:'user'),
+                 server_available:!!d.server_available};
+        _gifCfgOk=true;}
+    }catch(e){}
+    return _gifCfgOk;
+  })();
+  _gifCfgInflight=p;
+  // Identity-checked so a slower concurrent load can't clear a newer one's
+  // registration (and so a synchronous throw above can't wedge it non-null).
+  p.finally(()=>{ if(_gifCfgInflight===p) _gifCfgInflight=null; });
+  return p;
 }
 // Normalized [{preview,url,title}] for the active provider. Precedence:
 //  1) personal key for the active provider → that provider's API directly (override)
@@ -9324,6 +9360,13 @@ async function giphyFetchTop(query){
     showMsg('GIFs are disabled on this server.');
     show();
   }
+  // Shown when we genuinely could not read the server's GIF settings, so the
+  // user isn't told "no API key" for what is really a connection problem.
+  function renderCfgError(){
+    qEl.textContent=''; _brand();
+    showMsg('⚠ Couldn’t load GIF settings from the server. Check your connection and type your search again.');
+    show();
+  }
   function renderResults(list,q){
     qEl.textContent=q;
     grid.innerHTML='';
@@ -9376,6 +9419,17 @@ async function giphyFetchTop(query){
   async function search(q){
     if(q===lastQuery)return;
     lastQuery=q;
+    // The tray's idea of "is there a GIF source" comes from /api/gif/config,
+    // fetched once at login. If that fetch was slow or failed, mode/availability
+    // are still at their defaults and we would wrongly report "no API key" until
+    // the page was reloaded. Re-check here so opening the picker repairs it.
+    if(!_gifCfgOk){
+      _brand(); renderLoading(q);
+      await _loadGifConfig();
+      if(_extractQuery(inp.value)!==q){ if(lastQuery===q)lastQuery=''; return; }
+      // Still unknown: say so honestly (and clear lastQuery so a retry retries).
+      if(!_gifCfgOk){ lastQuery=''; renderCfgError(); return; }
+    }
     if(_gifCfg.mode==='off'){ renderDisabled(); return; }
     if(!_gifHasSource()){ renderNoKey(); return; }
     _brand();
@@ -13921,6 +13975,10 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.4.4', date:'July 2026', items:[
+    {tag:'fix', text:'Photos no longer upload sideways. Phone cameras store a picture the way the sensor saw it plus a note saying which way up it goes, and our privacy scrub — which removes GPS, timestamps and camera details from everything you upload — was removing that note too. The rotation is now preserved (and only the rotation); everything private still gets stripped.'},
+    {tag:'fix', text:'Fixed the GIF picker coming up empty until you reloaded the page. If the app couldn’t reach the server for its GIF settings when you signed in, it assumed no GIF service was available and never checked again for the rest of the session. It now re-checks when you open the picker, and tells you when it’s a connection problem instead of claiming no API key is set.'},
+  ]},
   {version:'0.4.2', date:'July 2026', items:[
     {tag:'fix', text:'Fixed new private messages sometimes never showing up in Messages. A PM delivered late — e.g. while the app was in the background on your phone — was mistaken for old bouncer playback and silently buffered without ever creating the conversation, so a first message from someone could be completely invisible. Late-arriving DMs now always surface with the proper badge and sound, replayed DMs still create their conversation row, and the conversation list now merges across your devices instead of one device being able to wipe a fresh conversation for all of them.'},
   ]},
@@ -14833,7 +14891,7 @@ async function adminSaveGif(){
     if(r.ok){
       if(gk) gk.value=''; if(tk) tk.value='';   // don't leave raw keys sitting in the DOM
       if(msg){ msg.textContent='GIF settings saved.'; setTimeout(()=>{ if(msg) msg.textContent=''; },2500); }
-      _loadGifConfig();   // refresh this admin's own client so their picker reflects the change
+      _loadGifConfig(true);   // force: refresh this admin's own client so their picker reflects the change
     } else if(msg){ msg.textContent='Save failed.'; }
   }catch(e){ if(msg) msg.textContent='Save failed.'; }
 }
