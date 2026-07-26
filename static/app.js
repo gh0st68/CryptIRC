@@ -3971,6 +3971,7 @@ document.addEventListener('DOMContentLoaded',()=>{
       _smartPasteText=txt;
       const dlg=document.getElementById('smart-paste-dialog');
       dlg.querySelector('.sp-info').textContent='Pasted text has '+txt.split('\n').length+' lines. Send as pastebin?';
+      _smartPasteApplyExpire();
       dlg.classList.add('show');
     }
   });
@@ -10762,15 +10763,41 @@ function renderSplitChat(){
 
 // ─── Smart paste ─────────────────────────────────────────────────────────────
 let _smartPasteText='';
+// Remembered expiry for the smart-paste dialog, in seconds ('0' = never). Kept as
+// a string so it round-trips through the <select>'s value verbatim. The stored
+// value is validated against the live <option> list rather than a duplicated JS
+// table, so the markup stays the single source of truth for the choices.
+function _smartPasteExpire(){ try{ return localStorage.getItem('cryptirc_smartpaste_expire')||'0'; }catch(_){ return '0'; } }
+// Push the remembered choice into the <select>. Assigning an unknown value to a
+// <select> leaves .value === '' — that's the validity check, so a corrupted or
+// removed option silently falls back to "Never" (today's behaviour) instead of
+// sending a bogus expires_in.
+function _smartPasteApplyExpire(){
+  const sel=document.getElementById('sp-expire'); if(!sel) return;
+  sel.value=_smartPasteExpire();
+  if(!sel.value) sel.value='0';
+}
 function smartPasteYes(){
   document.getElementById('smart-paste-dialog').classList.remove('show');
   if(!_smartPasteText||!active)return;
+  const sel=document.getElementById('sp-expire');
+  // Re-validate on read too: the dialog markup could be missing on an older
+  // cached index.html even though this app.js is fresh (they're separate
+  // network-first fetches), so never trust the element to exist.
+  let expire=sel?sel.value:'0';
+  if(sel&&!sel.value) expire='0';
+  const expSecs=parseInt(expire,10)||0;
+  const expLabel=sel?.selectedOptions?.[0]?.textContent||'Never';
+  try{ localStorage.setItem('cryptirc_smartpaste_expire',String(expSecs)); savePrefsToServer(); }catch(_){}
   // Create paste via API
   const token=sessionToken;
   fetch(`${location.pathname}paste`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},
-    body:JSON.stringify({content:_smartPasteText,language:'text',expires_in:0,password:null})
+    body:JSON.stringify({content:_smartPasteText,language:'text',expires_in:expSecs,password:null})
   }).then(r=>r.json()).then(d=>{
-    if(d.url){document.getElementById('msg-input').value=d.url;showToast('Paste created — URL in input bar');}
+    if(d.url){
+      document.getElementById('msg-input').value=d.url;
+      showToast(expSecs?`Paste created (expires in ${expLabel.toLowerCase()}) — URL in input bar`:'Paste created — URL in input bar');
+    }
   }).catch(()=>{document.getElementById('msg-input').value=_smartPasteText;});
   _smartPasteText='';
 }
@@ -10947,6 +10974,9 @@ function gatherPreferences(){
     giphyKey: localStorage.getItem('cryptirc_giphy_key')||'',
     tenorKey: localStorage.getItem('cryptirc_tenor_key')||'',
     giphyRating: localStorage.getItem('cryptirc_giphy_rating')||'',
+    // Smart-paste expiry (seconds, '0' = never) — a per-user preference, so it
+    // follows the account rather than the browser profile.
+    smartPasteExpire: localStorage.getItem('cryptirc_smartpaste_expire')||'',
   };
 }
 function savePrefsToServer(){
@@ -11254,6 +11284,12 @@ function restorePreferences(p){
       if(p.giphyRating) localStorage.setItem('cryptirc_giphy_rating',p.giphyRating);
       else localStorage.removeItem('cryptirc_giphy_rating');
     }
+    // Adopt ONLY a clean integer, and deliberately do NOT remove on empty — unlike
+    // the API keys above there is no "clear" gesture for this pref: every use writes
+    // a concrete value ('0' IS "never"), so '' means "this device has never set it",
+    // not "the user cleared it". Removing on '' would let a device that never opened
+    // the smart-paste dialog wipe the choice made on the user's other device.
+    if(/^\d+$/.test(String(p.smartPasteExpire??''))) localStorage.setItem('cryptirc_smartpaste_expire',String(p.smartPasteExpire));
     // Re-apply UI state
     renderSidebar(); updateMentionsBadge(); applyFavsOnly();
     if(isMessagesActive()) renderMessagesView(); // reflect synced unread/read-state changes live
@@ -14107,7 +14143,7 @@ function showHelpPanel(){
     <div class="help-cmd"><span class="help-cmd-name">Auto-rejoin</span><span class="help-cmd-desc">Rejoin channels automatically after being kicked</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Channel keys</span><span class="help-cmd-desc">Saved +k keys auto-sent on join (/key to manage)</span></div>
     <div class="help-cmd"><span class="help-cmd-name">KeepNick</span><span class="help-cmd-desc">irssi-style nick keeper — ISON poll + QUIT/NICK events</span></div>
-    <div class="help-cmd"><span class="help-cmd-name">Smart paste</span><span class="help-cmd-desc">Multi-line paste auto-offers pastebin creation</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">Smart paste</span><span class="help-cmd-desc">Multi-line paste auto-offers pastebin creation, with an expiry choice</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Read markers</span><span class="help-cmd-desc">"New messages" divider when switching channels</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Split view</span><span class="help-cmd-desc">View two channels side by side (/split)</span></div>
     <div class="help-cmd"><span class="help-cmd-name">User notes</span><span class="help-cmd-desc">Private notes on nicks (right-click → Note)</span></div>
@@ -14176,6 +14212,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.4.6', date:'July 2026', items:[
+    {tag:'new', text:'Smart paste can now expire. When you paste a wall of text and CryptIRC offers to turn it into a pastebin link, the dialog has an Expires dropdown — never, 10 minutes, 1 hour, 1 day, 1 week or 30 days. Pick a lifetime and the paste deletes itself when it runs out. Your choice is remembered and follows your account to your other devices, and it still defaults to never expiring, so nothing changes unless you want it to.'},
+  ]},
   {version:'0.4.5', date:'July 2026', items:[
     {tag:'new', text:'You can now choose your own timestamp format. Appearance ▸ Display ▸ Custom timestamp format lets you write a format string — 24-hour (%H:%M), 12-hour with uppercase AM/PM (%I:%M %p), seconds, the date, the day name, your timezone, whatever you like — with a live preview as you type. Off by default: leave it alone and timestamps look exactly as they always have.'},
   ]},

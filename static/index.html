@@ -1654,6 +1654,9 @@ html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;bac
 /* ── Smart paste dialog ── */
 #smart-paste-dialog { position:fixed; bottom:80px; left:50%; transform:translateX(-50%); background:var(--bg2); border:1px solid var(--border2); border-radius:10px; padding:14px 18px; z-index:180; box-shadow:0 8px 30px rgba(0,0,0,.5); font-size:12px; color:var(--text); display:none; max-width:340px; width:90%; }
 #smart-paste-dialog.show { display:block; }
+#smart-paste-dialog .sp-row { display:flex; align-items:center; gap:8px; margin-top:10px; }
+#smart-paste-dialog .sp-row label { color:var(--text2); font-family:var(--mono); font-size:11px; white-space:nowrap; }
+#smart-paste-dialog .sp-row select { flex:1; min-width:0; background:var(--bg2); border:1px solid var(--border); color:var(--text); font-family:var(--mono); font-size:11px; border-radius:4px; padding:3px 4px; outline:none; }
 #smart-paste-dialog .sp-btns { display:flex; gap:8px; margin-top:10px; }
 #smart-paste-dialog .sp-btn { padding:6px 14px; border-radius:5px; border:none; cursor:pointer; font-family:var(--mono); font-size:12px; }
 #smart-paste-dialog .sp-yes { background:var(--accent); color:#000; font-weight:700; }
@@ -3719,7 +3722,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </style>
 <div id="stats-overlay" onclick="if(event.target===this)this.classList.remove('show')"><div class="stats-box"></div></div>
 <!-- Smart paste dialog -->
-<div id="smart-paste-dialog"><div class="sp-info"></div><div class="sp-btns"><button class="sp-btn sp-yes" onclick="smartPasteYes()">Create Pastebin</button><button class="sp-btn sp-no" onclick="smartPasteNo()">Paste as Text</button></div></div>
+<div id="smart-paste-dialog"><div class="sp-info"></div><div class="sp-row"><label for="sp-expire">Expires</label><select id="sp-expire"><option value="0">Never</option><option value="600">10 minutes</option><option value="3600">1 hour</option><option value="86400">1 day</option><option value="604800">1 week</option><option value="2592000">30 days</option></select></div><div class="sp-btns"><button class="sp-btn sp-yes" onclick="smartPasteYes()">Create Pastebin</button><button class="sp-btn sp-no" onclick="smartPasteNo()">Paste as Text</button></div></div>
 <!-- Animation overlay for animated themes -->
 <div id="theme-bg-layer"></div>
 <div id="anim-overlay"><canvas id="anim-canvas"></canvas></div>
