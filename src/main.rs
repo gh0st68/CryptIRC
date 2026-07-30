@@ -411,7 +411,12 @@ pub enum ClientMessage {
     UpdateNetwork    { network: NetworkConfig },
     RemoveNetwork    { id: String },
     Connect          { id: String },
-    Disconnect       { id: String },
+    // `reason` carries the reason typed with `/quit <msg>`. Additive and
+    // `serde(default)`, so the Disconnect button (and any older client) can keep
+    // sending `{type:'disconnect',id}` with no reason and still get the configured
+    // Quit Message via `quit_reason_for`. Web-only: `IpcMessage::Drop` already
+    // carried a reason, so the daemon needs no change for this.
+    Disconnect       { id: String, #[serde(default)] reason: Option<String> },
     Send             { conn_id: String, raw: String },
     JoinChannel      { conn_id: String, channel: String, key: Option<String> },
     PartChannel      { conn_id: String, channel: String },
@@ -3477,11 +3482,22 @@ async fn handle_command(
                 ipc_client::dial_current(&state, username, cfg).await;
             }
         }
-        ClientMessage::Disconnect { id } => {
+        ClientMessage::Disconnect { id, reason: user_reason } => {
             if !state.owns_network(username, &id).await { return; }
-            let reason = match state.get_network_config(&id, username).await {
-                Some(cfg) => strip_crlf(quit_reason_for(&cfg)),
-                None => DEFAULT_QUIT_MESSAGE.to_string(),
+            // A reason supplied by `/quit <msg>` wins; blank/absent falls back to the
+            // network's configured Quit Message (else the default advert), so a bare
+            // /quit and the Disconnect button behave identically. strip_crlf on the
+            // user path too — it is untrusted input, and an embedded CRLF would
+            // otherwise ride into the daemon's QUIT line.
+            let user_reason = user_reason
+                .map(|r| strip_crlf(&r).trim().to_string())
+                .filter(|r| !r.is_empty());
+            let reason = match user_reason {
+                Some(r) => r,
+                None => match state.get_network_config(&id, username).await {
+                    Some(cfg) => strip_crlf(quit_reason_for(&cfg)),
+                    None => DEFAULT_QUIT_MESSAGE.to_string(),
+                },
             };
             // I-1: serialize under the same per-config lock so the disconnect-flag set +
             // Drop are atomic vs a concurrent two-tab Connect (which clears the flag + Dials)
@@ -5080,5 +5096,69 @@ mod app_js_template_tests {
     fn rewrites_base_path() {
         let out = render_app_js("fetch('/cryptirc/api')", "/custom", "dev", "0.4.3");
         assert_eq!(out, "fetch('/custom/api')");
+    }
+}
+
+#[cfg(test)]
+mod disconnect_reason_tests {
+    use super::ClientMessage;
+
+    /// SCHEMA LAW: `reason` is additive + `serde(default)`. The Disconnect button
+    /// (and any client cached from before 0.4.8) sends no `reason` at all, so if
+    /// this ever stops deserializing, the button silently breaks for everyone.
+    #[test]
+    fn disconnect_without_reason_still_parses() {
+        let m: ClientMessage =
+            serde_json::from_str(r#"{"type":"disconnect","id":"abc"}"#).unwrap();
+        match m {
+            ClientMessage::Disconnect { id, reason } => {
+                assert_eq!(id, "abc");
+                assert_eq!(reason, None, "absent reason must default to None, not error");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn disconnect_with_reason_parses() {
+        let m: ClientMessage =
+            serde_json::from_str(r#"{"type":"disconnect","id":"abc","reason":"see you tomorrow"}"#)
+                .unwrap();
+        match m {
+            ClientMessage::Disconnect { id, reason } => {
+                assert_eq!(id, "abc");
+                assert_eq!(reason.as_deref(), Some("see you tomorrow"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// The client sends `reason: null` when nothing was typed — must be treated
+    /// as "no reason", i.e. fall through to the configured Quit Message.
+    #[test]
+    fn disconnect_with_null_reason_parses_as_none() {
+        let m: ClientMessage =
+            serde_json::from_str(r#"{"type":"disconnect","id":"abc","reason":null}"#).unwrap();
+        match m {
+            ClientMessage::Disconnect { reason, .. } => assert_eq!(reason, None),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// Mirrors the handler's own normalisation: a reason that is blank-once-cleaned
+    /// must degrade to None so the configured Quit Message is used instead of an
+    /// empty QUIT reason, and an embedded CRLF must never survive.
+    #[test]
+    fn blank_and_crlf_reasons_normalise_like_the_handler() {
+        let norm = |r: Option<&str>| -> Option<String> {
+            r.map(|r| crate::strip_crlf(r).trim().to_string())
+                .filter(|r| !r.is_empty())
+        };
+        assert_eq!(norm(Some("   ")), None);
+        assert_eq!(norm(Some("\r\n")), None);
+        assert_eq!(norm(Some("bye")), Some("bye".to_string()));
+        let injected = norm(Some("bye\r\nJOIN #evil")).unwrap();
+        assert!(!injected.contains('\r') && !injected.contains('\n'),
+                "CRLF must not survive into the QUIT line: {injected:?}");
     }
 }
