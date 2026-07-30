@@ -4164,6 +4164,31 @@ async function handleInput(raw){
       case 'BACK': case 'UNAWAY':
         wsend({type:'send',conn_id,raw:'AWAY'});
         sysMsg(conn_id,target,'Back','system'); break;
+      case 'QUIT': {
+        // Emit the reason as a proper TRAILING parameter (`QUIT :reason`). Before this,
+        // /quit had no case and fell through to `default:` below, reaching the ircd
+        // unprefixed as `QUIT bye everyone` — UnrealIRCd rejoins the surplus params so
+        // it happened to work there, but by RFC only the first token is the reason, so
+        // a stricter daemon shows "bye" and drops the rest.
+        // No message typed → fall back to this network's configured Quit Message (the
+        // same value the Disconnect button uses), else send a bare QUIT and let the
+        // server supply its own default rather than advertising anything unasked.
+        // The \r\n\0 strip is belt-and-braces: the daemon's sanitize_outbound already
+        // filters these, but building a clean line here means we never emit one that
+        // relies on downstream sanitizing to be safe.
+        const _qclean=s=>String(s||'').replace(/[\r\n\0]/g,' ').trim();
+        const qreason=_qclean(args.join(' '))
+          || _qclean(networks.find(n=>n.config?.id===conn_id)?.config?.quit_message);
+        wsend({type:'send',conn_id,raw:qreason?`QUIT :${qreason}`:'QUIT'});
+        // The daemon owns the socket, so a raw QUIT only makes the server close it —
+        // run_connection's clean-close arm (irc_daemon.rs ~318) then redials, i.e.
+        // /quit does NOT keep you offline. Say so explicitly: without feedback the
+        // user assumes it failed and retypes it, and repeated quit/rejoin is exactly
+        // what earns a server-side throttle or a k-line. /disconnect is the one that
+        // sets the disconnect flag and stays off.
+        sysMsg(conn_id,target,'Quit sent'+(qreason?': '+qreason:'')+' — the IRC engine will reconnect shortly. Use /disconnect to stay offline.','system');
+        break;
+      }
 
       // ── Messaging ───────────────────────────────────────────────────
       case 'ME': {
@@ -9221,7 +9246,8 @@ document.addEventListener('click',e=>{
     {cmd:'squit',desc:'Disconnect a server',usage:'/squit server reason'},
     // ── Connection ──
     {cmd:'connect',desc:'Connect to server',usage:'/connect'},
-    {cmd:'disconnect',desc:'Disconnect from server',usage:'/disconnect'},
+    {cmd:'disconnect',desc:'Disconnect from server (stays offline)',usage:'/disconnect'},
+    {cmd:'quit',desc:'Send a quit message — reconnects after; use /disconnect to stay off',usage:'/quit [message]'},
     {cmd:'quote',desc:'Send raw IRC command',usage:'/quote RAW LINE'},
     // ── Encryption ──
     {cmd:'encrypt',desc:'Manage E2E encryption',usage:'/encrypt on|off|keygen|add|rotate'},
@@ -14212,6 +14238,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.4.7', date:'July 2026', items:[
+    {tag:'fix', text:'Your /quit message is now sent correctly. Typing /quit see you tomorrow passed the reason to the server in a form where, strictly speaking, only the first word counts — some servers are forgiving and showed the whole thing, others would have shown just "see". It is now sent properly, so the full message always appears. Typing /quit on its own uses the Quit Message saved on that network, if you have set one. Note that /quit only sends the message: the IRC engine reconnects right afterwards, so use Disconnect instead if you want to stay offline — CryptIRC now tells you this when you quit.'},
+  ]},
   {version:'0.4.6', date:'July 2026', items:[
     {tag:'new', text:'Smart paste can now expire. When you paste a wall of text and CryptIRC offers to turn it into a pastebin link, the dialog has an Expires dropdown — never, 10 minutes, 1 hour, 1 day, 1 week or 30 days. Pick a lifetime and the paste deletes itself when it runs out. Your choice is remembered and follows your account to your other devices, and it still defaults to never expiring, so nothing changes unless you want it to.'},
   ]},
