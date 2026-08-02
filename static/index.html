@@ -792,6 +792,39 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .theme-card .tc-edit:hover { background:var(--accent); color:#000; }
 /* Marks a card as the user's own copy — needed now that a theme customized from a
    built-in sits in the same grid as the built-in it came from, often same name. */
+/* ── Drag-to-resize column handles ───────────────────────────────────────────
+   Thin grab strips laid over the three column boundaries: the channel sidebar's
+   right edge, the user list's left edge, and the nick column inside each chat
+   row. They are position:fixed and placed from measured rects (see
+   _layoutResizeHandles in app.js) rather than being children of the panels,
+   because #sidebar and #chat-area both clip/scroll their contents.
+   z-index 56: above #sidebar's own stacking context (50) so the strip over its
+   edge is grabbable, below the upload pip (60) and every panel/modal (>=100). */
+#resize-handles { position:fixed; inset:0; z-index:56; pointer-events:none; }
+#resize-handles .rz {
+  position:fixed; width:9px; pointer-events:auto; cursor:col-resize;
+  background:transparent; touch-action:none;
+}
+/* The visible cue is a 1px line that only appears on hover/drag, so the chrome
+   looks exactly as it did until you go looking for the handle. */
+#resize-handles .rz::after {
+  content:''; position:absolute; top:0; bottom:0; left:4px; width:1px;
+  background:var(--accent); opacity:0; transition:opacity .12s;
+}
+#resize-handles .rz:hover::after, #resize-handles .rz.dragging::after { opacity:.9; }
+#resize-handles .rz.dragging::after { width:2px; left:3.5px; }
+/* While dragging: kill the panels' width transitions (they would lag the cursor
+   and feel rubbery), and stop the drag from selecting text across the app. */
+body.rz-dragging #sidebar, body.rz-dragging #nick-panel { transition:none !important; }
+body.rz-dragging { cursor:col-resize; user-select:none; -webkit-user-select:none; }
+/* Touch has no hover and the left edge is also the swipe-to-open gesture, so the
+   handles are pointer-precision only. */
+@media (hover:none), (pointer:coarse) { #resize-handles { display:none !important; } }
+/* The nick column gets a faint rule so there is something to aim at — it had no
+   divider at all before, only padding. */
+.msg-nick { border-right:1px solid var(--nick-rule, transparent); }
+body.rz-nick-visible .msg-nick { --nick-rule:var(--border); }
+
 /* "More Pets" chooser — a compact toggle grid, because twenty separate rows of
    off/desktop/mobile/both selects would bury the rest of the Appearance panel. */
 .pets-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(132px,1fr)); gap:6px; margin-top:4px; }
@@ -2654,17 +2687,17 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Layout</div>
         <div class="appear-row">
           <span class="appear-label">Sidebar width</span>
-          <input type="range" class="appear-slider" id="a-sidebar-w" min="160" max="360" step="10" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-sidebar-w" min="160" max="360" step="1" oninput="_rzSliderLive('sidebarW',this.value)" onchange="applyAppearance()">
           <span class="appear-value" id="a-sidebar-w-val"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Nick column</span>
-          <input type="range" class="appear-slider" id="a-nick-w" min="60" max="180" step="5" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-nick-w" min="60" max="180" step="1" oninput="_rzSliderLive('nickW',this.value)" onchange="applyAppearance()">
           <span class="appear-value" id="a-nick-w-val"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Nick panel width</span>
-          <input type="range" class="appear-slider" id="a-nickpanel-w" min="120" max="320" step="10" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-nickpanel-w" min="120" max="320" step="1" oninput="_rzSliderLive('nickPanelW',this.value)" onchange="applyAppearance()">
           <span class="appear-value" id="a-nickpanel-w-val"></span>
         </div>
         <div class="appear-row">
@@ -3850,6 +3883,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 <!-- Animation overlay for animated themes -->
 <div id="theme-bg-layer"></div>
 <div id="theme-bg-dim"></div>
+<!-- Drag-to-resize strips for the three column boundaries. Positioned from
+     measured rects by _layoutResizeHandles(); empty until app.js builds them. -->
+<div id="resize-handles" aria-hidden="true"></div>
 <div id="anim-overlay"><canvas id="anim-canvas"></canvas></div>
 <!-- Custom prompt modal (Electron doesn't support window.prompt) -->
 <div id="custom-prompt-overlay"><div id="custom-prompt-box"><div id="custom-prompt-msg"></div><input id="custom-prompt-input" type="text" autocomplete="off" spellcheck="false"><div id="custom-prompt-btns"><button id="custom-prompt-cancel">Cancel</button><button id="custom-prompt-ok">OK</button></div></div></div>

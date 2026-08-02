@@ -43,9 +43,11 @@ const NORMALISE = {
   // Opacity dips below this read as a blink on a pet drawn as a light source.
   FADE_FLOOR: 0.55,
   FADE_MIN_MS: 1600,
-  // Fast onset motion in peripheral vision is what actually grabs the eye.
-  GO_MIN_MS: 900,
-  GO_TRAVERSAL_MIN_MS: 1600,
+  // Floors only against genuinely startling darts. These were once 900/1600,
+  // which turned every pet into slow motion and, with the idle gaps, made them
+  // look dead. Motion is not the problem — see the tuning note in static/pets.js.
+  GO_MIN_MS: 320,
+  GO_TRAVERSAL_MIN_MS: 650,
   // Colour emoji are far more salient than the '·'/'✦' text glyphs. Map them to
   // monochrome equivalents so no pet can out-shout the others.
   GLYPH: { '💧': '·', '❄': '✦', '🍂': '·', '💦': '·', '✨': '✦', '⭐': '✦', '🌟': '✦', '💫': '✦', '🔥': '·', '💨': '·' },
@@ -85,12 +87,18 @@ function normalisePet(p) {
     }
     keep.push(b);
   }
-  // Re-weight so stillness dominates the weighted draw, not just the raw count.
+  // Bias the weighted draw TOWARD moving about. This used to do the opposite —
+  // it clamped anything energetic down to weight 2 and floored pure-idle at 3,
+  // so the draw overwhelmingly picked "sit still" and the pets barely budged.
+  // Wandering is the whole point of a desktop pet; the calm rules above are what
+  // keep it from being obnoxious.
   for (const b of keep) {
-    const abrupt = (b.steps || []).some(s => 'emit' in s || 'spin' in s || 'hop' in s || 'wiggle' in s ||
-      (('go' in s || 'scale' in s || 'rotate' in s) && (s.ms || 0) < 900));
-    if (abrupt && b.weight > 2) { b.weight = 2; notes.push(`lowered weight of abrupt "${b.name}"`); }
-    if (!abrupt && b.weight < 3) b.weight = 3;
+    const moves = (b.steps || []).some(s => 'go' in s || 'hop' in s);
+    const flashy = (b.steps || []).some(s => 'emit' in s || 'spin' in s);
+    if (moves && b.weight < 4) { b.weight = 4; notes.push(`raised weight of moving "${b.name}"`); }
+    if (!moves && b.weight > 2) { b.weight = 2; notes.push(`capped weight of idle "${b.name}"`); }
+    // Particles and spins are the showy ones — keep them occasional.
+    if (flashy && b.weight > 2) { b.weight = 2; notes.push(`lowered weight of showy "${b.name}"`); }
   }
   p.behaviors = keep;
   if (notes.length) { normCount += notes.length; }

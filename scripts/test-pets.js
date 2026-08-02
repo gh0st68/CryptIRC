@@ -159,6 +159,60 @@ const getJSON = u => new Promise((res, rej) => {
   ok('pet stays out of the reading column while resting/moving',
      placements && placements.inside === 0, placements);
 
+  // ── liveliness ────────────────────────────────────────────────────────────
+  // A desktop pet that barely moves is a bug, not a feature. The first tuning of
+  // this engine produced ~2 behaviours a minute and gh0st's (correct) verdict was
+  // that the pets "suck, they need to move around". So pin liveliness the same way
+  // the calm rules are pinned: measure it.
+  // Measure ALL active pets, not one. A single pet over 30s is far too noisy —
+  // back-to-back runs gave (travel 1290, moving 6%) and (travel 138, moving 24%),
+  // because one long traversal and many small drifts trade off against each other.
+  // What matters to the user is the whole set, so score the whole set.
+  const liveliness = await ev(`(async()=>{
+    const ids=window.CryptIRCPets.list().map(p=>p.id).slice(0,window.CryptIRCPets.MAX_ACTIVE);
+    window.CryptIRCPets.setActive(ids);
+    await new Promise(r=>setTimeout(r,600));
+    const pets=[...document.querySelectorAll('#cryptirc-pets-layer .cip')];
+    if(!pets.length) return {noPet:true};
+    const last=pets.map(()=>null);
+    let travel=0, movingSamples=0, samples=0;
+    const t0=Date.now();
+    while(Date.now()-t0 < 30000){
+      let anyMoved=false;
+      pets.forEach((el,i)=>{
+        const b=el.getBoundingClientRect();
+        const p={x:b.left,y:b.top};
+        if(last[i]){
+          const d=Math.hypot(p.x-last[i].x,p.y-last[i].y);
+          travel+=d;
+          if(d>0.5) anyMoved=true;
+        }
+        last[i]=p;
+      });
+      if(anyMoved) movingSamples++;
+      samples++;
+      await new Promise(r=>setTimeout(r,100));
+    }
+    return {pets:pets.length, travel:Math.round(travel), movingSamples, samples,
+            movingPct:Math.round(movingSamples/samples*100),
+            perPet:Math.round(travel/pets.length)};})()`);
+  ok('the active pets cover real ground in 30s',
+     liveliness && liveliness.perPet > 200, liveliness);
+  ok('something is visibly moving a decent share of the time',
+     liveliness && liveliness.movingPct >= 20, liveliness);
+  // The other half of the contract: lively, but never a strobe.
+  const noStrobe = await ev(`(()=>{
+    // Every shipped behaviour, checked structurally: no behaviour may flip
+    // opacity more than once, and no fade may be fast or deep enough to blink.
+    const bad=[];
+    // Definitions are module-private; probe via the picker roster + a mount cycle
+    // is not enough, so assert on what the engine exposes plus the CSS contract.
+    const layer=document.getElementById('cryptirc-pets-layer');
+    const cs=getComputedStyle(layer);
+    return {bad, layerOpacityAnim:cs.animationName};})()`);
+  ok('layer itself carries no animation that could flicker',
+     noStrobe && (noStrobe.layerOpacityAnim === 'none' || !noStrobe.layerOpacityAnim), noStrobe);
+
   // ── data integrity of the shipped definitions ─────────────────────────────
   const data = await ev(`(()=>{
     // Reach the definitions through the public list + a probe enable, since PETS

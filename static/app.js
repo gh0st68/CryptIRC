@@ -3023,6 +3023,10 @@ function renderChat(){
   // is immediately followed by the reply's numerics — treat those first appends
   // as part of the burst so they don't pulse in one-by-one after the view swap.
   _lastAppendTs=Date.now();
+
+  // The nick handle is measured off a live .msg-nick, so a re-render can
+  // remove the row it was tracking. Re-seat (coalesced).
+  try{ if(typeof _rzRelayoutSoon==='function') _rzRelayoutSoon(60); }catch(e){}
 }
 function loadOlderMessages(){
   if(!active)return;
@@ -3684,6 +3688,8 @@ function updateTopbar(){
     topicMenuBtn.style.display=active?'':'none';
     topbarSpacer.style.display='';
   }
+
+  try{ if(typeof _rzRelayoutSoon==='function') _rzRelayoutSoon(); }catch(e){}
 }
 
 // ─── Media ────────────────────────────────────────────────────────────────────
@@ -8145,6 +8151,11 @@ function applyThemeCSS(cfg){
   // text below — data-exfil via url()/defacement). Legit numbers pass through.
   const fontSize=(+(mob&&cfg.mobileChatSize?cfg.mobileChatSize:cfg.chatSize))||14;
   const nickW=(+(mob&&cfg.mobileNickW?cfg.mobileNickW:cfg.nickW))||100;
+  // Also expose it as a var. The generated rule above falls back to the literal,
+  // so nothing depends on this being set — it exists so a live drag can retarget
+  // the column with one setProperty instead of regenerating this whole sheet at
+  // pointer-move rate (which also re-ran the pet/theme/animation apply funnel).
+  document.documentElement.style.setProperty('--nick-col-w', nickW+'px');
   const _lineH=(+cfg.lineHeight)||1.55, _msgGap=(+cfg.msgGap)||4, _sideF=(+cfg.sidebarFont)||12, _nickF=(+cfg.nickFont)||13;
   const _fontFam=(cfg.font||"'DM Sans',sans-serif").replace(/[;{}()<>\\]/g,'');
   const showTs=mob?(cfg.mobileTimestamps!==undefined?cfg.mobileTimestamps:false):cfg.timestamps;
@@ -8153,7 +8164,7 @@ function applyThemeCSS(cfg){
     :root { --mono:${_fontFam}; }
     .msg-row { line-height:${_lineH}; ${cfg.compact?'padding:1px 12px;':''} gap:${_msgGap}px; }
     .msg-ts, .sc-ts { ${showTs?'':'display:none;'} font-size:${Math.max(fontSize-3,8)}px; }
-    .msg-nick { width:${nickW}px; font-size:${fontSize}px; }
+    .msg-nick { width:var(--nick-col-w, ${nickW}px); max-width:var(--nick-col-w, ${nickW}px); font-size:${fontSize}px; }
     .msg-body { font-size:${fontSize}px; }
     .chan-item { font-size:${_sideF}px; }
     .net-label { font-size:${Math.max(_sideF-1,9)}px; }
@@ -8200,6 +8211,9 @@ function applyThemeCSS(cfg){
   _applyPets(cfg);
   _applyBarButtons(cfg);
   _applyTsFormat(cfg);
+  // Column widths may have just changed — re-seat the drag strips over their
+  // new boundaries. Cheap, and this is the one funnel every width change passes.
+  try{ if(typeof _layoutResizeHandles==='function'){ _layoutResizeHandles(); _rzRelayoutSoon(); } }catch(e){}
 }
 // Adopt the saved timestamp format. Lives here rather than in applyAppearance so
 // it also takes effect on boot and on a cross-device settings sync, not just
@@ -9000,6 +9014,204 @@ function populateAppearanceModal(cfg){
   const _ch=el('a-colors-customhint');
   if(_ch) _ch.style.display=(typeof cfg.theme==='string'&&cfg.theme.indexOf('custom:')===0)?'':'none';
 }
+// ─── Drag-to-resize column dividers ─────────────────────────────────────────
+// Three boundaries are draggable: the channel sidebar's right edge, the user
+// list's left edge, and the nick column inside each chat row. Each one writes
+// the SAME appearance setting its Appearance slider already writes, so a dragged
+// width persists and syncs exactly like a slider-set one — there is no second
+// place to store it, and the slider and the handle can never disagree.
+//
+// The handles are position:fixed and placed from measured rects rather than
+// living inside the panels, because #sidebar clips its children and #chat-area
+// scrolls (a child there would scroll away with the messages).
+const RZ_DEFS=[
+  // `off` shifts the strip off the 4px scrollbar that sits just inside each
+  // boundary. Centring a 9px strip on the boundary covered #chat-area's scrollbar
+  // completely and most of the channel list's, making them undraggable.
+  {key:'sidebarW',   cssVar:'--sidebar-w', slider:'a-sidebar-w',   min:160, max:360, def:220, edge:'right', off:-1, el:()=>document.getElementById('sidebar')},
+  {key:'nickPanelW', cssVar:'--nicks-w',   slider:'a-nickpanel-w', min:120, max:320, def:180, edge:'left',  off:0,  el:()=>document.getElementById('nick-panel')},
+  // The nick column has no element of its own to measure an edge from — it is a
+  // per-row flex child — so it is driven off a live .msg-nick rect.
+  // First VISIBLE nick, not the first in document order: with "hide status
+  // messages" on, scrollback usually opens with display:none join/part rows, and
+  // a zero-width rect put the handle at x=-4 (far left, over the sidebar).
+  {key:'nickW',      cssVar:null,          slider:'a-nick-w',      min:60,  max:180, def:100, edge:'nick',  off:-4,
+   el:()=>[...document.querySelectorAll('#chat-area .msg-nick')].find(n=>n.getBoundingClientRect().width>0)||null},
+];
+let _rzBuilt=false, _rzDragging=null;
+function _rzHost(){ return document.getElementById('resize-handles'); }
+// Live preview for the three width sliders. They are step=1 (so a dragged width
+// is exactly representable), which made the old oninput="applyAppearance()" fire
+// a localStorage write + a save_appearance to the server + a broadcast to every
+// other session of this user on every pixel of travel. Preview here; the
+// slider's onchange commits once, on release.
+function _rzSliderLive(key,val){
+  const d=RZ_DEFS.find(x=>x.key===key); if(!d) return;
+  const v=_rzClamp(d,+val||d.def);
+  if(d.cssVar) document.documentElement.style.setProperty(d.cssVar,v+'px');
+  else document.documentElement.style.setProperty('--nick-col-w',v+'px');
+  const lbl=document.getElementById(d.slider+'-val');
+  if(lbl) lbl.textContent=v+'px';
+  if(typeof _rzRelayoutSoon==='function') _rzRelayoutSoon(0);
+}
+function _rzClamp(d,v){ return Math.round(Math.max(d.min,Math.min(d.max,v))); }
+
+// Position every handle over its current boundary. Cheap (three getBoundingClientRect)
+// and called whenever the layout could have moved.
+function _layoutResizeHandles(){
+  const host=_rzHost(); if(!host||!_rzBuilt) return;
+  if(isMobileView()){ host.style.display='none'; return; }
+  host.style.display='';
+  const chat=document.getElementById('chat-area');
+  const chatR=chat?chat.getBoundingClientRect():null;
+  for(const d of RZ_DEFS){
+    const h=document.getElementById('rz-'+d.key); if(!h) continue;
+    const t=d.el();
+    // Hide a handle whose panel is collapsed or not applicable to this view —
+    // a grab strip floating over nothing is worse than no handle.
+    let show=!!t;
+    if(d.key==='nickPanelW'){
+      const np=document.getElementById('nick-panel');
+      show=!!np && !np.classList.contains('collapsed') && !document.body.classList.contains('no-nicklist') && np.getBoundingClientRect().width>4;
+    }
+    if(d.key==='sidebarW'){
+      const sb=document.getElementById('sidebar');
+      show=!!sb && sb.getBoundingClientRect().width>4;
+    }
+    if(!show){ h.style.display='none'; continue; }
+    const r=t.getBoundingClientRect();
+    if(!r.width){ h.style.display='none'; continue; }
+    let x;
+    if(d.edge==='right')      x=r.right;
+    else if(d.edge==='left')  x=r.left;
+    else{
+      // A custom timestamp format makes .msg-ts content-sized, so the nick
+      // boundary is ragged per row. One straight strip can only honestly sit at
+      // the column's true extent — the widest row.
+      x=r.right;
+      if(document.body.classList.contains('ts-custom')){
+        for(const n of document.querySelectorAll('#chat-area .msg-nick')){
+          const nr=n.getBoundingClientRect();
+          if(nr.width>0 && nr.right>x) x=nr.right;
+        }
+      }
+    }
+    const top   = d.key==='nickW' && chatR ? chatR.top    : r.top;
+    const bottom= d.key==='nickW' && chatR ? chatR.bottom : r.bottom;
+    if(!(bottom>top)){ h.style.display='none'; continue; }
+    h.style.display='';
+    h.style.left=(x+(d.off!=null?d.off:-4))+'px';
+    h.style.top=top+'px';
+    h.style.height=(bottom-top)+'px';
+  }
+}
+function _rzBuild(){
+  const host=_rzHost(); if(!host||_rzBuilt) return;
+  for(const d of RZ_DEFS){
+    const h=document.createElement('div');
+    h.className='rz'; h.id='rz-'+d.key;
+    h.title='Drag to resize · double-click to reset';
+    h.style.display='none';
+    h.addEventListener('pointerdown',e=>_rzStart(e,d));
+    h.addEventListener('dblclick',()=>_rzApply(d,d.def,true));
+    host.appendChild(h);
+  }
+  _rzBuilt=true;
+  _layoutResizeHandles();
+  _rzSyncNickRule();
+}
+// The faint nick divider is only meaningful where there is a handle to grab, so
+// it is gated on the SAME condition as the handles — and re-evaluated, because a
+// window can be resized across the mobile breakpoint without a reload.
+function _rzSyncNickRule(){
+  let fine=true;
+  try{ fine=!window.matchMedia||window.matchMedia('(hover:hover) and (pointer:fine)').matches; }catch(e){}
+  try{ document.body.classList.toggle('rz-nick-visible', !!fine && !isMobileView()); }catch(e){}
+}
+// Write the width. `commit` persists; a live drag updates the view only, so the
+// synced appearance blob isn't rewritten on every pointermove.
+function _rzApply(d,val,commit){
+  const v=_rzClamp(d,val);
+  if(d.cssVar) document.documentElement.style.setProperty(d.cssVar,v+'px');
+  else document.documentElement.style.setProperty('--nick-col-w',v+'px');
+  const sl=document.getElementById(d.slider);
+  if(sl) sl.value=v;
+  const lbl=document.getElementById(d.slider+'-val');
+  if(lbl) lbl.textContent=v+'px';
+  if(commit){
+    const cfg={...loadAppearance()};
+    cfg[d.key]=v;
+    saveAppearance(cfg);
+    applyThemeCSS(cfg);
+  }
+  _layoutResizeHandles();
+}
+function _rzStart(e,d){
+  if(_rzDragging) return;                       // one drag at a time
+  if(e.button!==0 && e.pointerType==='mouse') return;
+  const t=d.el(); if(!t) return;
+  const pid=e.pointerId;                        // ignore every other pointer
+  let moved=false;
+  const startX=e.clientX;
+  const r=t.getBoundingClientRect();
+  const startW=(d.key==='nickW')?(+loadAppearance().nickW||d.def):Math.round(r.width);
+  const handleEl=e.currentTarget;
+  const move=ev2=>{
+    if(ev2.pointerId!==pid) return;
+    if(Math.abs(ev2.clientX-startX)>0) moved=true;
+    const dx=ev2.clientX-startX;
+    // The user list grows leftwards, so its handle inverts.
+    const w=(d.edge==='left')?(startW-dx):(startW+dx);
+    _rzApply(d,w,false);
+  };
+  const up=ev2=>{
+    if(ev2 && ev2.pointerId!==undefined && ev2.pointerId!==pid) return;
+    document.removeEventListener('pointermove',move);
+    document.removeEventListener('pointerup',up);
+    document.removeEventListener('pointercancel',up);
+    document.body.classList.remove('rz-dragging');
+    if(handleEl) handleEl.classList.remove('dragging');
+    _rzDragging=null;
+    // A bare click moved nothing — committing would write localStorage, push a
+    // save_appearance to the server and broadcast to every other session of this
+    // user for no reason (and a double-click reset would do it three times).
+    if(!moved) return;
+    // Persist once, on release — this is what makes the position stick across
+    // reloads and follow you to your other devices.
+    let cur;
+    if(d.key==='nickW'){
+      const raw=document.documentElement.style.getPropertyValue('--nick-col-w');
+      cur=parseFloat(raw)||d.def;
+    }else{
+      const t2=d.el();
+      cur=t2?Math.round(t2.getBoundingClientRect().width):d.def;
+    }
+    _rzApply(d,cur,true);
+  };
+  document.addEventListener('pointermove',move);
+  document.addEventListener('pointerup',up);
+  document.addEventListener('pointercancel',up);
+  // Only claim the drag once the listeners are actually attached, so a throwing
+  // setPointerCapture cannot strand .dragging / _rzDragging forever.
+  _rzDragging=d;
+  handleEl.classList.add('dragging');
+  document.body.classList.add('rz-dragging');
+  try{ handleEl.setPointerCapture && handleEl.setPointerCapture(pid); }catch(_){}
+  e.preventDefault();
+}
+// Coalesced re-seat. The panels animate width over 200ms, so a measurement taken
+// on the same tick as a width change reads a mid-transition value and strands the
+// strip; and updateTopbar fires from a dozen call sites, so an uncancelled timer
+// per call would queue a forced layout per NAMES event.
+let _rzRelayoutT=0;
+function _rzRelayoutSoon(delay){
+  if(_rzRelayoutT) clearTimeout(_rzRelayoutT);
+  _rzRelayoutT=setTimeout(()=>{ _rzRelayoutT=0; _rzSyncNickRule(); _layoutResizeHandles(); }, delay==null?240:delay);
+}
+// Keep the strips glued to their boundaries as the layout moves under them.
+window.addEventListener('resize',()=>{ _rzSyncNickRule(); _layoutResizeHandles(); _rzRelayoutSoon(); },{passive:true});
+document.addEventListener('DOMContentLoaded',()=>{ _rzBuild(); setTimeout(_layoutResizeHandles,300); });
+
 // ─── "More Pets" chooser (Appearance ▸ More Pets) ───────────────────────────
 // Built from the engine's own list() so adding a pet to static/pets.js is the
 // only edit needed — this UI, the cap and the labels all follow automatically.
@@ -13086,6 +13298,8 @@ function toggleNickPanel(){
     try{localStorage.setItem('cryptirc_nick_collapsed',collapsed?'1':'');}catch(e){}
     savePrefsToServer();
   }
+
+  try{ if(typeof _rzRelayoutSoon==='function') _rzRelayoutSoon(); }catch(e){}
 }
 function toggleSidebarCollapse(){
   const sb=document.getElementById('sidebar');
@@ -13095,6 +13309,8 @@ function toggleSidebarCollapse(){
   if(icon) icon.style.transform=collapsed?'rotate(180deg)':'';
   try{localStorage.setItem('cryptirc_sidebar_collapsed',collapsed?'1':'');}catch(e){}
   savePrefsToServer();
+
+  try{ if(typeof _rzRelayoutSoon==='function') _rzRelayoutSoon(); }catch(e){}
 }
 
 // ─── Certificate management ───────────────────────────────────────────────────
@@ -14820,6 +15036,11 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.5.2', date:'August 2026', items:[
+    {tag:'new', text:'You can now drag the column dividers to resize them. Grab the line at the edge of the channel list, the edge of the user list, or between the nicknames and the messages, and pull. A faint line shows up when your pointer is over a handle so you can see what you\u2019re grabbing. Double-click a divider to put it back to its default.'},
+    {tag:'new', text:'Widths you drag are remembered, and they follow you \u2014 they\u2019re the same setting the Appearance sliders have always written, so a size you set on your desktop shows up on your other devices too, and the sliders and the dividers can never disagree.'},
+    {tag:'fix', text:'The new desktop pets barely moved. They were tuned far too cautiously in the name of not being distracting \u2014 about two little movements a minute, which read as a statue rather than a pet. They now wander properly, and drift gently even between behaviours. The things that actually make a pet irritating are unchanged: no blinking, no bright particles, no sound, they still keep off the text you\u2019re reading, and clicks still pass straight through them.'},
+  ]},
   {version:'0.5.1', date:'August 2026', items:[
     {tag:'fix', text:'The chat no longer stops following along when a channel gets busy. The flag that means "you’ve scrolled up to read history" was a one-way latch — once something set it, auto-scroll gave up and stayed given up until you manually dragged back to the bottom, which is exactly what people were having to do. It can now only be set by you actually scrolling upward, so a burst of messages, a late-loading image or the client trimming old lines can’t strand you any more.'},
     {tag:'fix', text:'The "someone is typing" bar no longer covers the newest message. It slides in over 120ms and takes 18 pixels out of the chat, but the view was only re-pinned once at the very start of that — so it settled 15px too low and hid the last line. The chat now stays pinned for the whole animation rather than just its first instant. If you’re scrolled up reading history it still leaves you exactly where you were.'},
