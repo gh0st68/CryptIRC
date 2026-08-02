@@ -1,46 +1,75 @@
 <p align="center">
-  <img src="static/icon.svg" width="80" height="80" alt="CryptIRC">
+  <img src="static/icon.svg" width="88" height="88" alt="CryptIRC">
 </p>
 
 <h1 align="center">CryptIRC</h1>
 
 <p align="center">
-  <strong>End-to-end encrypted IRC client for the web</strong>
+  <b>End-to-end encrypted IRC. Self-hosted. Always on.</b>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
-  <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
-  <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.5.0-brightgreen" alt="Version">
-  <img src="https://img.shields.io/badge/%F0%9F%A4%96%20AI-9%20providers%20%2B%20ChatGPT%20OAuth-00d4aa" alt="AI">
-  <img src="https://img.shields.io/badge/bots-19%20built--in-ff8800" alt="Bots">
-  <img src="https://img.shields.io/badge/themes-173-9b59ff" alt="Themes">
-  <img src="https://img.shields.io/badge/fonts-140-blue" alt="Fonts">
-  <img src="https://img.shields.io/badge/commands-100+-red" alt="Commands">
-  <img src="https://img.shields.io/badge/license-private-lightgrey" alt="License">
+  <sub>Your server holds the connection. Your device holds the key.<br>
+  The server can't read a single thing it stores for you — and that's architectural, not a policy.</sub>
 </p>
 
 <p align="center">
-  <a href="https://cryptirc.com"><b>🌐 cryptirc.com</b></a> ·
-  <a href="https://gh0st68.github.io/CryptIRC/"><b>🎨 Browse the live Theme Gallery</b></a> ·
-  <a href="https://client.twistednet.org/cryptirc"><b>Launch the hosted client</b></a> ·
-  <a href="https://github.com/gh0st68/CryptIRC/releases"><b>Download apps</b></a>
+  <img src="https://img.shields.io/badge/version-0.5.0-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Version">
+  <img src="https://img.shields.io/badge/rust-1.78%2B-e43717?style=flat-square&labelColor=0b0d0f&logo=rust&logoColor=white" alt="Rust">
+  <img src="https://img.shields.io/badge/platform-linux-f0c040?style=flat-square&labelColor=0b0d0f&logo=linux&logoColor=white" alt="Linux">
+  <img src="https://img.shields.io/badge/PWA-installable-6c7ce0?style=flat-square&labelColor=0b0d0f&logo=pwa&logoColor=white" alt="PWA">
+  <img src="https://img.shields.io/badge/license-proprietary-6a7480?style=flat-square&labelColor=0b0d0f" alt="License">
 </p>
 
 <p align="center">
-  <b>For support, bugs, or just want to stop by:</b><br>
-  <code>irc.twistednet.org</code> — <b>#dev</b> &amp; <b>#twisted</b>
+  <img src="https://img.shields.io/badge/logs-AES--256--GCM-3ddc84?style=flat-square&labelColor=0b0d0f" alt="Encrypted logs">
+  <img src="https://img.shields.io/badge/DMs-Signal%20Protocol-2592e9?style=flat-square&labelColor=0b0d0f&logo=signal&logoColor=white" alt="Signal Protocol">
+  <img src="https://img.shields.io/badge/vault-Argon2id-9b59ff?style=flat-square&labelColor=0b0d0f" alt="Argon2id">
+  <img src="https://img.shields.io/badge/server-zero--knowledge-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Zero knowledge">
 </p>
 
 <p align="center">
-  👻 <b>Developed by gh0st</b>
+  <img src="https://img.shields.io/badge/themes-224-9b59ff?style=flat-square&labelColor=0b0d0f" alt="224 themes">
+  <img src="https://img.shields.io/badge/fonts-140-0099ff?style=flat-square&labelColor=0b0d0f" alt="140 fonts">
+  <img src="https://img.shields.io/badge/bots-19-ff8800?style=flat-square&labelColor=0b0d0f" alt="19 bots">
+  <img src="https://img.shields.io/badge/AI-9%20providers-00d4aa?style=flat-square&labelColor=0b0d0f" alt="9 AI providers">
+  <img src="https://img.shields.io/badge/commands-100%2B-e05555?style=flat-square&labelColor=0b0d0f" alt="100+ commands">
+  <img src="https://img.shields.io/badge/IRCv3-17%20caps-f0c040?style=flat-square&labelColor=0b0d0f" alt="IRCv3">
 </p>
 
 <p align="center">
-  <b>Don't feel like setting up your own? Use ours — free.</b><br>
-  Register at <a href="https://client.twistednet.org/cryptirc"><code>https://client.twistednet.org/cryptirc</code></a><br>
-  <sub>Your vault key is derived from your passphrase on your device. The passphrase is <b>never</b> sent to the server or stored anywhere. All your logs, DMs, credentials, and notes are encrypted with that key before they touch disk — even we can't read them.</sub>
+  <a href="https://cryptirc.com"><b>cryptirc.com</b></a> &nbsp;·&nbsp;
+  <a href="https://gh0st68.github.io/CryptIRC/"><b>Theme Gallery</b></a> &nbsp;·&nbsp;
+  <a href="https://client.twistednet.org/cryptirc"><b>Hosted client</b></a> &nbsp;·&nbsp;
+  <a href="https://github.com/gh0st68/CryptIRC/releases"><b>Downloads</b></a>
+</p>
+
+---
+
+```console
+$ git clone https://github.com/gh0st68/CryptIRC.git && cd CryptIRC
+$ sudo bash deploy/deploy.sh yourdomain.com you@yourdomain.com
+
+  [✓] dependencies resolved        [✓] systemd units hardened
+  [✓] TLS provisioned (Caddy)      [✓] irc-core daemon online
+  [✓] both binaries built          [✓] https://yourdomain.com ready
+```
+
+<p align="center">
+  <sub><b>One command.</b> Debian · Ubuntu · Arch. Nothing else to configure.</sub>
+</p>
+
+---
+
+<p align="center">
+  <b>Don't want to run your own? Use ours — free.</b><br>
+  <a href="https://client.twistednet.org/cryptirc"><code>client.twistednet.org/cryptirc</code></a><br>
+  <sub>Your vault key is derived from your passphrase <b>on your device</b>. The passphrase is <b>never</b> sent to the server or stored anywhere. Logs, DMs, credentials and notes are encrypted with that key before they touch disk — <b>even we can't read them.</b></sub>
+</p>
+
+<p align="center">
+  <b>Support · bugs · hanging out:</b> &nbsp;<code>irc.twistednet.org</code> &nbsp;→&nbsp; <b>#dev</b> · <b>#twisted</b><br>
+  <sub>👻 built by <b>gh0st</b></sub>
 </p>
 
 <p align="center">
@@ -110,7 +139,7 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 - **Multi-network** — connect to as many IRC networks as you want simultaneously
 - **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
 - **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
-- **224 themes** (64 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin and a **Discord** theme) + **140 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
+- **224 themes** (64 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin and a **Discord** theme) + **140 fonts** and a live [theme gallery](https://gh0st68.github.io/CryptIRC/). **Customize any of them** — hit ✎ on any theme to fork it into your own editable copy — and **put your own picture behind any theme**, with opacity, blur and dim so your chat stays readable
 - **🐑🦀👻🐟👽 Desktop pets** — five to pick from (desktop, mobile, or both): the classic '95 **eSheep** (wanders, climbs walls, naps, UFO abduction), a furious **Angry Crab** (scuttles sideways, snaps its claws, eats shrimp, naps, digs — drag it around, and it pesters the sheep), a friendly **Ghost** (floats freely, fades through walls, the odd spooky "BOO!"), a serene **Calm Fish** (drifts around, click near it to feed), and a **Little Alien** flying saucer (UFO tractor-beam abductions). The sheep and crab are draggable; the ghost, fish, and alien let clicks pass through
 - **In-app News & changelog** with an auto-versioning build badge, so you always see exactly what changed
 - **Full IRCv3 support** — 17 user-toggleable capabilities including typing indicators, away-notify, server-time, message-tags, plus SASL PLAIN/EXTERNAL and nick MONITOR
@@ -146,30 +175,38 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 
 ### Themes & Personalization
 
-**224 built-in themes** — 160 static + 64 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more), including a pixel-perfect **mIRC** skin with full Windows-95 window chrome and a **Discord** theme with its familiar dark UI. Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
+**224 built-in themes** — 160 static + 64 animated — each hand-tuned across a full palette: five background layers, two border tiers, three text weights, matched accents and its own status colors. 90 ship an illustrated backdrop drawn in SVG. Highlights include a pixel-perfect **mIRC** skin with real Windows-95 window chrome and a **Discord** theme with its familiar dark UI.
 
 <p align="center">
   <a href="https://gh0st68.github.io/CryptIRC/">
-    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 173 live theme previews">
+    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 224 live theme previews">
   </a>
   <br>
-  <b><a href="https://gh0st68.github.io/CryptIRC/">🎨 Browse the live Theme Gallery →</a></b><br>
-  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter, and preview all 173</sub>
+  <b><a href="https://gh0st68.github.io/CryptIRC/">Browse the live Theme Gallery →</a></b><br>
+  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter and preview all 224</sub>
 </p>
 
-A taste of the range:
+#### Make any of them yours
+
+Hover any theme and hit **✎**. The editor opens on that exact theme — its colors, its animation, its artwork all loaded — and saving gives you your own copy, marked **★**. The original is never touched, so you can always go back.
+
+**Your own background, on any theme.** Upload an image or paste an `https://` link and it sits behind every theme you switch to. Opacity, blur, dim and tiling are all on sliders — and they work on the built-in artwork too, so a theme you liked but found too busy can simply be turned down. Uploads stay on that device; a linked image follows you everywhere.
 
 | Family | Examples |
-|--------|----------|
+|---|---|
 | **Editor classics** | Dracula · Monokai · Nord · Gruvbox · One Dark · Catppuccin · Solarized · Tokyo Night |
-| **App-inspired** | Discord · mIRC (full Win95 chrome) |
+| **App-inspired** | Discord · mIRC *(full Win95 chrome)* |
 | **Neon / cyberpunk** | Cyberpunk · Outrun · Blade Runner · Vaporwave · Hotline Miami · Neon Tokyo |
-| **Terminal / hacker** | Matrix · Hacker · Retro Terminal · Cyberdeck · Firewall |
-| **Nature / seasonal** | Aurora · Snowfall · Cherry Blossom · Ocean · Forest Rain · Northern Lights |
+| **Terminal / hacker** | Matrix · Hacker · Retro Terminal · Cyberdeck · CRT Terminal · Oscilloscope · Sonar |
+| **Materials & craft** | Blueprint · Carbon Fiber · Damascus Steel · Verdigris · Marble · Letterpress · Circuit Etch |
+| **Weather & light** | Blue Hour · Fog Bank · Heat Haze · Monsoon · Eclipse · Harvest Moon · Aurora · Snowfall |
+| **Living world** | Coral Reef · Mycelium · Butterfly Wing · Peacock · Tide Pool · Cherry Blossom · Forest Rain |
+| **Art & culture** | Ukiyo-e · Byzantine Gold · Kintsugi · Zellij · Sumi Ink · Runestone · Bauhaus · Art Deco |
+| **Print & optical** | Risograph · Halftone · Venetian · Infrared · X-Ray · Liquid Metal · Dreamcore |
 | **Mono / metal** | Stealth · Charcoal · Graphite · Slate · Noir · Obsidian |
-| **Gemstone / warm** | Emerald · Ruby · Sapphire · Amethyst · Lava · Copper · Golden Hour |
+| **Warm / edible** | Matcha · Citrus Grove · Berry · Honeycomb · Cacao · Neapolitan · Golden Hour |
 
-…and ~140 more — [see them all in the gallery](https://gh0st68.github.io/CryptIRC/).
+…and ~180 more — [see them all in the gallery](https://gh0st68.github.io/CryptIRC/).
 
 ### Encryption & Security
 - **Per-user vaults** -- each user has their own passphrase and encryption key (Argon2id KDF + AES-256-GCM)

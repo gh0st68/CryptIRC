@@ -39,7 +39,9 @@ fi
 
 PKG_VER=$(grep -m1 '"version"[[:space:]]*:' "$PACKAGE_JSON" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
 LOCK_VER=$(grep -m1 '"version"[[:space:]]*:' "$PACKAGE_LOCK" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
-README_VER=$(grep -m1 'badge/version-' "$README" | sed -E 's/.*badge\/version-([0-9A-Za-z.+-]+)-[a-z]+.*/\1/')
+# Colour may be a shields.io name (brightgreen) OR a hex triplet (00d4aa), and the
+# badge may carry ?style=/&labelColor= params — match both without capturing them.
+README_VER=$(grep -m1 'badge/version-' "$README" | sed -E 's/.*badge\/version-([0-9A-Za-z.+-]+)-[0-9A-Za-z]+.*/\1/')
 
 DRIFT=false
 [[ "$PKG_VER" != "$CANON_VER" ]] && DRIFT=true
@@ -69,7 +71,9 @@ if [[ "$PKG_VER" != "$CANON_VER" || "$LOCK_VER" != "$CANON_VER" ]]; then
     CHANGED=true
 fi
 if [[ "$README_VER" != "$CANON_VER" ]]; then
-    sed -i -E "0,/badge\/version-[0-9A-Za-z.+-]+-[a-z]+/s//badge\/version-${CANON_VER}-brightgreen/" "$README"
+    # Preserve the badge's existing colour and any ?style= params — only the
+    # version segment is ours to rewrite.
+    sed -i -E "0,/badge\/version-[0-9A-Za-z.+-]+-([0-9A-Za-z]+)/s//badge\/version-${CANON_VER}-\1/" "$README"
     echo "  README.md badge: ${README_VER:-<unreadable>} → $CANON_VER"
     CHANGED=true
 fi
