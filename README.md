@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.5.2-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.5.3-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Version">
   <img src="https://img.shields.io/badge/rust-1.78%2B-e43717?style=flat-square&labelColor=0b0d0f&logo=rust&logoColor=white" alt="Rust">
   <img src="https://img.shields.io/badge/platform-linux-f0c040?style=flat-square&labelColor=0b0d0f&logo=linux&logoColor=white" alt="Linux">
   <img src="https://img.shields.io/badge/PWA-installable-6c7ce0?style=flat-square&labelColor=0b0d0f&logo=pwa&logoColor=white" alt="PWA">

@@ -24,7 +24,34 @@ const RESERVED = new Set(['esheep', 'crab', 'ghost', 'fish', 'alien']);
 const STEP_KEYS = new Set(['wait', 'go', 'hop', 'pose', 'flip', 'scale', 'rotate', 'fade', 'emit', 'wiggle', 'spin', 'ms', 'n']);
 const GO_WORDS  = new Set(['random', 'edge', 'corner', 'home', 'perch']);
 const POSES     = new Set(['idle', 'alert', 'sleep', 'happy', 'curious', 'shy', 'busy']);
-const MOTIONS   = new Set(['drift', 'walk', 'crawl', 'hover', 'swim', 'flit', 'bounce']);
+// Must stay in step with the MOTION table in static/pets.js — that table is what
+// gives each value meaning (progress curve, path shape, idle cadence, body life,
+// vertical band). A value not present there silently degrades to a plain glide,
+// which is the exact bug this vocabulary exists to prevent, so validate it here.
+const MOTIONS   = new Set([
+  'crawl', 'walk', 'bounce',            // ground
+  'swim', 'glide', 'paddle',            // water
+  'flit', 'soar', 'flap', 'hover',      // air
+  'scan', 'phase',                      // machines
+  'drift',                              // lighter than air
+]);
+// Physical plausibility, enforced rather than trusted. These pets were shipped
+// with a jellyfish that hopped, a snail that spun its shell and a rain cloud
+// that did a "startled pop" — the behaviour NAMES were species-flavoured but the
+// steps came from one generic pool. A motion implies a body, and a body cannot
+// do certain things.
+const CANNOT = {
+  crawl:  ['hop', 'spin'],   // no legs, no reason to pirouette
+  swim:   ['hop', 'spin'],   // a jellyfish has no ground to push off
+  drift:  ['hop'],           // nothing to push off in mid-air
+  soar:   ['hop'],
+  flap:   ['hop'],
+  hover:  ['hop'],
+  phase:  ['hop'],
+  scan:   ['hop'],
+  glide:  ['hop'],
+  paddle: ['spin'],
+};
 // Mirrors svgIsSafe() in static/pets.js — keep the two in step.
 const SVG_SHAPE     = /^<svg[\s>][\s\S]*<\/svg>$/i;
 const SVG_FORBIDDEN = /<\s*(script|foreignObject|image|use|iframe|object|embed|animate|set|handler|a)\b|javascript:|data:(?!image\/)|\son\w+\s*=|url\s*\(|xlink:href|href\s*=|<!--|<!\[CDATA/i;
@@ -175,6 +202,19 @@ for (const p of input) {
   });
   if (emitB > 6) why.push(`${emitB} behaviors use emit (cap 6)`);
   if (spinB > 4) why.push(`${spinB} behaviors use spin (cap 4)`);
+
+  // Physical plausibility for the motion this pet declares.
+  const banned = CANNOT[p && p.motion] || [];
+  if (banned.length) {
+    const offenders = [];
+    bs.forEach(b => {
+      const hit = ((b && b.steps) || []).some(s => s && banned.some(k => k in s));
+      if (hit) offenders.push(b.name);
+    });
+    if (offenders.length) {
+      why.push(`motion "${p.motion}" cannot ${banned.join('/')} — offending behaviors: ${offenders.slice(0, 6).join(', ')}${offenders.length > 6 ? ` (+${offenders.length - 6} more)` : ''}`);
+    }
+  }
   if (bs.length >= 46 && calm < 20) why.push(`only ${calm}/50 behaviors are calm (want >=20) — would read as busy`);
 
   if (why.length) problems.push({ id: id || '(unnamed)', why });
