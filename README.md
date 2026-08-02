@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.5.0-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.5.1-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Version">
   <img src="https://img.shields.io/badge/rust-1.78%2B-e43717?style=flat-square&labelColor=0b0d0f&logo=rust&logoColor=white" alt="Rust">
   <img src="https://img.shields.io/badge/platform-linux-f0c040?style=flat-square&labelColor=0b0d0f&logo=linux&logoColor=white" alt="Linux">
   <img src="https://img.shields.io/badge/PWA-installable-6c7ce0?style=flat-square&labelColor=0b0d0f&logo=pwa&logoColor=white" alt="PWA">
@@ -140,7 +140,7 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 - **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
 - **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
 - **224 themes** (64 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin and a **Discord** theme) + **140 fonts** and a live [theme gallery](https://gh0st68.github.io/CryptIRC/). **Customize any of them** — hit ✎ on any theme to fork it into your own editable copy — and **put your own picture behind any theme**, with opacity, blur and dim so your chat stays readable
-- **🐑🦀👻🐟👽 Desktop pets** — five to pick from (desktop, mobile, or both): the classic '95 **eSheep** (wanders, climbs walls, naps, UFO abduction), a furious **Angry Crab** (scuttles sideways, snaps its claws, eats shrimp, naps, digs — drag it around, and it pesters the sheep), a friendly **Ghost** (floats freely, fades through walls, the odd spooky "BOO!"), a serene **Calm Fish** (drifts around, click near it to feed), and a **Little Alien** flying saucer (UFO tractor-beam abductions). The sheep and crab are draggable; the ghost, fish, and alien let clicks pass through
+- **🐑🦀👻🐟👽 Desktop pets — 25 of them.** The five originals (the classic '95 **eSheep** that wanders, climbs walls, naps and gets abducted; a furious **Angry Crab**; a **Ghost**; a **Calm Fish** you can feed; a **Little Alien** flying saucer) plus **20 more** — jellyfish, paper plane, hot-air balloon, manta, moth, snail, firefly, hedgehog, teacup, desk lamp, wind-up key, rubber duck, survey probe, Lumen, Vesper relay, data wisp, ghost lantern, paper crane, toddle cap and a moody cloud — each with **50 different behaviours**. The new ones are deliberately unobtrusive: they keep to the edges and off the text you're reading, rest far more than they move, are silent, and clicks pass straight through. Up to three at a time, paused entirely when the window isn't focused, and off unless your system asks for reduced motion
 - **In-app News & changelog** with an auto-versioning build badge, so you always see exactly what changed
 - **Full IRCv3 support** — 17 user-toggleable capabilities including typing indicators, away-notify, server-time, message-tags, plus SASL PLAIN/EXTERNAL and nick MONITOR
 - **100+ slash commands** — everything from `/ascii` art to `/ud` Urban Dictionary lookups

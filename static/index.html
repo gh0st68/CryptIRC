@@ -26,6 +26,11 @@
 <script src="/cryptirc/ghost.js" defer></script>
 <script src="/cryptirc/fish.js" defer></script>
 <script src="/cryptirc/alien.js" defer></script>
+<!-- pets.js is NOT loaded here on purpose. It carries every pet's artwork and
+     behaviour table (~100KB) and these routes send no-cache, so a <script> tag
+     would cost that on every single page load for the great majority of people
+     who never switch a pet on. app.js fetches it on demand instead — when a pet
+     is already enabled at boot, or when the Appearance panel is opened. -->
 <style>
 /* ── Locally-hosted display fonts (dafont) ─────────────────────────────────── */
 @font-face { font-family:'Spooky';           src:url('fonts/spooky.ttf') format('truetype'); font-display:swap; }
@@ -787,6 +792,19 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .theme-card .tc-edit:hover { background:var(--accent); color:#000; }
 /* Marks a card as the user's own copy — needed now that a theme customized from a
    built-in sits in the same grid as the built-in it came from, often same name. */
+/* "More Pets" chooser — a compact toggle grid, because twenty separate rows of
+   off/desktop/mobile/both selects would bury the rest of the Appearance panel. */
+.pets-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(132px,1fr)); gap:6px; margin-top:4px; }
+.pets-grid .pet-chip {
+  display:flex; align-items:center; gap:6px; padding:6px 8px; cursor:pointer;
+  background:var(--bg2); border:1px solid var(--border); border-radius:6px;
+  font-size:11px; color:var(--text2); transition:border-color .15s,background .15s;
+  user-select:none; min-height:34px;
+}
+.pets-grid .pet-chip:hover { border-color:var(--border2); color:var(--text); }
+.pets-grid .pet-chip.on { border-color:var(--accent); background:var(--bg3); color:var(--text); }
+.pets-grid .pet-chip .pe { font-size:15px; line-height:1; flex:0 0 auto; }
+.pets-grid .pet-chip.disabled { opacity:.42; cursor:not-allowed; }
 .theme-card .tc-mine {
   position:absolute; top:3px; left:4px; font-size:9px; line-height:1;
   color:var(--accent); pointer-events:none; text-shadow:0 0 3px rgba(0,0,0,.6);
@@ -2860,6 +2878,22 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
             <option value="both">Both</option>
           </select>
         </div>
+      </div>
+
+      <div class="appear-section">
+        <div class="appear-section-title">✦ More Pets</div>
+        <div style="font-size:10px;color:var(--text3);margin-bottom:8px;line-height:1.5">A wider cast of quiet companions. They keep to the edges of the window and out of the text you're reading, rest far more than they move, make no sound, and clicks pass straight through them. Pick up to <b id="a-pets-max">4</b> at a time.</div>
+        <div class="appear-row">
+          <span class="appear-label">Show them</span>
+          <select id="a-pets-mode" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+            <option value="off">Off</option>
+            <option value="desktop">Desktop only</option>
+            <option value="mobile">Mobile only</option>
+            <option value="both">Both</option>
+          </select>
+        </div>
+        <div id="a-pets-grid" class="pets-grid"></div>
+        <div id="a-pets-count" style="font-size:10px;color:var(--text3);margin-top:6px"></div>
       </div>
 
       <div class="appear-section">

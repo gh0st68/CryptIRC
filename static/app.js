@@ -2520,8 +2520,19 @@ async function prependLogs(conn_id,target,lines){
       void area.offsetHeight;
       area.scrollTop=newHeight-oldHeight;
       area.style.overflowY='';
+      // renderChat() above went through scrollForce(), which cleared
+      // _userScrolledAway and armed re-anchor timers at 50-2000ms. Restoring the
+      // position is a scrollTop INCREASE, so the direction rule in _onChatScroll
+      // correctly declines to read it as the user stepping away — which means
+      // nothing would set the flag and those timers would snap the reader to the
+      // bottom about 50ms after their "load older" finished. Say what is true
+      // instead of hoping it gets inferred: the user IS reading history here.
+      _cancelScrollForce();
+      _userScrolledAway=true;
+      _lastScrollTop=area.scrollTop;
       requestAnimationFrame(()=>{
         area.scrollTop=newHeight-oldHeight;
+        _lastScrollTop=area.scrollTop;
       });
     }
   } else if(unique.length>0 && isMessagesActive() && _isDMTarget(target)){
@@ -3031,8 +3042,20 @@ function _pruneChatDOM(area){
   const MAX=1000;
   const n=area.children.length;
   if(n<=MAX)return;
-  const dist=area.scrollHeight-area.scrollTop-area.clientHeight;
-  if(dist>600)return; // user is scrolled up — don't disturb their view
+  // "Is the user reading history?" — ask the flag that means exactly that, rather
+  // than re-measuring here. appendMsgRow calls this BEFORE its scrollBottom(), so
+  // a measured distance still includes the row that was just added and has not
+  // been scrolled to yet. One tall message (an image, a multi-line paste) pushed
+  // that past 600 and the prune silently stopped running — in precisely the busy,
+  // media-heavy channels the 1000-row cap exists to protect. The DOM then grew
+  // without limit, which is its own performance problem.
+  // Belt AND braces. The flag is the honest answer to "is the user reading
+  // history", but if it is ever wrong this deletes scrollback they are looking at
+  // — including, specifically, the page they just fetched with "load older". So
+  // keep a geometric backstop too, measured generously enough that one tall new
+  // row cannot trip it the way the old `dist>600` test did.
+  if(_userScrolledAway||_jumpAnchor)return;
+  if(area.scrollTop>0 && (area.scrollHeight-area.scrollTop-area.clientHeight)>1200)return;
   let toRemove=n-MAX;
   while(toRemove>0){
     let node=area.firstChild;
@@ -3044,6 +3067,9 @@ function _pruneChatDOM(area){
     area.removeChild(node);
     toRemove--;
   }
+  // Rows vanished from above the viewport, so the browser adjusts scrollTop and
+  // fires a scroll event we did not ask for. Claim it (see _onChatScroll).
+  _markProgrammaticScroll(area);
 }
 // Rows appended within this many ms of the previous one are treated as a burst
 // and skip the fade-in animation (see .msg-row.no-anim). Tuned above typical
@@ -7764,6 +7790,11 @@ const APPEAR_DEFAULTS={
   ghost:'off',
   fish:'off',
   alien:'off',
+  // The wider pet cast (static/pets.js) shares one engine, so it shares one
+  // mode + a list of which are switched on — rather than 20 more keys, which
+  // would both bloat the 4KB synced appearance blob and bury the panel.
+  petsMode:'off',
+  petsOn:[],
   // External media auto-load policy (foreign-origin images/gifs/video/audio):
   //   'all'       = auto-load everything (default — show all images/gifs)
   //   'allowlist' = auto-load only hosts in extMediaHosts; click-to-load others
@@ -7797,6 +7828,54 @@ function _fishMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='m
 function _fishOn(v){ var m=_fishMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
 function _alienMode(v){ if(v===true) return 'both'; return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
 function _alienOn(v){ var m=_alienMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
+function _petsMode(v){ return (v==='desktop'||v==='mobile'||v==='both') ? v : 'off'; }
+function _petsShown(v){ var m=_petsMode(v), mob=isMobileView(); return m==='both' || (m==='desktop'&&!mob) || (m==='mobile'&&mob); }
+// Sanitize the enabled-pet list coming out of storage or a cross-device sync: it
+// reaches the engine, feeds the 4KB-capped synced blob, and a hostile/corrupt one
+// must not be able to grow it or summon a zoo. Unknown ids are dropped by the
+// engine itself; the cap is enforced here too so the stored value can't exceed it.
+function _petsList(v){
+  if(!Array.isArray(v)) return [];
+  var cap=(window.CryptIRCPets&&window.CryptIRCPets.MAX_ACTIVE)||4, out=[], seen={};
+  for(var i=0;i<v.length&&out.length<cap;i++){
+    var s=v[i];
+    if(typeof s!=='string'||!/^[a-z][a-z0-9_]{1,20}$/.test(s)||seen[s]) continue;
+    seen[s]=1; out.push(s);
+  }
+  return out;
+}
+// pets.js is fetched on demand rather than shipped in a <script> tag — see the
+// note in index.html. Idempotent and single-flight: many callers, one request.
+let _petsScriptPromise=null;
+function _ensurePetsLoaded(){
+  if(window.CryptIRCPets) return Promise.resolve(true);
+  if(_petsScriptPromise) return _petsScriptPromise;
+  _petsScriptPromise=new Promise(resolve=>{
+    try{
+      const s=document.createElement('script');
+      s.src='/cryptirc/pets.js';   // base path is rewritten at serve time
+      s.defer=true;
+      s.onload=()=>resolve(!!window.CryptIRCPets);
+      // Resolve (not reject) on failure so callers never hang; the pet section
+      // simply stays empty and everything else carries on.
+      s.onerror=()=>{ _petsScriptPromise=null; resolve(false); };
+      document.head.appendChild(s);
+    }catch(e){ _petsScriptPromise=null; resolve(false); }
+  });
+  return _petsScriptPromise;
+}
+// One funnel for the shared-engine pets, mirroring the five originals' pattern.
+function _applyPets(cfg){
+  // Nothing enabled and nothing loaded => do not fetch the script at all. This is
+  // what keeps the feature free for everyone who never turns a pet on.
+  if(!window.CryptIRCPets){
+    if(_petsShown(cfg.petsMode) && _petsList(cfg.petsOn).length){
+      _ensurePetsLoaded().then(okLoaded=>{ if(okLoaded) _applyPets(loadAppearance()); });
+    }
+    return;
+  }
+  try{ _petsShown(cfg.petsMode) ? window.CryptIRCPets.setActive(_petsList(cfg.petsOn)) : window.CryptIRCPets.disableAll(); }catch(e){}
+}
 let _appearCache=null,_appearCacheTs=0;
 function loadAppearance(){
   const now=Date.now();
@@ -7907,6 +7986,8 @@ function applyAppearance(){
     // Desktop pet toggle. Carry the previous value through if the row is absent.
     esheep:     el('a-esheep') ? el('a-esheep').value : _esheepMode(prev.esheep),
     crab:       el('a-crab') ? el('a-crab').value : _crabMode(prev.crab),
+    petsMode:   el('a-pets-mode') ? _petsMode(el('a-pets-mode').value) : _petsMode(prev.petsMode),
+    petsOn:     _petsList(prev.petsOn),   // toggled via the chip grid, not a form control
     ghost:      el('a-ghost') ? el('a-ghost').value : _ghostMode(prev.ghost),
     fish:       el('a-fish') ? el('a-fish').value : _fishMode(prev.fish),
     alien:      el('a-alien') ? el('a-alien').value : _alienMode(prev.alien),
@@ -8116,6 +8197,7 @@ function applyThemeCSS(cfg){
   if(window.CryptIRCGhost){ _ghostOn(cfg.ghost) ? window.CryptIRCGhost.enable() : window.CryptIRCGhost.disable(); }
   if(window.CryptIRCFish){ _fishOn(cfg.fish) ? window.CryptIRCFish.enable() : window.CryptIRCFish.disable(); }
   if(window.CryptIRCAlien){ _alienOn(cfg.alien) ? window.CryptIRCAlien.enable() : window.CryptIRCAlien.disable(); }
+  _applyPets(cfg);
   _applyBarButtons(cfg);
   _applyTsFormat(cfg);
 }
@@ -8176,6 +8258,7 @@ function _applyBarButtons(cfg){
 window.addEventListener('load', function(){
   try{ if(window.CryptIRCSheep){ var _c=loadAppearance(); _esheepOn(_c.esheep) ? window.CryptIRCSheep.enable() : window.CryptIRCSheep.disable(); } }catch(_){}
   try{ if(window.CryptIRCCrab){ var _cc=loadAppearance(); _crabOn(_cc.crab) ? window.CryptIRCCrab.enable() : window.CryptIRCCrab.disable(); } }catch(_){}
+  try{ _applyPets(loadAppearance()); }catch(_){}
   try{ if(window.CryptIRCGhost){ var _cg=loadAppearance(); _ghostOn(_cg.ghost) ? window.CryptIRCGhost.enable() : window.CryptIRCGhost.disable(); } }catch(_){}
   try{ if(window.CryptIRCFish){ var _cf=loadAppearance(); _fishOn(_cf.fish) ? window.CryptIRCFish.enable() : window.CryptIRCFish.disable(); } }catch(_){}
   try{ if(window.CryptIRCAlien){ var _ca=loadAppearance(); _alienOn(_ca.alien) ? window.CryptIRCAlien.enable() : window.CryptIRCAlien.disable(); } }catch(_){}
@@ -8783,6 +8866,8 @@ function populateAppearanceModal(cfg){
   _renderMsgColorSection();
   { const _es=el('a-esheep'); if(_es){ _es.value=_esheepMode(cfg.esheep); } }
   { const _cr=el('a-crab'); if(_cr){ _cr.value=_crabMode(cfg.crab); } }
+  { const _pm=el('a-pets-mode'); if(_pm){ _pm.value=_petsMode(cfg.petsMode); } }
+  _renderPetsGrid(cfg);
   { const _gh=el('a-ghost'); if(_gh){ _gh.value=_ghostMode(cfg.ghost); } }
   { const _fh=el('a-fish'); if(_fh){ _fh.value=_fishMode(cfg.fish); } }
   { const _al=el('a-alien'); if(_al){ _al.value=_alienMode(cfg.alien); } }
@@ -8914,6 +8999,69 @@ function populateAppearanceModal(cfg){
   // (the theme owns those colors) — surface a hint so the controls don't look broken.
   const _ch=el('a-colors-customhint');
   if(_ch) _ch.style.display=(typeof cfg.theme==='string'&&cfg.theme.indexOf('custom:')===0)?'':'none';
+}
+// ─── "More Pets" chooser (Appearance ▸ More Pets) ───────────────────────────
+// Built from the engine's own list() so adding a pet to static/pets.js is the
+// only edit needed — this UI, the cap and the labels all follow automatically.
+// Chips are built with textContent (never innerHTML): the names come from our
+// own definitions today, but this grid is the one place they'd reach the DOM.
+function _renderPetsGrid(cfg){
+  const grid=document.getElementById('a-pets-grid');
+  if(!grid) return;
+  cfg=cfg||loadAppearance();
+  const api=window.CryptIRCPets;
+  grid.innerHTML='';
+  if(!api||typeof api.list!=='function'){
+    const n=document.createElement('div');
+    n.style.cssText='font-size:10px;color:var(--text3)';
+    n.textContent='Loading…';
+    grid.appendChild(n);
+    // Opening Appearance is the other moment we need the roster, so fetch it now
+    // and re-render once it lands.
+    _ensurePetsLoaded().then(okLoaded=>{ if(okLoaded) _renderPetsGrid(loadAppearance()); });
+    return;
+  }
+  const cap=api.MAX_ACTIVE||4;
+  const maxEl=document.getElementById('a-pets-max'); if(maxEl) maxEl.textContent=String(cap);
+  const on=_petsList(cfg.petsOn);
+  const list=api.list();
+  for(const p of list){
+    const isOn=on.indexOf(p.id)>=0;
+    const full=!isOn&&on.length>=cap;
+    const chip=document.createElement('div');
+    chip.className='pet-chip'+(isOn?' on':'')+(full?' disabled':'');
+    chip.title=full?('Turn one off first — up to '+cap+' at a time'):(p.blurb||p.name);
+    const e=document.createElement('span'); e.className='pe'; e.textContent=p.emoji||'✦';
+    const nm=document.createElement('span'); nm.textContent=p.name;
+    chip.appendChild(e); chip.appendChild(nm);
+    chip.onclick=()=>{ if(full) return; _togglePet(p.id); };
+    grid.appendChild(chip);
+  }
+  const cnt=document.getElementById('a-pets-count');
+  if(cnt) cnt.textContent=on.length?(on.length+' of '+cap+' active'):'None active';
+}
+function _togglePet(id){
+  const cfg=loadAppearance();
+  const on=_petsList(cfg.petsOn);
+  const i=on.indexOf(id);
+  if(i>=0) on.splice(i,1);
+  else{
+    const cap=(window.CryptIRCPets&&window.CryptIRCPets.MAX_ACTIVE)||4;
+    if(on.length>=cap) return;
+    on.push(id);
+  }
+  // petsOn has no form control, so write it straight through rather than relying
+  // on applyAppearance's DOM gather (which would just read the old value back).
+  const next={...cfg, petsOn:on};
+  saveAppearance(next);
+  _applyPets(next);
+  _renderPetsGrid(next);
+  // Turning a pet on while the section is switched off is a dead click — flip it
+  // to a sensible default so the pet actually shows up.
+  if(on.length && _petsMode(next.petsMode)==='off'){
+    const sel=document.getElementById('a-pets-mode');
+    if(sel){ sel.value='both'; applyAppearance(); }
+  }
 }
 // ─── Background (Appearance ▸ Background) ───────────────────────────────────
 // Show only the rows that can actually do something in the selected mode, so the
@@ -14672,6 +14820,13 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.5.1', date:'August 2026', items:[
+    {tag:'fix', text:'The chat no longer stops following along when a channel gets busy. The flag that means "you’ve scrolled up to read history" was a one-way latch — once something set it, auto-scroll gave up and stayed given up until you manually dragged back to the bottom, which is exactly what people were having to do. It can now only be set by you actually scrolling upward, so a burst of messages, a late-loading image or the client trimming old lines can’t strand you any more.'},
+    {tag:'fix', text:'The "someone is typing" bar no longer covers the newest message. It slides in over 120ms and takes 18 pixels out of the chat, but the view was only re-pinned once at the very start of that — so it settled 15px too low and hid the last line. The chat now stays pinned for the whole animation rather than just its first instant. If you’re scrolled up reading history it still leaves you exactly where you were.'},
+    {tag:'new', text:'20 more desktop pets, in Appearance ▸ More Pets: a drifting jellyfish, paper plane, hot-air balloon, manta ray, dust moth, garden snail, firefly, hedgehog, teacup, desk lamp, wind-up key, rubber duck, survey probe, Lumen, Vesper relay, data wisp, ghost lantern, paper crane, toddle cap and a moody little cloud. Each has fifty different things it might do.'},
+    {tag:'new', text:'The new pets are built to stay out of your way. They keep to the edges of the window and off the text you’re reading, rest far more than they move, never make a sound, and clicks pass straight through them. Up to three at once. They pause completely when the window isn’t focused, and don’t run at all if your system asks for reduced motion.'},
+    {tag:'fix', text:'Old lines are trimmed from very long channels again. The trimmer bailed out whenever the newest message was tall — an image, or a multi-line paste — which meant it quietly stopped working in exactly the busy channels it exists for, and the page kept growing.'},
+  ]},
   {version:'0.5.0', date:'August 2026', items:[
     {tag:'new', text:'Every theme is now yours to change. Hover any theme card in Appearance ▸ Theme and hit the ✎ — the editor opens on that exact theme with all of its colors, its animation and its artwork already loaded. Change what you like and save; you get your own copy, marked with a ★, and the original stays untouched for when you want it back.'},
     {tag:'new', text:'Put your own picture behind any theme. Appearance ▸ Background lets you upload an image or paste an https link and use it on every theme, built-in or your own. Opacity, blur, dim and tiling let you push it back far enough to still read your chat comfortably — and those sliders work on the built-in artwork too, so a theme you liked but found too busy can simply be turned down.'},
@@ -15759,6 +15914,7 @@ let _jumpAnchorTs=0;
 function _cancelScrollForce(){
   _scrollForceTimers.forEach(t=>clearTimeout(t));
   _scrollForceTimers=[];
+  if(_flushRaf){cancelAnimationFrame(_flushRaf);_flushRaf=0;}
   if(_scrollForceRO){_scrollForceRO.disconnect();_scrollForceRO=null;}
 }
 function _isNearBottom(a,thresh){return a.scrollHeight-a.scrollTop-a.clientHeight<thresh;}
@@ -15891,14 +16047,30 @@ function pwaInstallFromMenu(){
 // reserving scrollbars that toggle reflows the view every message, which reads as a
 // flicker/blink during bursts (e.g. a WHOIS reply). So only toggle overflow on iOS;
 // everywhere else a plain scrollTop assignment (+ rAF re-pin) is enough and flicker-free.
+let _flushRaf=0;
 function _iosFlushScroll(a){
   if(_IS_IOS){a.style.overflowY='hidden';void a.offsetHeight;a.scrollTop=a.scrollHeight;a.style.overflowY='';}
   else{a.scrollTop=a.scrollHeight;}
-  requestAnimationFrame(()=>{a.scrollTop=a.scrollHeight;});
+  _markProgrammaticScroll(a);
+  // rAF is throttled to nothing in a hidden/backgrounded tab, so this trailing
+  // re-pin may simply never run while you are in another window — which is when
+  // a busy channel does most of its growing. Re-mark first so the catch-up scroll
+  // that eventually lands is still recognised as ours, not as the user leaving.
+  // Tracked so _cancelScrollForce() can cancel it. Untracked, this fired a frame
+  // after a deliberate scroll restore ("load older") and silently undid it.
+  if(_flushRaf) cancelAnimationFrame(_flushRaf);
+  _flushRaf=requestAnimationFrame(()=>{_flushRaf=0;a.scrollTop=a.scrollHeight;_markProgrammaticScroll(a);});
 }
 function scrollBottom(){
   const a=document.getElementById('chat-area');
-  if(!a||_userScrolledAway||_jumpAnchor)return;
+  if(!a)return;
+  // Second line of defence for the latch described in _onChatScroll: if the flag
+  // says the user is reading history but the viewport is demonstrably sitting at
+  // the bottom, the flag is stale (a restored session, a resize, an older build's
+  // state). Believe the geometry, not the flag.
+  if(_userScrolledAway&&!_jumpAnchor&&_isNearBottom(a,8))_userScrolledAway=false;
+  if(_userScrolledAway||_jumpAnchor)return;
+  if(Date.now()<_userGestureUntil)return;   // their hand is on it — don't fight
   // `_userScrolledAway` (kept current by _onChatScroll) is the source of truth for
   // "user is reading history, don't yank them down." DON'T re-measure distance here:
   // scrollBottom runs AFTER the new row is in the DOM, so a tall message (several
@@ -15932,10 +16104,64 @@ function scrollForce(){
   }
 }
 function updateScrollBtn(){const a=document.getElementById('chat-area'),b=document.getElementById('scroll-bottom-btn');if(!a||!b)return;const far=a.scrollHeight-a.scrollTop-a.clientHeight>200;b.classList.toggle('show',far);}
+// Last observed scrollTop, so a scroll event can tell WHICH WAY the view moved.
+let _lastScrollTop=0;
+// Accumulated upward travel since the last downward move. The direction test
+// needs a small deadband against sub-pixel jitter, but comparing each event to
+// the immediately preceding one lets a slow trackpad drag — many events of well
+// under a pixel — creep upward forever without ever tripping it. Summing the
+// travel makes the deadband a real threshold rather than a per-event one.
+let _upTravel=0;
+// While a real scroll gesture is in flight, auto-pinning is suspended so an
+// arriving message cannot drag the view out from under the user's fingers.
+let _userGestureUntil=0;
+// The scroll position WE last wrote. Identity, not a time window: an earlier
+// version suppressed detection for 350ms after any programmatic scroll, but
+// every arriving message pins the view, so in a busy channel that window was
+// perpetually in the future and the user could never scroll up at all — it broke
+// reading history in exactly the channels this whole fix is about.
+let _progScrollTop=-1;
+function _markProgrammaticScroll(a){
+  // Record what actually landed (the browser clamps to scrollHeight-clientHeight),
+  // so the resulting event can be recognised by its value.
+  try{ if(a) _progScrollTop=a.scrollTop; }catch(e){}
+}
 function _onChatScroll(){
   const a=document.getElementById('chat-area');
   if(!a)return;
-  _userScrolledAway=!_isNearBottom(a,200);
+  // WHY THIS IS DIRECTIONAL, and not simply `!_isNearBottom(a,200)`:
+  //
+  // _userScrolledAway is a LATCH with no self-healing path. Once it is true,
+  // scrollBottom() returns early, so scrollTop stops changing, so no further
+  // scroll event fires, so nothing ever recomputes it — it stays stuck until the
+  // user manually scrolls to the bottom themselves. That is exactly the reported
+  // "when people talk fast it stops scrolling and I have to force it down".
+  //
+  // Because the latch is permanent, ONE transient false positive is a permanent
+  // bug, and the old unconditional assignment had several ways to produce one:
+  // scroll events are dispatched asynchronously, so a burst of arriving rows (or
+  // a DOM prune, or late-loading media) can grow the content between the moment
+  // we set scrollTop and the moment the handler runs — at which point the handler
+  // measures a large distance-from-bottom and latches, even though the user never
+  // touched anything.
+  //
+  // So: detaching now requires evidence of INTENT. Content growing below you, or
+  // us moving the view, can never move scrollTop upward — only a real scroll can.
+  const top=a.scrollTop, prev=_lastScrollTop;
+  _lastScrollTop=top;
+  // Was this our own pin landing? Recognise it by the value we wrote, and let it
+  // pass exactly once so a later real scroll from the same spot still counts.
+  const ours=(_progScrollTop>=0 && Math.abs(top-_progScrollTop)<=1);
+  if(ours) _progScrollTop=-1;
+  if(_isNearBottom(a,200)){
+    _userScrolledAway=false;                 // at the bottom is always "following"
+    _upTravel=0;
+  }else if(!ours){
+    if(top<prev){ _upTravel+=(prev-top); } else if(top>prev){ _upTravel=0; }
+    if(_upTravel>=3){ _userScrolledAway=true; _upTravel=0; }  // moved up on purpose
+  }
+  // Otherwise leave the latch alone: the view moved down, or grew beneath us,
+  // or we scrolled it ourselves — none of which is the user stepping away.
   // Bottom-arrival releases the anchor regardless of HOW the user got there —
   // this is what covers scroll-only inputs the gesture listeners below can't
   // see (scrollbar drag, middle-click autoscroll, find-in-page): while anchored
@@ -15955,10 +16181,57 @@ function _releaseJumpAnchor(){ _jumpAnchor=false; }
 document.addEventListener('DOMContentLoaded',()=>{
   const ca=document.getElementById('chat-area');
   if(!ca)return;
+  _lastScrollTop=ca.scrollTop;
   ca.addEventListener('scroll',_onChatScroll);
-  ca.addEventListener('wheel',_releaseJumpAnchor,{passive:true});
-  ca.addEventListener('touchstart',_releaseJumpAnchor,{passive:true});
-  ca.addEventListener('touchmove',_releaseJumpAnchor,{passive:true});
+  // Keep the newest message visible whenever the chat viewport SHRINKS under it.
+  //
+  // The reported case is the typing indicator: it is a flex sibling that animates
+  // from height:0 to 18px over 120ms, taking those 18px out of #chat-area. The old
+  // code called scrollBottom() once, synchronously, the instant it became visible
+  // — against a layout that was still 18px taller than the one the user ends up
+  // looking at. Measured in Chromium against the shipped CSS, that left the newest
+  // row 15px below the fold, every time, until the next message arrived.
+  //
+  // Observing the viewport re-pins for the WHOLE animation instead of at a single
+  // instant, and covers the other things that shrink it: the reply bar appearing
+  // and the mobile keyboard opening. (It does NOT fire for the typer list growing
+  // — the bar is white-space:nowrap at a fixed 18px, so it cannot re-wrap — and it
+  // deliberately does nothing when the bar goes away, since that GROWS the
+  // viewport and needs no correction.) The guards below mean a reader of history
+  // is never yanked.
+  if(typeof ResizeObserver!=='undefined'){
+    let _lastH=ca.clientHeight;
+    const ro=new ResizeObserver(()=>{
+      const h=ca.clientHeight;
+      // A height of 0 means the element is hidden, not that the viewport shrank.
+      // Scrolling a collapsed box would throw away the position the user comes
+      // back to, and the 0 -> real transition on the way back is a GROW, so it
+      // must not be recorded as the new baseline either.
+      if(h<=0) return;
+      const shrank=_lastH>0 && h<_lastH;
+      _lastH=h;
+      // Minimal pin, deliberately not scrollBottom(): that routes through
+      // _iosFlushScroll (two writes + a rAF) and updateScrollBtn (a read), i.e. a
+      // read-after-write that forces a synchronous relayout from inside a
+      // ResizeObserver callback, on every delivery of a 120ms animation.
+      if(shrank && !_userScrolledAway && !_jumpAnchor){
+        ca.scrollTop=ca.scrollHeight;
+        _markProgrammaticScroll(ca);
+      }
+    });
+    ro.observe(ca);
+  }
+  ca.addEventListener('wheel',e=>{
+    _releaseJumpAnchor();
+    // Scrolling up is a decision, not a position. Act on it immediately —
+    // otherwise, in a fast channel, each arriving message pins the view back to
+    // the bottom between the user's wheel notches, the geometry never shows them
+    // more than a notch off-bottom, and they simply cannot leave.
+    if(e.deltaY<=-8){ _userScrolledAway=true; _upTravel=0; }
+    _userGestureUntil=Date.now()+450;
+  },{passive:true});
+  ca.addEventListener('touchstart',()=>{ _releaseJumpAnchor(); _userGestureUntil=Date.now()+450; },{passive:true});
+  ca.addEventListener('touchmove',()=>{ _releaseJumpAnchor(); _userGestureUntil=Date.now()+450; },{passive:true});
   // Classic-scrollbar drag/track-click: the mousedown lands on the element but
   // in the gutter past the content box (offsetX >= clientWidth). Content clicks
   // deliberately do NOT release — a click to select/copy text isn't a scroll.

@@ -1126,6 +1126,7 @@ async fn main() -> Result<()> {
         .route("/ghost.js",              get(serve_ghost_js))
         .route("/fish.js",               get(serve_fish_js))
         .route("/alien.js",              get(serve_alien_js))
+        .route("/pets.js",               get(serve_pets_js))
         .route("/app.js",                get(serve_app_js))
         .route("/manifest.json",         get(serve_manifest))
         .route("/sw.js",                 get(serve_sw))
@@ -1245,6 +1246,10 @@ async fn serve_crab_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"appli
 async fn serve_ghost_js()  -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/ghost.js")) }
 async fn serve_fish_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/fish.js")) }
 async fn serve_alien_js()  -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/alien.js")) }
+// The five above are one standalone script per pet. Everything added after them
+// shares ONE engine in pets.js (see that file's header for why), so this single
+// route covers all of them however many there are.
+async fn serve_pets_js()   -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], include_str!("../static/pets.js")) }
 
 // Bundled notification sounds — shipped in the binary so deploys don't need
 // external asset files. Served at /sounds/<name>.mp3.
