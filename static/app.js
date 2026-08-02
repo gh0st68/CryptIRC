@@ -4593,7 +4593,7 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 174 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 224 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'NP': case 'NOWPLAYING': {
         const sub=(args[0]||'').toLowerCase();
         if(sub==='set'){ const u=(args[1]||'').trim(); if(!u){ sysMsg(conn_id,target,'Usage: /np set <your-lastfm-username>','error'); break; } doSetLastfm(conn_id,target,u); break; }
@@ -7545,6 +7545,63 @@ const THEMES={
   scanlines: {label:'⎯ Scanlines',bg0:'#060a08',bg1:'#0a120e',bg2:'#101c16',bg3:'#16261e',bg4:'#1e3228',border:'#263c30',border2:'#3c5c48',text:'#d4e8dc',text2:'#94b49e',text3:'#5e7a68',animation:'scanlinesRoll'},
   falling_leaves: {label:'🍂 Autumn Leaves',bg0:'#120906',bg1:'#1c120a',bg2:'#281c10',bg3:'#342618',bg4:'#423222',border:'#4e3c2a',border2:'#785a40',text:'#f0e0cc',text2:'#c8a888',text3:'#8a7458',animation:'fallingLeaves'},
   firefly_meadow: {label:'✨ Firefly Meadow',bg0:'#050a06',bg1:'#0a120c',bg2:'#101a12',bg3:'#16241a',bg4:'#1e3022',border:'#263a2c',border2:'#3e5a44',text:'#e4efd8',text2:'#a4b898',text3:'#687c5c',animation:'fireflyMeadow'},
+  // ══ PACK: Materials & Craft (10) ══════════════════════════════════════════
+  blueprint: {label:'📐 Blueprint',bg0:'#061426',bg1:'#081a30',bg2:'#0b223c',bg3:'#0e2a4a',bg4:'#123458',border:'#1a4470',border2:'#2a5e96',text:'#dceaf8',text2:'#7fc4ff',text3:'#8aa8c8',accent:'#4fb3ff',accent2:'#b8dcff',link:'#9fd4ff',warn:'#ffc861',error:'#ff7a7a',join:'#7fe0c0',part:'#ff9a6a',notice:'#b0a8ff',action:'#ffd98a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='320' height='320'><rect width='320' height='320' fill='%23061426'/><g stroke='%234fb3ff' stroke-width='.4' opacity='.35'><path d='M0 40h320M0 80h320M0 120h320M0 160h320M0 200h320M0 240h320M0 280h320'/><path d='M40 0v320M80 0v320M120 0v320M160 0v320M200 0v320M240 0v320M280 0v320'/></g><g stroke='%23b8dcff' stroke-width='1' fill='none' opacity='.75'><circle cx='110' cy='120' r='46'/><circle cx='110' cy='120' r='22'/><rect x='180' y='170' width='96' height='68'/><path d='M180 150h96M228 142v16M40 250h120M96 244v12M104 244v12'/></g></svg>\")"},
+  verdigris: {label:'⛬ Verdigris',bg0:'#0b1512',bg1:'#0f1d18',bg2:'#14261f',bg3:'#1a3128',bg4:'#223c31',border:'#2b4a3c',border2:'#3d6650',text:'#d8e8de',text2:'#5fc9a4',text3:'#8ba99a',accent:'#43c9a0',accent2:'#b98a4e',link:'#6fd8b8',warn:'#e0b25a',error:'#e07a68',join:'#5fd0a0',part:'#c08a5a',notice:'#9fc0b0',action:'#d4b070',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><rect width='300' height='300' fill='%230e1a15'/><g opacity='.5'><ellipse cx='70' cy='90' rx='58' ry='40' fill='%232f6b52'/><ellipse cx='210' cy='70' rx='70' ry='36' fill='%23276048'/><ellipse cx='150' cy='190' rx='86' ry='48' fill='%23336f56'/><ellipse cx='40' cy='240' rx='50' ry='30' fill='%232a6a50'/><ellipse cx='260' cy='230' rx='54' ry='34' fill='%23255c46'/></g><g opacity='.35'><circle cx='96' cy='118' r='5' fill='%2343c9a0'/><circle cx='188' cy='96' r='4' fill='%2343c9a0'/><circle cx='132' cy='214' r='6' fill='%2343c9a0'/><circle cx='244' cy='188' r='4' fill='%2343c9a0'/></g></svg>\")"},
+  linen_press: {label:'▤ Linen',bg0:'#f3efe6',bg1:'#ece7db',bg2:'#e3ddcd',bg3:'#d9d2c0',bg4:'#cec6b2',border:'#c3b9a3',border2:'#a2977f',text:'#2a261d',text2:'#645839',text3:'#6e6249',accent:'#8a6a3a',accent2:'#3f6b5a',link:'#3a6480',warn:'#8a6000',error:'#a52a2a',join:'#2c6f4a',part:'#94481f',notice:'#5c4f8a',action:'#7d5518',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><rect width='24' height='24' fill='%23f3efe6'/><g stroke='%23cdc3ac' stroke-width='1' opacity='.7'><path d='M0 4h24M0 12h24M0 20h24'/></g><g stroke='%23d8cfba' stroke-width='1' opacity='.7'><path d='M4 0v24M12 0v24M20 0v24'/></g></svg>\")"},
+  carbon_fiber: {label:'▩ Carbon Fiber',bg0:'#0a0b0d',bg1:'#101216',bg2:'#16191e',bg3:'#1e2228',bg4:'#272c34',border:'#313841',border2:'#4a535f',text:'#dfe4ea',text2:'#9aa6b4',text3:'#8a95a3',accent:'#d0d6de',accent2:'#ff4d3d',link:'#8fb8e0',warn:'#e8b04a',error:'#ff5a48',join:'#4fc98a',part:'#e07a55',notice:'#a0a8d8',action:'#e0c060',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><rect width='32' height='32' fill='%230c0e11'/><g opacity='.85'><rect x='0' y='0' width='16' height='16' fill='%23151920'/><rect x='16' y='16' width='16' height='16' fill='%23151920'/></g><g stroke='%23262c35' stroke-width='1.5' opacity='.9'><path d='M0 0l16 16M16 0L0 16M16 16l16 16M32 16L16 32'/></g></svg>\")"},
+  damascus: {label:'≈ Damascus Steel',bg0:'#0c0f12',bg1:'#12161b',bg2:'#191e25',bg3:'#21272f',bg4:'#2b323c',border:'#39424e',border2:'#545f6d',text:'#dde3ea',text2:'#a3b4c6',text3:'#8b98a8',accent:'#9fb6cc',accent2:'#c9a227',link:'#a8c4dd',warn:'#d8a83c',error:'#e06a5a',join:'#5cc0a0',part:'#c88054',notice:'#a8a8d0',action:'#d4bc70',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='200'><rect width='300' height='200' fill='%230f1318'/><g stroke='%23566270' stroke-width='1.4' fill='none' opacity='.45'><path d='M-20 30 Q60 6 150 30 T320 30'/><path d='M-20 58 Q60 34 150 58 T320 58'/><path d='M-20 86 Q60 62 150 86 T320 86'/><path d='M-20 114 Q60 90 150 114 T320 114'/><path d='M-20 142 Q60 118 150 142 T320 142'/><path d='M-20 170 Q60 146 150 170 T320 170'/></g><g stroke='%23808f9e' stroke-width='.7' fill='none' opacity='.3'><path d='M-20 44 Q70 22 160 44 T320 44'/><path d='M-20 100 Q70 78 160 100 T320 100'/><path d='M-20 156 Q70 134 160 156 T320 156'/></g></svg>\")"},
+  terrazzo: {label:'⁙ Terrazzo',bg0:'#f7f4ef',bg1:'#efeae2',bg2:'#e6e0d6',bg3:'#dbd4c8',bg4:'#cfc7b9',border:'#c0b7a7',border2:'#9d9381',text:'#26231e',text2:'#59544a',text3:'#6a645a',accent:'#c33b4e',accent2:'#00707f',link:'#0f6379',warn:'#8a6100',error:'#b02a3a',join:'#1f7a58',part:'#a04a24',notice:'#5a4d94',action:'#8a5a10',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><rect width='160' height='160' fill='%23f7f4ef'/><g opacity='.8'><polygon points='18,22 34,16 38,30 22,36' fill='%23c33b4e'/><polygon points='96,12 112,20 104,32 92,26' fill='%2300707f'/><polygon points='138,44 152,50 146,62 134,56' fill='%23e0b23a'/><polygon points='54,64 70,60 74,74 58,78' fill='%232f2c28'/><polygon points='114,84 128,90 122,102 110,96' fill='%23c33b4e'/><polygon points='26,102 42,98 46,112 30,116' fill='%2300707f'/><polygon points='82,124 98,130 92,142 80,136' fill='%23e0b23a'/><polygon points='140,120 154,126 148,138 136,132' fill='%232f2c28'/><polygon points='60,144 74,150 68,158 56,154' fill='%2300707f'/></g></svg>\")"},
+  marble_vein: {label:'◊ Marble',bg0:'#f6f5f3',bg1:'#efedea',bg2:'#e6e3df',bg3:'#dcd8d2',bg4:'#d0cbc3',border:'#c2bcb2',border2:'#a09889',text:'#22201d',text2:'#565149',text3:'#67615a',accent:'#8a6d33',accent2:'#42525f',link:'#38596e',warn:'#8a6300',error:'#a63232',join:'#2a6c4e',part:'#95502a',notice:'#564a80',action:'#7d5c18',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><rect width='400' height='400' fill='%23f6f5f3'/><g stroke='%23cfc9bd' stroke-width='2' fill='none' opacity='.9'><path d='M-10 90 Q80 60 150 110 T300 90 T410 130'/><path d='M-10 250 Q90 210 170 260 T330 240 T410 280'/></g><g stroke='%23b99a4e' stroke-width='1.4' fill='none' opacity='.75'><path d='M-10 96 Q84 66 152 116 T302 96 T410 136'/><path d='M40 -10 Q70 90 30 170 T70 320 T40 410'/><path d='M-10 256 Q94 216 172 266 T332 246 T410 286'/></g><g stroke='%23d8d3ca' stroke-width='.8' fill='none' opacity='.8'><path d='M240 -10 Q210 80 250 160 T220 320'/><path d='M330 40 Q300 120 340 200'/></g></svg>\")"},
+  corkboard: {label:'▨ Corkboard',bg0:'#1a120a',bg1:'#23180e',bg2:'#2d2013',bg3:'#382818',bg4:'#45321f',border:'#543d26',border2:'#755538',text:'#f0e2cc',text2:'#d0a86a',text3:'#b0997c',accent:'#e8a951',accent2:'#6fa38a',link:'#d8b26a',warn:'#f0b84a',error:'#e0705a',join:'#68b890',part:'#c88250',notice:'#b8a0c8',action:'#e8c070',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80'><rect width='80' height='80' fill='%232a1d12'/><g opacity='.55'><ellipse cx='12' cy='10' rx='7' ry='4' fill='%23573d24'/><ellipse cx='44' cy='18' rx='9' ry='5' fill='%234a3520'/><ellipse cx='68' cy='8' rx='6' ry='4' fill='%23603f26'/><ellipse cx='24' cy='38' rx='10' ry='5' fill='%234e3721'/><ellipse cx='58' cy='44' rx='8' ry='4' fill='%235a3e24'/><ellipse cx='10' cy='62' rx='8' ry='4' fill='%23553a22'/><ellipse cx='40' cy='68' rx='9' ry='5' fill='%23483320'/><ellipse cx='72' cy='60' rx='6' ry='4' fill='%235e402a'/></g></svg>\")"},
+  letterpress: {label:'¶ Letterpress',bg0:'#f4f1ea',bg1:'#ebe7de',bg2:'#e1dcd1',bg3:'#d6d0c3',bg4:'#c9c2b3',border:'#b9b1a0',border2:'#978e7c',text:'#1f1c17',text2:'#514b40',text3:'#645d50',accent:'#8a2f2f',accent2:'#2f4858',link:'#2b5a73',warn:'#835c00',error:'#9c2626',join:'#2a6848',part:'#8e4520',notice:'#514584',action:'#78530f',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><rect width='120' height='120' fill='%23f4f1ea'/><g fill='%23ddd7ca' opacity='.9'><circle cx='14' cy='22' r='1'/><circle cx='58' cy='10' r='1.2'/><circle cx='96' cy='34' r='1'/><circle cx='30' cy='60' r='1.1'/><circle cx='78' cy='72' r='1'/><circle cx='108' cy='96' r='1.2'/><circle cx='42' cy='104' r='1'/><circle cx='8' cy='88' r='1.1'/></g><g stroke='%23cfc7b6' stroke-width='.8' opacity='.7'><path d='M16 44h88M16 52h68M16 60h88M16 68h52'/></g></svg>\")"},
+  circuit_etch: {label:'⊟ Circuit Etch',bg0:'#04120c',bg1:'#071c12',bg2:'#0a2618',bg3:'#0e321f',bg4:'#133e28',border:'#1a4f33',border2:'#2a6f49',accent:'#ffb648',accent2:'#48e08a',link:'#7fe8b0',text:'#d8f0e0',text2:'#ffb648',text3:'#88ae96',warn:'#ffc861',error:'#ff7060',join:'#48e08a',part:'#e08a50',notice:'#a8d0ff',action:'#ffd070',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><rect width='240' height='240' fill='%2305150e'/><g stroke='%23c8912e' stroke-width='1.6' fill='none' opacity='.7'><path d='M20 20h60v40h50V30h70'/><path d='M20 90h40v70h80v-40h80'/><path d='M20 200h100v-30h60v50h40'/><path d='M170 90v50'/></g><g fill='%23e8a93c' opacity='.85'><circle cx='80' cy='60' r='4'/><circle cx='130' cy='30' r='4'/><circle cx='60' cy='160' r='4'/><circle cx='140' cy='120' r='4'/><circle cx='120' cy='170' r='4'/><circle cx='180' cy='220' r='4'/></g><g fill='none' stroke='%232e7a52' stroke-width='1' opacity='.5'><rect x='96' y='96' width='48' height='48' rx='3'/></g></svg>\")"},
+  // ══ PACK: Weather & Light (6) ═════════════════════════════════════════════
+  blue_hour: {label:'◐ Blue Hour',bg0:'#070d1c',bg1:'#0b1428',bg2:'#101c38',bg3:'#162648',bg4:'#1e315c',border:'#24406e',border2:'#365a94',text:'#dfe6f6',text2:'#8fb0e8',text3:'#8b9dc4',accent:'#6f9dff',accent2:'#ffb07a',link:'#93b8ff',warn:'#ffc070',error:'#ff7d84',join:'#6fd8c0',part:'#ff9a70',notice:'#b0a8ff',action:'#ffd08a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='xMidYMax slice'><defs><linearGradient id='bh' x1='0' x2='0' y1='0' y2='1'><stop offset='0' stop-color='%23060a1a'/><stop offset='.45' stop-color='%23152a58'/><stop offset='.78' stop-color='%233a5a92'/><stop offset='1' stop-color='%23c88a68'/></linearGradient></defs><rect width='800' height='400' fill='url(%23bh)'/><circle cx='620' cy='150' r='3' fill='%23ffffff' opacity='.9'/><circle cx='180' cy='70' r='1.6' fill='%23ffffff' opacity='.6'/><circle cx='320' cy='40' r='1.2' fill='%23ffffff' opacity='.5'/><path d='M0 320 L60 310 L90 288 L140 300 L190 262 L240 292 L300 274 L360 300 L420 268 L470 296 L540 250 L600 290 L660 276 L730 300 L800 286 L800 400 L0 400Z' fill='%23050912'/><g fill='%23ffcf8a' opacity='.75'><rect x='196' y='276' width='3' height='4'/><rect x='306' y='288' width='3' height='4'/><rect x='546' y='264' width='3' height='4'/><rect x='664' y='290' width='3' height='4'/></g></svg>\")"},
+  fog_bank: {label:'≋ Fog Bank',bg0:'#131719',bg1:'#1a2023',bg2:'#22292d',bg3:'#2b3338',bg4:'#353e44',border:'#414b52',border2:'#5c6870',text:'#dfe5e8',text2:'#a2b0b6',text3:'#93a0a7',accent:'#9fc0c8',accent2:'#c4b39a',link:'#a8cdd8',warn:'#d8bc80',error:'#d8807c',join:'#84c0a8',part:'#c0906c',notice:'#a8a8c0',action:'#cdbc8c',animation:'fogDrift',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='xMidYMax slice'><rect width='800' height='400' fill='%23161b1e'/><g fill='%230d1113' opacity='.9'><polygon points='60,400 100,210 140,400'/><polygon points='150,400 186,240 222,400'/><polygon points='240,400 280,190 320,400'/><polygon points='340,400 372,250 404,400'/><polygon points='430,400 472,200 514,400'/><polygon points='530,400 566,246 602,400'/><polygon points='620,400 662,214 704,400'/><polygon points='710,400 748,244 786,400'/></g><g fill='%23aebcc4' opacity='.16'><ellipse cx='260' cy='300' rx='340' ry='42'/><ellipse cx='560' cy='344' rx='320' ry='36'/><ellipse cx='360' cy='378' rx='420' ry='34'/></g></svg>\")"},
+  heat_haze: {label:'♒ Heat Haze',bg0:'#1a1206',bg1:'#24190a',bg2:'#2f210d',bg3:'#3b2a12',bg4:'#493518',border:'#5a4220',border2:'#7d5c2e',text:'#f8e8c8',text2:'#ffb05a',text3:'#c0a276',accent:'#ff9a2e',accent2:'#ffd66b',link:'#ffc060',warn:'#ffcc55',error:'#ff6f4a',join:'#a8cc5a',part:'#e08840',notice:'#d8b088',action:'#ffdc80',animation:'heatHaze',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='xMidYMax slice'><defs><linearGradient id='hz' x1='0' x2='0' y1='0' y2='1'><stop offset='0' stop-color='%23c8791e'/><stop offset='.5' stop-color='%238a4a12'/><stop offset='1' stop-color='%23301c08'/></linearGradient></defs><rect width='800' height='400' fill='url(%23hz)'/><circle cx='400' cy='150' r='70' fill='%23ffe0a0' opacity='.85'/><circle cx='400' cy='150' r='120' fill='%23ffc860' opacity='.18'/><path d='M0 300 Q200 288 400 298 T800 292 L800 400 L0 400Z' fill='%23221306'/><g stroke='%23ffdba0' stroke-width='1' fill='none' opacity='.2'><path d='M0 268 Q100 262 200 268 T400 268 T600 268 T800 268'/><path d='M0 280 Q100 274 200 280 T400 280 T600 280 T800 280'/></g></svg>\")"},
+  monsoon: {label:'☔ Monsoon',bg0:'#06110f',bg1:'#0a1a17',bg2:'#0e2420',bg3:'#132e2a',bg4:'#193a35',border:'#204a44',border2:'#2e675f',text:'#d6ece7',text2:'#6fc4b4',text3:'#88a8a2',accent:'#3fbfa8',accent2:'#a8d8c8',link:'#63d4bd',warn:'#e0c070',error:'#e8786a',join:'#4fd0a8',part:'#d08a60',notice:'#a0b8d8',action:'#d8cc90',animation:'monsoonRain',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='xMidYMax slice'><rect width='800' height='400' fill='%23081613'/><g fill='%23061210' opacity='.95'><path d='M0 300 Q120 250 240 292 T480 280 T720 296 T800 286 L800 400 L0 400Z'/></g><g fill='%230a201b' opacity='.9'><path d='M0 340 Q160 306 320 336 T640 330 T800 344 L800 400 L0 400Z'/></g><g stroke='%23bfe4dc' stroke-width='.8' opacity='.12'><path d='M40 0l-24 400M120 0l-24 400M200 0l-24 400M280 0l-24 400M360 0l-24 400M440 0l-24 400M520 0l-24 400M600 0l-24 400M680 0l-24 400M760 0l-24 400'/></g></svg>\")"},
+  eclipse: {label:'◍ Eclipse',bg0:'#030305',bg1:'#08080c',bg2:'#0e0e14',bg3:'#16161e',bg4:'#20202a',border:'#2a2a36',border2:'#454550',text:'#e8e6e2',text2:'#c8b58a',text3:'#8e8c96',accent:'#ffdca8',accent2:'#ff8a5c',link:'#ffd08a',warn:'#ffc878',error:'#ff7060',join:'#8ad0b0',part:'#e08860',notice:'#b0a8d0',action:'#ffd898',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 600'><defs><radialGradient id='cor' cx='50%25' cy='50%25' r='50%25'><stop offset='.30' stop-color='%23000000' stop-opacity='0'/><stop offset='.315' stop-color='%23fff2d0' stop-opacity='.95'/><stop offset='.40' stop-color='%23ffb870' stop-opacity='.45'/><stop offset='.62' stop-color='%23a86a30' stop-opacity='.16'/><stop offset='1' stop-color='%23000000' stop-opacity='0'/></radialGradient></defs><rect width='800' height='600' fill='%23020204'/><g fill='%23ffffff' opacity='.5'><circle cx='120' cy='90' r='1'/><circle cx='680' cy='140' r='.8'/><circle cx='240' cy='500' r='.9'/><circle cx='700' cy='470' r='.7'/></g><circle cx='400' cy='300' r='300' fill='url(%23cor)'/><circle cx='400' cy='300' r='90' fill='%23000000'/></svg>\")"},
+  harvest_moon: {label:'🌕 Harvest Moon',bg0:'#100c08',bg1:'#17120b',bg2:'#1f180f',bg3:'#281f14',bg4:'#33281a',border:'#40321f',border2:'#5e4a2e',text:'#f4e4c4',text2:'#ffb347',text3:'#b89a74',accent:'#ffa62b',accent2:'#e0d0a0',link:'#ffc266',warn:'#ffc861',error:'#e8705a',join:'#a8c060',part:'#d88a48',notice:'#c0a8c8',action:'#ffd47a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='xMidYMax slice'><defs><radialGradient id='hm' cx='50%25' cy='50%25' r='50%25'><stop offset='.82' stop-color='%23ffae3a'/><stop offset='1' stop-color='%23c9761c'/></radialGradient></defs><rect width='800' height='400' fill='%23120d08'/><circle cx='560' cy='170' r='230' fill='%23ff9c2a' opacity='.07'/><circle cx='560' cy='170' r='108' fill='url(%23hm)'/><g fill='%23d98b25' opacity='.5'><circle cx='530' cy='140' r='16'/><circle cx='596' cy='190' r='12'/><circle cx='556' cy='214' r='9'/></g><path d='M0 300 Q200 282 400 296 T800 288 L800 400 L0 400Z' fill='%230d0906'/><g stroke='%231d150c' stroke-width='3'><path d='M60 400v-70M110 400v-84M160 400v-64M660 400v-76M710 400v-62M760 400v-80'/></g></svg>\")"},
+  // ══ PACK: Living World (6) ════════════════════════════════════════════════
+  coral_reef: {label:'🐠 Coral Reef',bg0:'#04141c',bg1:'#061e28',bg2:'#092835',bg3:'#0d3342',bg4:'#124052',border:'#185066',border2:'#237090',text:'#d8f0f8',text2:'#ff8a7a',text3:'#82a8bc',accent:'#ff7a6a',accent2:'#ffd34e',link:'#4fd8e8',warn:'#ffcc55',error:'#ff6a58',join:'#4fe0b0',part:'#ff9068',notice:'#b08aff',action:'#ffd86a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='xMidYMax slice'><defs><linearGradient id='rf' x1='0' x2='0' y1='0' y2='1'><stop offset='0' stop-color='%2306283a'/><stop offset='1' stop-color='%23031018'/></linearGradient></defs><rect width='800' height='400' fill='url(%23rf)'/><g opacity='.85'><path d='M60 400 q10-70 -14-96 q34 10 44-40 q16 52 44 34 q-20 40 -8 102Z' fill='%23c8434a'/><path d='M200 400 q6-56 -18-80 q30 4 32-44 q22 46 46 30 q-24 34 -14 94Z' fill='%23d87a3c'/><path d='M620 400 q8-64 -16-90 q32 8 38-42 q18 50 46 32 q-22 38 -12 100Z' fill='%23b8446a'/><g fill='%23e0a03c'><ellipse cx='380' cy='396' rx='70' ry='26'/><ellipse cx='500' cy='400' rx='54' ry='20'/></g></g><g fill='%23ffd34e' opacity='.9'><path d='M300 180 l22 10 l-22 10 l6-10Z'/><path d='M470 130 l20 9 l-20 9 l5-9Z'/><path d='M600 220 l18 8 l-18 8 l5-8Z'/></g><g fill='%234fd8e8' opacity='.55'><circle cx='150' cy='120' r='4'/><circle cx='170' cy='90' r='3'/><circle cx='140' cy='60' r='2.5'/></g></svg>\")"},
+  mycelium: {label:'⚭ Mycelium',bg0:'#0a0806',bg1:'#100d0a',bg2:'#17130e',bg3:'#1e1913',bg4:'#272018',border:'#332a20',border2:'#4b3d2d',text:'#e4dcd0',text2:'#7fe0c8',text3:'#a2958a',accent:'#62d8b8',accent2:'#c8a26a',link:'#86e8cc',warn:'#e0b464',error:'#e07a68',join:'#62d8b8',part:'#c08a5c',notice:'#a8b0d8',action:'#d8b878',animation:'myceliumGlow',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><rect width='400' height='400' fill='%230b0907'/><g stroke='%233c8f78' stroke-width='.8' fill='none' opacity='.5'><path d='M200 200 L120 130 L60 100M120 130 L96 60M200 200 L290 140 L350 108M290 140 L306 72M200 200 L140 290 L80 330M140 290 L110 356M200 200 L282 282 L340 320M282 282 L300 350M200 200 L200 110M200 200 L210 306'/></g><g fill='%2362d8b8' opacity='.6'><circle cx='200' cy='200' r='3'/><circle cx='120' cy='130' r='2'/><circle cx='290' cy='140' r='2'/><circle cx='140' cy='290' r='2'/><circle cx='282' cy='282' r='2'/><circle cx='60' cy='100' r='1.5'/><circle cx='350' cy='108' r='1.5'/><circle cx='80' cy='330' r='1.5'/><circle cx='340' cy='320' r='1.5'/></g></svg>\")"},
+  butterfly: {label:'✤ Butterfly Wing',bg0:'#0a0614',bg1:'#100a1e',bg2:'#17102c',bg3:'#1f163a',bg4:'#291e4a',border:'#34275e',border2:'#4c3a86',text:'#ecdcfa',text2:'#66e0d8',text3:'#a897c8',accent:'#b388ff',accent2:'#3fe0d0',link:'#c9a6ff',warn:'#ffc86a',error:'#ff6f9a',join:'#3fe0d0',part:'#e08ac0',notice:'#b388ff',action:'#ffd08a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><defs><linearGradient id='bw' x1='0' x2='1' y1='0' y2='1'><stop offset='0' stop-color='%23b388ff'/><stop offset='.5' stop-color='%235a4ad0'/><stop offset='1' stop-color='%233fe0d0'/></linearGradient></defs><rect width='300' height='300' fill='%230c0818'/><g opacity='.5'><ellipse cx='60' cy='60' rx='34' ry='22' fill='url(%23bw)' transform='rotate(-24 60 60)'/><ellipse cx='150' cy='40' rx='30' ry='20' fill='url(%23bw)' transform='rotate(12 150 40)'/><ellipse cx='240' cy='80' rx='36' ry='24' fill='url(%23bw)' transform='rotate(-18 240 80)'/><ellipse cx='90' cy='160' rx='32' ry='21' fill='url(%23bw)' transform='rotate(20 90 160)'/><ellipse cx='200' cy='180' rx='38' ry='25' fill='url(%23bw)' transform='rotate(-10 200 180)'/><ellipse cx='50' cy='250' rx='30' ry='20' fill='url(%23bw)' transform='rotate(-30 50 250)'/><ellipse cx='160' cy='262' rx='34' ry='22' fill='url(%23bw)' transform='rotate(16 160 262)'/><ellipse cx='262' cy='230' rx='28' ry='19' fill='url(%23bw)' transform='rotate(-22 262 230)'/></g></svg>\")"},
+  peacock: {label:'❦ Peacock',bg0:'#04130f',bg1:'#071c17',bg2:'#0a2620',bg3:'#0e322a',bg4:'#133e35',border:'#1a4f44',border2:'#26705f',text:'#d8f0e8',text2:'#48d4c0',text3:'#85aaa2',accent:'#17b0a0',accent2:'#d4a017',link:'#3fd0bc',warn:'#e8b830',error:'#e0685a',join:'#3fd0a8',part:'#d0885a',notice:'#7fa8e0',action:'#e8c040',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><rect width='240' height='240' fill='%23051712'/><g opacity='.75'><g transform='translate(60 60)'><ellipse rx='30' ry='40' fill='%230d4a42'/><ellipse rx='19' ry='26' fill='%231e7a68'/><ellipse rx='11' ry='15' fill='%23c9971a'/><ellipse rx='5' ry='7' fill='%23123a6a'/></g><g transform='translate(180 60)'><ellipse rx='30' ry='40' fill='%230d4a42'/><ellipse rx='19' ry='26' fill='%231e7a68'/><ellipse rx='11' ry='15' fill='%23c9971a'/><ellipse rx='5' ry='7' fill='%23123a6a'/></g><g transform='translate(120 170)'><ellipse rx='30' ry='40' fill='%230d4a42'/><ellipse rx='19' ry='26' fill='%231e7a68'/><ellipse rx='11' ry='15' fill='%23c9971a'/><ellipse rx='5' ry='7' fill='%23123a6a'/></g></g></svg>\")"},
+  succulent: {label:'❁ Succulent',bg0:'#171d18',bg1:'#1e2620',bg2:'#26302a',bg3:'#303b34',bg4:'#3b4840',border:'#47544c',border2:'#647466',text:'#e2ecdf',text2:'#a8c9a0',text3:'#9aab98',accent:'#8fbc8f',accent2:'#d8a0b0',link:'#9fd0b8',warn:'#d8c070',error:'#d8807c',join:'#8fd0a0',part:'#c89078',notice:'#b8a8d0',action:'#d8c888',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='260'><rect width='260' height='260' fill='%23192019'/><g opacity='.6'><g transform='translate(70 70)' fill='none' stroke='%236f9a72' stroke-width='2'><circle r='10'/><circle r='20'/><circle r='30'/><circle r='40'/></g><g transform='translate(190 100)' fill='none' stroke='%23849a6a' stroke-width='2'><circle r='8'/><circle r='17'/><circle r='26'/><circle r='35'/></g><g transform='translate(110 195)' fill='none' stroke='%23a08094' stroke-width='2'><circle r='9'/><circle r='19'/><circle r='29'/></g><g transform='translate(220 210)' fill='none' stroke='%236f9a72' stroke-width='2'><circle r='7'/><circle r='15'/><circle r='24'/></g></g></svg>\")"},
+  tide_pool: {label:'◕ Tide Pool',bg0:'#071214',bg1:'#0b1b1e',bg2:'#102428',bg3:'#152f34',bg4:'#1c3c42',border:'#244c54',border2:'#346c78',text:'#d4ecef',text2:'#7fd0c0',text3:'#89a6ae',accent:'#4fc8b8',accent2:'#e08a6a',link:'#6fd8cc',warn:'#e0bc70',error:'#e8786a',join:'#4fd0a8',part:'#e08a6a',notice:'#9fb8e0',action:'#e0c888',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='320' height='320'><rect width='320' height='320' fill='%23091518'/><g fill='%23132a30' opacity='.9'><ellipse cx='90' cy='100' rx='68' ry='48'/><ellipse cx='230' cy='190' rx='78' ry='56'/><ellipse cx='120' cy='250' rx='52' ry='36'/></g><g fill='%231d4048' opacity='.7'><ellipse cx='90' cy='100' rx='52' ry='34'/><ellipse cx='230' cy='190' rx='60' ry='40'/><ellipse cx='120' cy='250' rx='38' ry='24'/></g><g opacity='.75'><g fill='%23e08a6a'><circle cx='72' cy='92' r='5'/><circle cx='108' cy='110' r='4'/><circle cx='214' cy='180' r='5'/><circle cx='248' cy='202' r='4'/><circle cx='118' cy='246' r='4'/></g><g stroke='%234fc8b8' stroke-width='1' opacity='.8'><path d='M72 92 l0-9M72 92 l7-6M72 92 l-7-6M214 180 l0-9M214 180 l7-6M214 180 l-7-6'/></g></g></svg>\")"},
+  // ══ PACK: Cultural (9) ════════════════════════════════════════════════════
+  ukiyoe: {label:'🌊 Ukiyo-e',bg0:'#0d1826',bg1:'#122234',bg2:'#182c44',bg3:'#1f3754',bg4:'#274466',border:'#2f5480',border2:'#4372a8',text:'#f0ead8',text2:'#8fb8dc',text3:'#93a4ba',accent:'#d8cfa8',accent2:'#c25a4a',link:'#a8cce8',warn:'#d8b45a',error:'#c25a4a',join:'#6fae96',part:'#c88a5a',notice:'#9a9ac8',action:'#d8c07a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='xMidYMax slice'><rect width='800' height='400' fill='%23e8e0c8'/><circle cx='620' cy='110' r='52' fill='%23e8d0b0'/><g fill='%231d3a5c'><path d='M0 250 Q120 150 260 236 Q340 286 420 236 Q520 176 620 246 Q700 300 800 254 L800 400 L0 400Z'/></g><g fill='%232f5a86'><path d='M0 300 Q140 226 300 296 Q420 350 540 296 Q660 244 800 306 L800 400 L0 400Z'/></g><g fill='%23f0ead8' opacity='.95'><path d='M232 232 q22-26 44-6 q-24 4-44 6Z'/><path d='M300 258 q26-30 52-8 q-28 4-52 8Z'/><path d='M540 262 q24-28 48-6 q-26 4-48 6Z'/></g></svg>\")"},
+  byzantine: {label:'✜ Byzantine Gold',bg0:'#140a08',bg1:'#1e100c',bg2:'#281611',bg3:'#341d16',bg4:'#42261c',border:'#533226',border2:'#7a4a34',text:'#f4e2be',text2:'#e0b451',text3:'#b5946a',accent:'#d4af37',accent2:'#9b2226',link:'#e8c866',warn:'#e8c04a',error:'#c0392b',join:'#7fa860',part:'#c07840',notice:'#a08ac0',action:'#e0c060',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><rect width='120' height='120' fill='%23150b08'/><g opacity='.8'><rect x='4' y='4' width='24' height='24' fill='%23b8942e'/><rect x='34' y='4' width='24' height='24' fill='%238a2020'/><rect x='64' y='4' width='24' height='24' fill='%23c9a63a'/><rect x='94' y='4' width='22' height='24' fill='%232f4a6a'/><rect x='4' y='34' width='24' height='24' fill='%232f4a6a'/><rect x='34' y='34' width='24' height='24' fill='%23d4af37'/><rect x='64' y='34' width='24' height='24' fill='%238a2020'/><rect x='94' y='34' width='22' height='24' fill='%23b8942e'/><rect x='4' y='64' width='24' height='24' fill='%23c9a63a'/><rect x='34' y='64' width='24' height='24' fill='%232f4a6a'/><rect x='64' y='64' width='24' height='24' fill='%23d4af37'/><rect x='94' y='64' width='22' height='24' fill='%238a2020'/><rect x='4' y='94' width='24' height='22' fill='%238a2020'/><rect x='34' y='94' width='24' height='22' fill='%23b8942e'/><rect x='64' y='94' width='24' height='22' fill='%232f4a6a'/><rect x='94' y='94' width='22' height='22' fill='%23c9a63a'/></g></svg>\")"},
+  runestone: {label:'ᛉ Runestone',bg0:'#14161a',bg1:'#1b1e23',bg2:'#23272d',bg3:'#2c3138',bg4:'#373d46',border:'#444b55',border2:'#616a77',text:'#dfe3e8',text2:'#a8b6c4',text3:'#949fac',accent:'#b0c4d8',accent2:'#a08a5a',link:'#a8c0dc',warn:'#d0b060',error:'#d07868',join:'#78b898',part:'#c08868',notice:'#a0a0c8',action:'#c8b078',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><rect width='240' height='240' fill='%23181b1f'/><g fill='%231f2429' opacity='.9'><circle cx='40' cy='60' r='26'/><circle cx='150' cy='40' r='34'/><circle cx='210' cy='130' r='28'/><circle cx='80' cy='170' r='32'/><circle cx='190' cy='210' r='24'/></g><g stroke='%236f7d8c' stroke-width='2.4' fill='none' opacity='.65' stroke-linecap='square'><path d='M50 90v50M50 100l16-10M50 118l16 10'/><path d='M120 80v52M120 92l16 12M136 80v52'/><path d='M170 150v48M170 150l18 16M188 150v48'/><path d='M96 200v-46M96 176l18-16M96 176l18 16'/></g></svg>\")"},
+  zellij: {label:'✧ Zellij',bg0:'#071418',bg1:'#0b1e24',bg2:'#102830',bg3:'#15343e',bg4:'#1c424e',border:'#245464',border2:'#33788e',text:'#e8f2f4',text2:'#4fc8d8',text3:'#88a8b2',accent:'#22b8cf',accent2:'#d9a441',link:'#4fd8e8',warn:'#e8b840',error:'#d95a4a',join:'#3fc8a0',part:'#d98a4a',notice:'#8a9ad8',action:'#e0b858',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><rect width='160' height='160' fill='%23081a1f'/><g stroke='%2308222a' stroke-width='1.5'><g transform='translate(80 80)'><polygon points='0,-52 12,-16 50,-16 20,8 32,44 0,22 -32,44 -20,8 -50,-16 -12,-16' fill='%23177f92'/><polygon points='0,-28 7,-9 27,-9 11,4 17,24 0,12 -17,24 -11,4 -27,-9 -7,-9' fill='%23c9963a'/></g><g transform='translate(0 0)'><polygon points='0,-36 8,-11 35,-11 14,6 22,31 0,15 -22,31 -14,6 -35,-11 -8,-11' fill='%23125f70'/></g><g transform='translate(160 0)'><polygon points='0,-36 8,-11 35,-11 14,6 22,31 0,15 -22,31 -14,6 -35,-11 -8,-11' fill='%23125f70'/></g><g transform='translate(0 160)'><polygon points='0,-36 8,-11 35,-11 14,6 22,31 0,15 -22,31 -14,6 -35,-11 -8,-11' fill='%23125f70'/></g><g transform='translate(160 160)'><polygon points='0,-36 8,-11 35,-11 14,6 22,31 0,15 -22,31 -14,6 -35,-11 -8,-11' fill='%23125f70'/></g></g></svg>\")"},
+  sumi: {label:'✒ Sumi Ink',bg0:'#f5f3ee',bg1:'#edeae3',bg2:'#e3dfd6',bg3:'#d8d3c8',bg4:'#cac4b8',border:'#b9b2a4',border2:'#928a7b',text:'#161513',text2:'#484440',text3:'#5d584f',accent:'#1f1d1a',accent2:'#8a2f22',link:'#355269',warn:'#7d5800',error:'#93261a',join:'#256048',part:'#8a4018',notice:'#4a4278',action:'#6e4d10',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 600 400'><rect width='600' height='400' fill='%23f5f3ee'/><g fill='none' stroke='%231f1d1a' stroke-linecap='round' opacity='.5'><path d='M90 300 Q150 120 210 300' stroke-width='16'/><path d='M250 90 Q330 200 300 320' stroke-width='11'/><path d='M380 130 Q430 250 500 190' stroke-width='20'/></g><g fill='%231f1d1a' opacity='.25'><circle cx='236' cy='330' r='5'/><circle cx='252' cy='344' r='3'/><circle cx='514' cy='214' r='4'/></g><rect x='520' y='40' width='42' height='42' fill='none' stroke='%238a2f22' stroke-width='3' opacity='.8'/></svg>\")"},
+  tartan: {label:'❖ Tartan',bg0:'#0a1410',bg1:'#0e1c16',bg2:'#13251d',bg3:'#182f25',bg4:'#1f3b2e',border:'#2a4a38',border2:'#3d6a50',text:'#e8e0d0',text2:'#c8a04a',text3:'#9aa894',accent:'#c9503c',accent2:'#c8a04a',link:'#6fb08a',warn:'#d8b040',error:'#c0392b',join:'#5fa87c',part:'#c07a3a',notice:'#8a9ac0',action:'#d0aa58',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80'><rect width='80' height='80' fill='%230e1c16'/><g opacity='.72'><rect x='0' y='0' width='80' height='14' fill='%23163828'/><rect x='0' y='30' width='80' height='6' fill='%238a2c22'/><rect x='0' y='48' width='80' height='18' fill='%23112a3e'/><rect x='0' y='72' width='80' height='4' fill='%23a8862e'/><rect x='0' y='0' width='14' height='80' fill='%23163828'/><rect x='30' y='0' width='6' height='80' fill='%238a2c22'/><rect x='48' y='0' width='18' height='80' fill='%23112a3e'/><rect x='72' y='0' width='4' height='80' fill='%23a8862e'/></g></svg>\")"},
+  papyrus: {label:'☥ Papyrus',bg0:'#efe3c8',bg1:'#e6d8b8',bg2:'#dccca6',bg3:'#d0be94',bg4:'#c2ae80',border:'#b39c6a',border2:'#8e7845',text:'#2a2013',text2:'#63501f',text3:'#6f5c30',accent:'#8a5a20',accent2:'#3a5548',link:'#42527a',warn:'#7d5a00',error:'#94301f',join:'#2f6244',part:'#8a4514',notice:'#4e4478',action:'#6f4e0c',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><rect width='140' height='140' fill='%23efe3c8'/><g stroke='%23d6c49c' stroke-width='2' opacity='.75'><path d='M0 12h140M0 34h140M0 56h140M0 78h140M0 100h140M0 122h140'/></g><g stroke='%23dccdaa' stroke-width='2' opacity='.5'><path d='M18 0v140M46 0v140M74 0v140M102 0v140M130 0v140'/></g><g fill='%238a5a20' opacity='.35'><path d='M28 30 h4 v14 h-4z M26 26 h8 v3 h-8z'/><circle cx='70' cy='68' r='6' fill='none' stroke='%238a5a20' stroke-width='2'/><path d='M108 96 l6 10 l-12 0z'/></g></svg>\")"},
+  kintsugi: {label:'⟡ Kintsugi',bg0:'#0c0d10',bg1:'#131519',bg2:'#1a1d22',bg3:'#23272d',bg4:'#2d323a',border:'#3a4048',border2:'#565e69',text:'#e8e6e0',text2:'#d4af37',text3:'#9599a1',accent:'#d4af37',accent2:'#c8c2b6',link:'#e6c761',warn:'#e0bc50',error:'#d0685a',join:'#7fb898',part:'#c08a60',notice:'#a8a8c0',action:'#e0c870',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><rect width='400' height='400' fill='%230e1013'/><g fill='%23171a1f' stroke='%230b0d10' stroke-width='1'><polygon points='0,0 170,0 130,150 0,120'/><polygon points='170,0 400,0 400,110 250,170 130,150'/><polygon points='0,120 130,150 110,280 0,300'/><polygon points='130,150 250,170 260,300 110,280'/><polygon points='250,170 400,110 400,290 260,300'/><polygon points='0,300 110,280 140,400 0,400'/><polygon points='110,280 260,300 280,400 140,400'/><polygon points='260,300 400,290 400,400 280,400'/></g><g stroke='%23d4af37' stroke-width='2.2' fill='none' opacity='.9' stroke-linejoin='round'><path d='M170 0 L130 150 L0 120'/><path d='M130 150 L250 170 L400 110'/><path d='M110 280 L260 300 L400 290'/><path d='M0 300 L110 280 L130 150'/><path d='M260 300 L250 170'/><path d='M140 400 L110 280'/><path d='M280 400 L260 300'/></g></svg>\")"},
+  lantern_festival: {label:'🏮 Lantern Festival',bg0:'#0a0812',bg1:'#100c1c',bg2:'#171228',bg3:'#1f1834',bg4:'#292042',border:'#352a54',border2:'#4e3f78',text:'#f4e4d8',text2:'#ffb060',text3:'#ab9dbe',accent:'#ff8c42',accent2:'#ffd166',link:'#ffb877',warn:'#ffc861',error:'#ff6a5a',join:'#7fd0a8',part:'#ff9a60',notice:'#b8a0e0',action:'#ffd88a',animation:'lanternRise',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='xMidYMax slice'><defs><linearGradient id='lw' x1='0' x2='0' y1='0' y2='1'><stop offset='0' stop-color='%230b0916'/><stop offset='1' stop-color='%23241a38'/></linearGradient></defs><rect width='800' height='400' fill='url(%23lw)'/><rect y='300' width='800' height='100' fill='%23120e22'/><g opacity='.35'><ellipse cx='180' cy='330' rx='30' ry='7' fill='%23ff8c42'/><ellipse cx='430' cy='348' rx='26' ry='6' fill='%23ffd166'/><ellipse cx='650' cy='324' rx='28' ry='7' fill='%23ff8c42'/></g><g opacity='.9'><g transform='translate(180 200)'><ellipse rx='16' ry='21' fill='%23e0552e'/><ellipse rx='11' ry='16' fill='%23ff8c42'/><rect x='-4' y='-25' width='8' height='5' fill='%238a3418'/></g><g transform='translate(430 130)'><ellipse rx='13' ry='17' fill='%23d8912a'/><ellipse rx='9' ry='12' fill='%23ffd166'/><rect x='-3' y='-21' width='6' height='4' fill='%238a6018'/></g><g transform='translate(650 240)'><ellipse rx='14' ry='19' fill='%23e0552e'/><ellipse rx='10' ry='14' fill='%23ff8c42'/><rect x='-3' y='-23' width='6' height='4' fill='%238a3418'/></g><g transform='translate(300 70)'><ellipse rx='9' ry='12' fill='%23ffb060'/></g><g transform='translate(560 60)'><ellipse rx='7' ry='10' fill='%23ffd166'/></g></g></svg>\")"},
+  // ══ PACK: Instruments & Data (6) ══════════════════════════════════════════
+  oscilloscope: {label:'∿ Oscilloscope',bg0:'#04120a',bg1:'#061a0e',bg2:'#092414',bg3:'#0c2e1a',bg4:'#113a22',border:'#17492b',border2:'#22683d',text:'#b8f0c8',text2:'#46e07a',text3:'#7cae8a',accent:'#3ee06e',accent2:'#d8f048',link:'#6ef098',warn:'#d8f048',error:'#ff6a5a',join:'#3ee06e',part:'#e0a050',notice:'#7fd8d0',action:'#a8f060',animation:'scopeTrace',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='200' height='200'><rect width='200' height='200' fill='%2305150c'/><g stroke='%232a6b40' stroke-width='.5' opacity='.55'><path d='M0 20h200M0 40h200M0 60h200M0 80h200M0 120h200M0 140h200M0 160h200M0 180h200'/><path d='M20 0v200M40 0v200M60 0v200M80 0v200M120 0v200M140 0v200M160 0v200M180 0v200'/></g><g stroke='%233ee06e' stroke-width='1' opacity='.75'><path d='M0 100h200M100 0v200'/></g><g stroke='%233ee06e' stroke-width='.8' opacity='.5'><path d='M96 90h8M96 110h8M90 96v8M110 96v8'/></g></svg>\")"},
+  spectrogram: {label:'⌁ Spectrogram',bg0:'#06060f',bg1:'#0b0b18',bg2:'#101024',bg3:'#171732',bg4:'#202042',border:'#2a2a54',border2:'#3f3f7a',text:'#e0e0f4',text2:'#ff5fa2',text3:'#9494b8',accent:'#ff4f9a',accent2:'#38d0ff',link:'#6fdcff',warn:'#ffc24a',error:'#ff4f6a',join:'#38d0ff',part:'#ff8a5a',notice:'#b06fff',action:'#ffd05a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 300' preserveAspectRatio='none'><rect width='800' height='300' fill='%23070712'/><g opacity='.8'><rect x='0' y='230' width='800' height='70' fill='%23231044'/><rect x='0' y='180' width='800' height='50' fill='%233a1060'/><rect x='0' y='140' width='800' height='40' fill='%23701a72'/><rect x='0' y='112' width='800' height='28' fill='%23b02a72'/><rect x='0' y='94' width='800' height='18' fill='%23e04a80'/><rect x='0' y='84' width='800' height='10' fill='%23ff7aa0'/></g><g fill='%23070712' opacity='.55'><rect x='60' y='84' width='14' height='216'/><rect x='150' y='94' width='10' height='206'/><rect x='250' y='84' width='18' height='216'/><rect x='380' y='112' width='12' height='188'/><rect x='470' y='84' width='16' height='216'/><rect x='600' y='94' width='10' height='206'/><rect x='700' y='140' width='20' height='160'/></g></svg>\")"},
+  topo_map: {label:'⌒ Topographic',bg0:'#14180f',bg1:'#1b2015',bg2:'#23291b',bg3:'#2c3422',bg4:'#37402b',border:'#444f35',border2:'#616f4c',text:'#e6e8d8',text2:'#b8c48a',text3:'#a0a888',accent:'#a8b86a',accent2:'#d08a4a',link:'#b8cc7a',warn:'#d8bc50',error:'#d0705a',join:'#8ac07a',part:'#c88a50',notice:'#9aa8c8',action:'#d0c070',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><rect width='400' height='400' fill='%23161b11'/><g fill='none' stroke='%23697a4a' stroke-width='1' opacity='.6'><ellipse cx='140' cy='150' rx='30' ry='22'/><ellipse cx='140' cy='150' rx='56' ry='42'/><ellipse cx='140' cy='150' rx='84' ry='62'/><ellipse cx='140' cy='150' rx='114' ry='84'/><ellipse cx='140' cy='150' rx='146' ry='108'/><ellipse cx='300' cy='300' rx='26' ry='20'/><ellipse cx='300' cy='300' rx='50' ry='38'/><ellipse cx='300' cy='300' rx='76' ry='58'/><ellipse cx='300' cy='300' rx='104' ry='78'/></g><g stroke='%23c07a3a' stroke-width='1.4' fill='none' opacity='.55'><path d='M0 210 Q120 240 200 200 T400 230'/></g></svg>\")"},
+  star_chart: {label:'✵ Star Chart',bg0:'#060a18',bg1:'#0a1026',bg2:'#0e1634',bg3:'#131e44',bg4:'#1a2858',border:'#223460',border2:'#33508f',text:'#e4e8f8',text2:'#e8c86a',text3:'#95a0c0',accent:'#f0cd6d',accent2:'#7fa8ff',link:'#a8c0ff',warn:'#f0cd6d',error:'#ff7a80',join:'#6fd0b0',part:'#e0956a',notice:'#a89aff',action:'#ffdc90',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><rect width='400' height='400' fill='%23070b1a'/><g stroke='%232c3f70' stroke-width='.5' fill='none' opacity='.6'><circle cx='200' cy='200' r='60'/><circle cx='200' cy='200' r='120'/><circle cx='200' cy='200' r='180'/><path d='M200 20v360M20 200h360M74 74l252 252M326 74L74 326'/></g><g stroke='%23c9a94e' stroke-width='1' opacity='.85' fill='none'><path d='M96 120 L140 86 L196 108 L228 70 L286 96'/><path d='M120 288 L170 258 L214 286 L268 260 L310 300'/></g><g fill='%23f4e3ae'><circle cx='96' cy='120' r='2.6'/><circle cx='140' cy='86' r='3.4'/><circle cx='196' cy='108' r='2.2'/><circle cx='228' cy='70' r='3'/><circle cx='286' cy='96' r='2.4'/><circle cx='120' cy='288' r='2.6'/><circle cx='170' cy='258' r='3.2'/><circle cx='214' cy='286' r='2.2'/><circle cx='268' cy='260' r='2.8'/><circle cx='310' cy='300' r='2.4'/></g><g fill='%23ffffff' opacity='.45'><circle cx='60' cy='60' r='1'/><circle cx='340' cy='150' r='1.2'/><circle cx='250' cy='350' r='1'/><circle cx='50' cy='330' r='.9'/><circle cx='370' cy='40' r='1.1'/></g></svg>\")"},
+  microscope: {label:'⊛ Microscope',bg0:'#f7f7fa',bg1:'#eff0f5',bg2:'#e6e8f0',bg3:'#dadde8',bg4:'#ccd0df',border:'#bcc1d2',border2:'#969db6',text:'#1e2030',text2:'#8a2f7a',text3:'#585d78',accent:'#b02582',accent2:'#1a7f96',link:'#166488',warn:'#8a5f00',error:'#a42234',join:'#1f6f58',part:'#95461f',notice:'#5a3f96',action:'#7a5210',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><rect width='300' height='300' fill='%23f7f7fa'/><g opacity='.55'><g fill='none' stroke='%23c0298a' stroke-width='2'><circle cx='70' cy='80' r='26'/><circle cx='150' cy='50' r='20'/><circle cx='232' cy='96' r='30'/><circle cx='96' cy='190' r='24'/><circle cx='196' cy='210' r='28'/><circle cx='40' cy='260' r='18'/><circle cx='270' cy='240' r='22'/></g><g fill='%231f8fa8' opacity='.75'><circle cx='70' cy='80' r='7'/><circle cx='150' cy='50' r='6'/><circle cx='232' cy='96' r='8'/><circle cx='96' cy='190' r='7'/><circle cx='196' cy='210' r='8'/><circle cx='40' cy='260' r='5'/><circle cx='270' cy='240' r='6'/></g></g></svg>\")"},
+  sonar: {label:'⟲ Sonar',bg0:'#020c08',bg1:'#04140d',bg2:'#061c13',bg3:'#09261a',bg4:'#0d3122',border:'#12402c',border2:'#1c5c40',text:'#c4ecd8',text2:'#3fd88a',text3:'#7ba892',accent:'#2fd07a',accent2:'#d0e850',link:'#5fe0a0',warn:'#d0e850',error:'#ff6a5a',join:'#2fd07a',part:'#d09850',notice:'#6fd0c8',action:'#a0e860',animation:'sonarPing',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><rect width='400' height='400' fill='%23030f0a'/><g fill='none' stroke='%231d6b46' stroke-width='1' opacity='.7'><circle cx='200' cy='200' r='48'/><circle cx='200' cy='200' r='96'/><circle cx='200' cy='200' r='144'/><circle cx='200' cy='200' r='192'/></g><g stroke='%23155638' stroke-width='.8' opacity='.65'><path d='M200 8v384M8 200h384M64 64l272 272M336 64L64 336'/></g><g fill='%232fd07a' opacity='.85'><circle cx='268' cy='142' r='3'/><circle cx='136' cy='250' r='2.4'/><circle cx='232' cy='288' r='2'/></g></svg>\")"},
+  // ══ PACK: Print & Optical (7) ═════════════════════════════════════════════
+  risograph: {label:'❐ Risograph',bg0:'#14121c',bg1:'#1c1826',bg2:'#241f32',bg3:'#2e2740',bg4:'#3a3150',border:'#483d64',border2:'#665690',text:'#f2ecf8',text2:'#ff5f9e',text3:'#a89bc0',accent:'#ff4f8f',accent2:'#2fc4e0',link:'#58d4ec',warn:'#ffc84a',error:'#ff4f6a',join:'#2fd8a8',part:'#ff8f5a',notice:'#b06fff',action:'#ffd45a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><rect width='300' height='300' fill='%23161320'/><g opacity='.55'><circle cx='110' cy='110' r='72' fill='%23ff4f8f'/><circle cx='190' cy='130' r='72' fill='%232fc4e0' style='mix-blend-mode:screen'/></g><g opacity='.4'><rect x='40' y='210' width='120' height='40' fill='%23ff4f8f'/><rect x='52' y='218' width='120' height='40' fill='%232fc4e0' style='mix-blend-mode:screen'/></g><g opacity='.5'><polygon points='230,190 280,190 255,240' fill='%23ffd45a'/><polygon points='238,198 288,198 263,248' fill='%23ff4f8f' style='mix-blend-mode:multiply'/></g></svg>\")"},
+  halftone: {label:'⁘ Halftone',bg0:'#0e0e10',bg1:'#151518',bg2:'#1d1d21',bg3:'#26262c',bg4:'#313138',border:'#3d3d45',border2:'#5a5a66',text:'#f0eeea',text2:'#ffd23f',text3:'#9d9da8',accent:'#ffd23f',accent2:'#ee4266',link:'#56b4e8',warn:'#ffd23f',error:'#ee4266',join:'#3fd68a',part:'#ff8a4a',notice:'#9a7fe8',action:'#ffe07a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><rect width='60' height='60' fill='%23101012'/><g fill='%23ffd23f' opacity='.5'><circle cx='10' cy='10' r='5'/><circle cx='40' cy='10' r='3.4'/><circle cx='25' cy='25' r='4.2'/><circle cx='55' cy='25' r='2.4'/><circle cx='10' cy='40' r='3'/><circle cx='40' cy='40' r='5'/><circle cx='25' cy='55' r='2.6'/><circle cx='55' cy='55' r='4'/></g><g fill='%23ee4266' opacity='.32'><circle cx='18' cy='18' r='2.4'/><circle cx='48' cy='33' r='2'/><circle cx='33' cy='48' r='2.6'/></g></svg>\")"},
+  venetian: {label:'▥ Venetian',bg0:'#0b0b0c',bg1:'#111113',bg2:'#18181b',bg3:'#202024',bg4:'#2a2a30',border:'#35353c',border2:'#4f4f59',text:'#ebe9e6',text2:'#b4b0aa',text3:'#96928c',accent:'#d8d2c6',accent2:'#a8763f',link:'#b8c4d0',warn:'#d8bc70',error:'#d8706a',join:'#88b8a0',part:'#c08a60',notice:'#a8a8b8',action:'#d0c090',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='none'><rect width='800' height='400' fill='%230b0b0c'/><g fill='%23e4e0d8' opacity='.11'><rect x='0' y='16' width='800' height='16'/><rect x='0' y='56' width='800' height='16'/><rect x='0' y='96' width='800' height='16'/><rect x='0' y='136' width='800' height='16'/><rect x='0' y='176' width='800' height='16'/><rect x='0' y='216' width='800' height='16'/><rect x='0' y='256' width='800' height='16'/><rect x='0' y='296' width='800' height='16'/><rect x='0' y='336' width='800' height='16'/><rect x='0' y='376' width='800' height='16'/></g><g fill='%23000000' opacity='.5'><rect x='0' y='0' width='120' height='400'/><rect x='680' y='0' width='120' height='400'/></g></svg>\")"},
+  infrared: {label:'⏣ Infrared',bg0:'#10041a',bg1:'#180628',bg2:'#200a36',bg3:'#2a0e46',bg4:'#361458',border:'#451c70',border2:'#642a9e',text:'#f4e0f8',text2:'#ff6fd0',text3:'#b28ac8',accent:'#ff4fc4',accent2:'#7ff0d0',link:'#ff8ad8',warn:'#ffc86a',error:'#ff5a7a',join:'#7ff0d0',part:'#ff8a6a',notice:'#b08aff',action:'#ffd08a',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 400' preserveAspectRatio='xMidYMax slice'><defs><linearGradient id='ir' x1='0' x2='0' y1='0' y2='1'><stop offset='0' stop-color='%23200a36'/><stop offset='1' stop-color='%23561a6e'/></linearGradient></defs><rect width='800' height='400' fill='url(%23ir)'/><g fill='%23ff4fc4' opacity='.45'><ellipse cx='120' cy='300' rx='150' ry='80'/><ellipse cx='330' cy='330' rx='170' ry='70'/><ellipse cx='560' cy='300' rx='160' ry='84'/><ellipse cx='760' cy='340' rx='130' ry='64'/></g><g fill='%23ff8ad8' opacity='.5'><ellipse cx='210' cy='250' rx='60' ry='40'/><ellipse cx='470' cy='236' rx='72' ry='44'/><ellipse cx='680' cy='262' rx='54' ry='36'/></g><circle cx='650' cy='90' r='40' fill='%23fff0fa' opacity='.5'/></svg>\")"},
+  xray: {label:'☓ X-Ray',bg0:'#040810',bg1:'#07101c',bg2:'#0a1828',bg3:'#0e2036',bg4:'#142c46',border:'#1c3a5c',border2:'#2b5686',text:'#e8f0f8',text2:'#a8ccec',text3:'#8ba2bd',accent:'#cfe4f6',accent2:'#6fb0e0',link:'#9fd0f4',warn:'#e0c878',error:'#e0787a',join:'#78c8b0',part:'#c89078',notice:'#a8b0e0',action:'#d8d0a0',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><rect width='300' height='300' fill='%23050a13'/><g stroke='%23bcd8ee' stroke-width='7' stroke-linecap='round' fill='none' opacity='.28'><path d='M60 40 V150 M60 150 L36 250 M60 150 L88 250'/><path d='M60 60 L20 100 M60 60 L104 100'/><path d='M200 50 V160 M200 160 L172 260 M200 160 L230 260'/><path d='M200 70 L158 112 M200 70 L246 112'/></g><g fill='none' stroke='%236fb0e0' stroke-width='3' opacity='.22'><ellipse cx='60' cy='96' rx='30' ry='22'/><ellipse cx='200' cy='108' rx='32' ry='24'/></g></svg>\")"},
+  liquid_metal: {label:'◑ Liquid Metal',bg0:'#0a0c0e',bg1:'#101317',bg2:'#171b20',bg3:'#1f242b',bg4:'#292f38',border:'#353d47',border2:'#505b69',text:'#e6ebf0',text2:'#a9b6c4',text3:'#909cab',accent:'#c8d4e0',accent2:'#7f95ab',link:'#a8c0d8',warn:'#d8c078',error:'#d8746e',join:'#7fc0a8',part:'#c08a70',notice:'#a0a8c8',action:'#c8c0a0',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='340' height='340'><defs><radialGradient id='lm' cx='35%25' cy='30%25' r='70%25'><stop offset='0' stop-color='%23f0f4f8'/><stop offset='.4' stop-color='%239aa8b8'/><stop offset='.75' stop-color='%23454e5a'/><stop offset='1' stop-color='%23161a1f'/></radialGradient></defs><rect width='340' height='340' fill='%230c0e11'/><g opacity='.55'><circle cx='90' cy='90' r='58' fill='url(%23lm)'/><circle cx='226' cy='128' r='44' fill='url(%23lm)'/><circle cx='140' cy='224' r='66' fill='url(%23lm)'/><circle cx='276' cy='266' r='38' fill='url(%23lm)'/><circle cx='40' cy='286' r='30' fill='url(%23lm)'/></g></svg>\")"},
+  dreamcore: {label:'❍ Dreamcore',bg0:'#171425',bg1:'#1f1b32',bg2:'#282341',bg3:'#332c52',bg4:'#3f3765',border:'#4d4380',border2:'#6d5fae',text:'#f0eafa',text2:'#b8a6f0',text3:'#a89cc4',accent:'#c8a8ff',accent2:'#7fe8e0',link:'#d8bcff',warn:'#ffd88a',error:'#ff8aa8',join:'#7fe8c0',part:'#ffab8a',notice:'#c8a8ff',action:'#ffe0a0',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><defs><radialGradient id='d1' cx='50%25' cy='50%25' r='50%25'><stop offset='0' stop-color='%23c8a8ff' stop-opacity='.75'/><stop offset='1' stop-color='%23c8a8ff' stop-opacity='0'/></radialGradient><radialGradient id='d2' cx='50%25' cy='50%25' r='50%25'><stop offset='0' stop-color='%237fe8e0' stop-opacity='.7'/><stop offset='1' stop-color='%237fe8e0' stop-opacity='0'/></radialGradient><radialGradient id='d3' cx='50%25' cy='50%25' r='50%25'><stop offset='0' stop-color='%23ffb0d8' stop-opacity='.6'/><stop offset='1' stop-color='%23ffb0d8' stop-opacity='0'/></radialGradient></defs><rect width='400' height='400' fill='%23191627'/><circle cx='110' cy='120' r='130' fill='url(%23d1)'/><circle cx='300' cy='180' r='150' fill='url(%23d2)'/><circle cx='190' cy='320' r='140' fill='url(%23d3)'/></svg>\")"},
+  // ══ PACK: Warmth & Flavor (6) ═════════════════════════════════════════════
+  matcha: {label:'🍵 Matcha',bg0:'#eef2e4',bg1:'#e5ebd8',bg2:'#dae3ca',bg3:'#ccd8b9',bg4:'#bdcca7',border:'#adbf94',border2:'#8b9f72',text:'#1f2617',text2:'#4a5c33',text3:'#586b3f',accent:'#5f8420',accent2:'#8a6a3a',link:'#356558',warn:'#7d5c00',error:'#a02a2a',join:'#2c6b46',part:'#8a4a18',notice:'#524488',action:'#6e5410',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><rect width='300' height='300' fill='%23eef2e4'/><g fill='none' stroke='%23a8bd8a' stroke-width='3' opacity='.55'><circle cx='150' cy='150' r='30'/><circle cx='150' cy='150' r='56'/><circle cx='150' cy='150' r='84'/><circle cx='150' cy='150' r='112'/></g><g fill='%23c3d2a8' opacity='.55'><circle cx='96' cy='104' r='9'/><circle cx='210' cy='128' r='7'/><circle cx='168' cy='214' r='8'/><circle cx='108' cy='198' r='6'/></g></svg>\")"},
+  citrus: {label:'🍋 Citrus Grove',bg0:'#fbf7e4',bg1:'#f5f0d4',bg2:'#ede7c2',bg3:'#e2dbae',bg4:'#d5cd98',border:'#c5bc84',border2:'#a09760',text:'#26240f',text2:'#576119',text3:'#646a29',accent:'#6f9020',accent2:'#c47600',link:'#2a6a5c',warn:'#7d5c00',error:'#a02620',join:'#2a6b40',part:'#8a4610',notice:'#4e4488',action:'#6e5410',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='260'><rect width='260' height='260' fill='%23fbf7e4'/><g opacity='.6'><g transform='translate(70 70)'><circle r='26' fill='%23f2d33c'/><circle r='26' fill='none' stroke='%23c9a520' stroke-width='2'/><path d='M-26 0h52M0 -26v52M-18 -18l36 36M18 -18l-36 36' stroke='%23e0c02e' stroke-width='1.4'/></g><g transform='translate(190 130)'><circle r='22' fill='%23a8c93c'/><circle r='22' fill='none' stroke='%237e9a22' stroke-width='2'/><path d='M-22 0h44M0 -22v44' stroke='%2392b52c' stroke-width='1.4'/></g><g transform='translate(100 200)'><circle r='24' fill='%23f2d33c'/><circle r='24' fill='none' stroke='%23c9a520' stroke-width='2'/><path d='M-24 0h48M0 -24v48' stroke='%23e0c02e' stroke-width='1.4'/></g><g fill='%236f9020'><ellipse cx='128' cy='40' rx='24' ry='10' transform='rotate(-25 128 40)'/><ellipse cx='40' cy='150' rx='22' ry='9' transform='rotate(20 40 150)'/><ellipse cx='218' cy='220' rx='20' ry='8' transform='rotate(-15 218 220)'/></g></g></svg>\")"},
+  berry_jam: {label:'🫐 Berry',bg0:'#14060e',bg1:'#1e0a16',bg2:'#280e1e',bg3:'#341328',bg4:'#421932',border:'#522040',border2:'#78305e',text:'#f4dce8',text2:'#ff6fae',text3:'#bb8ba4',accent:'#e0417f',accent2:'#8a5ecc',link:'#ff8ac0',warn:'#e8b850',error:'#ff5a70',join:'#5fc8a0',part:'#e08a70',notice:'#a87ae8',action:'#e8c070',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='280' height='280'><rect width='280' height='280' fill='%23170717'/><g opacity='.7'><circle cx='70' cy='80' r='30' fill='%236a2450'/><circle cx='118' cy='60' r='24' fill='%23a3306a'/><circle cx='104' cy='116' r='28' fill='%234c1c48'/><circle cx='200' cy='140' r='32' fill='%236a2450'/><circle cx='244' cy='106' r='22' fill='%23a3306a'/><circle cx='170' cy='196' r='26' fill='%234c1c48'/><circle cx='70' cy='210' r='30' fill='%23a3306a'/><circle cx='36' cy='160' r='20' fill='%236a2450'/><circle cx='230' cy='226' r='24' fill='%234c1c48'/></g><g fill='%23f0a8cc' opacity='.35'><circle cx='62' cy='70' r='6'/><circle cx='112' cy='52' r='5'/><circle cx='192' cy='130' r='6'/><circle cx='62' cy='200' r='6'/></g></svg>\")"},
+  honeycomb: {label:'⬡ Honeycomb',bg0:'#141004',bg1:'#1d1707',bg2:'#261e0a',bg3:'#31270e',bg4:'#3e3113',border:'#4d3d18',border2:'#705926',text:'#f6e6bc',text2:'#ffc233',text3:'#b8a06a',accent:'#ffb300',accent2:'#e08a2e',link:'#ffcf5c',warn:'#ffc233',error:'#e8685a',join:'#a8c050',part:'#e0904a',notice:'#c0a0d0',action:'#ffd870',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='112' height='96'><rect width='112' height='96' fill='%23161206'/><g fill='none' stroke='%23a8801e' stroke-width='2' opacity='.6'><polygon points='28,4 48,16 48,40 28,52 8,40 8,16'/><polygon points='84,4 104,16 104,40 84,52 64,40 64,16'/><polygon points='56,52 76,64 76,88 56,100 36,88 36,64'/><polygon points='0,52 20,64 20,88 0,100 -20,88 -20,64'/><polygon points='112,52 132,64 132,88 112,100 92,88 92,64'/></g><g fill='%23c9971e' opacity='.28'><polygon points='28,10 43,19 43,37 28,46 13,37 13,19'/><polygon points='84,10 99,19 99,37 84,46 69,37 69,19'/></g></svg>\")"},
+  neapolitan: {label:'🍨 Neapolitan',bg0:'#f7ece6',bg1:'#f0e2da',bg2:'#e7d5cb',bg3:'#dcc7bb',bg4:'#cfb7a9',border:'#c0a695',border2:'#9c8271',text:'#2b1f19',text2:'#7a4a3a',text3:'#6f584a',accent:'#c05a52',accent2:'#6b4423',link:'#6f5090',warn:'#8a5c00',error:'#a5302c',join:'#2f6a4c',part:'#8f4a1e',notice:'#5c4a8a',action:'#77530f',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 300' preserveAspectRatio='none'><rect width='400' height='300' fill='%23f7ece6'/><rect y='0' width='400' height='100' fill='%23f0c4bc'/><rect y='100' width='400' height='100' fill='%23f6ecd8'/><rect y='200' width='400' height='100' fill='%23a9765a'/><g stroke='%23ffffff' stroke-width='2' opacity='.3'><path d='M0 100h400M0 200h400'/></g></svg>\")"},
+  cacao: {label:'🍫 Cacao',bg0:'#100a06',bg1:'#18100a',bg2:'#20170e',bg3:'#2a1e13',bg4:'#362719',border:'#443220',border2:'#634931',text:'#f0e0cc',text2:'#c89a5e',text3:'#ac9078',accent:'#a9714b',accent2:'#e0b878',link:'#d8a86a',warn:'#e0b060',error:'#d8705a',join:'#88b070',part:'#c08050',notice:'#b098c0',action:'#e0be80',bgImage:"url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><rect width='120' height='120' fill='%23150e08'/><g fill='%23241a10' opacity='.9'><rect x='4' y='4' width='52' height='52' rx='3'/><rect x='64' y='4' width='52' height='52' rx='3'/><rect x='4' y='64' width='52' height='52' rx='3'/><rect x='64' y='64' width='52' height='52' rx='3'/></g><g fill='%232f2216' opacity='.85'><rect x='8' y='8' width='44' height='44' rx='2'/><rect x='68' y='8' width='44' height='44' rx='2'/><rect x='8' y='68' width='44' height='44' rx='2'/><rect x='68' y='68' width='44' height='44' rx='2'/></g></svg>\")"},
   // ── mIRC: classic 1998 white-chrome look. Pairs with the html[data-theme='mirc']
   //    CSS block in index.html (square corners, navy switchbar, Fixedsys font). ──
   mirc:         {label:'mIRC',bg0:'#ffffff',bg1:'#ffffff',bg2:'#f0f0f0',bg3:'#e4e4e4',bg4:'#000080',border:'#c0c0c0',border2:'#808080',text:'#000000',text2:'#00007f',text3:'#555555',accent:'#000080',accent2:'#00007f',link:'#0000ff',warn:'#7f0000',error:'#ff0000',join:'#009300',part:'#7f0000',notice:'#7f0000',action:'#9c009c'},
@@ -7581,6 +7638,63 @@ function _customThemeBgValue(themeName,t){
     try{ return localStorage.getItem('cryptirc_cbg_'+themeName.slice(7)); }catch(e){ return null; }
   }
   return null;
+}
+// A custom theme cloned from a built-in inherits that built-in's SVG scene by
+// REFERENCE (bgFrom:'<builtin key>'), never by copy — those scenes run 1-3KB each
+// and the whole appearance blob has to stay under the server's 4KB cap, so a copy
+// would make "customize this theme" unsaveable on exactly the themes people most
+// want to tweak. Returns a ready-to-use CSS url(...) string, or ''.
+// True only for a key naming a shipped theme that really has a scene.
+// hasOwnProperty, not a bare lookup: THEMES['constructor'] is truthy through the
+// prototype chain, and this key decides what gets interpolated into a CSS url().
+function _validSceneKey(k){
+  return typeof k==='string' && !!k &&
+    Object.prototype.hasOwnProperty.call(THEMES,k) && !!THEMES[k].bgImage;
+}
+function _themeSceneFrom(t){
+  return (t&&_validSceneKey(t.bgFrom)) ? THEMES[t.bgFrom].bgImage : '';
+}
+// The user's own background picture (Appearance ▸ Background). Syncable https URL
+// wins over the device-local upload, mirroring the per-theme editor's precedence.
+function _globalBgValue(cfg){
+  if(cfg&&cfg.bgUrl) return cfg.bgUrl;
+  try{ return localStorage.getItem('cryptirc_bg_custom'); }catch(e){ return null; }
+}
+// Resolve what actually goes behind the chat, for ANY theme. Returns
+// {image, opacity, repeat} where image is a CSS value ('none' or 'url("…")').
+//
+// Precedence, by mode:
+//   'none'   → nothing
+//   'custom' → the user's picture, at the user's opacity/tiling. If they picked
+//              custom but never supplied an image we fall through to the theme's
+//              own rather than blanking the app on them.
+//   'theme'  → a custom theme uses the picture and opacity IT stores (so saved
+//              themes keep looking exactly as designed); a built-in uses its
+//              shipped scene at the global opacity/tiling, which is new control
+//              over something that was previously hardcoded at 25%/cover.
+function _resolveBackground(cfg,themeName,t,isCustom){
+  const mode=(cfg&&cfg.bgMode)||'theme';
+  // Clamp AND reject non-numbers: these values arrive from a synced appearance
+  // blob, so a junk one (`{}`, `"abc"`, null) must degrade to the default rather
+  // than emit `--theme-bg-opacity: NaN` and silently drop back to the CSS
+  // fallback — the same class of trap as the tsFormat sanitizer.
+  const _pct=(v,dflt)=>{const n=+v; return Number.isFinite(n)?Math.max(0,Math.min(100,n))/100:dflt;};
+  const gOp=_pct(cfg&&cfg.bgOpacity,.25);
+  const gRepeat=!!(cfg&&cfg.bgRepeat);
+  if(mode==='none') return {image:'none',opacity:0,repeat:false};
+  if(mode==='custom'){
+    const css=_safeBgCss(_globalBgValue(cfg));
+    if(css!=='none') return {image:css,opacity:gOp,repeat:gRepeat};
+    // configured "custom" but nothing set yet — fall through to the theme's own
+  }
+  if(isCustom){
+    const own=_customThemeBgValue(themeName,t);
+    if(own) return {image:_safeBgCss(own),opacity:_pct(t.bgOpacity,.25),repeat:!!t.bgRepeat};
+    const inherited=_themeSceneFrom(t);
+    if(inherited) return {image:inherited,opacity:_pct(t.bgOpacity,.25),repeat:!!t.bgRepeat};
+    return {image:'none',opacity:0,repeat:false};
+  }
+  return {image:t.bgImage||'none',opacity:gOp,repeat:gRepeat};
 }
 // Sanitize a background image value for safe use inside CSS url("..."). Allows only
 // https: URLs and data:image/* URLs (matches the CSP img-src directive). Strips any
@@ -7627,6 +7741,23 @@ const APPEAR_DEFAULTS={
   linkColor:'', mobileLink:'',
   // User-created themes, keyed by id. Selected via theme:'custom:<id>'.
   customThemes:{},
+  // ── Background, independent of the theme ────────────────────────────────────
+  // Lets anyone put their own picture behind ANY theme, built-in or custom, and
+  // tune how loud it is. bgMode:
+  //   'theme'  = use whatever background the active theme ships (DEFAULT — this
+  //              is byte-for-byte the pre-0.4.9 behavior)
+  //   'none'   = no picture at all, flat theme colors
+  //   'custom' = your own image on every theme (falls back to the theme's own
+  //              picture if you haven't actually set one, so this can't blank out)
+  // bgUrl syncs across devices (https only); an uploaded image is too large for
+  // the 4KB appearance cap so it lives in localStorage 'cryptirc_bg_custom' on
+  // this device only — same split the per-theme editor already uses.
+  bgMode:'theme',
+  bgUrl:'',
+  bgOpacity:25,     // 0-100. 25 == the long-standing built-in scene opacity.
+  bgRepeat:false,   // tile instead of cover
+  bgBlur:0,         // 0-20px — push a busy photo behind the text
+  bgDim:0,          // 0-80% black scrim — same, for bright photos
   // Desktop pet (eSheep) — a little sheep wanders the client window. Off by default.
   esheep:'off',
   crab:'off',
@@ -7728,6 +7859,15 @@ function applyAppearance(){
     // Custom themes are not represented by DOM inputs here — carry them through
     // untouched so a slider tweak never drops the user's saved themes.
     customThemes: prev.customThemes||{},
+    // Background (Appearance ▸ Background). Read defensively via `prev` fallbacks:
+    // index.html and app.js are separate network-first fetches, so a fresh app.js
+    // can run against a cached page that predates these controls.
+    bgMode:    el('a-bg-mode') ? (el('a-bg-mode').value||'theme') : (prev.bgMode||'theme'),
+    bgUrl:     el('a-bg-url')  ? el('a-bg-url').value.trim()      : (prev.bgUrl||''),
+    bgOpacity: el('a-bg-opacity') ? +el('a-bg-opacity').value : (prev.bgOpacity!=null?prev.bgOpacity:25),
+    bgRepeat:  el('a-bg-repeat')  ? el('a-bg-repeat').classList.contains('on') : !!prev.bgRepeat,
+    bgBlur:    el('a-bg-blur') ? +el('a-bg-blur').value : (prev.bgBlur|0),
+    bgDim:     el('a-bg-dim')  ? +el('a-bg-dim').value  : (prev.bgDim|0),
     brightness: +el('a-brightness').value,
     mobileChatSize: +el('a-mobile-chat-size').value,
     mobileNickW:    +el('a-mobile-nick-w').value,
@@ -7827,29 +7967,35 @@ function applyThemeCSS(cfg){
   // Hyperlink color: mobile override → theme link → custom accent2 / global linkColor → accent2.
   const link=(mob&&cfg.mobileLink)?cfg.mobileLink:(t.link||(isCustom?(t.accent2||accent2):(cfg.linkColor||accent2)));
   r.setProperty('--link',_safeColor(link||accent2,'#0099ff'));
-  // Semantic message colors: custom themes may override them; built-ins keep the
-  // :root defaults, so always reset to default first then apply any custom value.
+  // Semantic message colors. Any theme carrying its own wins; everything else gets
+  // the :root defaults, so always reset first then apply.
+  // (Built-ins used to be excluded from this, which quietly made the warn/error/
+  // join/part/notice/action keys mIRC has always defined dead code. Honoring them
+  // is what those keys are for, and it's what lets a theme ship status colors that
+  // match its palette instead of the same six defaults on all 224.)
   ['warn','error','join','part','notice','action'].forEach(k=>{
-    if(isCustom && t[k]) r.setProperty('--'+k,_safeColor(t[k],SEMANTIC_DEFAULTS[k]));
+    if(t[k]) r.setProperty('--'+k,_safeColor(t[k],SEMANTIC_DEFAULTS[k]));
     else r.setProperty('--'+k,SEMANTIC_DEFAULTS[k]);
   });
   r.setProperty('--sidebar-w',cfg.sidebarW+'px');
   r.setProperty('--nicks-w',cfg.nickPanelW+'px');
   r.setProperty('--input-h',(cfg.inputH!=null?cfg.inputH:36)+'px');
-  // Picture-backdrop layer — themes with bgImage render an SVG scene at low
-  // opacity behind the chat. Themes without bgImage clear the var so solid color wins.
-  if(isCustom){
-    const _cbg=_customThemeBgValue(themeName,t);
-    r.setProperty('--theme-bg-image', _cbg ? _safeBgCss(_cbg) : 'none');
-    r.setProperty('--theme-bg-opacity', t.bgOpacity!=null ? (Math.max(0,Math.min(100,t.bgOpacity))/100) : .25);
-    const _bgl=document.getElementById('theme-bg-layer');
-    if(_bgl) _bgl.classList.toggle('repeat', !!t.bgRepeat);
-  }else{
-    r.setProperty('--theme-bg-image', t.bgImage || 'none');
-    r.setProperty('--theme-bg-opacity', .25);
-    const _bgl=document.getElementById('theme-bg-layer');
-    if(_bgl) _bgl.classList.remove('repeat');
-  }
+  // Picture-backdrop layer — the theme's own SVG scene, or the user's own image
+  // when they've set one (Appearance ▸ Background), behind the chat at low opacity.
+  // Tiling is driven by CSS vars rather than a class so the no-flash boot script in
+  // index.html — which runs before <body> exists — can set it too.
+  const _bg=_resolveBackground(cfg,themeName,t,isCustom);
+  r.setProperty('--theme-bg-image', _bg.image);
+  r.setProperty('--theme-bg-opacity', _bg.opacity);
+  r.setProperty('--theme-bg-size', _bg.repeat?'auto':'cover');
+  r.setProperty('--theme-bg-repeat', _bg.repeat?'repeat':'no-repeat');
+  // Blur/dim are readability tools for busy photos and apply to whatever picture
+  // is showing, including a built-in theme's scene. Both default to 0 = no change.
+  const _blur=Math.max(0,Math.min(20,(cfg.bgBlur|0)||0));
+  r.setProperty('--theme-bg-blur', _blur+'px');
+  // A blurred fixed layer bleeds transparent at the edges; scale it out past them.
+  r.setProperty('--theme-bg-scale', _blur?(1+_blur/100).toFixed(3):'1');
+  r.setProperty('--theme-bg-dim', (Math.max(0,Math.min(80,(cfg.bgDim|0)||0))/100));
   // Media & preview variables — shape/size/border/aspect/max-height/YT play overlay
   const _sizeMap = { small: 200, medium: 320, large: 400, xlarge: 480 };
   const _mMaxW = _sizeMap[cfg.mediaSize] || _sizeMap.medium;
@@ -8098,6 +8244,158 @@ document.addEventListener('visibilitychange',_syncAnimToVisibility);
 window.addEventListener('blur',_syncAnimToVisibility);
 window.addEventListener('focus',_syncAnimToVisibility);
 const _ANIM={
+// ── Animations for the Materials/Weather/Instruments theme packs ─────────────
+// All follow the house rules: draw straight onto #anim-canvas, keep the rAF
+// handle in _animId and any setInterval in _animTimers so stopAnimation() can
+// tear them down, and re-read cv.width/cv.height each frame (the canvas is
+// resized under us on rotate / iOS URL-bar show-hide).
+fogDrift(cv,ctx){
+  const banks=[];
+  for(let i=0;i<7;i++)banks.push({x:Math.random()*cv.width,y:cv.height*(0.35+Math.random()*0.6),rx:180+Math.random()*260,ry:26+Math.random()*40,sp:0.12+Math.random()*0.35,a:0.04+Math.random()*0.06});
+  (function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    for(const b of banks){
+      const g=ctx.createRadialGradient(b.x,b.y,0,b.x,b.y,b.rx);
+      g.addColorStop(0,`rgba(200,215,222,${b.a})`); g.addColorStop(1,'rgba(200,215,222,0)');
+      ctx.fillStyle=g;
+      ctx.save(); ctx.translate(b.x,b.y); ctx.scale(1,b.ry/b.rx); ctx.beginPath(); ctx.arc(0,0,b.rx,0,Math.PI*2); ctx.fill(); ctx.restore();
+      b.x+=b.sp; if(b.x-b.rx>cv.width){b.x=-b.rx;b.y=cv.height*(0.35+Math.random()*0.6);}
+    }
+    _animId=requestAnimationFrame(draw);
+  })();
+},
+heatHaze(cv,ctx){
+  // Horizontal shimmer bands with a slow vertical crawl — the desert-road wobble.
+  let t=0;
+  (function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    t+=0.035;
+    const rows=Math.ceil(cv.height/14);
+    for(let i=0;i<rows;i++){
+      const y=i*14, phase=t+i*0.32;
+      const off=Math.sin(phase)*7*(1-i/rows);
+      const a=0.020+0.020*Math.sin(phase*0.7);
+      ctx.fillStyle=`rgba(255,208,140,${Math.max(0,a)})`;
+      ctx.fillRect(off,y,cv.width,7);
+    }
+    _animId=requestAnimationFrame(draw);
+  })();
+},
+monsoonRain(cv,ctx){
+  // Heavier and more slanted than the classic `rain`, with gust-driven sheets.
+  const drops=[];
+  for(let i=0;i<260;i++)drops.push({x:Math.random()*cv.width,y:Math.random()*cv.height,len:14+Math.random()*26,sp:11+Math.random()*9,a:0.06+Math.random()*0.16});
+  let gust=0,gustT=0;
+  (function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    gustT+=0.008; gust=Math.sin(gustT)*3.2;
+    ctx.lineWidth=1.1;
+    for(const d of drops){
+      const dx=3.4+gust;
+      ctx.beginPath(); ctx.moveTo(d.x,d.y); ctx.lineTo(d.x+dx*(d.len/d.sp)*2,d.y+d.len);
+      ctx.strokeStyle=`rgba(170,220,212,${d.a})`; ctx.stroke();
+      d.y+=d.sp; d.x+=dx;
+      if(d.y>cv.height){d.y=-d.len;d.x=Math.random()*cv.width-40;}
+      else if(d.x>cv.width+40){d.x=-40;}
+    }
+    _animId=requestAnimationFrame(draw);
+  })();
+},
+myceliumGlow(cv,ctx){
+  // Nodes on a slow-breathing network; edges only between near neighbours so the
+  // draw cost stays linear-ish rather than N² across the whole viewport.
+  const nodes=[];
+  const N=Math.min(70,Math.round((cv.width*cv.height)/26000)+22);
+  for(let i=0;i<N;i++)nodes.push({x:Math.random()*cv.width,y:Math.random()*cv.height,vx:(Math.random()-.5)*0.16,vy:(Math.random()-.5)*0.16,ph:Math.random()*Math.PI*2});
+  (function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    for(const n of nodes){
+      n.x+=n.vx; n.y+=n.vy; n.ph+=0.02;
+      if(n.x<0||n.x>cv.width)n.vx*=-1;
+      if(n.y<0||n.y>cv.height)n.vy*=-1;
+    }
+    ctx.lineWidth=0.7;
+    for(let i=0;i<nodes.length;i++)for(let j=i+1;j<nodes.length;j++){
+      const a=nodes[i],b=nodes[j],dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy;
+      if(d2<20000){
+        const o=(1-Math.sqrt(d2)/141)*0.16;
+        ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y);
+        ctx.strokeStyle=`rgba(98,216,184,${o})`; ctx.stroke();
+      }
+    }
+    for(const n of nodes){
+      const p=0.30+Math.sin(n.ph)*0.22;
+      ctx.beginPath(); ctx.arc(n.x,n.y,1.7,0,Math.PI*2);
+      ctx.fillStyle=`rgba(140,240,208,${p})`; ctx.fill();
+    }
+    _animId=requestAnimationFrame(draw);
+  })();
+},
+lanternRise(cv,ctx){
+  const lamps=[];
+  const mk=()=>({x:Math.random()*cv.width,y:cv.height+20+Math.random()*80,r:5+Math.random()*7,sp:0.25+Math.random()*0.45,sw:Math.random()*Math.PI*2,a:0.35+Math.random()*0.45});
+  for(let i=0;i<22;i++){const l=mk();l.y=Math.random()*cv.height;lamps.push(l);}
+  (function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    for(let i=0;i<lamps.length;i++){
+      const l=lamps[i];
+      l.y-=l.sp; l.sw+=0.012;
+      const x=l.x+Math.sin(l.sw)*12;
+      const g=ctx.createRadialGradient(x,l.y,0,x,l.y,l.r*4);
+      g.addColorStop(0,`rgba(255,170,80,${l.a})`);
+      g.addColorStop(.45,`rgba(255,130,50,${l.a*0.28})`);
+      g.addColorStop(1,'rgba(255,120,40,0)');
+      ctx.fillStyle=g; ctx.beginPath(); ctx.arc(x,l.y,l.r*4,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle=`rgba(255,205,130,${Math.min(1,l.a+0.25)})`;
+      ctx.beginPath(); ctx.ellipse(x,l.y,l.r*0.62,l.r*0.85,0,0,Math.PI*2); ctx.fill();
+      if(l.y<-40) lamps[i]=mk();
+    }
+    _animId=requestAnimationFrame(draw);
+  })();
+},
+scopeTrace(cv,ctx){
+  // A single sweeping phosphor trace with a decaying tail, drawn from a rolling
+  // sample buffer so the waveform shape changes over time like a real signal.
+  const buf=[]; let ph=0, drift=0;
+  (function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    ph+=0.045; drift+=0.0035;
+    const mid=cv.height*0.5, amp=cv.height*0.16;
+    buf.push(Math.sin(ph)*amp + Math.sin(ph*2.7+drift)*amp*0.4 + Math.sin(ph*0.31)*amp*0.3);
+    const maxPts=Math.max(80,Math.round(cv.width/3));
+    while(buf.length>maxPts) buf.shift();
+    ctx.lineWidth=1.6; ctx.lineJoin='round';
+    for(let pass=0;pass<2;pass++){
+      ctx.beginPath();
+      for(let i=0;i<buf.length;i++){
+        const x=(i/(maxPts-1))*cv.width, y=mid+buf[i];
+        i?ctx.lineTo(x,y):ctx.moveTo(x,y);
+      }
+      ctx.strokeStyle=pass?'rgba(62,224,110,0.85)':'rgba(62,224,110,0.16)';
+      ctx.lineWidth=pass?1.4:5;
+      ctx.stroke();
+    }
+    _animId=requestAnimationFrame(draw);
+  })();
+},
+sonarPing(cv,ctx){
+  const rings=[];
+  (function draw(){
+    ctx.clearRect(0,0,cv.width,cv.height);
+    const cx=cv.width*0.5, cy=cv.height*0.5;
+    const max=Math.hypot(cx,cy);
+    for(let i=rings.length-1;i>=0;i--){
+      const r=rings[i];
+      r.rad+=r.sp;
+      const o=Math.max(0,(1-r.rad/max))*0.5;
+      if(o<=0.002||r.rad>max){rings.splice(i,1);continue;}
+      ctx.beginPath(); ctx.arc(cx,cy,r.rad,0,Math.PI*2);
+      ctx.strokeStyle=`rgba(47,208,122,${o})`; ctx.lineWidth=1.6; ctx.stroke();
+    }
+    _animId=requestAnimationFrame(draw);
+  })();
+  _animTimers.push(setInterval(()=>{ if(rings.length<6) rings.push({rad:0,sp:1.5}); },2200));
+},
 rain(cv,ctx){
   const drops=[];
   for(let i=0;i<150;i++)drops.push({x:Math.random()*cv.width,y:Math.random()*cv.height,len:Math.random()*15+8,speed:Math.random()*4+6,opacity:Math.random()*0.15+0.05});
@@ -8553,6 +8851,17 @@ function populateAppearanceModal(cfg){
   if (el('a-media-radius-row')) el('a-media-radius-row').style.display = cfg.mediaShape === 'custom' ? '' : 'none';
   const _ytp = el('a-yt-play');
   if (_ytp) (cfg.ytPlayOverlay !== false) ? _ytp.classList.add('on') : _ytp.classList.remove('on');
+  // Background
+  if (el('a-bg-mode'))    el('a-bg-mode').value    = cfg.bgMode || 'theme';
+  if (el('a-bg-url'))     el('a-bg-url').value     = cfg.bgUrl || '';
+  if (el('a-bg-opacity')) el('a-bg-opacity').value = cfg.bgOpacity!=null ? cfg.bgOpacity : 25;
+  if (el('a-bg-opacity-val')) el('a-bg-opacity-val').textContent = (cfg.bgOpacity!=null?cfg.bgOpacity:25)+'%';
+  if (el('a-bg-blur'))    el('a-bg-blur').value    = cfg.bgBlur|0;
+  if (el('a-bg-blur-val'))el('a-bg-blur-val').textContent = (cfg.bgBlur|0)+'px';
+  if (el('a-bg-dim'))     el('a-bg-dim').value     = cfg.bgDim|0;
+  if (el('a-bg-dim-val')) el('a-bg-dim-val').textContent = (cfg.bgDim|0)+'%';
+  if (el('a-bg-repeat'))  el('a-bg-repeat').classList.toggle('on', !!cfg.bgRepeat);
+  _toggleBgRows();
   // Privacy/Security/Behavior settings are now in the standalone Security panel
   // Theme cards
   const _tsInput=el('theme-search'); if(_tsInput) _tsInput.value='';
@@ -8572,7 +8881,10 @@ function populateAppearanceModal(cfg){
     const name=document.createElement('div'); name.className='theme-name'; name.textContent=t.label||'Custom';
     const edit=document.createElement('button'); edit.className='tc-edit'; edit.title='Edit theme'; edit.textContent='✎';
     edit.onclick=(e)=>{e.stopPropagation();openThemeEditor(id);};
-    card.appendChild(prev); card.appendChild(name); card.appendChild(edit);
+    // ★ marks this as the user's own copy, so a theme customized from a built-in
+    // is tellable at a glance from the built-in it still sits beside.
+    const mine=document.createElement('span'); mine.className='tc-mine'; mine.textContent='★'; mine.title='Your theme';
+    card.appendChild(prev); card.appendChild(name); card.appendChild(edit); card.appendChild(mine);
     card.onclick=()=>selectCard(card);
     grid.appendChild(card);
   }
@@ -8582,12 +8894,19 @@ function populateAppearanceModal(cfg){
   create.innerHTML='<div class="tc-plus">+</div><div class="theme-name">Create theme</div>';
   create.onclick=()=>openThemeEditor(null);
   grid.appendChild(create);
-  // 3) Built-in themes (labels are static/trusted).
+  // 3) Built-in themes (labels are static/trusted). Every one of them now carries
+  //    a ✎ that opens the editor seeded from it — "customize any theme", without
+  //    ever mutating THEMES itself (it's compiled into the binary, and shared by
+  //    every user of the server).
   for(const[key,t] of Object.entries(THEMES)){
     const card=document.createElement('div');
     card.className='theme-card'+(cfg.theme===key?' active':'');
     card.dataset.theme=key;
     card.innerHTML=`<div class="theme-preview"><span style="background:${t.bg0}"></span><span style="background:${t.bg2}"></span><span style="background:${t.bg4}"></span></div><div class="theme-name">${t.label}</div>`;
+    const edit=document.createElement('button');
+    edit.className='tc-edit'; edit.title='Customize '+t.label; edit.textContent='✎';
+    edit.onclick=(e)=>{e.stopPropagation();openThemeEditor(null,key);};
+    card.appendChild(edit);
     card.onclick=()=>selectCard(card);
     grid.appendChild(card);
   }
@@ -8595,6 +8914,80 @@ function populateAppearanceModal(cfg){
   // (the theme owns those colors) — surface a hint so the controls don't look broken.
   const _ch=el('a-colors-customhint');
   if(_ch) _ch.style.display=(typeof cfg.theme==='string'&&cfg.theme.indexOf('custom:')===0)?'':'none';
+}
+// ─── Background (Appearance ▸ Background) ───────────────────────────────────
+// Show only the rows that can actually do something in the selected mode, so the
+// panel never presents a control that silently no-ops.
+function _toggleBgRows(){
+  const el=id=>document.getElementById(id);
+  const mode=el('a-bg-mode')?el('a-bg-mode').value:'theme';
+  const show=(id,on)=>{const n=el(id); if(n) n.style.display=on?'':'none';};
+  show('a-bg-image-row',  mode==='custom');
+  show('a-bg-url-row',    mode==='custom');
+  show('a-bg-status-row', mode==='custom');
+  // Opacity/tile drive the theme's own scene too, so they stay for 'theme'.
+  show('a-bg-opacity-row',mode!=='none');
+  show('a-bg-repeat-row', mode!=='none');
+  show('a-bg-blur-row',   mode!=='none');
+  show('a-bg-dim-row',    mode!=='none');
+  const hint=el('a-bg-theme-hint');
+  if(hint) hint.style.display=(mode==='theme')?'':'none';
+  _bgUpdateStatus();
+}
+function _bgUpdateStatus(){
+  const s=document.getElementById('a-bg-status'); if(!s) return;
+  // Read the live input, not the saved config, so typing gets instant feedback.
+  const u=document.getElementById('a-bg-url');
+  const url=u?(u.value||'').trim():(loadAppearance().bgUrl||'');
+  let local=null; try{ local=localStorage.getItem('cryptirc_bg_custom'); }catch(e){}
+  if(url && !/^https:\/\//i.test(url)) s.textContent='⚠ Image URLs must start with https:// — this one is being ignored.';
+  else if(url) s.textContent='✓ Using image URL — syncs to your other devices.';
+  else if(local) s.textContent='✓ Uploaded image (~'+Math.round((local.length*0.75)/1024)+' KB) — this device only.';
+  else s.textContent='No image chosen yet — showing the theme’s own background.';
+}
+// The URL box doubles as a paste target. A data: URL pasted there would ride into
+// the synced appearance blob and blow the server's 4KB cap, so route it to
+// device-local storage instead — exactly what the theme editor does with one.
+function bgSetUrl(){
+  const u=document.getElementById('a-bg-url'); if(!u) return;
+  const v=(u.value||'').trim();
+  if(/^data:image\//i.test(v)){
+    try{ localStorage.setItem('cryptirc_bg_custom',v); }
+    catch(e){ showToast('Image too large for this device’s storage'); }
+    u.value='';
+  }else if(v.length>1024){
+    u.value=v.slice(0,1024);
+  }
+  applyAppearance();
+  _bgUpdateStatus();
+}
+// Upload replaces any URL: two sources would be ambiguous, and the uploaded one is
+// what the user just picked. Downscaled through the same helper the theme editor
+// uses so the localStorage blob stays small.
+async function bgUploadImage(file){
+  if(!file) return;
+  if(!/^image\//.test(file.type)){ showToast('Please choose an image file'); return; }
+  const s=document.getElementById('a-bg-status'); if(s) s.textContent='Processing image…';
+  try{
+    const dataUrl=await _downscaleImage(file,TE_MAX_BG_DIM);
+    try{ localStorage.setItem('cryptirc_bg_custom',dataUrl); }
+    catch(e){ showToast('Image too large for this device’s storage'); _bgUpdateStatus(); return; }
+    const u=document.getElementById('a-bg-url'); if(u) u.value='';
+    const m=document.getElementById('a-bg-mode'); if(m) m.value='custom';
+    _toggleBgRows();
+    applyAppearance();
+    _bgUpdateStatus();
+    showToast('Background updated');
+  }catch(e){
+    if(s) s.textContent='Could not read image.';
+    showToast('Image processing failed');
+  }
+}
+function bgClearImage(){
+  try{ localStorage.removeItem('cryptirc_bg_custom'); }catch(e){}
+  const u=document.getElementById('a-bg-url'); if(u) u.value='';
+  applyAppearance();
+  _bgUpdateStatus();
 }
 // Filters the theme grid by name as the user types in #theme-search. The
 // "Create theme" card is exempt — it's an action, not a theme, so it should
@@ -8643,6 +9036,7 @@ let _teId=null;        // id of the custom theme being edited (always assigned)
 let _teState=null;     // working copy of the theme object
 let _teBgData=null;    // device-local uploaded background data URL (held until save)
 let _teIsNew=false;    // true when creating (vs editing an existing theme)
+let _teFrom='';        // label of the built-in being customized, for the title
 const TE_MAX_BG_DIM=1600;   // downscale uploads so the localStorage blob stays small
 const APPEAR_SYNC_BUDGET=3900; // keep synced config under the server's 4KB cap
 
@@ -8652,34 +9046,55 @@ function _teNewId(){
 }
 // Build a complete theme object, filling any missing color from the current
 // effective theme / global prefs so a custom theme is always fully specified.
-function _teSeedFrom(t,isCustom,cfg){
+// srcKey is the THEMES key when cloning a built-in — needed so the clone can point
+// at that theme's scene by reference instead of copying it.
+function _teSeedFrom(t,isCustom,cfg,srcKey){
   const out={};
   for(const k of ['bg0','bg1','bg2','bg3','bg4','border','border2','text','text2','text3']) out[k]=t[k]||THEMES.midnight[k];
-  out.accent = isCustom?(t.accent||cfg.accent||'#00d4aa'):(cfg.accent||'#00d4aa');
-  out.accent2= isCustom?(t.accent2||cfg.accent2||'#0099ff'):(cfg.accent2||'#0099ff');
-  out.link   = isCustom?(t.link||t.accent2||out.accent2):(cfg.linkColor||out.accent2);
-  for(const k of ['warn','error','join','part','notice','action']) out[k]=(isCustom&&t[k])?t[k]:SEMANTIC_DEFAULTS[k];
+  // A built-in that defines its OWN accent/link/semantic colors (mIRC, and every
+  // new theme that ships a matched palette) must have them carried into the clone
+  // — otherwise "customize this theme" silently hands back a differently-colored
+  // theme before the user has changed anything.
+  out.accent = t.accent||cfg.accent||'#00d4aa';
+  out.accent2= t.accent2||cfg.accent2||'#0099ff';
+  out.link   = t.link||(isCustom?(t.accent2||out.accent2):(cfg.linkColor||out.accent2));
+  for(const k of ['warn','error','join','part','notice','action']) out[k]=t[k]||SEMANTIC_DEFAULTS[k];
   out.animation = t.animation||'';
   out.bgUrl = isCustom?(t.bgUrl||''):'';
   out.bgKind = isCustom?(t.bgKind||''):'';
   out.bgRepeat = isCustom?!!t.bgRepeat:false;
   out.bgOpacity = isCustom&&t.bgOpacity!=null?t.bgOpacity:25;
+  // Inherit the source theme's illustrated scene BY REFERENCE. Copying the SVG
+  // itself would add 1-3KB to a config capped at 4KB total.
+  out.bgFrom = _validSceneKey(isCustom ? t.bgFrom : srcKey) ? (isCustom ? t.bgFrom : srcKey) : '';
   return out;
 }
-function openThemeEditor(id){
+// id        — edit an existing custom theme in place
+// builtinKey— customize a BUILT-IN: seeds a new theme from it, faithfully. The
+//             shipped theme is never mutated (THEMES is compiled into the binary),
+//             so this saves the user's own copy, which then sorts to the top of
+//             the grid with its own ✎.
+function openThemeEditor(id,builtinKey){
   const cfg=loadAppearance();
   _teIsNew=!id;
+  _teFrom='';
   if(id && cfg.customThemes && cfg.customThemes[id]){
     _teId=id;
     // _teSeedFrom returns a fresh object, so edits never mutate the stored theme.
     _teState=_teSeedFrom(cfg.customThemes[id],true,cfg);
     _teState.label=cfg.customThemes[id].label||'Custom';
     try{_teBgData=localStorage.getItem('cryptirc_cbg_'+id);}catch(e){_teBgData=null;}
+  }else if(builtinKey && THEMES[builtinKey]){
+    _teId=_teNewId();
+    _teState=_teSeedFrom(THEMES[builtinKey],false,cfg,builtinKey);
+    _teState.label=THEMES[builtinKey].label||'My Theme';
+    _teFrom=THEMES[builtinKey].label||builtinKey;
+    _teBgData=null;
   }else{
     _teId=_teNewId();
     // Seed from whatever theme is currently active so "create" starts from a sane palette.
     const rt=resolveThemeObj(cfg.theme,cfg);
-    _teState=_teSeedFrom(rt.t,rt.custom,cfg);
+    _teState=_teSeedFrom(rt.t,rt.custom,cfg,rt.custom?null:cfg.theme);
     _teState.label='My Theme';
     _teBgData=null;
   }
@@ -8694,7 +9109,7 @@ function closeThemeEditor(){
 }
 function _renderThemeEditor(){
   const el=id=>document.getElementById(id);
-  el('te-title').textContent=_teIsNew?'New Custom Theme':'Edit Custom Theme';
+  el('te-title').textContent=_teFrom?('Customize '+_teFrom):(_teIsNew?'New Custom Theme':'Edit Custom Theme');
   el('te-name').value=_teState.label||'';
   el('te-delete').style.display=_teIsNew?'none':'';
   // Base dropdown (clone source): current + built-ins
@@ -8783,7 +9198,9 @@ function teSetRepeat(){ if(!_teState) return; _teState.bgRepeat=document.getElem
 function teSetOpacity(v){ if(!_teState) return; _teState.bgOpacity=Math.max(0,Math.min(100,+v||0)); document.getElementById('te-bg-opacity-val').textContent=_teState.bgOpacity+'%'; _teApplyPreview(); }
 function teClearBg(){
   if(!_teState) return;
-  _teBgData=null; _teState.bgUrl=''; _teState.bgKind='';
+  // Clears the inherited scene too — otherwise "Clear" would appear to do nothing
+  // on a theme cloned from an illustrated built-in.
+  _teBgData=null; _teState.bgUrl=''; _teState.bgKind=''; _teState.bgFrom='';
   document.getElementById('te-bg-url').value='';
   _teUpdateBgStatus(); _teApplyPreview();
 }
@@ -8792,6 +9209,7 @@ function _teUpdateBgStatus(){
   if(!s||!_teState) return;
   if(_teBgData) s.textContent='✓ Uploaded image (this device only, ~'+Math.round((_teBgData.length*0.75)/1024)+' KB)';
   else if(_teState.bgUrl) s.textContent='✓ Using image URL (syncs across devices)';
+  else if(_teState.bgFrom&&THEMES[_teState.bgFrom]) s.textContent='✓ Using the illustrated backdrop from “'+(THEMES[_teState.bgFrom].label||_teState.bgFrom)+'”. Upload or paste an image to replace it; Clear removes it.';
   else s.textContent='No background image.';
 }
 async function teUploadBg(file){
@@ -8841,7 +9259,9 @@ function _teApplyPreview(){
   const st=pv.style;
   for(const k of CT_COLOR_KEYS) st.setProperty('--'+k, _safeColor(_teState[k],'#000'));
   const bg=_teBgData||_teState.bgUrl||'';
-  st.setProperty('--te-bg', bg?_safeBgCss(bg):'none');
+  // Own image wins; otherwise show the scene inherited from the source built-in so
+  // the preview matches what saving will actually produce.
+  st.setProperty('--te-bg', bg?_safeBgCss(bg):(_themeSceneFrom(_teState)||'none'));
   st.setProperty('--te-bg-op', (_teState.bgOpacity!=null?_teState.bgOpacity:25)/100);
   pv.classList.toggle('bg-repeat', !!_teState.bgRepeat);
 }
@@ -8852,9 +9272,13 @@ function teStartFrom(name){
   if(!name||!_teState) return;
   const cfg=loadAppearance();
   const rt=resolveThemeObj(name,cfg);
-  const seeded=_teSeedFrom(rt.t,rt.custom,cfg);
+  const seeded=_teSeedFrom(rt.t,rt.custom,cfg,rt.custom?null:name);
+  // Keep the user's name and their OWN background choices — but let the new base's
+  // illustrated scene (seeded.bgFrom) come along, since switching base is exactly
+  // when you'd want its artwork too. An uploaded/URL image still wins over it.
   const keep={label:_teState.label, bgUrl:_teState.bgUrl, bgKind:_teState.bgKind, bgRepeat:_teState.bgRepeat, bgOpacity:_teState.bgOpacity};
   _teState=Object.assign(seeded, keep);
+  _teFrom=''; // the title no longer describes what's in the editor
   _renderThemeEditor(); // re-renders color rows + resets the dropdown to "current"
 }
 function _appearByteSize(cfg){ try{return JSON.stringify(cfg).length;}catch(e){return 0;} }
@@ -8879,6 +9303,12 @@ function saveCustomTheme(){
   if(bgUrl.length>1024){ showToast('Background URL too long'); return; }
   _teState.bgUrl=bgUrl;
   _teState.bgKind=(bgUrl||_teBgData)?'image':'';
+  // bgFrom is a key into THEMES, and it ends up inside a CSS url(...) via
+  // _themeSceneFrom. Store it only if it names a shipped theme that actually has a
+  // scene — so a synced or hand-edited value can't resolve to anything we didn't
+  // author, and inherited Object.prototype keys ('constructor', 'toString', …)
+  // don't survive as dead weight in the synced blob.
+  if(_teState.bgFrom && !_validSceneKey(_teState.bgFrom)) _teState.bgFrom='';
   // Build the prospective config and enforce the 4KB server cap BEFORE committing.
   const cfg=loadAppearance();
   const customThemes={...(cfg.customThemes||{})};
@@ -14165,7 +14595,7 @@ function showHelpPanel(){
   // Features section
   const feat=document.createElement('div');feat.className='help-section';
   feat.innerHTML=`<div class="help-section-title">Features</div>
-    <div class="help-cmd"><span class="help-cmd-name">172 themes</span><span class="help-cmd-desc">57 animated (canvas effects) + 115 static themes</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">224 themes</span><span class="help-cmd-desc">64 animated (canvas effects) + 160 static — hit ✎ on any theme card to customize it</span></div>
     <div class="help-cmd"><span class="help-cmd-name">140 fonts</span><span class="help-cmd-desc">Monospace, sans-serif, serif, display, handwriting</span></div>
     <div class="help-cmd"><span class="help-cmd-name">E2E encryption</span><span class="help-cmd-desc">Signal protocol for DMs + AES-256-GCM for channels</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Encrypted vault</span><span class="help-cmd-desc">Argon2id KDF — all data encrypted at rest</span></div>
@@ -14242,6 +14672,12 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.5.0', date:'August 2026', items:[
+    {tag:'new', text:'Every theme is now yours to change. Hover any theme card in Appearance ▸ Theme and hit the ✎ — the editor opens on that exact theme with all of its colors, its animation and its artwork already loaded. Change what you like and save; you get your own copy, marked with a ★, and the original stays untouched for when you want it back.'},
+    {tag:'new', text:'Put your own picture behind any theme. Appearance ▸ Background lets you upload an image or paste an https link and use it on every theme, built-in or your own. Opacity, blur, dim and tiling let you push it back far enough to still read your chat comfortably — and those sliders work on the built-in artwork too, so a theme you liked but found too busy can simply be turned down.'},
+    {tag:'new', text:'50 new themes, bringing the total to 224. Blueprint, Verdigris, Carbon Fiber, Damascus Steel, Terrazzo, Marble, Letterpress and Circuit Etch for a material feel. Blue Hour, Fog Bank, Heat Haze, Monsoon, Eclipse and Harvest Moon for weather and light. Coral Reef, Mycelium, Butterfly Wing, Peacock, Succulent and Tide Pool from the living world. Ukiyo-e, Byzantine Gold, Runestone, Zellij, Sumi Ink, Tartan, Papyrus, Kintsugi and Lantern Festival from art and craft. Oscilloscope, Spectrogram, Topographic, Star Chart, Microscope and Sonar off the instrument bench. Risograph, Halftone, Venetian, Infrared, X-Ray, Liquid Metal and Dreamcore from print and optics. Matcha, Citrus Grove, Berry, Honeycomb, Neapolitan and Cacao to finish. Seven come with new animations.'},
+    {tag:'fix', text:'Themes that ship their own status colors now actually use them. The warn/error/join/part colors a theme defines were being overwritten by the defaults on every built-in, so a carefully matched palette still showed the same six stock colors in your chat. They now come through.'},
+  ]},
   {version:'0.4.8', date:'July 2026', items:[
     {tag:'fix', text:'/quit now works the way it does in every other IRC client: it disconnects you and shows your message to everyone. Two things were wrong before. The message was passed to the server in a form where, strictly speaking, only the first word counted — forgiving servers showed all of it, stricter ones would have shown just the first word. And /quit did not actually keep you disconnected: it dropped the connection and the always-on IRC engine simply reconnected you moments later. Both are fixed. Typing /quit on its own uses the Quit Message saved on that network, the same one the Disconnect button sends. Use /connect when you want to come back.'},
   ]},

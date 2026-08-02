@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/rust-1.78+-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/encryption-AES--256--GCM-green?logo=letsencrypt" alt="AES-256-GCM">
   <img src="https://img.shields.io/badge/protocol-Signal%20E2E-blue?logo=signal" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/version-0.4.8-brightgreen" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.5.0-brightgreen" alt="Version">
   <img src="https://img.shields.io/badge/%F0%9F%A4%96%20AI-9%20providers%20%2B%20ChatGPT%20OAuth-00d4aa" alt="AI">
   <img src="https://img.shields.io/badge/bots-19%20built--in-ff8800" alt="Bots">
   <img src="https://img.shields.io/badge/themes-173-9b59ff" alt="Themes">
@@ -110,7 +110,7 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 - **Multi-network** — connect to as many IRC networks as you want simultaneously
 - **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
 - **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
-- **173 themes** (57 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin and a **Discord** theme) + **140 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
+- **224 themes** (64 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin and a **Discord** theme) + **140 fonts**, a live [theme gallery](https://gh0st68.github.io/CryptIRC/), and a full **custom theme editor**
 - **🐑🦀👻🐟👽 Desktop pets** — five to pick from (desktop, mobile, or both): the classic '95 **eSheep** (wanders, climbs walls, naps, UFO abduction), a furious **Angry Crab** (scuttles sideways, snaps its claws, eats shrimp, naps, digs — drag it around, and it pesters the sheep), a friendly **Ghost** (floats freely, fades through walls, the odd spooky "BOO!"), a serene **Calm Fish** (drifts around, click near it to feed), and a **Little Alien** flying saucer (UFO tractor-beam abductions). The sheep and crab are draggable; the ghost, fish, and alien let clicks pass through
 - **In-app News & changelog** with an auto-versioning build badge, so you always see exactly what changed
 - **Full IRCv3 support** — 17 user-toggleable capabilities including typing indicators, away-notify, server-time, message-tags, plus SASL PLAIN/EXTERNAL and nick MONITOR
@@ -146,7 +146,7 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 
 ### Themes & Personalization
 
-**173 built-in themes** — 116 static + 57 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more), including a pixel-perfect **mIRC** skin with full Windows-95 window chrome and a **Discord** theme with its familiar dark UI. Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
+**224 built-in themes** — 160 static + 64 animated (starfields, forest rain, aurora, Matrix code, the UFO/eSheep alien sequence, synthwave grids, and more), including a pixel-perfect **mIRC** skin with full Windows-95 window chrome and a **Discord** theme with its familiar dark UI. Each is hand-tuned across a 10-color palette. Plus a full **custom theme editor** (build your own, drop in a background image, customize link colors) and a **separate mobile theme**, so your phone and desktop can look completely different.
 
 <p align="center">
   <a href="https://gh0st68.github.io/CryptIRC/">
@@ -473,7 +473,7 @@ Accessible from the sidebar gear menu:
 | Panel | Contents |
 |-------|----------|
 | Notifications | Push alerts, desktop popups, sounds, trigger rules, custom highlight words (tag UI), per-network mute |
-| Theme | 173 themes (57 animated), 140 fonts, custom theme editor, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
+| Theme | 224 themes (64 animated), 140 fonts, customize any theme, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
 | Security | Vault auto-lock timer, message expiry, rate limit, block PMs (+g), auto-rejoin, link previews, spellcheck |
 | Monitor | Nick online/offline tracking with push notifications |
 | Notepad | Private encrypted auto-saving notes |
