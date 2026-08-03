@@ -3548,6 +3548,11 @@ async fn handle_command(
                 info!("[{}] SEND ({}B): {}", conn_id, safe.len(), redact_for_log(&safe));
                 let mut c = conn.lock().await;
                 let nick = c.nick.clone();
+                // Our own user@host, learned from the self-JOIN prefix / CHGHOST. Used to
+                // build the owner's full mask for the bot-trigger hook below. It can be
+                // empty (it resets on a web reattach until relearned) — harmless here,
+                // since the owner bypasses host-based access lists anyway.
+                let self_userhost = c.self_userhost.clone();
                 // F2: capture the connection's live state under the same lock as the send.
                 // If it isn't registered/connected, the daemon drops this RawSend (it's in
                 // reconnect/backoff), so we must NOT log + IrcEcho the message as sent — that
@@ -3601,6 +3606,27 @@ async fn handle_command(
                                     MessageKind::Notice => "notice",
                                     MessageKind::Action => "action",
                                 }).await;
+                                // Server-side bot triggers on the owner's OWN line.
+                                // irc.rs can never see these (our own PRIVMSG is either
+                                // echo-suppressed or never echoed at all), so without
+                                // this hook the owner's own `$ai`/`!w` silently did
+                                // nothing. Channel targets only, and NOTICE is excluded
+                                // to match irc.rs. ACTION (/me) IS included, because
+                                // irc.rs dispatches on the cleaned text without checking
+                                // kind — so `/me !w london` fires the bot for everyone
+                                // else, and excluding it here would make the owner's own
+                                // /me the one case that silently didn't work.
+                                // No loop is possible — bot replies go out via
+                                // bot_send → send_raw, never back through this handler.
+                                if !matches!(kind, MessageKind::Notice)
+                                    && display_target.starts_with(['#', '&', '+', '!'])
+                                {
+                                    let own_mask = format!("{}!{}", nick, self_userhost);
+                                    bots::maybe_trigger_self(
+                                        &state, username, &conn_id, &conn,
+                                        &display_target, &nick, &own_mask, &clean,
+                                    );
+                                }
                                 state.send_to_user(username, ServerEvent::IrcEcho {
                                     conn_id: conn_id.clone(),
                                     from: nick.clone(),
@@ -4197,10 +4223,19 @@ async fn handle_command(
             if config.len() > 65536 {
                 send(ServerEvent::Error { message: "Bot config too large".into() });
             } else {
+                info!("bots: save request from {} ({} bytes)", username, config.len());
                 match serde_json::from_str::<bots::BotConfig>(&config) {
+                    Err(e) => {
+                        // A rejected save used to be near-invisible: the panel showed
+                        // its own optimistic "Bots saved" toast while the server threw
+                        // the config away, so every toggle silently reverted on reload.
+                        warn!("bots: save REJECTED for {} — malformed config: {}", username, e);
+                        send(ServerEvent::Error { message: format!("Bot config rejected: {}", e) });
+                    }
                     Ok(cfg) => {
                         match bots::save(&state.data_dir, username, &cfg).await {
                             Ok(()) => {
+                                info!("bots: saved for {} (master={})", username, cfg.enabled);
                                 state.bots.insert(username.to_string(), cfg);
                                 // Echo the canonical stored form back to all of this
                                 // user's sessions so every device stays in sync.
@@ -4210,10 +4245,12 @@ async fn handle_command(
                                     }
                                 }
                             }
-                            Err(e) => send(ServerEvent::Error { message: format!("Bot config save failed: {}", e) }),
+                            Err(e) => {
+                                warn!("bots: DISK WRITE failed for {}: {}", username, e);
+                                send(ServerEvent::Error { message: format!("Bot config save failed: {}", e) });
+                            }
                         }
                     }
-                    Err(e) => send(ServerEvent::Error { message: format!("Bot config invalid: {}", e) }),
                 }
             }
         }
@@ -4254,7 +4291,7 @@ async fn handle_command(
                 let (u, cid, tgt, query) = (username.to_string(), conn_id.clone(), target.clone(), q.to_string());
                 tokio::spawn(async move {
                     // /aido shares the owner's private AI conversation ("__owner__").
-                    let reply = bots::run_ai_channel(&st, &u, "__owner__", &cid, &conn, &tgt, allow, yolo, &query).await;
+                    let reply = bots::run_ai_channel(&st, &u, bots::OWNER_CONV, &cid, &conn, &tgt, allow, yolo, &query).await;
                     if !reply.is_empty() {
                         let line = format!("PRIVMSG {} :{}\r\n", tgt, reply);
                         bots::bot_send(&cid, &conn, &line).await;

@@ -1810,8 +1810,26 @@ function handleEvent(ev) {
     case 'irc_channel_modes': {
       // Current channel modes (324). Feed the dialog if open for this channel;
       // otherwise show it for manual /mode users.
+      // Did the user ASK for this with /mode? Consume the pending query FIRST, even
+      // when the Channel Modes dialog also wants this 324 — they asked out loud and
+      // deserve an answer in their buffer either way, and leaving the entry armed
+      // would let a later unsolicited 324 claim it.
+      const _mq = _modeQueryTake(ev.conn_id, ev.channel);
       if (_cmMatch(ev.conn_id, ev.channel)) { cmParseModes(ev.modes); cmRender(); }
-      else sysMsg(ev.conn_id, ev.channel, `Modes: ${ev.modes || '(none)'}`, 'mode', { ts: Math.floor(Date.now()/1000), from: '*' });
+      if (_mq) {
+        // Answer as kind 'system' so it is NOT folded into a condensed status block
+        // (kind 'mode' is, which is why this used to look like nothing happened).
+        // The origin buffer may be gone by now (parted the channel / closed the PM);
+        // writing there would resurrect a closed query window or land in an orphan
+        // buffer with no sidebar row — i.e. invisible, the very bug being fixed.
+        sysMsg(ev.conn_id, _modeReplyTarget(ev.conn_id, _mq.target, ev.channel),
+          `Modes for ${ev.channel}: ${_describeModes(ev.modes)}`, 'system',
+          { ts: Math.floor(Date.now()/1000), from: '*' });
+      } else if (!_cmMatch(ev.conn_id, ev.channel)) {
+        // Unsolicited 324 (e.g. the per-channel resync burst on reattach) stays a
+        // quiet condensed status line, exactly as before.
+        sysMsg(ev.conn_id, ev.channel, `Modes: ${ev.modes || '(none)'}`, 'mode', { ts: Math.floor(Date.now()/1000), from: '*' });
+      }
       break;
     }
     case 'irc_ban_entry': {
@@ -3296,8 +3314,17 @@ function _fmtMsgTs(ts,mode){
   const t=new Date(ts*1000);
   if(_tsFormat) return _strftime(_tsFormat,t);
   if(mode==='locale') return t.toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
-  if(mode==='row'&&document.documentElement.dataset.theme==='mirc')
-    return `[${_tsPad2(t.getHours())}:${_tsPad2(t.getMinutes())}]`;
+  // Client-lookalike skins use their real client's clock format. No IRC client on
+  // a terminal has ever printed "3:45pm", and it is the most-repeated pixel on the
+  // screen — getting it wrong undoes the rest of the illusion. mIRC and irssi
+  // bracket it; HexChat and XChat default to bare 24-hour.
+  if(mode==='row'){
+    const _th=document.documentElement.dataset.theme;
+    if(_th==='mirc'||_th==='irssi')
+      return `[${_tsPad2(t.getHours())}:${_tsPad2(t.getMinutes())}]`;
+    if(_th==='hexchat'||_th==='xchat')
+      return `${_tsPad2(t.getHours())}:${_tsPad2(t.getMinutes())}`;
+  }
   return `${t.getHours()%12||12}:${_tsPad2(t.getMinutes())}${t.getHours()<12?'am':'pm'}`;
 }
 // Appearance-panel wiring for the format box. The toggle is pure UI sugar: it
@@ -3549,6 +3576,7 @@ function buildRow(msg){
   });
 })();
 function renderNickPanel(names){
+  try{ setTimeout(_clientChromeSync,0); }catch(e){}   // op/total counts feed the hexchat/xchat statusbar
   const list=document.getElementById('nick-list');
   const cnt=document.getElementById('nick-panel-count');
   list.innerHTML=''; cnt.textContent=`(${names.length})`;
@@ -3629,8 +3657,103 @@ setInterval(()=>{
   el._dc=((el._dc||0)%3)+1;
   el.textContent=el._typingBase+'.'.repeat(el._dc);
 },400);
+// ── Fake desktop chrome for the client-lookalike themes ─────────────────────────
+// The hexchat/xchat/irssi themes render a menubar + statusbar (see the data-theme
+// blocks in index.html) to complete the illusion. Those bars quote real state — the
+// channel, the op/total counts, your nick, the irssi window list — because static
+// placeholder text reads as obviously fake the moment you look at it.
+// Cheap and self-limiting: returns immediately unless one of the three is active,
+// and the bars are display:none below 769px so phones never pay for it either.
+const _CLIENT_CHROME_THEMES = new Set(['hexchat','xchat','irssi']);
+// irssi numbers windows 1..N in sidebar order; the statusbar and the window bar must
+// agree on that number, so both derive it here.
+function _irssiWinNum(conn, tgt){
+  let i = 1;
+  for(const n of networks)
+    for(const c of (n.channels||[])){
+      if(n.config?.id===conn && _sameChan(c.name,tgt)) return i;
+      i++;
+    }
+  return 0;
+}
+function _clientChromeSync(){
+  const th = document.documentElement.getAttribute('data-theme') || '';
+  if(!_CLIENT_CHROME_THEMES.has(th)) return;
+  const set = (id,txt)=>{ const e=document.getElementById(id); if(e) e.textContent=txt; };
+  // With no active buffer (fresh account, or the gap between auth and first render)
+  // the bars are already display:flex, so returning early would leave the seeded
+  // placeholder text on screen — the exact "obviously fake" failure this exists to
+  // avoid. Blank them instead.
+  if(!active){
+    for(const id of ['hx-sb-chan','hx-sb-users','hx-sb-nick','xc-sb-chan','xc-sb-users','xc-sb-nick','is-sb-body']) set(id,'');
+    set('is-wb-body','[Act: ]');
+    return;
+  }
+  const conn = active.conn_id, tgt = String(active.target||'');
+  const isChan = /^[#&+!]/.test(tgt);
+  const nick = getNick(conn);
+  if(th==='hexchat' || th==='xchat'){
+    const p = th==='hexchat' ? 'hx' : 'xc';
+    set(p+'-sb-chan', tgt || '—');
+    if(isChan){
+      const net = networks.find(n=>n.config?.id===conn);
+      const ch  = net?.channels?.find(c=>_sameChan(c.name,tgt));
+      const names = (ch&&ch.names)||[];
+      // HexChat counts only true ops (@ and above) in its "N ops" figure.
+      const ops = names.filter(n=>/^[~&@]/.test(n)).length;
+      set(p+'-sb-users', `${ops} ops, ${names.length} total`);
+    } else set(p+'-sb-users','');
+    set(p+'-sb-nick', nick);
+  } else {
+    // irssi statusbar: [HH:MM] [nick(+i)] [#chan(+nt)] — then the window list below.
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2,'0'), mm = String(d.getMinutes()).padStart(2,'0');
+    // Real irssi shows the window NUMBER and the channel's modes here. Include the
+    // number (we know it) and the modes when the Channel Modes parser has them, so
+    // the live bar never shows LESS detail than the seeded placeholder did.
+    const wn = _irssiWinNum(conn, tgt);
+    const cm = (typeof _cm==='object' && _cm && _cmMatch(conn,tgt) && _cm.loaded && _cm.flags && _cm.flags.size)
+      ? '(+' + [..._cm.flags].join('') + ')' : '';
+    set('is-sb-body', `[${hh}:${mm}] [${nick}] ${isChan ? '['+(wn?wn+':':'')+tgt+cm+']' : ''}`);
+    // Window list, numbered the way irssi numbers windows (1-based, in sidebar order).
+    // Number EVERY window first, then show a 12-wide span that always contains the
+    // active one. A plain prefix truncation hid the current window entirely for
+    // anyone past the 12th channel — and a window bar that omits the window you are
+    // in is worse than none, because it reads as frozen placeholder text.
+    const all = [];
+    let i = 1;
+    for(const n of networks)
+      for(const c of (n.channels||[]))
+        all.push({ n:i++, name:c.name, act:(n.config?.id===conn && _sameChan(c.name,tgt)) });
+    const MAXW = 12;
+    let wins = all;
+    if(all.length > MAXW){
+      const ai = Math.max(0, all.findIndex(w=>w.act));
+      let start = Math.min(Math.max(0, ai - Math.floor(MAXW/2)), all.length - MAXW);
+      wins = all.slice(start, start + MAXW);
+    }
+    const bar = document.getElementById('is-wb-body');
+    if(bar){
+      bar.textContent = '';
+      if(!wins.length) bar.textContent = '[Act: ]';
+      for(const w of wins){
+        const s = document.createElement('span');
+        // textContent only — channel names are server-supplied and must never be
+        // interpolated into markup.
+        s.textContent = `[${w.n}:${w.name}]`;
+        if(w.act) s.className = 'is-act';
+        bar.appendChild(s);
+        bar.appendChild(document.createTextNode(' '));
+      }
+    }
+  }
+}
+// irssi's statusbar clock ticks. _clientChromeSync early-returns on one Set lookup
+// for the other 224 themes, so this costs them nothing.
+setInterval(()=>{ try{ _clientChromeSync(); }catch(e){} }, 30000);
 function updateTopbar(){
   if(!active)return;
+  try{ _clientChromeSync(); }catch(e){}   // never let the fake chrome break the topbar
   // The user/nick list only makes sense for a CHANNEL. Hide its toggle button +
   // panel for every non-channel view — the Messages inbox, Upload Status, and DMs
   // (none have members). `no-nicklist` on <body> drives the CSS (desktop + mobile).
@@ -4330,8 +4453,42 @@ async function handleInput(raw){
       }
 
       // ── Mode shortcuts ───────────────────────────────────────────────
-      case 'MODE':
-        wsend({type:'send',conn_id,raw:`MODE ${args.join(' ')}`}); break;
+      case 'MODE': {
+        // Bare `/mode` = ask about the channel you're looking at. `/mode #chan` with
+        // no mode letters = a QUESTION, so arm the query and answer it visibly (see
+        // _modeQueryArm). Anything with mode letters is a CHANGE and passes straight
+        // through, exactly as before.
+        // `raw` is split on a single space, so "/mode  #chan" leaves empty tokens —
+        // drop them, or the blank arg reads as "no target" and the channel name gets
+        // sent as a modestring.
+        const mArgs = args.filter(a => a !== '');
+        // '+' is BOTH a channel prefix and the mode-add sign, so `/mode +o nick` must
+        // not be read as "the channel called +o", and `/mode +warez` (an archaic but
+        // legal RFC1459 channel) must not be read as the modes "+w+a+r+e+z" — which
+        // would silently apply them to whatever channel you happen to be sitting in.
+        // Resolve it: it is a modestring only if it LOOKS like one and is not a
+        // channel we are actually in.
+        const mNet = networks.find(n => n.config?.id === conn_id);
+        const mJoined = c => !!(mNet && (mNet.channels || []).some(ch => _sameChan(ch.name, c)));
+        const mFirstIsModes = /^[+-][A-Za-z]*$/.test(mArgs[0] || '') && !mJoined(mArgs[0] || '');
+        // With no explicit target, mode letters apply to the current CHANNEL — or, in
+        // a status/PM window where there is no channel, to your own nick (umodes),
+        // which is the only thing `/mode +i` can sensibly mean there.
+        const mCurIsChan = /^[#&+!]/.test(target || '');
+        const mTarget = (mArgs[0] && !mFirstIsModes) ? mArgs[0] : (mCurIsChan ? target : getNick(conn_id));
+        const mRest = (mArgs[0] && !mFirstIsModes) ? mArgs.slice(1) : mArgs;
+        if (!mTarget) { sysMsg(conn_id,target,'Usage: /mode [#channel] [+/-modes] — with no modes, shows the channel’s current modes','error'); break; }
+        // A QUERY is a channel target with NOTHING after it. `/mode #chan b` is a
+        // ban-list request answered by 367/368, not 324 — arming it there would leave
+        // a pending entry that the next unsolicited 324 (the resync burst fires one
+        // per channel on every reattach) would consume and mislabel as the answer.
+        const mIsQuery = /^[#&+!]/.test(mTarget) && mRest.length === 0;
+        if (mIsQuery) _modeQueryArm(conn_id, mTarget, target);
+        // Always send an explicit target so `/mode +o nick` in a channel works
+        // instead of the server reading "+o" as the target.
+        wsend({type:'send',conn_id,raw:`MODE ${[mTarget].concat(mRest).join(' ').trim()}`});
+        break;
+      }
       case 'OP':
         if(!args[0]){sysMsg(conn_id,target,'Usage: /op <nick> [nick2...]','error');break;}
         batchMode(conn_id,target,'+o',args); break;
@@ -4625,7 +4782,7 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 224 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 227 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
       case 'NP': case 'NOWPLAYING': {
         const sub=(args[0]||'').toLowerCase();
         if(sub==='set'){ const u=(args[1]||'').trim(); if(!u){ sysMsg(conn_id,target,'Usage: /np set <your-lastfm-username>','error'); break; } doSetLastfm(conn_id,target,u); break; }
@@ -7637,6 +7794,14 @@ const THEMES={
   // ── mIRC: classic 1998 white-chrome look. Pairs with the html[data-theme='mirc']
   //    CSS block in index.html (square corners, navy switchbar, Fixedsys font). ──
   mirc:         {label:'mIRC',bg0:'#ffffff',bg1:'#ffffff',bg2:'#f0f0f0',bg3:'#e4e4e4',bg4:'#000080',border:'#c0c0c0',border2:'#808080',text:'#000000',text2:'#00007f',text3:'#555555',accent:'#000080',accent2:'#00007f',link:'#0000ff',warn:'#7f0000',error:'#ff0000',join:'#009300',part:'#7f0000',notice:'#7f0000',action:'#9c009c'},
+  // ── App-inspired IRC clients. Palettes are the real defaults, not approximations;
+  // each also has a dedicated chrome block in index.html (search data-theme='hexchat').
+  // HexChat 2.x GTK3 default: white text box, Adwaita-light chrome, mIRC-16 nick colors.
+  hexchat:      {label:'HexChat',bg0:'#ffffff',bg1:'#f6f5f4',bg2:'#ffffff',bg3:'#ebe8e6',bg4:'#3584e4',border:'#cdc7c2',border2:'#9a9996',text:'#000000',text2:'#1c71d8',text3:'#5e5c64',accent:'#3584e4',accent2:'#1c71d8',link:'#1c71d8',warn:'#a51d2d',error:'#e01b24',join:'#009300',part:'#7f0000',notice:'#7f0000',action:'#9c009c'},
+  // XChat 2.8 (GTK2 / classic Bluecurve-era grey). Same layout, older chrome + fg.
+  xchat:        {label:'XChat',bg0:'#ffffff',bg1:'#d6d3ce',bg2:'#ffffff',bg3:'#c9c5c0',bg4:'#000080',border:'#9d9a95',border2:'#7b7873',text:'#000000',text2:'#00007f',text3:'#5f5c58',accent:'#000080',accent2:'#00007f',link:'#0000ff',warn:'#7f0000',error:'#ff0000',join:'#009300',part:'#7f0000',notice:'#7f0000',action:'#9c009c'},
+  // irssi on a default xterm: black bg, ANSI-7 grey text, and the signature cyan statusbar.
+  irssi:        {label:'irssi',bg0:'#000000',bg1:'#000000',bg2:'#000000',bg3:'#0d0d0d',bg4:'#00aaaa',border:'#333333',border2:'#555555',text:'#aaaaaa',text2:'#00aaaa',text3:'#555555',accent:'#00aaaa',accent2:'#55ffff',link:'#5555ff',warn:'#aa5500',error:'#ff5555',join:'#00aa00',part:'#aa0000',notice:'#00aaaa',action:'#aa00aa'},
   // ── ESHEEP: classic desktop pet, wanders the screen ────────────────────────
 };
 // Default semantic message colors (mirror :root in index.html). Used to RESET
@@ -8038,6 +8203,7 @@ function applyThemeCSS(cfg){
   // Expose the active theme name so theme-specific CSS (e.g. the mIRC look) can
   // target html[data-theme='...']. Harmless for every other theme.
   document.documentElement.setAttribute('data-theme', typeof themeName==='string'?themeName:'');
+  try{ _clientChromeSync(); }catch(e){}   // populate the client-lookalike chrome bars
   // Keep the iOS PWA status-bar tint in sync with the active theme background,
   // otherwise a light theme shows a black status-bar seam above the app.
   const _tc=document.querySelector('meta[name="theme-color"]'); if(_tc&&t.bg0) _tc.setAttribute('content',t.bg0);
@@ -8059,7 +8225,7 @@ function applyThemeCSS(cfg){
   // (Built-ins used to be excluded from this, which quietly made the warn/error/
   // join/part/notice/action keys mIRC has always defined dead code. Honoring them
   // is what those keys are for, and it's what lets a theme ship status colors that
-  // match its palette instead of the same six defaults on all 224.)
+  // match its palette instead of the same six defaults on all 227.)
   ['warn','error','join','part','notice','action'].forEach(k=>{
     if(t[k]) r.setProperty('--'+k,_safeColor(t[k],SEMANTIC_DEFAULTS[k]));
     else r.setProperty('--'+k,SEMANTIC_DEFAULTS[k]);
@@ -9984,7 +10150,7 @@ document.addEventListener('click',e=>{
     {cmd:'whowas',desc:'Look up offline user',usage:'/whowas nick'},
     {cmd:'who',desc:'List channel users',usage:'/who #channel'},
     // ── User Modes ──
-    {cmd:'mode',desc:'Set channel/user mode',usage:'/mode +o nick'},
+    {cmd:'mode',desc:'Show or set channel modes (no modes = show current)',usage:'/mode [#channel] [+/-modes]'},
     {cmd:'op',desc:'Give operator',usage:'/op nick'},
     {cmd:'deop',desc:'Remove operator',usage:'/deop nick'},
     {cmd:'voice',desc:'Give voice',usage:'/voice nick'},
@@ -12731,6 +12897,78 @@ function cmRefresh(){
   _cmRefreshT=setTimeout(()=>{ if(!_cm)return; _cm.lists={b:[],e:[],I:[]}; _cm.collecting={b:true,e:true,I:true}; cmQueryAll();
     setTimeout(()=>{ if(_cm){ _cm.collecting={b:false,e:false,I:false}; cmRenderList(); } },5000); },250);
 }
+// ── /mode <#channel> as a readable QUERY ────────────────────────────────────
+// A bare `/mode #chan` asks the server for the channel's current modes; the reply
+// (numeric 324) used to render with kind 'mode', which is a CONDENSED status kind
+// (_STATUS_KINDS) — so the answer got folded into a collapsed status block and was
+// invisible outright for anyone hiding status messages. A deliberate question
+// deserves a visible answer, so a query registers here and the 324 handler renders
+// it as a normal system line, in the buffer the user actually asked from, with the
+// mode letters spelled out.
+const _modeQuery = {};                       // key -> {conn_id, target, ts}
+function _modeQueryKey(connId, chan){ return connId + '/' + String(chan || '').toLowerCase(); }
+function _modeQueryArm(connId, chan, originTarget){
+  _modeQuery[_modeQueryKey(connId, chan)] = { conn_id: connId, target: originTarget, ts: Date.now() };
+}
+// Consume a pending query. Also expires stale entries so a server that never answers
+// (or answers only after the user moved on) can't leave the map growing forever.
+function _modeQueryTake(connId, chan){
+  const k = _modeQueryKey(connId, chan);
+  const now = Date.now();
+  for (const kk of Object.keys(_modeQuery)) {
+    if (now - _modeQuery[kk].ts > 30000) delete _modeQuery[kk];
+  }
+  const hit = _modeQuery[k];
+  if (hit) delete _modeQuery[k];
+  return hit || null;
+}
+// Where to print a /mode answer. Prefer the buffer the user asked from, but only if
+// it is STILL open — otherwise writing there either lands in an orphan buffer with no
+// sidebar row (parted channel) or re-opens a query window the user deliberately closed
+// (addMessage's DM branch calls clearQueryClosed for a newer message). Falls back to
+// the channel itself, then the status window, which always exists.
+function _modeReplyTarget(connId, origin, channel){
+  const net = networks.find(n => n.config?.id === connId);
+  const chanOpen = c => !!(net && (net.channels || []).some(ch => _sameChan(ch.name, c)));
+  const queryOpen = t => !!(queryBufs[connId] && queryBufs[connId].has(String(t || '').toLowerCase()));
+  if (origin === 'status') return 'status';
+  if (origin && (chanOpen(origin) || queryOpen(origin))) return origin;
+  if (chanOpen(channel)) return channel;
+  return 'status';
+}
+// "+ntk secret" -> "+ntk secret — no external messages, topic locked, key required (secret)"
+//
+// The raw string is ALWAYS shown first, so nothing is ever hidden; the decoded half
+// is a convenience and is deliberately conservative. Only `+k`/`+l` take arguments
+// here, and they are consumed positionally — which is only sound if every other
+// letter present is argument-less. Some daemons have parameter-taking modes we don't
+// know (`+f` flood, `+j` throttle, `+L` overflow); one of those appearing BEFORE k/l
+// shifts the positions and we would confidently print the wrong key. So when an
+// unrecognised letter is present we still name the modes but drop the parenthesised
+// VALUES rather than risk stating a false one. (Doing this properly means parsing
+// CHANMODES out of 005, which nothing in this codebase does yet — `cmParseModes` has
+// the same limitation.) Minus-form letters are not re-described; a 324 is always
+// all-'+', and the raw string covers the malformed case.
+function _describeModes(s){
+  const raw = String(s || '').trim();
+  if (!raw || raw === '+') return '(no modes set)';
+  const parts = raw.split(/\s+/);
+  const letters = parts[0] || '';
+  const known = ch => ch === 'k' || ch === 'l' || _CM_FLAGS.some(x => x[0] === ch);
+  const trustArgs = [...letters].every(ch => ch === '+' || ch === '-' || known(ch));
+  let argi = 1, adding = true;
+  const names = [];
+  for (const ch of letters) {
+    if (ch === '+') { adding = true; continue; }
+    if (ch === '-') { adding = false; continue; }
+    if (ch === 'k') { const v = parts[argi++] || ''; if (adding) names.push(v && trustArgs ? `key required (${v})` : 'key required'); continue; }
+    if (ch === 'l') { const v = parts[argi++] || ''; if (adding) names.push(v && trustArgs ? `limit ${v}` : 'user limit'); continue; }
+    if (!adding) continue;
+    const f = _CM_FLAGS.find(x => x[0] === ch);
+    names.push(f ? f[1].toLowerCase() : `+${ch}`);   // unknown letter: named raw, never dropped
+  }
+  return names.length ? `${raw} — ${names.join(', ')}` : raw;
+}
 function cmParseModes(s){
   if(!_cm)return;
   _cm.flags=new Set(); _cm.key=''; _cm.limit=''; _cm.loaded=true;
@@ -14959,7 +15197,7 @@ function showHelpPanel(){
   // Features section
   const feat=document.createElement('div');feat.className='help-section';
   feat.innerHTML=`<div class="help-section-title">Features</div>
-    <div class="help-cmd"><span class="help-cmd-name">224 themes</span><span class="help-cmd-desc">64 animated (canvas effects) + 160 static — hit ✎ on any theme card to customize it</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">227 themes</span><span class="help-cmd-desc">64 animated (canvas effects) + 163 static — hit ✎ on any theme card to customize it</span></div>
     <div class="help-cmd"><span class="help-cmd-name">140 fonts</span><span class="help-cmd-desc">Monospace, sans-serif, serif, display, handwriting</span></div>
     <div class="help-cmd"><span class="help-cmd-name">E2E encryption</span><span class="help-cmd-desc">Signal protocol for DMs + AES-256-GCM for channels</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Encrypted vault</span><span class="help-cmd-desc">Argon2id KDF — all data encrypted at rest</span></div>
@@ -15036,6 +15274,13 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.5.4', date:'August 2026', items:[
+    {tag:'new', text:'Three new themes that copy real IRC clients rather than just borrowing their colours. HexChat and XChat both get the layout that actually makes them recognisable — a right-aligned nick column with a thin vertical rule separating it from the message — plus their menubar and a status bar showing the live channel, the op and user counts and your nick. irssi gets the terminal treatment: black background, monospace everywhere, [24-hour] timestamps, -!- status lines, <bracketed> nicks, and the cyan status bars along the bottom with a real numbered window list where the channel you are in is highlighted in reverse video. (Stock irssi packs that into one bar; the two-bar window list is the look you get with the adv_windowlist script, which is how most people actually run it.)'},
+    {tag:'new', text:'Typing /mode #channel on its own now tells you the channel’s modes in plain language — for example “+ntk secret — no external messages, topic locked, key required (secret)” — and it answers in the window you asked from. It always sent the query before, but the reply arrived tagged as a status message, so it got folded into a collapsed status block and was invisible entirely if you hide those. /mode +o nick also now applies to the channel you are in rather than being sent without a target.'},
+    {tag:'fix', text:'Your own bot triggers now work in a channel. Typing something like $ai or !w yourself used to do absolutely nothing — the bots only ever watched messages arriving from other people, and your own outgoing line was never routed to them. It is now, so a trigger you type fires exactly like everyone else’s and the reply lands in the channel.'},
+    {tag:'new', text:'When you trigger your own AI in a channel it picks up the same conversation as /ai and /aido rather than starting a separate thread, so you can switch between them mid-conversation and it remembers.'},
+    {tag:'fix', text:'Your own triggers also ignore each bot’s access list. Setting a bot to private means "nobody else", not "not even me". Flood and bad-word enforcement deliberately skip your own messages too — they exist to police other people, and previously would have been able to kick or ban you out of your own channel.'},
+  ]},
   {version:'0.5.3', date:'August 2026', items:[
     {tag:'fix', text:'The twenty newer pets now move like the thing they actually are. Every one of them carried a "motion" setting \u2014 swim, crawl, flit and so on \u2014 that the engine never once read, so the snail, the paper plane and the wind-up key all slid along the same straight line at the same speed, and the only thing telling them apart was the drawing. That setting now drives everything: how a pet accelerates, the shape of the path it takes, and what its body does while it is doing it.'},
     {tag:'new', text:'So the jellyfish jets forward in pulses and coasts between them, with its bell contracting as it goes. The snail crawls at a dead constant speed and never accelerates. The moth arrives in a rush, zigzags, and never stops beating its wings. The manta banks through long undulating cruises. The survey probe moves one axis at a time like a plotter head and holds perfectly still otherwise. The paper crane rises on each wingbeat and dips between them.'},
@@ -15894,16 +16139,22 @@ function _readBotDef(key){
   // network/channel checkbox values (netid or netid␟#chan).
   const allc=document.querySelector(`[data-bot-allchans="${key}"]`);
   const channels=(allc&&allc.checked)?[]:[...document.querySelectorAll(`[data-bot-scope="${key}"]:checked`)].map(cb=>cb.value);
+  const on=s=>{const e=g(s);return !!(e&&e.classList&&e.classList.contains('on'));};
+  const val=s=>{const e=g(s);return e?(e.value||''):'';};
   return {
-    enabled: g('enable').classList.contains('on'),
-    trigger: (g('trigger').value||'').trim(),
-    access:  g('access').value,
-    allow_nicks: list(g('nicks').value),
-    allow_hosts: list(g('hosts').value),
+    enabled: on('enable'),
+    trigger: val('trigger').trim(),
+    // An absent <select> must NOT yield '' — the Rust Access enum has no such
+    // variant, so the whole config would fail to deserialize server-side and the
+    // ENTIRE save (every bot, plus the master switch) would be silently rejected.
+    access:  val('access') || 'public',
+    allow_nicks: list(val('nicks')),
+    allow_hosts: list(val('hosts')),
     channels,
   };
 }
 function saveBotConfig(){
+  try{
   const cfg={
     enabled: document.getElementById('bot-master').classList.contains('on'),
     weather:   _readBotDef('weather'),
@@ -15930,6 +16181,13 @@ function saveBotConfig(){
   };
   wsend({type:'save_bot_config', config:JSON.stringify(cfg)});
   showToast('Bots saved');
+  }catch(e){
+    // Never fail silently: a throw while collecting the 21 sub-configs used to abort
+    // before the request AND before the toast, so the panel looked like it had saved
+    // when nothing was sent at all.
+    console.error('saveBotConfig failed:',e);
+    showToast('Could not save bots — '+(e&&e.message?e.message:'unexpected error'));
+  }
 }
 
 async function adminSaveSettings(){

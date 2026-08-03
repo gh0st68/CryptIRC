@@ -1,2 +1,6 @@
 /target
 /data
+# The terminal client is its own crate with its own build dir — the root /target
+# rule is anchored and does NOT cover it, so without this its 335MB of build
+# artifacts land in the commit.
+/tui/target

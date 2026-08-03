@@ -1,0 +1,29 @@
+[package]
+name = "cryptirc-tui"
+version = "0.5.4"
+edition = "2021"
+description = "Terminal client for CryptIRC — speaks the same WebSocket protocol as the web app"
+
+# Its OWN workspace root. This crate is deliberately NOT a dependency of the server:
+# the cryptirc/irc_core binaries must not grow a TUI's dependency tree (ratatui,
+# crossterm, tungstenite) just to build. Nothing here can affect prod.
+[workspace]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-std", "io-util", "signal"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+reqwest = { version = "0.11", default-features = false, features = ["native-tls", "json"] }
+ratatui = "0.26"
+crossterm = { version = "0.27", features = ["event-stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+chrono = "0.4"
+dirs = "5"
+rpassword = "7"
+unicode-width = "0.1"
+
+[profile.release]
+opt-level = 2
+strip = true

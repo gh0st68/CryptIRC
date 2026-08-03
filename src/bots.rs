@@ -379,6 +379,22 @@ fn strip_do_lines(text: &str) -> String {
 // nick containing 0x1F can't straddle another conversation's key namespace.
 fn hist_key(username: &str, conv: &str) -> String { format!("{}\u{1f}{}", username, conv.replace('\u{1f}', "").to_lowercase()) }
 
+/// The owner's own AI conversation — shared by `/ai`, `/aido` and the owner's own
+/// channel trigger so they form one continuous thread.
+pub const OWNER_CONV: &str = "__owner__";
+
+/// Conversation key for someone ELSE talking to the AI.
+///
+/// ⚠️ MUST be namespaced away from [`OWNER_CONV`]. `hist_key` only strips `\u{1f}`
+/// and lowercases, so a bare nick as the key means anyone who takes the nick
+/// `__owner__` lands in the owner's private conversation — able to read back the
+/// owner's `/ai` + `/aido` history (the model recites it), poison it, or wipe it
+/// with "clear". `_` is a legal nick character on essentially every IRCd, so this
+/// is trivially reachable. A colon cannot appear in a nick (it is the IRC trailing
+/// -parameter marker and outside the RFC nick charset), so this prefix can never
+/// collide with the owner key.
+fn conv_for_nick(from_nick: &str) -> String { format!("nick:{}", from_nick) }
+
 /// Prior turns for this conversation within the retention window (capped).
 fn history_turns(username: &str, conv: &str, retention_secs: i64) -> Vec<(String, String)> {
     if retention_secs <= 0 { return Vec::new(); }
@@ -453,6 +469,80 @@ CryptIRC web IRC client. Keep replies concise and conversational — IRC lines a
 avoid long paragraphs, markdown, and code fences unless asked. When you're unsure about the \
 current channels or who's around, USE your query actions (names/who/whois) or join a channel \
 to find out rather than guessing or claiming you can't. Be direct and genuinely useful.";
+
+/// Appended to EVERY AI system prompt, including a user-supplied one. Models default
+/// to chat-window habits — markdown, headings, bullet lists, multi-paragraph answers —
+/// none of which IRC renders, and search-flavoured models (Perplexity's `sonar`) also
+/// emit `[1][4]` citation markers. `format_for_irc` cleans the output up regardless,
+/// but telling the model up front produces a better-shaped answer than post-processing
+/// a badly-shaped one. Kept short so it never crowds out the owner's own context.
+const AI_IRC_STYLE: &str = "\n\nOutput rules: you are speaking on IRC. Reply in plain text \
+as one short paragraph — no markdown (no **bold**, headings, bullet lists or code fences), \
+no citation markers like [1], no line breaks. Answer conversationally and directly rather \
+than defining or looking up the words used; if someone greets you, just greet them back.";
+
+/// Flatten an AI reply into something that reads correctly on a single IRC line.
+///
+/// `**bold**` becomes real mIRC bold (\x02) so the emphasis survives instead of showing
+/// as literal asterisks. Everything else markdown-ish is removed. Newlines become spaces
+/// FIRST — `strip_crlf` (applied later by `truncate_line`) deletes them outright, which
+/// would jam the last word of one line into the first word of the next.
+fn format_for_irc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    // **bold** → \x02bold\x02 (paired; an odd trailing "**" is just dropped).
+    let mut rest = s;
+    let mut bold_open = false;
+    while let Some(i) = rest.find("**") {
+        out.push_str(&rest[..i]);
+        out.push('\x02');
+        bold_open = !bold_open;
+        rest = &rest[i + 2..];
+    }
+    out.push_str(rest);
+    if bold_open { out.push('\x02'); }   // never leave formatting unterminated
+
+    // Drop bracketed numeric citation markers: [1], [12], [3][4] …
+    let mut cleaned = String::with_capacity(out.len());
+    let bytes: Vec<char> = out.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '[' {
+            if let Some(close) = bytes[i..].iter().position(|&c| c == ']') {
+                let inner: String = bytes[i + 1..i + close].iter().collect();
+                if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+                    i += close + 1;      // skip the whole [n] token
+                    continue;
+                }
+            }
+        }
+        cleaned.push(bytes[i]);
+        i += 1;
+    }
+
+    // Strip leading markdown structure per line, then join onto one line.
+    let joined = cleaned
+        .lines()
+        .map(|l| {
+            let t = l.trim();
+            let t = t.trim_start_matches('#').trim_start();
+            let t = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")).unwrap_or(t);
+            t
+        })
+        .filter(|l| !l.is_empty() && *l != "```")
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Collapse runs of whitespace left behind by the removals.
+    let mut final_out = String::with_capacity(joined.len());
+    let mut prev_space = false;
+    for c in joined.chars() {
+        let is_space = c == ' ' || c == '\t';
+        if is_space && prev_space { continue; }
+        prev_space = is_space;
+        final_out.push(if is_space { ' ' } else { c });
+    }
+    final_out.trim().to_string()
+}
 
 /// True if `p` is a provider ai.rs knows how to call.
 pub fn valid_provider(p: &str) -> bool {
@@ -584,7 +674,7 @@ async fn record_seen(state: &AppState, user: &str, chan: &str, nick: &str, act: 
 }
 
 /// Quote DB command. `arg` is everything after the trigger.
-async fn quote_cmd(state: &AppState, user: &str, chan: &str, by: &str, arg: &str) -> String {
+async fn quote_cmd(state: &AppState, user: &str, chan: &str, by: &str, arg: &str, is_owner: bool) -> String {
     let h = botdata_handle(&state.data_dir, user).await;
     let mut d = h.lock().await;
     let a = arg.trim();
@@ -611,8 +701,12 @@ async fn quote_cmd(state: &AppState, user: &str, chan: &str, by: &str, arg: &str
         let n = d.quotes.iter().filter(|q| q.chan.eq_ignore_ascii_case(chan)).count();
         return format!("{} has {} quote(s)", chan, n);
     }
-    // "del <id>" (owner-driven /q only — channel path passes by="" for this guard)
-    if cmd == "del" && by == "__owner__" {
+    // "del <id>" — owner only. Previously this compared `by` (the invoker's NICK)
+    // against the literal "__owner__", which was both dead code for the real owner
+    // (the private /q path passes their actual IRC nick) and a squat hole on the
+    // channel path (anyone taking the nick `__owner__` could delete quotes). It is
+    // now an explicit caller-supplied flag that no remote user can influence.
+    if cmd == "del" && is_owner {
         if let Ok(id) = tail.parse::<u64>() {
             let before = d.quotes.len();
             d.quotes.retain(|q| q.id != id);
@@ -897,6 +991,47 @@ fn bot_send_gates() -> &'static DashMap<String, Arc<Mutex<i64>>> {
     static G: OnceLock<DashMap<String, Arc<Mutex<i64>>>> = OnceLock::new();
     G.get_or_init(DashMap::new)
 }
+/// Send a bot's PRIVMSG reply AND make it visible in the owner's own client.
+///
+/// ⚠️ THE NON-OBVIOUS PART. Bots reply as the owner's own nick. `bot_send` writes
+/// straight to the socket, so unlike a message the user typed (which goes through
+/// `ClientMessage::Send`) nothing ever tells the owner's own sessions that the line
+/// happened: no `IrcEcho` is emitted, and the server's echo-message copy is discarded
+/// by irc.rs's self-echo suppression (which exists to stop your own messages showing
+/// twice). Net effect: **everyone in the channel sees the bot's answer except the
+/// person who owns the bot** — which is indistinguishable from the bot being dead,
+/// and is exactly what made `$ai` look broken long after it was working.
+///
+/// So every bot reply must ALSO be logged and echoed to the owner, the same way the
+/// Send handler does it. Use this for anything the bot says; `bot_send` remains for
+/// non-PRIVMSG actions (MODE/KICK), which need no echo.
+pub async fn bot_say(
+    state: &AppState,
+    username: &str,
+    conn_id: &str,
+    conn: &Arc<Mutex<IrcConnection>>,
+    target: &str,
+    text: &str,
+) {
+    let target = cryptirc::ircproto::strip_crlf(target);
+    if target.is_empty() || target.contains(' ') { return; }
+    let text = truncate_line(text, 400);
+    if text.is_empty() { return; }
+    bot_send(conn_id, conn, &format!("PRIVMSG {} :{}\r\n", target, text)).await;
+    let nick = conn.lock().await.nick.clone();
+    let ts = chrono::Utc::now().timestamp();
+    let msg_id = state.logger.append(username, conn_id, &target, ts, &nick, &text, "privmsg").await;
+    state.send_to_user(username, crate::ServerEvent::IrcEcho {
+        conn_id: conn_id.to_string(),
+        from: nick,
+        target: target.to_string(),
+        text,
+        ts,
+        kind: crate::MessageKind::Privmsg,
+        msg_id,
+    });
+}
+
 pub async fn bot_send(conn_id: &str, conn: &Arc<Mutex<IrcConnection>>, line: &str) {
     const MIN_GAP_MS: i64 = 500;
     let gate = bot_send_gates()
@@ -911,7 +1046,9 @@ pub async fn bot_send(conn_id: &str, conn: &Arc<Mutex<IrcConnection>>, line: &st
     if wait > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(wait as u64)).await;
     }
-    let _ = conn.lock().await.send_raw(line).await;
+    if let Err(e) = conn.lock().await.send_raw(line).await {
+        tracing::warn!("bot: send failed on {}: {}", conn_id, e);
+    }
     *last = chrono::Utc::now().timestamp_millis();
 }
 const COOLDOWN_SECS: i64 = 3;
@@ -1425,6 +1562,7 @@ pub async fn run_ai(state: &AppState, username: &str, conv: &str, query: &str, a
     if allow_commands {
         context.push_str(if yolo { AI_YOLO_PROTOCOL } else { AI_COMMAND_PROTOCOL });
     }
+    context.push_str(AI_IRC_STYLE);
     if !extra_context.is_empty() { context.push_str("\n\n"); context.push_str(extra_context); }
 
     // Multi-turn: prior turns (within the retention window) + the current message.
@@ -1586,7 +1724,7 @@ pub async fn run_ai_channel(state: &AppState, username: &str, conv: &str, conn_i
     let extra = ai_environment(conn, full_ctx).await;
     let text = run_ai(state, username, conv, query, allow_commands, yolo, &extra).await;
     if !allow_commands {
-        return truncate_line(&text, 400);
+        return truncate_line(&format_for_irc(&text), 400);
     }
     let (mut cmds, chat) = if yolo { ai_extract_raw(&text) } else { ai_extract_actions(&text, channel) };
     // Hard cap actions per turn so a runaway/injected model can't flood the network
@@ -1635,13 +1773,14 @@ pub async fn run_ai_channel(state: &AppState, username: &str, conv: &str, conn_i
             if let Ok((cfg, key)) = ai_ready(state, username).await {
                 let mut context = if cfg.context.trim().is_empty() { DEFAULT_AI_SYSTEM.to_string() } else { cfg.context.clone() };
                 if !extra.is_empty() { context.push_str("\n\n"); context.push_str(&extra); }
+                context.push_str(AI_IRC_STYLE);
                 let retention = cfg.history_minutes as i64 * 60;
                 let mut turns = history_turns(username, conv, retention);
                 turns.push(("user".to_string(), followup));
                 if let Ok(reply) = crate::ai::chat(&cfg.provider, &cfg.custom_base, &cfg.model, &key, &context, &turns, cfg.max_tokens).await {
                     let chat2 = strip_do_lines(&reply);
                     if !chat2.is_empty() {
-                        return truncate_line(&chat2, 400);
+                        return truncate_line(&format_for_irc(&chat2), 400);
                     }
                 }
             }
@@ -1653,7 +1792,7 @@ pub async fn run_ai_channel(state: &AppState, username: &str, conv: &str, conn_i
     } else {
         chat
     };
-    truncate_line(&out, 400)
+    truncate_line(&format_for_irc(&out), 400)
 }
 
 /// PM path: if someone privately messages the owner and the AI bot is enabled with
@@ -1688,9 +1827,8 @@ pub fn maybe_ai_pm(
     tokio::spawn(async move {
         let full_ctx = state2.bots.get(&username2).map(|c| c.ai.full_context).unwrap_or(false);
         let extra = ai_environment(&conn, full_ctx).await;
-        let reply = truncate_line(&run_ai(&state2, &username2, &from2, &query, false, false, &extra).await, 400);
-        let line = format!("PRIVMSG {} :{}\r\n", from2, reply);
-        bot_send(&cid, &conn, &line).await;
+        let reply = truncate_line(&format_for_irc(&run_ai(&state2, &username2, &conv_for_nick(&from2), &query, false, false, &extra).await), 400);
+        bot_say(&state2, &username2, &cid, &conn, &from2, &reply).await;
     });
 }
 
@@ -1794,7 +1932,7 @@ pub fn maybe_join_bots(
         if seen_on { record_seen(&st, &u, &channel, &nick, "joining", "").await; }
         if tell_on {
             for line in take_tells(&st, &u, &nick).await {
-                bot_send(&cid, &conn2, &format!("PRIVMSG {} :{}\r\n", channel, truncate_line(&line, 400))).await;
+                bot_say(&st, &u, &cid, &conn2, &channel, &line).await;
             }
         }
     });
@@ -1852,9 +1990,11 @@ fn build_help(cfg: &BotConfig) -> String {
 
 /// Dispatch the stateful command bots (quote/seen/tell/note/help). Returns true if a
 /// trigger matched (so the caller stops). `help` always replies in a private message.
+#[allow(clippy::too_many_arguments)]
 fn maybe_stateful_trigger(
     state: &AppState, cfg: &BotConfig, username: &str, conn_id: &str,
     conn: &Arc<Mutex<IrcConnection>>, channel: &str, from_nick: &str, full_mask: &str, text: &str,
+    is_owner: bool,
 ) -> bool {
     // (name, def, default trigger, requires_arg, reply_in_pm)
     let entries: [(&str, &BotDef, &str, bool, bool); 5] = [
@@ -1877,36 +2017,48 @@ fn maybe_stateful_trigger(
             continue;
         };
         if !scope_matches(&def.channels, conn_id, channel) { continue; }
-        if !access_ok(def, from_nick, full_mask) { continue; }
+        // The owner always passes their own access list (`private` = "nobody else").
+        if !(is_owner || access_ok(def, from_nick, full_mask)) { continue; }
         if requires_arg && arg.is_empty() { continue; }
         if !cooldown_ok(username, name) { continue; }
 
         let st = state.clone();
         let cfg2 = cfg.clone();
+        let owner = is_owner;
         let (nm, u, cid, ch, from, mask, q) = (name.to_string(), username.to_string(), conn_id.to_string(),
             channel.to_string(), from_nick.to_string(), full_mask.to_string(), arg.to_string());
         let conn2 = conn.clone();
         tokio::spawn(async move {
             let reply = match nm.as_str() {
                 "help"    => build_help(&cfg2),
-                "quotedb" => quote_cmd(&st, &u, &ch, &from, &q).await,
+                "quotedb" => quote_cmd(&st, &u, &ch, &from, &q, owner).await,
                 "seen"    => seen_cmd(&st, &u, &q).await,
                 "tell"    => tell_cmd(&st, &u, &ch, &from, &q).await,
                 "note"    => note_cmd(&st, &u, &from, &q).await,
                 _ => return,
             };
             if reply.is_empty() { return; }
+            let _ = mask; // reserved (future per-invoker gating)
+            // A PM-reply bot (help/note) triggered by the OWNER would address the PM to
+            // the owner's own nick — and a self-PM is exactly what the client drops to
+            // avoid double-display (irc.rs's echo suppression), so the reply would be
+            // invisible: the same silent-nothing this whole feature exists to fix.
+            // Deliver it straight to their app instead, as the private /command does.
+            if owner && reply_pm {
+                st.send_to_user(&u, ServerEvent::BotResult { bot: nm.clone(), text: truncate_line(&reply, 400) });
+                return;
+            }
             // Sanitize reply target (nick) + build the line. help/note go to PM.
             let target = if reply_pm { cryptirc::ircproto::strip_crlf(&from) } else { ch.clone() };
             if target.is_empty() || target.contains(' ') { return; }
-            let _ = mask; // reserved (future per-invoker gating)
-            bot_send(&cid, &conn2, &format!("PRIVMSG {} :{}\r\n", target, truncate_line(&reply, 400))).await;
+            bot_say(&st, &u, &cid, &conn2, &target, &reply).await;
         });
         return true;
     }
     false
 }
 
+/// Channel message from SOMEONE ELSE (called from irc.rs on inbound PRIVMSG).
 pub fn maybe_trigger(
     state: &AppState,
     username: &str,
@@ -1916,6 +2068,57 @@ pub fn maybe_trigger(
     from_nick: &str,
     full_mask: &str,
     text: &str,
+) {
+    dispatch_triggers(state, username, conn_id, conn, channel, from_nick, full_mask, text, false);
+}
+
+/// Channel message from the OWNER themselves (called from main.rs's Send handler).
+///
+/// The owner's own outgoing lines never come back through irc.rs — a server that
+/// supports echo-message has its echo suppressed to stop double-display, and one
+/// that doesn't never echoes at all — so `maybe_trigger` could never see them and
+/// the owner's own `!w` / `$ai` silently did nothing. This is the other half of the
+/// pipe: dispatch straight off the line we just sent.
+///
+/// Differences from the inbound path, all deliberate:
+/// - **No passive processing.** Enforcement (flood/bad-word kick+ban), seen-tracking
+///   and tell-delivery are for OTHER people. Running them here would let the owner
+///   flood-kick or bad-word-ban themselves out of their own channel.
+/// - **Access lists are bypassed.** These are the owner's own bots; `access: private`
+///   means "nobody else", never "not even me".
+/// - **AI actions are allowed whenever `commands_enabled` is on**, exactly like
+///   `/aido` — the owner is inherently trusted, so `ai_can_command`'s allow-list
+///   check (which exists to gate *strangers*) doesn't apply.
+/// - **YOLO stays off.** Unrestricted raw commands remain `/aido`-only, preserving
+///   that invariant; a channel line is a wider surface than a deliberate slash command.
+///
+/// No echo loop is possible: bot replies are written with `bot_send` →
+/// `IrcConnection::send_raw`, which does not route through `ClientMessage::Send`,
+/// so a reply can never re-enter this function.
+pub fn maybe_trigger_self(
+    state: &AppState,
+    username: &str,
+    conn_id: &str,
+    conn: &Arc<Mutex<IrcConnection>>,
+    channel: &str,
+    own_nick: &str,
+    own_mask: &str,
+    text: &str,
+) {
+    dispatch_triggers(state, username, conn_id, conn, channel, own_nick, own_mask, text, true);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_triggers(
+    state: &AppState,
+    username: &str,
+    conn_id: &str,
+    conn: &Arc<Mutex<IrcConnection>>,
+    channel: &str,
+    from_nick: &str,
+    full_mask: &str,
+    text: &str,
+    is_owner: bool,
 ) {
     let Some(cfg) = state.bots.get(username).map(|c| c.clone()) else { return };
     if !cfg.enabled { return; }
@@ -1933,17 +2136,27 @@ pub fn maybe_trigger(
             (username.to_string(), conn_id.to_string(), channel.to_string(), from_nick.to_string(), full_mask.to_string(), text.to_string());
         let conn2 = conn.clone();
         let cfg2 = cfg.clone();
+        let owner = is_owner;
         tokio::spawn(async move {
             // Enforcement (flood + bad words). Takes action itself if triggered.
-            enforce_message(&st, &u, &cfg2.enforce, &cid, &conn2, &ch, &nick, &mask, &msg).await;
-            // Seen tracker.
+            // Skipped for the owner's own lines — REDUNDANT, not dangerous:
+            // enforce_message already returns early when the offender is our own nick.
+            // Skipping it here just avoids the pointless work and the conn lock.
+            if !owner {
+                enforce_message(&st, &u, &cfg2.enforce, &cid, &conn2, &ch, &nick, &mask, &msg).await;
+            }
+            // Seen tracker. Runs for the owner too, so `!seen <owner>` isn't a hole.
             if cfg2.seen.enabled && scope_matches(&cfg2.seen.channels, &cid, &ch) {
                 record_seen(&st, &u, &ch, &nick, "saying", &msg).await;
             }
-            // Deliver any messages left for this nick (tell bot).
+            // Deliver any messages left for this nick (tell bot). Also runs for the
+            // owner: tell_cmd will happily queue a tell addressed to the owner, and
+            // the only other delivery point (maybe_join_bots) fires on OTHER users'
+            // joins — so without this, a tell left for the owner would never arrive
+            // and would occupy a slot forever.
             if cfg2.tell.enabled && scope_matches(&cfg2.tell.channels, &cid, &ch) {
                 for line in take_tells(&st, &u, &nick).await {
-                    bot_send(&cid, &conn2, &format!("PRIVMSG {} :{}\r\n", ch, truncate_line(&line, 400))).await;
+                    bot_say(&st, &u, &cid, &conn2, &ch, &line).await;
                 }
             }
         });
@@ -1951,7 +2164,7 @@ pub fn maybe_trigger(
 
     // Stateful command bots (quote DB / seen / tell / note / help). Each needs
     // AppState + channel/nick context, so they're dispatched here, not via run_bot.
-    if maybe_stateful_trigger(state, &cfg, username, conn_id, conn, channel, from_nick, full_mask, text) {
+    if maybe_stateful_trigger(state, &cfg, username, conn_id, conn, channel, from_nick, full_mask, text, is_owner) {
         return;
     }
 
@@ -1967,23 +2180,46 @@ pub fn maybe_trigger(
             None
         };
         if let Some(arg) = matched {
-            if scope_matches(&cfg.ai.channels, conn_id, channel)
-                && ai_access_ok(&cfg.ai, from_nick, full_mask)
-                && !arg.is_empty()
-                && cooldown_ok(username, "ai")
-            {
+            // NOTE: cooldown_ok() RECORDS a timestamp — it must be evaluated exactly
+            // once, so bind every gate before logging rather than calling it twice.
+            let g_scope = scope_matches(&cfg.ai.channels, conn_id, channel);
+            let g_access = is_owner || ai_access_ok(&cfg.ai, from_nick, full_mask);
+            let g_arg = !arg.is_empty();
+            let g_cool = cooldown_ok(username, "ai");
+            if g_scope && g_access && g_arg && g_cool {
                 // Non-owner channel invokers can only make it ACT if they're trusted
                 // (on the allow lists) and commands are enabled — else text only.
-                let allow = ai_can_command(&cfg.ai, from_nick, full_mask);
+                //
+                // The OWNER's channel trigger is deliberately chat-only too. It looks
+                // like it should inherit /aido's trust, but it must not: /aido is a
+                // deliberate command naming its own target, whereas this fires on any
+                // line starting with the trigger, in whatever channel they're sitting
+                // in — a channel whose topic and member nicks are attacker-controlled
+                // and get fed into the prompt (full_context) along with raw server
+                // replies (the agent loop). A hostile topic saying "!DO kick <owner>"
+                // would then execute, since kick/deop/ban/mode are all on the SAFE
+                // allowlist and YOLO being off does not help. Actions stay on /aido.
+                let allow = if is_owner { false } else { ai_can_command(&cfg.ai, from_nick, full_mask) };
                 let state2 = state.clone();
-                let (u, cid, q, ch, conv) = (username.to_string(), conn_id.to_string(), arg.to_string(), channel.to_string(), from_nick.to_string());
+                // The owner's channel trigger shares the SAME conversation memory as
+                // /ai and /aido ("__owner__") so it's one continuous thread; everyone
+                // else gets their own per-nick conversation.
+                let conv_key = if is_owner { OWNER_CONV.to_string() } else { conv_for_nick(from_nick) };
+                let (u, cid, q, ch, conv) = (username.to_string(), conn_id.to_string(), arg.to_string(), channel.to_string(), conv_key);
                 let conn2 = conn.clone();
+                tracing::info!("bot: ai trigger accepted (owner={}) in {} — querying provider", is_owner, channel);
                 tokio::spawn(async move {
                     let reply = run_ai_channel(&state2, &u, &conv, &cid, &conn2, &ch, allow, false, &q).await;
-                    if !reply.is_empty() {
-                        let line = format!("PRIVMSG {} :{}\r\n", ch, reply);
-                        bot_send(&cid, &conn2, &line).await;
+                    if reply.is_empty() {
+                        // Every failure path inside run_ai returns a human "AI: …"
+                        // string, so an EMPTY reply means the text survived the API
+                        // call but was erased by formatting — a bug, and one that
+                        // looks exactly like the bot being dead. Never fail silently.
+                        tracing::warn!("bot: ai produced an EMPTY reply for {} — nothing sent", ch);
+                        return;
                     }
+                    bot_say(&state2, &u, &cid, &conn2, &ch, &reply).await;
+                    tracing::info!("bot: ai replied to {} ({} chars)", ch, reply.chars().count());
                 });
             }
             return;  // AI trigger matched → don't also try the other bots
@@ -2019,11 +2255,14 @@ pub fn maybe_trigger(
         };
         // Channel scope (empty = all channels on all networks; else network-aware).
         if !scope_matches(&def.channels, conn_id, channel) { continue; }
-        if !access_ok(def, from_nick, full_mask) { continue; }
+        // The owner always passes their own access list (`private` = "nobody else").
+        if !(is_owner || access_ok(def, from_nick, full_mask)) { continue; }
         if requires_arg && arg.is_empty() { continue; }  // needs a query → stay silent
         if !cooldown_ok(username, bot) { continue; }     // anti-flood self-guard
 
         let conn = conn.clone();
+        let st = state.clone();
+        let u = username.to_string();
         let (bot, query, channel, cid) = (bot.to_string(), arg.to_string(), channel.to_string(), conn_id.to_string());
         tokio::spawn(async move {
             // Sanitize at the boundary: truncate_line (→ strip_crlf) here guarantees
@@ -2031,8 +2270,7 @@ pub fn maybe_trigger(
             // can ever smuggle CR/LF/NUL into the outbound IRC line. Matches the
             // CRLF-injection discipline the rest of the code follows (see irc.rs).
             let reply = truncate_line(&run_bot(&bot, &query).await, 400);
-            let line = format!("PRIVMSG {} :{}\r\n", channel, reply);
-            bot_send(&cid, &conn, &line).await;
+            bot_say(&st, &u, &cid, &conn, &channel, &reply).await;
         });
         // One message fires at most one bot — if the owner misconfigured two bots
         // with the same trigger, don't double-reply (and double the flood surface).
@@ -2059,7 +2297,7 @@ pub fn run_private_ai(state: &AppState, username: &str, query: &str, conn_id: &s
         } else {
             String::new()
         };
-        let text = run_ai(&state, &username, "__owner__", &query, false, false, &extra).await;
+        let text = run_ai(&state, &username, OWNER_CONV, &query, false, false, &extra).await;
         state.send_to_user(&username, ServerEvent::BotResult { bot: "ai".into(), text });
     });
 }
@@ -2084,7 +2322,7 @@ pub fn run_private_stateful(state: &AppState, username: &str, bot: &str, conn_id
             format!("open a channel first — /{} works in the channel you're viewing", if bot == "quotedb" { "q" } else { "tell" })
         } else {
             match bot.as_str() {
-                "quotedb" => quote_cmd(&state, &username, &chan_clean, &nick, &query).await,
+                "quotedb" => quote_cmd(&state, &username, &chan_clean, &nick, &query, true).await,
                 "seen"    => seen_cmd(&state, &username, &query).await,
                 "tell"    => tell_cmd(&state, &username, &chan_clean, &nick, &query).await,
                 "note"    => note_cmd(&state, &username, &nick, &query).await,
@@ -2107,6 +2345,56 @@ pub fn run_private_query(state: &AppState, username: &str, bot: &str, query: &st
 #[cfg(test)]
 mod ai_agent_tests {
     use super::*;
+
+    /// AI replies are written for a chat window; IRC is one plain line. Real output
+    /// from Perplexity's `sonar` motivated every case here.
+    #[test]
+    fn irc_formatting_of_ai_replies() {
+        // The exact shape sonar returned for "$ai sup".
+        let got = format_for_irc("**“Sup”** is usually an informal greeting meaning **“What’s up?”**[1][6][9][13]");
+        assert_eq!(got, "\u{2}“Sup”\u{2} is usually an informal greeting meaning \u{2}“What’s up?”\u{2}");
+        assert!(!got.contains('*'), "literal asterisks must not reach IRC");
+        assert!(!got.contains('['), "citation markers must be stripped");
+
+        // Newlines become spaces BEFORE strip_crlf deletes them — otherwise the last
+        // word of one line fuses onto the first word of the next.
+        assert_eq!(format_for_irc("alpha\nbravo"), "alpha bravo");
+        assert_eq!(format_for_irc("### Heading\n- one\n- two"), "Heading one two");
+        assert_eq!(format_for_irc("```\ncode\n```"), "code");
+
+        // Unpaired ** must still terminate, never leave IRC formatting bleeding.
+        let odd = format_for_irc("**unterminated");
+        assert_eq!(odd.matches('\u{2}').count() % 2, 0, "bold must be balanced");
+
+        // Non-numeric brackets are ordinary text and must survive.
+        assert_eq!(format_for_irc("array[i] and [see] this"), "array[i] and [see] this");
+        // Whitespace runs left by removals get collapsed.
+        assert_eq!(format_for_irc("a [1]  [2] b"), "a b");
+        // Plain text is untouched.
+        assert_eq!(format_for_irc("just a normal reply"), "just a normal reply");
+        assert_eq!(format_for_irc(""), "");
+    }
+
+    /// A remote user must never be able to land in the owner's AI conversation by
+    /// taking a particular nick. `_` is legal in an IRC nick, so a bare-nick key
+    /// would let `__owner__` read back (via the model), poison, or "clear" the
+    /// owner's private /ai + /aido history. Regression test for that squat.
+    #[test]
+    fn nick_conv_cannot_collide_with_owner_conv() {
+        for hostile in ["__owner__", "__OWNER__", "__Owner__"] {
+            assert_ne!(conv_for_nick(hostile), OWNER_CONV,
+                "nick {hostile} collided with the owner conversation key");
+            // hist_key lowercases, so compare post-derivation too — that is the
+            // value actually used to index the history map.
+            assert_ne!(hist_key("u", &conv_for_nick(hostile)), hist_key("u", OWNER_CONV),
+                "nick {hostile} produced the owner's history key");
+        }
+        // Distinct nicks still get distinct conversations, and the same nick is stable.
+        assert_ne!(conv_for_nick("alice"), conv_for_nick("bob"));
+        assert_eq!(conv_for_nick("alice"), conv_for_nick("alice"));
+        // IRC nicks are case-insensitive, so these must share one conversation.
+        assert_eq!(hist_key("u", &conv_for_nick("Alice")), hist_key("u", &conv_for_nick("alice")));
+    }
 
     #[test]
     fn query_cmd_detection() {

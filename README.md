@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.5.3-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.5.4-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Version">
   <img src="https://img.shields.io/badge/rust-1.78%2B-e43717?style=flat-square&labelColor=0b0d0f&logo=rust&logoColor=white" alt="Rust">
   <img src="https://img.shields.io/badge/platform-linux-f0c040?style=flat-square&labelColor=0b0d0f&logo=linux&logoColor=white" alt="Linux">
   <img src="https://img.shields.io/badge/PWA-installable-6c7ce0?style=flat-square&labelColor=0b0d0f&logo=pwa&logoColor=white" alt="PWA">
@@ -29,7 +29,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/themes-224-9b59ff?style=flat-square&labelColor=0b0d0f" alt="224 themes">
+  <img src="https://img.shields.io/badge/themes-227-9b59ff?style=flat-square&labelColor=0b0d0f" alt="227 themes">
   <img src="https://img.shields.io/badge/fonts-140-0099ff?style=flat-square&labelColor=0b0d0f" alt="140 fonts">
   <img src="https://img.shields.io/badge/bots-19-ff8800?style=flat-square&labelColor=0b0d0f" alt="19 bots">
   <img src="https://img.shields.io/badge/AI-9%20providers-00d4aa?style=flat-square&labelColor=0b0d0f" alt="9 AI providers">
@@ -139,7 +139,7 @@ CryptIRC encrypts **everything** before it touches disk. The server cannot read 
 - **Multi-network** — connect to as many IRC networks as you want simultaneously
 - **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
 - **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
-- **224 themes** (64 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin and a **Discord** theme) + **140 fonts** and a live [theme gallery](https://gh0st68.github.io/CryptIRC/). **Customize any of them** — hit ✎ on any theme to fork it into your own editable copy — and **put your own picture behind any theme**, with opacity, blur and dim so your chat stays readable
+- **227 themes** (64 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin and a **Discord** theme) + **140 fonts** and a live [theme gallery](https://gh0st68.github.io/CryptIRC/). **Customize any of them** — hit ✎ on any theme to fork it into your own editable copy — and **put your own picture behind any theme**, with opacity, blur and dim so your chat stays readable
 - **🐑🦀👻🐟👽 Desktop pets — 25 of them.** The five originals (the classic '95 **eSheep** that wanders, climbs walls, naps and gets abducted; a furious **Angry Crab**; a **Ghost**; a **Calm Fish** you can feed; a **Little Alien** flying saucer) plus **20 more** — jellyfish, paper plane, hot-air balloon, manta, moth, snail, firefly, hedgehog, teacup, desk lamp, wind-up key, rubber duck, survey probe, Lumen, Vesper relay, data wisp, ghost lantern, paper crane, toddle cap and a moody cloud — each with **50 different behaviours**. The new ones are deliberately unobtrusive: they keep to the edges and off the text you're reading, rest far more than they move, are silent, and clicks pass straight through. Up to three at a time, paused entirely when the window isn't focused, and off unless your system asks for reduced motion
 - **Resizable columns** — drag the divider at the edge of the channel list, the edge of the user list, or between the nicknames and the messages. Double-click a divider to reset it. Widths are remembered and sync across your devices
 - **In-app News & changelog** with an auto-versioning build badge, so you always see exactly what changed
@@ -176,15 +176,15 @@ That's it. Visit `https://yourdomain.com`, register an account, unlock your vaul
 
 ### Themes & Personalization
 
-**224 built-in themes** — 160 static + 64 animated — each hand-tuned across a full palette: five background layers, two border tiers, three text weights, matched accents and its own status colors. 90 ship an illustrated backdrop drawn in SVG. Highlights include a pixel-perfect **mIRC** skin with real Windows-95 window chrome and a **Discord** theme with its familiar dark UI.
+**227 built-in themes** — 163 static + 64 animated — each hand-tuned across a full palette: five background layers, two border tiers, three text weights, matched accents and its own status colors. 90 ship an illustrated backdrop drawn in SVG. Highlights include a pixel-perfect **mIRC** skin with real Windows-95 window chrome, **HexChat**, **XChat** and **irssi** skins that copy each client's actual layout, not just its palette (right-aligned nick column with the separator rule for the GTK pair; black terminal, `-!-` status lines and the cyan status bars for irssi, in the two-bar `adv_windowlist` arrangement most people run) and a **Discord** theme with its familiar dark UI.
 
 <p align="center">
   <a href="https://gh0st68.github.io/CryptIRC/">
-    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 224 live theme previews">
+    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 227 live theme previews">
   </a>
   <br>
   <b><a href="https://gh0st68.github.io/CryptIRC/">Browse the live Theme Gallery →</a></b><br>
-  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter and preview all 224</sub>
+  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter and preview all 227</sub>
 </p>
 
 #### Make any of them yours
@@ -196,7 +196,7 @@ Hover any theme and hit **✎**. The editor opens on that exact theme — its co
 | Family | Examples |
 |---|---|
 | **Editor classics** | Dracula · Monokai · Nord · Gruvbox · One Dark · Catppuccin · Solarized · Tokyo Night |
-| **App-inspired** | Discord · mIRC *(full Win95 chrome)* |
+| **App-inspired** | Discord · mIRC *(full Win95 chrome)* · HexChat · XChat · irssi *(each with its real menubar/statusbar chrome)* |
 | **Neon / cyberpunk** | Cyberpunk · Outrun · Blade Runner · Vaporwave · Hotline Miami · Neon Tokyo |
 | **Terminal / hacker** | Matrix · Hacker · Retro Terminal · Cyberdeck · CRT Terminal · Oscilloscope · Sonar |
 | **Materials & craft** | Blueprint · Carbon Fiber · Damascus Steel · Verdigris · Marble · Letterpress · Circuit Etch |
@@ -511,7 +511,7 @@ Accessible from the sidebar gear menu:
 | Panel | Contents |
 |-------|----------|
 | Notifications | Push alerts, desktop popups, sounds, trigger rules, custom highlight words (tag UI), per-network mute |
-| Theme | 224 themes (64 animated), 140 fonts, customize any theme, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
+| Theme | 227 themes (64 animated), 140 fonts, customize any theme, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
 | Security | Vault auto-lock timer, message expiry, rate limit, block PMs (+g), auto-rejoin, link previews, spellcheck |
 | Monitor | Nick online/offline tracking with push notifications |
 | Notepad | Private encrypted auto-saving notes |

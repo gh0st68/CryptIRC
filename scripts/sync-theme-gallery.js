@@ -77,6 +77,11 @@ const animated = keys.filter(k => THEMES[k].animation).length;
 // (#n and #count are populated at runtime from the data, so they need no help.)
 function retargetCounts(html) {
   return html
+    // "227 built-in themes" — MUST come first: the generic rule below only matches
+    // a digit immediately followed by " themes", so an intervening "built-in" hid
+    // the OpenGraph description from every sync and left it 3 releases stale (it
+    // still read 174 at 227 themes). Every social unfurl of the gallery quoted it.
+    .replace(/\b\d{2,4}( built-in themes)/g, `${total}$1`)
     .replace(/\b\d{2,4} themes\b/g, `${total} themes`)
     .replace(/\b(Browse all )\d{2,4}( built-in)/g, `$1${total}$2`);
 }

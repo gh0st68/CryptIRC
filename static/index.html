@@ -1134,7 +1134,114 @@ html[data-theme='mirc'] ::-webkit-scrollbar-thumb{background:#c0c0c0;border:1px 
 html[data-theme='mirc'] ::-webkit-scrollbar-button{display:block;height:16px;background:#c0c0c0;border:1px solid;border-color:#ffffff #808080 #808080 #ffffff}
 /* ── mIRC fake Win95 window chrome — title bar, menu bar, toolbar, status bar (desktop only) ── */
 .mirc-chrome{display:none}
+
+/* ── HexChat / XChat ────────────────────────────────────────────────────────────
+   Both are the same GTK application a decade apart, so they share every layout rule
+   and differ only in chrome colour. Their single most recognisable trait is the
+   INDENTED TEXT LAYOUT: a right-aligned nick column, a thin vertical rule, then the
+   message — which is why the nick column here gets a fixed width, right alignment
+   and a border, rather than the usual free-flowing row.                            */
+/* HexChat 2.x and XChat 2.8 both ship `<nick>` in their stock Channel Message text
+   event (%C18%H<%H$4$1%C18%H>%H%O$t$2) AND the indent rule — it is both, not either. */
+html[data-theme='hexchat'] .row-privmsg .msg-nick::before,
+html[data-theme='xchat'] .row-privmsg .msg-nick::before{content:'<'}
+html[data-theme='hexchat'] .row-privmsg .msg-nick::after,
+html[data-theme='xchat'] .row-privmsg .msg-nick::after{content:'>'}
+html[data-theme='hexchat'] .msg-ts,html[data-theme='hexchat'] .sc-ts,
+html[data-theme='xchat'] .msg-ts,html[data-theme='xchat'] .sc-ts{color:#5e5c64}
+/* HexChat prefixes status lines with these glyphs in its default text events. */
+html[data-theme='hexchat'] .row-join .msg-body::before,
+html[data-theme='xchat'] .row-join .msg-body::before{content:'--> ';color:#009300}
+html[data-theme='hexchat'] .row-part .msg-body::before,
+html[data-theme='hexchat'] .row-quit .msg-body::before,
+html[data-theme='xchat'] .row-part .msg-body::before,
+html[data-theme='xchat'] .row-quit .msg-body::before{content:'<-- ';color:#7f0000}
+html[data-theme='hexchat'] .row-action .msg-body,
+html[data-theme='xchat'] .row-action .msg-body{color:#9c009c}
+/* GTK list selection. */
+html[data-theme='hexchat'] .chan-item.active{background:#3584e4!important;color:#ffffff!important}
+html[data-theme='xchat'] .chan-item.active{background:#000080!important;color:#ffffff!important}
+html[data-theme='hexchat'] ::selection{background:#3584e4;color:#ffffff}
+html[data-theme='xchat'] ::selection{background:#000080;color:#ffffff}
+/* XChat predates GTK3's rounded everything. */
+html[data-theme='xchat'] *{border-radius:0!important}
+html[data-theme='hexchat'] #msg-input,html[data-theme='xchat'] #msg-input{
+  background:#ffffff!important; color:#000000!important;
+}
+html[data-theme='xchat'] #msg-input{border:2px inset #9d9a95!important}
+
+/* ── irssi ──────────────────────────────────────────────────────────────────────
+   A terminal client: one full-width text area, everything monospace, no chrome at
+   all except the cyan statusbar. Nicks are <bracketed> and the whole UI is flat.   */
+html[data-theme='irssi'] *{border-radius:0!important}
+html[data-theme='irssi'] #chat-area,html[data-theme='irssi'] #chat-area *,
+html[data-theme='irssi'] #msg-input,html[data-theme='irssi'] #nick-panel,
+html[data-theme='irssi'] #nick-panel *,html[data-theme='irssi'] #network-list,
+html[data-theme='irssi'] #network-list *,html[data-theme='irssi'] #topbar{
+  font-family:'DejaVu Sans Mono','Liberation Mono','Consolas','Courier New',monospace!important;
+}
+html[data-theme='irssi'] .row-privmsg .msg-nick::before{content:'<'}
+html[data-theme='irssi'] .row-privmsg .msg-nick::after{content:'>'}
+html[data-theme='irssi'] .msg-ts,html[data-theme='irssi'] .sc-ts{color:#555555}
+/* irssi's default theme prints these three status forms verbatim. */
+html[data-theme='irssi'] .row-join .msg-body::before{content:'-!- ';color:#00aa00}
+html[data-theme='irssi'] .row-part .msg-body::before,
+html[data-theme='irssi'] .row-quit .msg-body::before,
+html[data-theme='irssi'] .row-kick .msg-body::before,
+html[data-theme='irssi'] .row-mode .msg-body::before,
+html[data-theme='irssi'] .row-nick .msg-body::before{content:'-!- ';color:#555555}
+html[data-theme='irssi'] .row-action .msg-body{color:#aa00aa}
+/* Reverse-video selection, the way a terminal does it. */
+html[data-theme='irssi'] .chan-item.active{background:#00aaaa!important;color:#000000!important}
+html[data-theme='irssi'] ::selection{background:#aaaaaa;color:#000000}
+html[data-theme='irssi'] #msg-input{background:#000000!important;color:#aaaaaa!important;border:none!important}
+/* Blocky terminal scrollbar. */
+html[data-theme='irssi'] ::-webkit-scrollbar{width:8px}
+html[data-theme='irssi'] ::-webkit-scrollbar-track{background:#000000}
+html[data-theme='irssi'] ::-webkit-scrollbar-thumb{background:#333333}
+/* Desktop-only chrome for the three client themes. Hidden by default like .mirc-chrome;
+   each theme reveals only its own. Phone widths get none of it — there is no room, and
+   a fake menubar would eat the viewport. */
+.hx-chrome,.xc-chrome,.is-chrome{display:none}
 @media(min-width:769px){
+  /* The indented nick column is DESKTOP-ONLY: on a phone .msg-row is display:block
+     and .msg-nick is display:inline, so a border-right renders as a stray vertical
+     rule mid-sentence and text-align:right does nothing. */
+  html[data-theme='hexchat'] .msg-row,
+  html[data-theme='xchat'] .msg-row{align-items:baseline}
+  html[data-theme='hexchat'] .msg-nick,
+  html[data-theme='xchat'] .msg-nick{
+    text-align:right; padding-right:7px; margin-right:7px;
+    border-right:1px solid var(--border); flex:0 0 auto;
+  }
+  /* ── HexChat: GTK3 headerbar-ish menubar + the "N ops, N total" statusbar ─────── */
+  html[data-theme='hexchat'] #app{padding-top:26px;padding-bottom:22px}
+  html[data-theme='hexchat'] .hx-chrome{display:flex;align-items:center;position:fixed;left:0;right:0;z-index:95;box-sizing:border-box;font-family:'Cantarell','Segoe UI','Ubuntu',sans-serif;font-size:12px;line-height:1;user-select:none}
+  html[data-theme='hexchat'] #hx-menubar{top:0;height:26px;background:#f6f5f4;color:#2e3436;border-bottom:1px solid #cdc7c2;padding:0 6px;gap:2px}
+  html[data-theme='hexchat'] #hx-menubar span{padding:4px 9px;cursor:default;border-radius:4px}
+  html[data-theme='hexchat'] #hx-menubar span:hover{background:#dcd8d4}
+  html[data-theme='hexchat'] #hx-statusbar{bottom:0;height:22px;background:#f6f5f4;color:#5e5c64;border-top:1px solid #cdc7c2;padding:0 8px;gap:14px;font-size:11px}
+  html[data-theme='hexchat'] #hx-statusbar .hx-grow{flex:1}
+  /* ── XChat: the same bar in GTK2 grey, with a raised bevel ────────────────────── */
+  html[data-theme='xchat'] #app{padding-top:24px;padding-bottom:22px}
+  html[data-theme='xchat'] .xc-chrome{display:flex;align-items:center;position:fixed;left:0;right:0;z-index:95;box-sizing:border-box;font-family:'Tahoma','DejaVu Sans','Segoe UI',sans-serif;font-size:11px;line-height:1;user-select:none}
+  html[data-theme='xchat'] #xc-menubar{top:0;height:24px;background:#d6d3ce;color:#000000;border-bottom:1px solid #9d9a95;padding:0 4px;gap:1px}
+  html[data-theme='xchat'] #xc-menubar span{padding:4px 8px;cursor:default}
+  html[data-theme='xchat'] #xc-menubar span:hover{background:#000080;color:#ffffff}
+  html[data-theme='xchat'] #xc-statusbar{bottom:0;height:22px;background:#d6d3ce;color:#000000;border-top:1px solid #ffffff;padding:2px 4px;gap:3px;font-size:11px}
+  html[data-theme='xchat'] #xc-statusbar span{display:flex;align-items:center;padding:0 6px;height:100%;border:1px solid;border-color:#9d9a95 #ffffff #ffffff #9d9a95;white-space:nowrap}
+  html[data-theme='xchat'] #xc-statusbar .xc-grow{flex:1;border:none}
+  /* ── irssi: no menubar at all — just the cyan statusbar and the window list ───── */
+  html[data-theme='irssi'] #app{padding-bottom:38px}
+  html[data-theme='irssi'] .is-chrome{display:flex;align-items:center;position:fixed;left:0;right:0;z-index:95;box-sizing:border-box;font-family:'DejaVu Sans Mono','Liberation Mono','Consolas',monospace;font-size:12px;line-height:1;user-select:none;white-space:nowrap;overflow:hidden}
+  /* The iconic pair: cyan background, black text, square corners. */
+  html[data-theme='irssi'] #is-statusbar{bottom:19px;height:19px;background:#00aaaa;color:#000000;padding:0 4px;gap:0}
+  html[data-theme='irssi'] #is-windowbar{bottom:0;height:19px;background:#00aaaa;color:#000000;padding:0 4px;gap:0}
+  html[data-theme='irssi'] .is-chrome b{font-weight:700}
+  html[data-theme='irssi'] .is-grow{flex:1}
+  /* The active window is shown reverse-video against the cyan bar. */
+  html[data-theme='irssi'] .is-act{background:#000000;color:#00aaaa;padding:0 2px}
+
   html[data-theme='mirc'] #app{padding-top:70px;padding-bottom:22px}
   html[data-theme='mirc'] .mirc-chrome{display:flex;align-items:center;position:fixed;left:0;right:0;z-index:95;box-sizing:border-box;font-family:'Pixelated MS Sans Serif','Tahoma','Segoe UI',sans-serif;font-size:11px;line-height:1;user-select:none}
   html[data-theme='mirc'] #mirc-titlebar{top:0;height:22px;background:linear-gradient(90deg,#000080,#1084d0);color:#fff;font-weight:700;padding:0 4px;gap:6px}
@@ -2202,6 +2309,12 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </script>
 
 <!-- ── mIRC fake Win95 window chrome (decorative; shown only on the mIRC theme, desktop) ── -->
+<div id="hx-menubar" class="hx-chrome"><span>HexChat</span><span>Server</span><span>Settings</span><span>Window</span><span>Help</span></div>
+<div id="hx-statusbar" class="hx-chrome"><span id="hx-sb-chan"></span><span id="hx-sb-users"></span><span class="hx-grow"></span><span id="hx-sb-nick"></span></div>
+<div id="xc-menubar" class="xc-chrome"><span>XChat</span><span>IRC</span><span>Server</span><span>Settings</span><span>Window</span><span>Help</span></div>
+<div id="xc-statusbar" class="xc-chrome"><span id="xc-sb-chan"></span><span id="xc-sb-users"></span><span class="xc-grow"></span><span id="xc-sb-nick"></span></div>
+<div id="is-statusbar" class="is-chrome"><span id="is-sb-body"></span><span class="is-grow"></span></div>
+<div id="is-windowbar" class="is-chrome"><span id="is-wb-body">[Act: ]</span><span class="is-grow"></span></div>
 <div id="mirc-titlebar" class="mirc-chrome"><span class="mt-ico">▦</span><span class="mt-title">mIRC - [CryptIRC @ frozen.gh0st.boo]</span><span class="mt-btns"><b>_</b><b>□</b><b class="mt-x">✕</b></span></div>
 <div id="mirc-menubar" class="mirc-chrome"><span><u>F</u>ile</span><span><u>V</u>iew</span><span><u>F</u>avorites</span><span><u>T</u>ools</span><span><u>C</u>ommands</span><span><u>W</u>indow</span><span><u>H</u>elp</span></div>
 <div id="mirc-toolbar" class="mirc-chrome"><i>⊞</i><i>⇄</i><i>⚙</i><i>✉</i><i>⌕</i><i>★</i><span class="mt-tb-sep"></span><i>◧</i><i>▦</i></div>
