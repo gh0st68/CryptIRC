@@ -117,8 +117,37 @@ CryptIRC ships a full **server-side bot suite** that runs **24/7 on your connect
 | **Android** | Open in Chrome/Brave → Menu → **Add to Home Screen** (PWA) |
 | **iPhone / iPad** | Open in Safari → Share → **Add to Home Screen** (PWA) |
 | **Any browser** | Just visit your server URL — nothing to install |
+| **Terminal** | [`cryptirc-tui`](tui/) — build it and run it in any shell, over SSH, inside tmux |
 
-The desktop apps and PWA give you push notifications, offline caching, and a native app feel. The web version works anywhere with a browser.
+The desktop apps and PWA give you push notifications, offline caching, and a native app feel. The web version works anywhere with a browser. And when you'd rather stay in the terminal, there's a full TUI that connects to the **same account at the same time** — see below.
+
+### 🖥️ Terminal Client
+
+A real TUI — not a stripped-down fallback. It logs into the **same account** as the web app and runs
+**at the same time as your browser**: same messages, same vault, same encrypted logs, same server-side bots.
+
+<p align="center">
+  <img src="screenshots/terminal.png" width="900" alt="cryptirc-tui — buffer list grouped by network, chat with wrapped messages, nick list and status bar">
+</p>
+
+weechat-style layout — networks and channels on the left, members on the right, a status bar with your
+nick, lag and unread activity. **Mouse works**: click a buffer to switch, wheel to scroll. Plus
+`Alt+1..9` to jump, Tab to cycle nick completion, paged scrollback, and the full slash-command set
+built the way the web client builds it.
+
+**52 built-in themes** — real terminal colourschemes, switchable live with `/theme` and remembered:
+
+<p align="center">
+  <img src="screenshots/terminal-themes.png" width="900" alt="Four of the 52 terminal themes: dracula, nord, catppuccin-mocha and phosphor-amber">
+</p>
+
+```console
+$ cd tui && cargo build --release
+$ ./target/release/cryptirc-tui -s https://your.server/cryptirc -u yournick
+```
+
+It talks the same WebSocket protocol the browser does, so it needs **no changes to the server or the
+daemon** — [full details and key bindings](tui/).
 
 ### Encryption — Everything is Encrypted
 
@@ -537,8 +566,12 @@ The IRC connection itself lives in a small always-on daemon (`irc-core`), separa
 from the web server (`cryptirc`) that does everything else. Routine web-server
 updates and restarts never touch the daemon, so nobody's IRC connection drops.
 
+The terminal client speaks that same WebSocket protocol, so a browser and a TUI can be signed into one
+account simultaneously — the web server fans every event out to all of a user's sessions.
+
 ```
-Browser (PWA)
+Browser (PWA) ------.
+cryptirc-tui -------+   (both, at the same time, same account)
   |-- E2E encryption (Signal protocol, Web Crypto API)
   |-- Per-user vault unlock (Argon2id KDF -> AES-256-GCM)
   '-- WebSocket --> cryptirc (Rust/Axum, web server)
