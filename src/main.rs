@@ -563,6 +563,14 @@ pub enum ServerEvent {
     IrcBanEnd        { conn_id: String, channel: String, list: String },
     /// 324 — RPL_CHANNELMODEIS: the channel's current mode string (e.g. "+mnt" or "+ntkl key 50")
     IrcChannelModes  { conn_id: String, channel: String, modes: String },
+    /// 329 — RPL_CREATIONTIME: the channel's creation timestamp (unix seconds; 0 when
+    /// the server sent something unparseable). Its own event rather than a plain notice
+    /// so the client can decide where it belongs: spelled out when the user asked with
+    /// `/mode #chan`, folded into a condensed status line for the copies nobody asked
+    /// for. A bare `MODE #chan` is answered with 324 AND 329, and we send bare MODEs on
+    /// our own (reattach resync, Channel Modes dialog refresh) — as an un-deduped notice
+    /// this stacked another "Channel created" line in the channel every single time.
+    IrcChannelCreated { conn_id: String, channel: String, created: i64 },
     /// 322 — channel list entry
     IrcListEntry     { conn_id: String, channel: String, users: u32, topic: String },
     /// 323 — end of channel list

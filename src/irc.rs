@@ -440,7 +440,16 @@ pub async fn dispatch_line(
                         // later -k on a favorites-keyed channel still persists its
                         // removal (the +k/324/-k dedup compares against ch.key).
                         let seed_key = c.cfg.channel_keys.get(&chan_key).cloned();
-                        c.channels.insert(chan_key.clone(), ChannelState { name: channel.clone(), topic: String::new(), names: vec![], key: seed_key });
+                        // Seed the member list with OURSELVES rather than leaving it empty.
+                        // We are provably a member (this is our own JOIN echo), and an empty
+                        // `names` is what ipc_client's resync test reads as "this channel needs
+                        // rebuilding" — so any SessionSync landing in the window between this
+                        // JOIN and its 366 (the daemon emits one on every JOIN/PART/NICK and on
+                        // every 30s heartbeat PONG) fired a whole NAMES/WHO/MODE/TOPIC burst for
+                        // a channel we were already resyncing, and the bare MODE in that burst
+                        // is what produced the duplicate RPL_CREATIONTIME lines. The 366 below
+                        // replaces this list wholesale, so it costs nothing but the race.
+                        c.channels.insert(chan_key.clone(), ChannelState { name: channel.clone(), topic: String::new(), names: vec![nick.clone()], key: seed_key });
                         (true, true)
                     } else {
                         warn!("[{}] Ignoring self-JOIN {} — channel cap ({}) reached", conn_id, channel, MAX_CHANNELS_PER_CONN);
@@ -821,7 +830,22 @@ pub async fn dispatch_line(
             // (web-side ch.names OR the client, via an emitted empty IrcNames). Skip it.
             if !names.is_empty() {
                 // #28: gate forged 366 for untracked channels (see TOPIC arm).
-                let tracked = { let mut c = conn.lock().await; if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) { ch.names = names.clone(); true } else { false } };
+                // Also adopt the server's spelling of the name. A channel we learned from
+                // a SessionSync placeholder (web restart / re-Attach) carries the daemon's
+                // case-FOLDED name, because that set is keyed by irc_lower — and `ch.name`
+                // is what the QUIT arm and the 315 away snapshot use as the display/log
+                // target, so a mixed-case channel's quits were being logged to a second,
+                // all-lowercase buffer of their own.
+                // This lookup is already case-insensitive, so the only thing that can
+                // change here is the case, and the server's is the canonical one.
+                let tracked = {
+                    let mut c = conn.lock().await;
+                    if let Some(ch) = c.channels.get_mut(&irc_lower(&channel)) {
+                        ch.names = names.clone();
+                        if ch.name != channel { ch.name = channel.clone(); }
+                        true
+                    } else { false }
+                };
                 if tracked {
                     send(ServerEvent::IrcNames { conn_id: conn_id.to_string(), channel, names });
                 }
@@ -1098,22 +1122,36 @@ pub async fn dispatch_line(
                 conn_id: conn_id.to_string(), channel: chan, modes,
             });
         }
-        // 329 RPL_CREATIONTIME — route to channel
+        // 329 RPL_CREATIONTIME — structured, not a notice.
+        // This used to be an ordinary Notice, which meant it was neither condensed
+        // (`notice` is not a _STATUS_KINDS kind) nor de-duplicated (`msg_id: 0` skips the
+        // id-dedup, and the content-dedup is status-kinds-only) — so every bare `MODE
+        // #chan` WE send on the user's behalf (reattach resync burst, Channel Modes
+        // dialog refresh) stacked another permanent "Channel created" line in the
+        // channel. Its 324 twin was invisible the whole time because `mode` IS a status
+        // kind. Handing the client a typed event lets it apply the same policy to both
+        // halves of the reply. Formatting moved to the client so it can render in the
+        // user's own timestamp preference instead of a hardcoded UTC string.
         "329" => {
             let chan = p.params.get(1).cloned().unwrap_or_default();
-            let raw_ts = p.params.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
-            let text = if raw_ts > 0 {
-                let dt = chrono::DateTime::from_timestamp(raw_ts, 0)
-                    .map(|d| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                    .unwrap_or_else(|| raw_ts.to_string());
-                format!("Channel created: {}", dt)
-            } else { raw_ts.to_string() };
-            let display_target = if chan.starts_with(['#','&','+','!']) { chan } else { "status".to_string() };
-            send(ServerEvent::IrcMessage { replayed: false,
-                conn_id: conn_id.to_string(), from: "*".into(),
-                target: display_target, text, ts,
-                kind: MessageKind::Notice, msg_id: 0, prefix: None,
-            });
+            let created = p.params.get(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+            if chan.starts_with(['#','&','+','!']) {
+                send(ServerEvent::IrcChannelCreated {
+                    conn_id: conn_id.to_string(), channel: chan, created,
+                });
+            } else {
+                // A 329 whose param isn't a channel is malformed/forged. Keep the old
+                // behaviour of surfacing it in status rather than swallowing it silently
+                // — but only when there is actually something to show.
+                let text = params_from(&p.params, 1);
+                if !text.is_empty() {
+                    send(ServerEvent::IrcMessage { replayed: false,
+                        conn_id: conn_id.to_string(), from: "*".into(),
+                        target: "status".into(), text, ts,
+                        kind: MessageKind::Notice, msg_id: 0, prefix: None,
+                    });
+                }
+            }
         }
         // 403 ERR_NOSUCHCHANNEL — route to channel if it looks like one
         "403" => {

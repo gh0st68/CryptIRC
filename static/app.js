@@ -1822,14 +1822,48 @@ function handleEvent(ev) {
         // The origin buffer may be gone by now (parted the channel / closed the PM);
         // writing there would resurrect a closed query window or land in an orphan
         // buffer with no sidebar row — i.e. invisible, the very bug being fixed.
-        sysMsg(ev.conn_id, _modeReplyTarget(ev.conn_id, _mq.target, ev.channel),
+        const _mqTarget = _modeReplyTarget(ev.conn_id, _mq.target, ev.channel);
+        sysMsg(ev.conn_id, _mqTarget,
           `Modes for ${ev.channel}: ${_describeModes(ev.modes)}`, 'system',
           { ts: Math.floor(Date.now()/1000), from: '*' });
+        // The 329 half of this same reply is right behind us — send it to the same
+        // buffer so the question gets one complete answer.
+        _modeCreatedArm(ev.conn_id, ev.channel, _mqTarget);
       } else if (!_cmMatch(ev.conn_id, ev.channel)) {
         // Unsolicited 324 (e.g. the per-channel resync burst on reattach) stays a
         // quiet condensed status line, exactly as before.
         sysMsg(ev.conn_id, ev.channel, `Modes: ${ev.modes || '(none)'}`, 'mode', { ts: Math.floor(Date.now()/1000), from: '*' });
       }
+      break;
+    }
+    case 'irc_channel_created': {
+      // 329 RPL_CREATIONTIME — the other half of a bare-MODE reply, and until now the
+      // only half anyone could see: it arrived as a plain notice, which is neither
+      // condensed nor de-duplicated, so every MODE this client sends on its own account
+      // stacked another permanent "Channel created" line in the channel. Same policy as
+      // the 324 above, so the two halves finally agree: the dialog swallows it, a /mode
+      // QUESTION gets it spelled out, and everything else is a quiet condensed line —
+      // said once, because the answer never changes.
+      if (!ev.channel) break;
+      // Normalise BEFORE the memo compares against it. An absent/garbage `created`
+      // (a self-hoster running a mixed pair of versions) would otherwise be `undefined`
+      // — which equals the memo's own "never seen this buffer" value, so the line would
+      // be suppressed forever instead of shown once.
+      const _created = Number(ev.created) || 0;
+      const _cc = _modeCreatedTake(ev.conn_id, ev.channel);
+      if (_cc) {
+        sysMsg(ev.conn_id, _cc.target, `${ev.channel} created ${_fmtCreated(_created)}`,
+          'system', { ts: Math.floor(Date.now()/1000), from: '*' });
+        break;
+      }
+      // Dialog is showing this channel's modes — it asked, not the user. Swallow it
+      // WITHOUT memoising, so the first line the user does see is still a real one.
+      if (_cmMatch(ev.conn_id, ev.channel)) break;
+      const _ck = bk(ev.conn_id, ev.channel);
+      if (_chanCreatedSeen[_ck] === _created) break;
+      _chanCreatedSeen[_ck] = _created;
+      sysMsg(ev.conn_id, ev.channel, `Channel created: ${_fmtCreated(_created)}`, 'mode',
+        { ts: Math.floor(Date.now()/1000), from: '*' });
       break;
     }
     case 'irc_ban_entry': {
@@ -12921,6 +12955,38 @@ function _modeQueryTake(connId, chan){
   const hit = _modeQuery[k];
   if (hit) delete _modeQuery[k];
   return hit || null;
+}
+// A bare MODE reply is 324 AND THEN 329 (creation time). `_modeQueryTake` has already
+// consumed the arm by the time the 329 lands, so the 324 handler leaves a short-lived
+// breadcrumb here — "the user asked, and I answered in this buffer" — and the creation
+// time joins that same answer instead of being orphaned. Same 30s expiry sweep as the
+// query map, so a server that sends 324 without 329 can't leak entries.
+const _modeCreatedFollow = {};
+function _modeCreatedArm(connId, chan, replyTarget){
+  _modeCreatedFollow[_modeQueryKey(connId, chan)] = { target: replyTarget, ts: Date.now() };
+}
+function _modeCreatedTake(connId, chan){
+  const k = _modeQueryKey(connId, chan);
+  const now = Date.now();
+  for (const kk of Object.keys(_modeCreatedFollow)) {
+    if (now - _modeCreatedFollow[kk].ts > 30000) delete _modeCreatedFollow[kk];
+  }
+  const hit = _modeCreatedFollow[k];
+  if (hit) delete _modeCreatedFollow[k];
+  return hit || null;
+}
+// Creation timestamp already announced per buffer. WE issue bare MODEs the user never
+// asked for — the reattach resync burst, and cmRefresh() on every live mode change while
+// the Channel Modes dialog is open — and each one is answered with a 329. A channel's
+// creation time is fixed for the life of that channel, so one line is all there is to
+// say; repeating it is the bug this map exists to stop. Keyed by bk() (case-folded), and
+// compared by VALUE so a genuinely re-created channel — routine on EFNet, where an
+// emptied channel is reborn with a new TS — still announces its new one.
+const _chanCreatedSeen = {};
+function _fmtCreated(secs){
+  if(!(secs > 0)) return 'unknown';
+  try { return new Date(secs*1000).toLocaleString([],{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }
+  catch(e){ return String(secs); }
 }
 // Where to print a /mode answer. Prefer the buffer the user asked from, but only if
 // it is STILL open — otherwise writing there either lands in an orphan buffer with no

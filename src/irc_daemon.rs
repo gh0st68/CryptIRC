@@ -1019,6 +1019,10 @@ where
                     "JOIN" => {
                         let who = nick_from_prefix(&p.prefix);
                         let mut joined: Option<String> = None;
+                        // Whether this JOIN changed our own membership state, i.e. whether a
+                        // SessionSync is owed. Deferred until AFTER the line is forwarded —
+                        // see the comment at the emit below.
+                        let mut self_join = false;
                         {
                             let mut c = conn.lock().await;
                             if irc_lower(&who) == irc_lower(&c.nick) {
@@ -1052,7 +1056,7 @@ where
                                         }
                                         joined = Some(lc);
                                     }
-                                    sync(&c, registered, true, None);
+                                    self_join = true;
                                 }
                             }
                         }
@@ -1063,7 +1067,24 @@ where
                                 persistent_channels.insert(lc);
                             }
                         }
+                        // Forward the JOIN BEFORE the state snapshot. Emitting SessionSync
+                        // first meant the web process learned about the channel from the
+                        // snapshot, not from the JOIN: it inserted an empty placeholder and
+                        // queued a full NAMES/WHO/MODE/TOPIC resync burst, and by the time the
+                        // JOIN line arrived the channel was "already tracked" — so the web
+                        // side's own self-JOIN handling was skipped on every single join. Two
+                        // consequences, both fixed by this one line move: the burst's bare
+                        // `MODE #chan` produced a duplicate RPL_CREATIONTIME line per join, and
+                        // the placeholder kept the case-FOLDED channel name (this set is keyed
+                        // by irc_lower) as its display/log name, so a mixed-case channel had its
+                        // history split across a second, all-lowercase log directory. JOIN-first
+                        // hands the channel
+                        // to the self-JOIN path with the server's canonical spelling.
                         fwd(&line);
+                        if self_join {
+                            let c = conn.lock().await;
+                            sync(&c, registered, true, None);
+                        }
                     }
                     "PART" => {
                         let who = nick_from_prefix(&p.prefix);
