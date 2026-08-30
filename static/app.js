@@ -1524,7 +1524,13 @@ function handleEvent(ev) {
       // Only a SELF-join changes the sidebar (a new channel row). Another user
       // joining doesn't alter any sidebar row, so skip the full rebuild (it was a
       // per-event flicker source on busy channels). Nick panel + count still update.
-      if(ev.nick===getNick(ev.conn_id)) renderSidebar();
+      if(ev.nick===getNick(ev.conn_id)){
+        // Re-arm the topic announcement for this channel: the 332 the server sends
+        // right behind this JOIN is the one line the user should see, and the memo
+        // left over from before we parted would otherwise swallow it.
+        _topicForget(ev.conn_id,ev.channel);
+        renderSidebar();
+      }
       refreshUserCount(ev.conn_id,ev.channel); blinkUserCount('join');
       if(ev.nick===getNick(ev.conn_id)){
         if(consumeUserJoin(ev.conn_id,ev.channel)) setActive(ev.conn_id,ev.channel);
@@ -1608,7 +1614,16 @@ function handleEvent(ev) {
     }
     case 'irc_topic': {
       if(ev.channel){
-        sysMsg(ev.conn_id,ev.channel,`Topic: ${ev.topic}${ev.set_by?' ('+ev.set_by+')':''}`, 'topic');
+        // Say it only when there is something new to say — see _topicSeen. `set_by` is
+        // non-empty only for a live TOPIC someone actually set (irc.rs leaves it empty
+        // for the 332 query reply), and that always prints. The unprompted 332 that
+        // arrives on JOIN and again from the resync burst prints once per topic value.
+        const _tSeen=_topicKey(ev.conn_id,ev.channel), _tText=String(ev.topic||'');
+        const _tAsked=_topicAskTake(ev.conn_id,ev.channel);
+        if(ev.set_by||_tAsked||_topicSeen[_tSeen]!==_tText){
+          _topicSeen[_tSeen]=_tText;
+          sysMsg(ev.conn_id,ev.channel,`Topic: ${ev.topic}${ev.set_by?' ('+ev.set_by+')':''}`, 'topic');
+        }
         const tNet=networks.find(n=>n.config.id===ev.conn_id);
         if(tNet){
           const tCh=tNet.channels.find(c=>_sameChan(c.name,ev.channel));
@@ -2242,6 +2257,48 @@ function previewNotifSound(id){
 const _STATUS_KINDS=new Set(['join','part','quit','nick','mode','kick','away','back','chghost','topic']);
 function _isStatusKind(k){return _STATUS_KINDS.has(k);}
 function _statusKey(m){return (m.ts)+'|'+(m.from)+'|'+((m.text||'').slice(0,50));}
+// ── "Topic:" said once, not once per copy of the same answer ────────────────
+// A channel's topic reaches us by two different routes that carry the SAME text: the
+// server volunteers 332 the moment we JOIN, and we ask for it again ourselves in the
+// reattach resync burst (ipc_client.rs sends NAMES/WHO/MODE/TOPIC per channel). The
+// content-dedup above cannot collapse that pair — `_statusKey` includes the timestamp
+// and the two copies land whole seconds apart, with the burst's condensed mode block
+// sitting between them — so the channel showed "Topic: ..." twice per join. (Reported
+// by nipsey on EFNet; same shape as the "Channel created" pile-up, see _chanCreatedSeen.)
+// The timestamps genuinely differ, too: 332 carries no server-time tag, so irc.rs stamps
+// each copy off its own parse-time clock — there is nothing for a ts-based dedup to match
+// on, which is why this has to be a value memo rather than a smarter _statusKey.
+//
+// Memoised per buffer instead: keyed case-INSENSITIVELY (a server may echo a different
+// spelling of the channel than we sent), compared by VALUE so a real topic CHANGE always
+// announces. Only unprompted query replies (332 — `set_by` empty) are ever suppressed; a
+// live TOPIC someone actually set always prints. Bounded without a sweep: irc.rs gates
+// 332/TOPIC to channels we actually track (#28), which is itself capped per connection.
+const _topicSeen = {};
+// An explicit `/topic` is a QUESTION, and a question deserves an answer even when the
+// answer hasn't changed. The command arms this; the next reply for that buffer prints
+// unconditionally. Same 30s expiry sweep as _modeQuery, so a server that never answers
+// (or answers after the user moved on) cannot leave the map growing forever.
+const _topicAsked = {};
+function _topicKey(connId, chan){ return connId + '/' + String(chan || '').toLowerCase(); }
+function _topicAskArm(connId, chan){ _topicAsked[_topicKey(connId, chan)] = Date.now(); }
+function _topicAskTake(connId, chan){
+  const k = _topicKey(connId, chan);
+  const now = Date.now();
+  for (const kk of Object.keys(_topicAsked)) {
+    if (now - _topicAsked[kk] > 30000) delete _topicAsked[kk];
+  }
+  const hit = Object.prototype.hasOwnProperty.call(_topicAsked, k);
+  if (hit) delete _topicAsked[k];
+  return hit;
+}
+// Forget what we announced for a buffer. Called on our OWN join: a rejoin must
+// re-announce the topic once (it is the first thing the server tells us), and without
+// this the memo from before we parted would silently swallow it.
+function _topicForget(connId, chan){
+  if (!chan) return;
+  delete _topicSeen[_topicKey(connId, chan)];
+}
 // Is this message OUR OWN? Two signals: an explicit `own:true` flag (set by the
 // irc_echo path — an IrcEcho is BY DEFINITION this account's own send, from any
 // device, so it must never count as unread / play a sound no matter what the
@@ -4444,7 +4501,9 @@ async function handleInput(raw){
 
       // ── Channel info ────────────────────────────────────────────────
       case 'TOPIC':
-        if(!args.length) wsend({type:'send',conn_id,raw:`TOPIC ${target}`}); // fetch topic
+        // Arm before sending: a bare /topic is a deliberate question, so its answer
+        // must print even when the topic has not changed since we last showed it.
+        if(!args.length){ _topicAskArm(conn_id,target); wsend({type:'send',conn_id,raw:`TOPIC ${target}`}); } // fetch topic
         else wsend({type:'send',conn_id,raw:`TOPIC ${target} :${args.join(' ')}`});
         break;
       case 'NAMES':

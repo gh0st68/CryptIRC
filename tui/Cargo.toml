@@ -1,6 +1,6 @@
 [package]
 name = "cryptirc-tui"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2021"
 description = "Terminal client for CryptIRC — speaks the same WebSocket protocol as the web app"
 
