@@ -36,6 +36,7 @@ mod lastfm;
 mod logs;
 mod notifications;
 mod paste;
+mod paste_render;
 mod preview;
 mod sysstatus;
 mod upload;
@@ -818,7 +819,10 @@ impl Drop for WsConnGuard {
 async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
     let mut response = next.run(req).await;
     let h = response.headers_mut();
-    h.insert(HeaderName::from_static("x-frame-options"),          HeaderValue::from_static("DENY"));
+    // `serve_paste_app` marks its response so it may be framed by the same-origin
+    // paste page; the marker is private and removed here before the response leaves.
+    let is_app_frame = h.remove(HeaderName::from_static(PASTE_APP_FRAME_MARKER)).is_some();
+    apply_security_headers(h, is_app_frame);
     h.insert(HeaderName::from_static("x-content-type-options"),   HeaderValue::from_static("nosniff"));
     h.insert(HeaderName::from_static("referrer-policy"),          HeaderValue::from_static("no-referrer"));
     h.insert(HeaderName::from_static("permissions-policy"),       HeaderValue::from_static("camera=(), microphone=(), geolocation=()"));
@@ -835,6 +839,46 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
         h.insert(HeaderName::from_static("strict-transport-security"),
                  HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"));
     }
+    response
+}
+
+/// Apply the framing/CSP headers for a response. `is_app_frame` selects the
+/// sandboxed-HTML-paste app policy (the ONLY route framable by the same-origin
+/// paste page); every other response keeps the strict global deny policy.
+///
+/// Security invariants:
+/// - The app document is framable only by `'self'` and runs under a CSP `sandbox`
+///   directive without `allow-same-origin`, so it has an opaque origin and cannot
+///   touch CryptIRC cookies/session/storage or its parent document.
+/// - The global policy keeps `frame-ancestors 'none'` + `XFO: DENY`, so the
+///   `frame-src 'self'` allowance (needed to frame the app route) cannot expose
+///   any other route to framing.
+fn apply_security_headers(h: &mut HeaderMap, is_app_frame: bool) {
+    if is_app_frame {
+        h.insert(HeaderName::from_static("x-frame-options"), HeaderValue::from_static("SAMEORIGIN"));
+        // NOTE (#55): 'unsafe-inline'/'unsafe-eval' and wildcard sources are the
+        // point of this isolated document — it is an opaque-origin sandbox running
+        // user-supplied single-file apps (CDN scripts, API calls). None of it can
+        // reach the CryptIRC origin.
+        h.insert(HeaderName::from_static("content-security-policy"), HeaderValue::from_static(
+            "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock; \
+             default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; \
+             script-src * 'unsafe-inline' 'unsafe-eval' data: blob:; \
+             style-src * 'unsafe-inline'; \
+             img-src * data: blob:; \
+             media-src * data: blob:; \
+             font-src * data:; \
+             connect-src *; \
+             worker-src * blob:; \
+             frame-src *; \
+             child-src *; \
+             base-uri 'none'; \
+             form-action *; \
+             frame-ancestors 'self';"
+        ));
+        return;
+    }
+    h.insert(HeaderName::from_static("x-frame-options"),          HeaderValue::from_static("DENY"));
     // NOTE (#55): script-src still includes 'unsafe-inline' because the frontend
     // (static/app.js inline onclick handlers + static/index.html theme bootstrap
     // script) currently requires it. 'unsafe-inline' cannot be dropped here until
@@ -845,9 +889,36 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
          font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; \
          media-src 'self' blob: data: https:; \
          connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com https://api.urbandictionary.com https://api.giphy.com https://tenor.googleapis.com; \
-         frame-src https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';"
+         frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';"
     ));
-    response
+}
+
+#[cfg(test)]
+mod security_headers_tests {
+    use super::*;
+
+    #[test]
+    fn app_frame_gets_sameorigin_sandbox_policy() {
+        let mut h = HeaderMap::new();
+        apply_security_headers(&mut h, true);
+        assert_eq!(h.get("x-frame-options").unwrap(), "SAMEORIGIN");
+        let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'self'"), "{}", csp);
+        assert!(csp.contains("sandbox allow-scripts"), "{}", csp);
+        assert!(!csp.contains("allow-same-origin"), "{}", csp);
+        assert!(!csp.contains("frame-ancestors 'none'"), "{}", csp);
+    }
+
+    #[test]
+    fn normal_responses_keep_deny_policy() {
+        let mut h = HeaderMap::new();
+        apply_security_headers(&mut h, false);
+        assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
+        let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"), "{}", csp);
+        assert!(csp.contains("frame-src 'self'"), "{}", csp);
+        assert!(!csp.contains("sandbox allow-scripts"), "{}", csp);
+    }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -1188,6 +1259,7 @@ async fn main() -> Result<()> {
         .route("/paste",                post(route_paste_create).layer(DefaultBodyLimit::max(524_288)))
         .route("/paste/:id",            get(route_paste_view).post(route_paste_view_post))
         .route("/paste/:id/raw",        get(route_paste_raw))
+        .route("/paste/:id/app",        get(route_paste_app).post(route_paste_app_post))
         .route("/s",                    post(route_short_create).layer(DefaultBodyLimit::max(4_096)))
         .route("/s/:id",                get(route_short_redirect))
         .route("/preview",              get(route_link_preview))
@@ -2407,6 +2479,7 @@ async fn route_paste_create(
             Json(serde_json::json!({
                 "id": paste.id,
                 "url": url,
+                "content_type": paste.content_type.as_str(),
                 "has_password": paste.password_hash.is_some(),
                 "expires_at": paste.expires_at,
             })).into_response()
@@ -2441,6 +2514,134 @@ async fn route_paste_view_post(
     let pw = form.get("password").map(|s| s.as_str()).unwrap_or("");
     render_paste(&state, &id, &headers, pw).await
 }
+
+// POST unlock for the sandboxed app view: the hidden form on the paste page
+// posts the already-verified password here (never a URL), mirroring
+// route_paste_view_post's rate-limit + verify path.
+async fn route_paste_app_post(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let pw = form.get("password").map(|s| s.as_str()).unwrap_or("");
+    serve_paste_app(&state, &id, &headers, pw).await
+}
+
+// GET: public html pastes only. A protected paste is refused so the password can
+// never be supplied via the URL (audit #F24); the POST form above is the only way in.
+async fn route_paste_app(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    serve_paste_app(&state, &id, &headers, "").await
+}
+
+/// Serve an `html` paste as a runnable, sandboxed document for the paste page's
+/// iframe. Only this route ever returns a paste body as text/html — the raw route
+/// stays text/plain, so no paste ever executes with CryptIRC origin privileges.
+/// The response carries the private marker that `security_headers_mw` turns into
+/// the app framing policy (frame-ancestors 'self' + CSP sandbox) and then removes.
+async fn serve_paste_app(state: &AppState, id: &str, headers: &HeaderMap, pw: &str) -> axum::response::Response {
+    // Same per-IP view budget as the paste page so app loads can't outpace views.
+    if state.auth.check_ip_rate_limit("paste_view", client_ip(headers).as_deref()).is_err() {
+        return (StatusCode::TOO_MANY_REQUESTS, "Too many requests — try again later.").into_response();
+    }
+    match state.paste_store.get(id).await {
+        Ok(Some(paste)) => {
+            if paste.content_type != paste::PasteKind::Html {
+                // Only HTML pastes have an app view; text/markdown are 404 here.
+                return (StatusCode::NOT_FOUND, "Not found").into_response();
+            }
+            if paste.password_hash.is_some() {
+                // GET never unlocks (the password would travel in the URL); only the
+                // hidden POST form from the unlocked paste page may.
+                if pw.is_empty() {
+                    return (StatusCode::FORBIDDEN, "Password required").into_response();
+                }
+                // Unauthenticated + 64-MiB Argon2id derive: rate-limit per client IP
+                // before the derive and run it off the async workers (as render_paste).
+                if state.auth.check_ip_rate_limit("paste_unlock", client_ip(headers).as_deref()).is_err() {
+                    return (StatusCode::TOO_MANY_REQUESTS, "Too many attempts — try again later.").into_response();
+                }
+                let verify_ok = {
+                    let paste = paste.clone();
+                    let pw = pw.to_string();
+                    tokio::task::spawn_blocking(move || paste::PasteStore::verify_password(&paste, &pw))
+                        .await
+                        .unwrap_or(false)
+                };
+                if !verify_ok {
+                    return (StatusCode::FORBIDDEN, "Password required").into_response();
+                }
+            }
+            let mut resp = (
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8"), (header::CACHE_CONTROL, NO_CACHE)],
+                paste.content,
+            ).into_response();
+            // Consumed and removed by security_headers_mw.
+            resp.headers_mut().insert(HeaderName::from_static(PASTE_APP_FRAME_MARKER), HeaderValue::from_static("1"));
+            resp
+        }
+        Ok(None) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Error loading paste.").into_response(),
+    }
+}
+
+// ── Paste view styles/constants ─────────────────────────────────────────────
+// The paste view is rendered per paste type (text/markdown/html). Styles live in
+// constants so the format! calls below never need escaped braces.
+/// Private marker header consumed by `security_headers_mw`: a response carrying it
+/// gets the sandboxed-app framing policy (frame-ancestors 'self'; CSP sandbox)
+/// instead of the global DENY/none policy. Only `serve_paste_app` ever sets it, and
+/// the middleware removes it before the response leaves the server.
+const PASTE_APP_FRAME_MARKER: &str = "x-cryptirc-app-frame";
+const PASTE_BASE_CSS: &str =
+    "body{background:#0b0d0f;color:#e0e0e0;font-family:monospace;margin:0}a{color:#00d4aa}";
+const PASTE_TEXT_CSS: &str = "body{padding:16px}\
+    .hdr{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2a2e3e;margin-bottom:12px;flex-wrap:wrap;gap:8px}\
+    .meta{font-size:12px;color:#888}\
+    pre{background:#141620;padding:16px;border-radius:8px;overflow-x:auto;border:1px solid #2a2e3e;white-space:pre-wrap;word-break:break-word;line-height:1.5}";
+const PASTE_MD_CSS: &str =
+    ".md{background:#141620;padding:18px 22px;border-radius:8px;border:1px solid #2a2e3e;line-height:1.65;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-size:15px;overflow-wrap:break-word}\
+    .md h1,.md h2{border-bottom:1px solid #2a2e3e;padding-bottom:6px;margin:18px 0 10px}\
+    .md h1{font-size:26px}.md h2{font-size:21px}\
+    .md h3,.md h4,.md h5,.md h6{margin:14px 0 8px}\
+    .md p{margin:10px 0}\
+    .md ul,.md ol{padding-left:24px}.md li{margin:3px 0}\
+    .md code{font-family:monospace;background:#0b0d0f;padding:2px 5px;border-radius:4px;font-size:13px}\
+    .md pre{background:#0b0d0f;padding:12px;border-radius:6px;overflow-x:auto;border:1px solid #2a2e3e;white-space:pre-wrap;word-break:break-word}\
+    .md pre code{background:none;padding:0}\
+    .md blockquote{margin:10px 0;padding:6px 14px;border-left:3px solid #00d4aa;background:#10131c;color:#b8b8b8}\
+    .md table{border-collapse:collapse;margin:12px 0;display:block;overflow-x:auto}\
+    .md th,.md td{border:1px solid #2a2e3e;padding:6px 10px}\
+    .md img{max-width:100%}.md input[type=checkbox]{margin-right:6px}\
+    .md hr{border:none;border-top:1px solid #2a2e3e;margin:16px 0}";
+const PASTE_APP_CSS: &str = "body{height:100vh;display:flex;flex-direction:column;overflow:hidden}\
+    .toolbar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #2a2e3e;background:#141620;flex-wrap:wrap}\
+    .toolbar .spacer{flex:1}\
+    .meta{font-size:12px;color:#888}\
+    .tab{padding:5px 12px;border-radius:5px;border:1px solid #2a2e3e;background:#1a1e2e;color:#e0e0e0;cursor:pointer;font:inherit;font-size:12px;text-decoration:none}\
+    .tab.active{background:#00d4aa;color:#000;font-weight:700;border-color:#00d4aa}\
+    .pane{flex:1;min-height:0;position:relative}\
+    .pane iframe{width:100%;height:100%;border:0;background:#fff}\
+    #pane-src{display:none;flex:1;min-height:0;overflow:auto;padding:16px}\
+    #pane-src pre{margin:0;background:#141620;padding:16px;border-radius:8px;border:1px solid #2a2e3e;white-space:pre-wrap;word-break:break-word;line-height:1.5}";
+/// Iframe sandbox tokens for a running HTML paste. `allow-same-origin` is
+/// deliberately absent: the app gets an opaque origin and cannot touch CryptIRC
+/// cookies/session/storage or the parent document. Top-navigation is allowed for
+/// no token. The app route repeats this isolation with a CSP `sandbox` directive.
+const PASTE_APP_SANDBOX: &str =
+    "allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock";
+const PASTE_APP_TOGGLE_JS: &str = "<script>(function(){\
+    var t=document.getElementById('tab-app'),s=document.getElementById('tab-src');\
+    function show(n){var a=document.getElementById('pane-app'),p=document.getElementById('pane-src');\
+    var isApp=n==='app';a.style.display=isApp?'block':'none';p.style.display=isApp?'none':'block';\
+    t.classList.toggle('active',isApp);s.classList.toggle('active',!isApp);}\
+    t.addEventListener('click',function(){show('app');});\
+    s.addEventListener('click',function(){show('src');});\
+    var f=document.getElementById('app-auth');if(f){f.submit();}})();</script>";
 
 async fn render_paste(state: &AppState, id: &str, headers: &HeaderMap, pw: &str) -> axum::response::Response {
     // #19/#45: the paste id is an unguessable full-UUID capability; still rate-limit
@@ -2482,22 +2683,86 @@ async fn render_paste(state: &AppState, id: &str, headers: &HeaderMap, pw: &str)
                 }
             }
             let escaped = html_escape(&paste.content);
+            let id_esc = html_escape(id);
             let lang = html_escape(&paste.language);
             let created = chrono::DateTime::from_timestamp(paste.created_at, 0)
                 .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
             let expires = paste.expires_at.and_then(|t| chrono::DateTime::from_timestamp(t, 0))
                 .map(|d| format!("Expires: {}", d.format("%Y-%m-%d %H:%M UTC"))).unwrap_or_else(|| "No expiration".into());
+            // Build URLs from the configured base path; never hardcode /cryptirc
+            // (that breaks root deployments and was the legacy behaviour here).
+            let base = state.base_path.as_str();
+            let meta = format!(
+                "{} · {} · by {} · {} · <a href=\"{}/paste/{}/raw\">raw</a>",
+                lang, created, html_escape(&paste.author), expires, base, id_esc
+            );
+            let hdr = format!(
+                "<div class=\"hdr\"><span><a href=\"{}/\">CryptIRC</a> Paste</span><span class=\"meta\">{}</span></div>",
+                base, meta
+            );
+            let (style, body) = match paste.content_type {
+                paste::PasteKind::Text => (
+                    format!("{}{}", PASTE_BASE_CSS, PASTE_TEXT_CSS),
+                    format!("{}<pre>{}</pre>", hdr, escaped),
+                ),
+                paste::PasteKind::Markdown => (
+                    format!("{}{}{}", PASTE_BASE_CSS, PASTE_TEXT_CSS, PASTE_MD_CSS),
+                    format!("{}<article class=\"md\">{}</article>", hdr, paste_render::render_markdown(&paste.content)),
+                ),
+                paste::PasteKind::Html => {
+                    // The app runs only on this dedicated route (never the raw URL,
+                    // which stays text/plain) inside a sandbox with an opaque origin.
+                    let app_url = format!("{}/paste/{}/app", base, id_esc);
+                    // A protected paste was already unlocked by the POST that reached
+                    // this render; pass the verified password to the app route through
+                    // a hidden auto-submitting form (targets the same iframe) so the
+                    // secret never appears in a URL (audit #F24). Public pastes use a
+                    // plain iframe src.
+                    let (frame, open_link, auth_form) = if paste.password_hash.is_none() {
+                        (
+                            format!(
+                                "<iframe name=\"cryptirc-app\" title=\"Pasted app\" sandbox=\"{}\" referrerpolicy=\"no-referrer\" src=\"{}\"></iframe>",
+                                PASTE_APP_SANDBOX, app_url
+                            ),
+                            format!(
+                                "<a class=\"tab\" href=\"{}\" target=\"_blank\" rel=\"noopener\">open app</a>",
+                                app_url
+                            ),
+                            String::new(),
+                        )
+                    } else {
+                        (
+                            format!(
+                                "<iframe name=\"cryptirc-app\" title=\"Pasted app\" sandbox=\"{}\" referrerpolicy=\"no-referrer\"></iframe>",
+                                PASTE_APP_SANDBOX
+                            ),
+                            String::new(),
+                            format!(
+                                "<form id=\"app-auth\" method=\"post\" action=\"{}\"><input type=\"hidden\" name=\"password\" value=\"{}\"></form>",
+                                app_url, html_escape(pw)
+                            ),
+                        )
+                    };
+                    let raw_tab = format!("<a class=\"tab\" href=\"{}/paste/{}/raw\">raw</a>", base, id_esc);
+                    let toolbar = format!(
+                        "<div class=\"toolbar\"><span><a href=\"{}/\">CryptIRC</a> Paste</span>\
+                         <button class=\"tab active\" id=\"tab-app\" type=\"button\">App</button>\
+                         <button class=\"tab\" id=\"tab-src\" type=\"button\">Source</button>{}{}\
+                         <span class=\"spacer\"></span><span class=\"meta\">{}</span></div>",
+                        base, open_link, raw_tab, meta
+                    );
+                    (
+                        format!("{}{}", PASTE_BASE_CSS, PASTE_APP_CSS),
+                        format!(
+                            "{}<div class=\"pane\" id=\"pane-app\">{}</div><div id=\"pane-src\"><pre>{}</pre></div>{}{}",
+                            toolbar, frame, escaped, auth_form, PASTE_APP_TOGGLE_JS
+                        ),
+                    )
+                }
+            };
             Html(format!(
-                "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>CryptIRC Paste — {}</title>\
-                 <style>body{{background:#0b0d0f;color:#e0e0e0;font-family:monospace;margin:0;padding:16px}}\
-                 .hdr{{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2a2e3e;margin-bottom:12px;flex-wrap:wrap;gap:8px}}\
-                 .meta{{font-size:12px;color:#888}}\
-                 pre{{background:#141620;padding:16px;border-radius:8px;overflow-x:auto;border:1px solid #2a2e3e;white-space:pre-wrap;word-break:break-word;line-height:1.5}}\
-                 a{{color:#00d4aa}}</style></head>\
-                 <body><div class=\"hdr\"><span><a href=\"/cryptirc/\">CryptIRC</a> Paste</span>\
-                 <span class=\"meta\">{} · {} · by {} · {} · <a href=\"/cryptirc/paste/{}/raw\">raw</a></span></div>\
-                 <pre>{}</pre></body></html>",
-                html_escape(id), lang, created, html_escape(&paste.author), expires, html_escape(id), escaped
+                "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>CryptIRC Paste — {}</title><style>{}</style></head><body>{}</body></html>",
+                id_esc, style, body
             )).into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, Html("Paste not found or expired.".to_string())).into_response(),

@@ -1,6 +1,6 @@
 [package]
 name = "cryptirc"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 
 [dependencies]
@@ -35,6 +35,8 @@ hkdf = "0.12"
 p256 = { version = "0.13", features = ["ecdsa"] }
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "gzip"] }
 socket2 = { version = "0.5", features = ["all"] }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+ammonia = "4.2.3"
 
 # ── Build profile — pinned deliberately for the never-restart irc_core daemon ──
 # (applies to the web binary too; both are fine with these). Explicit so a future

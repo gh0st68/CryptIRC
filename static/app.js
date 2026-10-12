@@ -4210,15 +4210,25 @@ document.addEventListener('DOMContentLoaded',()=>{
     const items=Array.from(e.clipboardData?.items||[]);
     const imgItem=items.find(i=>i.type.startsWith('image/'));
     if(imgItem){e.preventDefault();const f=imgItem.getAsFile();if(f)uploadFile(f);return;}
-    // Smart paste: detect multi-line text and offer pastebin
+    // Smart paste: classify the content and offer the matching paste type
     const txt=e.clipboardData?.getData('text/plain')||'';
-    if(txt && txt.split('\n').length>=5 && document.activeElement===document.getElementById('msg-input')){
-      e.preventDefault();
-      _smartPasteText=txt;
-      const dlg=document.getElementById('smart-paste-dialog');
-      dlg.querySelector('.sp-info').textContent='Pasted text has '+txt.split('\n').length+' lines. Send as pastebin?';
-      _smartPasteApplyExpire();
-      dlg.classList.add('show');
+    if(txt && document.activeElement===document.getElementById('msg-input')){
+      const kind=classifyPasteText(txt);
+      if(kind){
+        e.preventDefault();
+        _smartPasteText=txt;
+        _smartPasteType=kind;
+        const dlg=document.getElementById('smart-paste-dialog');
+        dlg.querySelector('.sp-info').textContent=kind==='html'
+          ? 'HTML document detected. Create an app paste?'
+          : kind==='markdown'
+            ? 'Markdown detected. Create a Markdown paste?'
+            : 'Pasted text has '+txt.split('\n').length+' lines. Send as pastebin?';
+        const yes=document.getElementById('smart-paste-yes');
+        if(yes) yes.textContent=kind==='html'?'Create HTML App Paste':kind==='markdown'?'Create Markdown Paste':'Create Pastebin';
+        _smartPasteApplyExpire();
+        dlg.classList.add('show');
+      }
     }
   });
   // SW messages
@@ -5497,12 +5507,12 @@ function showPasteModal(){
     <div style="padding:16px 20px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:10px">
       <textarea id="paste-content" placeholder="Paste your text here..." style="width:100%;min-height:200px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:10px;resize:vertical;outline:none;box-sizing:border-box"></textarea>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <select id="paste-lang" style="flex:1;padding:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px">
+        <select id="paste-lang" onchange="updatePasteKindHint()" style="flex:1;padding:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px">
           <option value="text">Plain Text</option>
           <option value="javascript">JavaScript</option>
           <option value="python">Python</option>
           <option value="rust">Rust</option>
-          <option value="html">HTML</option>
+          <option value="html">HTML (renders as app)</option>
           <option value="css">CSS</option>
           <option value="bash">Bash</option>
           <option value="json">JSON</option>
@@ -5513,7 +5523,7 @@ function showPasteModal(){
           <option value="ruby">Ruby</option>
           <option value="yaml">YAML</option>
           <option value="xml">XML</option>
-          <option value="markdown">Markdown</option>
+          <option value="markdown">Markdown (formatted)</option>
         </select>
         <select id="paste-expire" style="flex:1;padding:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px">
           <option value="0">No Expiration</option>
@@ -5524,6 +5534,7 @@ function showPasteModal(){
           <option value="2592000">30 Days</option>
         </select>
       </div>
+      <div id="paste-kind-hint" style="font-size:11px;color:var(--text3);line-height:1.4">Code/text pastes render as plain text.</div>
       <input id="paste-password" type="password" placeholder="Password (optional)" style="padding:6px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:14px;outline:none">
       <button onclick="submitPaste(this)" style="padding:10px;background:var(--accent,#00d4aa);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:14px">Create Paste</button>
     </div>`;
@@ -5532,15 +5543,26 @@ function showPasteModal(){
   ov.onclick=e=>{if(e.target===ov)ov.remove();};
   document.getElementById('paste-content')?.focus();
 }
+// One-line hint under the Paste modal's language select: HTML and Markdown are
+// render types (app page / formatted document), everything else is plain text.
+function updatePasteKindHint(){
+  const v=document.getElementById('paste-lang')?.value||'text';
+  const h=document.getElementById('paste-kind-hint');
+  if(!h)return;
+  h.textContent=v==='html'?'HTML pastes render as a sandboxed app page.'
+    :v==='markdown'?'Markdown pastes render as a formatted document.'
+    :'Code/text pastes render as plain text.';
+}
 async function submitPaste(btn){
   const content=document.getElementById('paste-content')?.value;
   if(!content?.trim()){showToast('Paste cannot be empty');return;}
   const lang=document.getElementById('paste-lang')?.value||'text';
+  const contentType=lang==='html'?'html':lang==='markdown'?'markdown':'text';
   const expire=parseInt(document.getElementById('paste-expire')?.value||'0');
   const pw=document.getElementById('paste-password')?.value||'';
   btn.disabled=true;btn.textContent='Creating...';
   try{
-    const r=await fetch('/cryptirc/paste',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({content,language:lang,expires_in:expire||null,password:pw||null})});
+    const r=await fetch('/cryptirc/paste',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({content,language:lang,content_type:contentType,expires_in:expire||null,password:pw||null})});
     const d=await r.json();
     if(!r.ok){showToast(d.error||'Failed');return;}
     const inp=document.getElementById('msg-input');
@@ -11841,7 +11863,29 @@ function renderSplitChat(){
 }
 
 // ─── Smart paste ─────────────────────────────────────────────────────────────
-let _smartPasteText='';
+let _smartPasteText='',_smartPasteType='text';
+// Classify text pasted into the chat input. Returns 'html' | 'markdown' | 'text'
+// when the dialog should be offered, or null to leave the paste alone.
+// HTML detection accepts a complete document at any length (doctype/<html> after
+// leading whitespace/BOM, or a script tag plus a closing document tag); Markdown
+// requires the classic >=5-line gate plus at least one strong structural marker,
+// so ordinary chat and log excerpts are not interrupted.
+function classifyPasteText(txt){
+  const t=txt.replace(/^\uFEFF/,'').trimStart();
+  const isHtml=/^<!doctype\s+html/i.test(t) || /^<html[\s>]/i.test(t)
+    || (/<script[\s>]/i.test(t) && /<\/(html|body|div|section|main)>/i.test(t));
+  if(isHtml) return 'html';
+  if(txt.split('\n').length>=5){
+    const md=/(^|\n)#{1,6}\s+\S/.test(txt)                       // ATX heading
+      || /(^|\n)```/.test(txt)                                   // fenced code
+      || /(^|\n)>\s+\S/.test(txt)                                // blockquote
+      || /(^|\n)\s*([-*+]\s+\S|\d+\.\s+\S)/.test(txt)            // list item
+      || /\[[^\]\n]+\]\([^)\s]+\)/.test(txt)                     // markdown link
+      || (/(^|\n)\s*\|.*\|/.test(txt) && /(^|\n)\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*(\n|$)/.test(txt)); // table
+    return md?'markdown':'text';
+  }
+  return null;
+}
 // Remembered expiry for the smart-paste dialog, in seconds ('0' = never). Kept as
 // a string so it round-trips through the <select>'s value verbatim. The stored
 // value is validated against the live <option> list rather than a duplicated JS
@@ -11859,6 +11903,8 @@ function _smartPasteApplyExpire(){
 function smartPasteYes(){
   document.getElementById('smart-paste-dialog').classList.remove('show');
   if(!_smartPasteText||!active)return;
+  const text=_smartPasteText,type=_smartPasteType;
+  _smartPasteText='';
   const sel=document.getElementById('sp-expire');
   // Re-validate on read too: the dialog markup could be missing on an older
   // cached index.html even though this app.js is fresh (they're separate
@@ -11868,17 +11914,18 @@ function smartPasteYes(){
   const expSecs=parseInt(expire,10)||0;
   const expLabel=sel?.selectedOptions?.[0]?.textContent||'Never';
   try{ localStorage.setItem('cryptirc_smartpaste_expire',String(expSecs)); savePrefsToServer(); }catch(_){}
-  // Create paste via API
+  // Create the classified paste via the API. On any failure the original content
+  // is preserved in the input so nothing is lost.
   const token=sessionToken;
   fetch(`${location.pathname}paste`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},
-    body:JSON.stringify({content:_smartPasteText,language:'text',expires_in:expSecs,password:null})
-  }).then(r=>r.json()).then(d=>{
-    if(d.url){
-      document.getElementById('msg-input').value=d.url;
-      showToast(expSecs?`Paste created (expires in ${expLabel.toLowerCase()}) — URL in input bar`:'Paste created — URL in input bar');
-    }
-  }).catch(()=>{document.getElementById('msg-input').value=_smartPasteText;});
-  _smartPasteText='';
+    body:JSON.stringify({content:text,language:type,content_type:type,expires_in:expSecs,password:null})
+  }).then(async r=>{
+    const d=await r.json().catch(()=>({})),inp=document.getElementById('msg-input');
+    if(!r.ok||!d.url){inp.value=text;showToast(d.error||'Paste failed — text kept in input');return;}
+    inp.value=d.url;
+    const kindLabel=type==='html'?'HTML app paste':type==='markdown'?'Markdown paste':'Paste';
+    showToast(expSecs?`${kindLabel} created (expires in ${expLabel.toLowerCase()}) — URL in input bar`:`${kindLabel} created — URL in input bar`);
+  }).catch(()=>{document.getElementById('msg-input').value=text;});
 }
 function smartPasteNo(){
   document.getElementById('smart-paste-dialog').classList.remove('show');
@@ -15399,6 +15446,9 @@ const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
+  {version:'0.5.7', date:'October 2026', items:[
+    {tag:'new', text:'📋 Pastes now render by type: a single-file HTML/JS app runs as a sandboxed page with an App/Source toggle, Markdown renders as a formatted document, and plain text stays as-is. Paste HTML or Markdown into the chat input and it offers the right kind of paste — or choose HTML/Markdown in the Paste modal.'},
+  ]},
   {version:'0.5.4', date:'August 2026', items:[
     {tag:'new', text:'Three new themes that copy real IRC clients rather than just borrowing their colours. HexChat and XChat both get the layout that actually makes them recognisable — a right-aligned nick column with a thin vertical rule separating it from the message — plus their menubar and a status bar showing the live channel, the op and user counts and your nick. irssi gets the terminal treatment: black background, monospace everywhere, [24-hour] timestamps, -!- status lines, <bracketed> nicks, and the cyan status bars along the bottom with a real numbered window list where the channel you are in is highlighted in reverse video. (Stock irssi packs that into one bar; the two-bar window list is the look you get with the adv_windowlist script, which is how most people actually run it.)'},
     {tag:'new', text:'Typing /mode #channel on its own now tells you the channel’s modes in plain language — for example “+ntk secret — no external messages, topic locked, key required (secret)” — and it answers in the window you asked from. It always sent the query before, but the reply arrived tagged as a status message, so it got folded into a collapsed status block and was invisible entirely if you hide those. /mode +o nick also now applies to the channel you are in rather than being sent without a target.'},

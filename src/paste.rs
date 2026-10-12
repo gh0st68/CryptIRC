@@ -35,11 +35,61 @@ use uuid::Uuid;
 
 const MAX_PASTE_SIZE: usize = 500_000; // 500KB max
 
+/// Render type of a paste: how the `/paste/<id>` view presents the stored content.
+/// `Text` (the historical default) keeps the escaped-`<pre>` view, `Markdown`
+/// renders a sanitized document, and `Html` runs the payload as a sandboxed app.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PasteKind {
+    #[default]
+    Text,
+    Markdown,
+    Html,
+}
+
+impl PasteKind {
+    /// Parse a client-supplied wire value. `None` marks an unrecognized type so the
+    /// create path can reject it with a client error — unlike stored-file parsing,
+    /// which tolerates unknown values by falling back to `Text`.
+    pub fn from_wire(s: &str) -> Option<Self> {
+        match s {
+            "text" => Some(Self::Text),
+            "markdown" => Some(Self::Markdown),
+            "html" => Some(Self::Html),
+            _ => None,
+        }
+    }
+
+    /// Stable wire name (also used in API responses).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Markdown => "markdown",
+            Self::Html => "html",
+        }
+    }
+}
+
+/// Tolerant deserializer for stored pastes: a missing field is handled by
+/// `#[serde(default)]`, and an unknown value falls back to `Text` so a file from a
+/// future build (or a hand-edited one) still opens as a safe plain-text paste
+/// instead of failing the whole view.
+fn deserialize_kind<'de, D>(d: D) -> Result<PasteKind, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(d)?;
+    Ok(PasteKind::from_wire(&raw).unwrap_or_default())
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Paste {
     pub id: String,
     pub content: String,
     pub language: String,
+    /// Render type. Missing (pre-change files) or unknown values parse as `Text`.
+    #[serde(default, deserialize_with = "deserialize_kind")]
+    pub content_type: PasteKind,
     pub created_at: i64,
     pub expires_at: Option<i64>,     // Unix timestamp, None = no expiry
     pub password_hash: Option<String>, // Argon2id hash if password-protected
@@ -50,6 +100,9 @@ pub struct Paste {
 pub struct CreatePasteRequest {
     pub content: String,
     pub language: Option<String>,
+    /// Optional render type (`text` | `markdown` | `html`); omitted = `text`.
+    #[serde(default)]
+    pub content_type: Option<String>,
     pub expires_in: Option<i64>,  // seconds from now, 0 or None = no expiry
     pub password: Option<String>,
 }
@@ -88,6 +141,16 @@ impl PasteStore {
             anyhow::bail!("Paste cannot be empty");
         }
 
+        // Explicit opt-in render type. An unknown value is a client error; omitting
+        // it keeps every legacy client on plain text. Validate before the Argon2
+        // derive below so a malformed request never pays the hashing cost.
+        let content_type = match req.content_type.as_deref() {
+            None => PasteKind::Text,
+            Some(s) => PasteKind::from_wire(s).ok_or_else(|| {
+                anyhow::anyhow!("Unknown content type (expected text, markdown, or html)")
+            })?,
+        };
+
         // audit #45: use the FULL UUIDv4 (122 bits of entropy) as the id rather
         // than truncating to 12 hex chars (~48 bits). This makes the id an
         // unguessable capability — enumeration/collision is infeasible.
@@ -123,6 +186,7 @@ impl PasteStore {
             id: id.clone(),
             content: req.content.clone(),
             language: req.language.clone().unwrap_or_else(|| "text".into()),
+            content_type,
             created_at: now,
             expires_at,
             password_hash,
@@ -269,4 +333,118 @@ async fn set_secret_mode(path: &std::path::Path) {
     }
     #[cfg(not(unix))]
     { let _ = path; }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_store() -> (PasteStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("cryptirc-paste-test-{}", Uuid::new_v4()));
+        (PasteStore::new(dir.to_str().unwrap()), dir)
+    }
+
+    fn req(content: String, kind: Option<&str>) -> CreatePasteRequest {
+        CreatePasteRequest {
+            content,
+            language: None,
+            content_type: kind.map(|s| s.to_string()),
+            expires_in: None,
+            password: None,
+        }
+    }
+
+    fn full_paste(kind: PasteKind) -> Paste {
+        Paste {
+            id: "abc".into(),
+            content: "hello".into(),
+            language: "text".into(),
+            content_type: kind,
+            created_at: 1,
+            expires_at: None,
+            password_hash: None,
+            author: "tester".into(),
+        }
+    }
+
+    #[test]
+    fn legacy_paste_without_type_parses_as_text() {
+        let json = r#"{"id":"abc","content":"hello","language":"text","created_at":1,"expires_at":null,"password_hash":null,"author":"tester"}"#;
+        let p: Paste = serde_json::from_str(json).unwrap();
+        assert_eq!(p.content_type, PasteKind::Text);
+    }
+
+    #[test]
+    fn unknown_stored_type_falls_back_to_text() {
+        let json = r#"{"id":"abc","content":"hello","language":"text","content_type":"exe","created_at":1,"expires_at":null,"password_hash":null,"author":"tester"}"#;
+        let p: Paste = serde_json::from_str(json).unwrap();
+        assert_eq!(p.content_type, PasteKind::Text);
+    }
+
+    #[test]
+    fn each_allowed_type_round_trips() {
+        for (wire, kind) in [
+            ("text", PasteKind::Text),
+            ("markdown", PasteKind::Markdown),
+            ("html", PasteKind::Html),
+        ] {
+            let json = serde_json::to_string(&full_paste(kind)).unwrap();
+            assert!(json.contains(&format!("\"content_type\":\"{}\"", wire)), "{}", json);
+            let back: Paste = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.content_type, kind);
+        }
+    }
+
+    #[test]
+    fn request_wire_values_validate() {
+        assert_eq!(PasteKind::from_wire("text"), Some(PasteKind::Text));
+        assert_eq!(PasteKind::from_wire("markdown"), Some(PasteKind::Markdown));
+        assert_eq!(PasteKind::from_wire("html"), Some(PasteKind::Html));
+        assert_eq!(PasteKind::from_wire("HTML"), None);
+        assert_eq!(PasteKind::from_wire("exe"), None);
+    }
+
+    #[tokio::test]
+    async fn omitted_type_creates_text_paste() {
+        let (store, dir) = test_store();
+        let p = store.create(&req("hello".into(), None), "tester").await.unwrap();
+        assert_eq!(p.content_type, PasteKind::Text);
+        // The stored file round-trips through get() with the same type.
+        let loaded = store.get(&p.id).await.unwrap().unwrap();
+        assert_eq!(loaded.content_type, PasteKind::Text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn requested_types_are_stored() {
+        let (store, dir) = test_store();
+        for wire in ["markdown", "html"] {
+            let p = store.create(&req("<h1>hi</h1>".into(), Some(wire)), "tester").await.unwrap();
+            assert_eq!(p.content_type.as_str(), wire);
+            let loaded = store.get(&p.id).await.unwrap().unwrap();
+            assert_eq!(loaded.content_type.as_str(), wire);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unknown_type_is_rejected() {
+        let (store, dir) = test_store();
+        assert!(store.create(&req("hello".into(), Some("exe")), "tester").await.is_err());
+        assert!(store.create(&req("hello".into(), Some("HTML")), "tester").await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn size_limit_applies_to_every_type() {
+        let (store, dir) = test_store();
+        for kind in ["text", "markdown", "html"] {
+            let over = "a".repeat(MAX_PASTE_SIZE + 1);
+            assert!(store.create(&req(over, Some(kind)), "tester").await.is_err(), "{} should reject oversize", kind);
+        }
+        // Exactly at the cap is still accepted (unchanged boundary).
+        let exact = "a".repeat(MAX_PASTE_SIZE);
+        assert!(store.create(&req(exact, Some("html")), "tester").await.is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

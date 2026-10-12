@@ -4,3 +4,6 @@
 # rule is anchored and does NOT cover it, so without this its 335MB of build
 # artifacts land in the commit.
 /tui/target
+# Deploy script embeds production passwords (SSH/sudo) — keep it out of git.
+# It supports CRYPTIRC_DEPLOY_PASS_<HOST> / CRYPTIRC_DEPLOY_PASS env overrides.
+/ship.sh
