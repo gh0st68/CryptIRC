@@ -178,7 +178,11 @@ self.addEventListener('push', e => {
   e.waitUntil(
     // Only show notification if no client window is focused
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clients => {
-      const focused = clients.some(c => c.visibilityState === 'visible');
+      const focused = clients.some(c => {
+        try { const u = new URL(c.url); return u.origin === self.location.origin &&
+          (u.pathname === '/cryptirc' || u.pathname.startsWith('/cryptirc/')) &&
+          c.visibilityState === 'visible' && c.focused; } catch { return false; }
+      });
       if (!focused) {
         return self.registration.showNotification(title, options);
       }
@@ -234,7 +238,8 @@ self.addEventListener('notificationclick', e => {
     // (e.g. https://evil.example.com.attacker.test) (audit #135).
     for (const client of clientsList) {
       let sameOrigin = false;
-      try { sameOrigin = new URL(client.url).origin === self.location.origin; } catch (err) {}
+      try { const u = new URL(client.url); sameOrigin = u.origin === self.location.origin &&
+        (u.pathname === '/cryptirc' || u.pathname.startsWith('/cryptirc/')); } catch (err) {}
       if (sameOrigin) {
         try { client.postMessage(payload); } catch (err) {}
         if ('focus' in client) {

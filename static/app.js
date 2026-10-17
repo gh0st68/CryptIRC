@@ -43,6 +43,7 @@ let unreadAsOf=new Map();
 // timestamp (unix seconds). Used so a closed query isn't re-opened by old/replayed
 // messages on reconnect — only a genuinely newer message reopens it. Synced + local.
 let closedQueries={};
+let _messageJumpSerial=0, _messageJump=null;
 let _historyView=null; // history-view state: {bk,conn_id,target} when the active buffer is a past window (see jumpToMessage)
 // Restore unread counts
 try{const ur=JSON.parse(localStorage.getItem('cryptirc_unread')||'{}');for(const[k,v] of Object.entries(ur))unread.set(k,v);}catch(e){}
@@ -176,16 +177,28 @@ function _saveDetached(){
   try{localStorage.setItem('cryptirc_detached',JSON.stringify(arr));}catch(e){}
 }
 _loadDetached();
-function openDetachedWindow(conn_id,target){
+function openDetachedWindow(conn_id,target,jump){
   const k=_detKey(conn_id,target);
   const existing=_detachedWindows[k];
-  if(existing && !existing.closed){try{existing.focus();}catch(_){} return;}
+  if(existing && !existing.closed){try{existing.focus();if(jump&&typeof existing.jumpToMessage==='function')existing.jumpToMessage(conn_id,target,jump.ts,jump.from,jump.match);}catch(_){} return;}
   const basePath=(document.location.pathname.match(/^\/[^\/]+/)||[''])[0]||'';
-  const url=basePath+'/?detached=1&conn='+encodeURIComponent(conn_id)+'&target='+encodeURIComponent(target);
+  const url=basePath+'/?detached=1&conn='+encodeURIComponent(conn_id)+'&target='+encodeURIComponent(target)+(jump?'&ts='+encodeURIComponent(jump.ts)+'&from='+encodeURIComponent(jump.from||''):'');
   const name='cryptirc-d-'+conn_id+'-'+target.toLowerCase().replace(/[^a-z0-9_-]/g,'_');
   const w=window.open(url,name,'width=900,height=700,resizable=yes,scrollbars=yes');
-  if(w) _detachedWindows[k]=w;
-  else showToast('Pop-up blocked — allow popups for this site');
+  if(w){
+    _detachedWindows[k]=w;
+    if(jump){
+      // The cold popup must finish auth before showApp can overwrite its pending
+      // navigation. Deliver the exact locator directly, never private text in a URL.
+      let tries=0;
+      const deliver=()=>{
+        if(w.closed)return;
+        try{if(w._appShown && typeof w.jumpToMessage==='function'){w.jumpToMessage(conn_id,target,jump.ts,jump.from,jump.match);return;}}catch(_){}
+        if(++tries<80)setTimeout(deliver,250);
+      };
+      setTimeout(deliver,250);
+    }
+  } else showToast('Pop-up blocked — allow popups for this site');
 }
 function detachView(conn_id,target){
   if(_detMode){showToast('Already in a detached window');return;}
@@ -878,27 +891,28 @@ function _onResume(){
 }
 document.addEventListener('visibilitychange',()=>{
   if(!document.hidden){_onResume();_resetIdleTimer();}
-  else{
-    // Tab backgrounded — go idle after 60s instead of full 20min
-    clearTimeout(_idleTimer);
-    _idleTimer=setTimeout(()=>{
-      if(!_isIdle){_isIdle=true;if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'idle'}));}
-    },60000);
-  }
+  else { clearTimeout(_idleTimer); _setSessionIdle(true); }
 });
 window.addEventListener('pageshow',e=>{
   if(e.persisted) _onResume();
 });
-window.addEventListener('focus',_onResume);
+window.addEventListener('focus',()=>{_onResume();_resetIdleTimer();});
+window.addEventListener('blur',()=>{clearTimeout(_idleTimer);_setSessionIdle(true);});
 // ─── Idle detection for push notification gating ──────────────────────────────
 let _idleTimer=null, _isIdle=false;
-const IDLE_TIMEOUT_MS=20*60*1000; // 20 minutes
+const IDLE_TIMEOUT_MS=20*60*1000; // 20 minutes while visibly using the app
+function _setSessionIdle(idle){
+  if(_isIdle===idle)return;
+  _isIdle=idle;
+  if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:idle?'idle':'active'}));
+}
 function _resetIdleTimer(){
-  if(_isIdle){_isIdle=false;if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'active'}));}
   clearTimeout(_idleTimer);
-  _idleTimer=setTimeout(()=>{
-    if(!_isIdle){_isIdle=true;if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'idle'}));}
-  },IDLE_TIMEOUT_MS);
+  // Mobile browsers can suspend timers immediately on backgrounding. Report idle
+  // synchronously and never reactivate a hidden/unfocused page from queued input.
+  if(document.hidden||!document.hasFocus()){_setSessionIdle(true);return;}
+  _setSessionIdle(false);
+  _idleTimer=setTimeout(()=>_setSessionIdle(true),IDLE_TIMEOUT_MS);
 }
 ['mousemove','mousedown','keydown','touchstart','scroll','wheel'].forEach(evt=>
   document.addEventListener(evt,_resetIdleTimer,{passive:true,capture:true})
@@ -964,6 +978,7 @@ function updateStarfieldTitle(){
 // tell a young in-flight request (worth waiting for) from a stale key whose
 // response was dropped (must be abandoned, not waited on forever).
 const _pendingLogs=new Map();
+const _processingLogs=new Map();
 const _pendingSyncs=new Set();
 // Messages-inbox preview fetches already ANSWERED this connection (same key shape
 // as _pendingLogs). A conversation whose get_logs comes back with ZERO lines (no
@@ -1391,7 +1406,7 @@ function handleEvent(ev) {
         // one. (Genuine ZNC-bouncer playback mentions may re-appear on reconnect; that's the
         // accepted lesser evil.) `mentioned` is still computed for highlight rendering.
         const _recordMention = !ev.replayed;
-        const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts,_recordMention);
+        const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts,_recordMention,ev.msg_id);
         // ZNC playback detection — batch old messages silently
         const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null};
         // Daemon ring-buffer replay (a cryptirc.service restart reattaching to the
@@ -1943,7 +1958,14 @@ function handleEvent(ev) {
       const _lk=ev.conn_id+'/'+ev.target;
       if(!_pendingLogs.has(_lk)) break; // Response from another session — ignore
       _pendingLogs.delete(_lk);
-      prependLogs(ev.conn_id,ev.target,ev.lines);
+      // Receipt is not completion: E2E decryption and rendering are asynchronous.
+      const work=_processingLogs.get(_lk)||{count:0,started:Date.now()};
+      work.count++; _processingLogs.set(_lk,work);
+      Promise.resolve(prependLogs(ev.conn_id,ev.target,ev.lines)).catch(()=>{
+        showToast('Could not load message history — try again');
+      }).finally(()=>{
+        if(_processingLogs.get(_lk)===work && --work.count===0) _processingLogs.delete(_lk);
+      });
       break;
     }
     case 'search_results': {
@@ -2314,6 +2336,43 @@ function _isOwnMsg(conn_id,msg){
   const n=getNick(conn_id);
   return !!n && String(msg.from).toLowerCase()===String(n).toLowerCase();
 }
+// Use the persistent notification API on browsers so live PM alerts work on
+// mobile as well as desktop. The SW click handler receives the same locator as push.
+async function _showChatNotification(title,body,meta){
+  if(window.electronAPI?.isElectron){window.electronAPI.showNotification(title,body,meta);return;}
+  if(typeof Notification==='undefined'||Notification.permission!=='granted')return;
+  const options={body,icon:'/cryptirc/icon-192.png',tag:'cryptirc:'+meta.conn_id+':'+meta.target,
+    silent:true,data:{...meta,url:location.origin+'/cryptirc/'}};
+  try{
+    const registration=swRegistration||await navigator.serviceWorker?.getRegistration('/cryptirc/');
+    if(registration?.showNotification){
+      try{await registration.showNotification(title,options);return;}
+      catch(e){console.warn('Persistent notification unavailable; trying browser fallback:',e);}
+    }
+    const n=new Notification(title,options);
+    n.onclick=()=>{window.focus();jumpToMessage(meta.conn_id,meta.target,meta.ts,meta.from);n.close();};
+    setTimeout(()=>n.close(),60000);
+  }catch(e){console.warn('Chat notification failed:',e);}
+}
+
+function _notifyChatMessage(conn_id,target,msg,isDM){
+  const focused=!document.hidden&&document.hasFocus();
+  if((focused&&!_isIdle&&isActive(conn_id,target)) || msg.noUnread || _isOwnMsg(conn_id,msg) ||
+    target==='status' || !['privmsg','action','notice'].includes(msg.kind) ||
+    isMuted(conn_id+'/'+target) || isMuted('net:'+conn_id) || isDndActive())return;
+  const cfg=loadAppearance();
+  // Each device has one delivery path: background Web Push when subscribed,
+  // otherwise local fallback (including the native Electron notification bridge).
+  const local=focused || window.electronAPI?.isElectron || !_notifPrefs?.enabled || !pushSubscription;
+  if(!local)return;
+  if(isDM&&cfg.soundPM!==false)playNotifSound('pm');
+  else if(msg.mentioned&&cfg.soundMention!==false)playNotifSound('mention');
+  if(cfg.desktopNotif!==false&&(isDM||msg.mentioned)){
+    void _showChatNotification(isDM?`DM from ${msg.from}`:`${msg.from} in ${target}`,
+      msg.text?.slice(0,120)||'',{conn_id,target,ts:msg.ts,from:msg.from});
+  }
+}
+
 function addMessage(conn_id,target,msg){
   const buf=getBuf(conn_id,target);
   // History view: the buffer is a focused window from the past, not the live
@@ -2440,35 +2499,13 @@ function addMessage(conn_id,target,msg){
       // count doesn't go stale (e.g. a favorited PM whose row updated in place).
       else if(isDM && msgsTabEnabled()){ const _mp=document.getElementById('messages-pin'); if(_mp){ _mp.innerHTML=''; const _me=_renderMessagesSidebarEntry(); if(_me) _mp.appendChild(_me); } }
     }
-    // Notices inbox: one row per PM sender, first message only; only if that
+    // Notices inbox: one row per PM sender, showing the latest unread message; only if that
     // PM view isn't currently active (handled by the enclosing else).
     if(isDM && !_ownMsg && !_isStatus && !_muted && (msg.kind==='privmsg'||msg.kind==='action')){
       addPmNotice(conn_id,target,msg);
     }
-    // Play sound for unread DMs and mentions — never for own or status messages.
-    if(!_muted && !_ownMsg && !_isStatus && !_isStatusBuf){
-      const soundCfg=loadAppearance();
-      if(isDM && soundCfg.soundPM!==false) playNotifSound('pm');
-      else if(msg.mentioned && soundCfg.soundMention!==false) playNotifSound('mention');
-      // Browser desktop notification (popup bubble)
-      if(soundCfg.desktopNotif!==false && (isDM || msg.mentioned) && !isDndActive()){
-        const title=isDM?`DM from ${msg.from}`:`${msg.from} in ${target}`;
-        const body=msg.text?.slice(0,120)||'';
-        const notifMeta={conn_id, target, ts:msg.ts, from:msg.from};
-        if(window.electronAPI?.isElectron){
-          window.electronAPI.showNotification(title, body, notifMeta);
-        } else if(Notification?.permission==='granted'){
-          try{
-            const n=new Notification(title,{body,icon:'/cryptirc/icon-192.png',tag:conn_id+'/'+target,requireInteraction:true,silent:true});
-            n.onclick=()=>{window.focus();jumpToMessage(conn_id,target,msg.ts,msg.from);n.close();};
-            setTimeout(()=>n.close(),60000);
-          }catch(e){console.error('Notification error:',e);}
-        } else if(Notification?.permission!=='denied'){
-          Notification.requestPermission?.();
-        }
-      }
-    }
   }
+  _notifyChatMessage(conn_id,target,msg,isDM);
   // Live-refresh the unified Messages inbox when it's the active view and a DM lands.
   if(isDM && isMessagesActive()) renderMessagesView();
 }
@@ -2640,10 +2677,12 @@ async function prependLogs(conn_id,target,lines){
       _userScrolledAway=true;
       _lastScrollTop=area.scrollTop;
       requestAnimationFrame(()=>{
+        if(_jumpAnchor && _jumpAnchorBk===bk(conn_id,target)){_restoreMessageJump();return;}
         area.scrollTop=newHeight-oldHeight;
         _lastScrollTop=area.scrollTop;
       });
     }
+    _restoreMessageJump();
   } else if(unique.length>0 && isMessagesActive() && _isDMTarget(target)){
     // A preview-only fetch (see renderMessagesView) landed while the inbox is
     // open — redraw so the new preview text/time appear without needing to
@@ -2949,7 +2988,8 @@ function updateLagDisplay(){
     }
   }
 }
-function setActive(conn_id,target){
+function setActive(conn_id,target,options){
+  ++_messageJumpSerial;
   active={conn_id,target};
   // Uploads pseudo-channel doesn't live in IRC space — skip unread/sync/E2E
   // bookkeeping entirely. It still uses the same active/render plumbing.
@@ -2980,7 +3020,7 @@ function setActive(conn_id,target){
   }
   adoptUnreadAsOf(bk(conn_id,target));   // kill immortal wall-clock-stamped badges (see helper)
   unreadClear(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
-  clearNoticesForTarget(conn_id,target);
+  if(!options?.keepNotices) clearNoticesForTarget(conn_id,target);
   // Persist active view and open queries — skipped in detached mode so the
   // popup's target doesn't overwrite the main window's last-active on reload.
   if(!_detMode){
@@ -3133,6 +3173,7 @@ function renderChat(){
   // as part of the burst so they don't pulse in one-by-one after the view swap.
   _lastAppendTs=Date.now();
 
+  _restoreMessageJump();
   // The nick handle is measured off a live .msg-nick, so a re-render can
   // remove the row it was tracking. Re-seat (coalesced).
   try{ if(typeof _rzRelayoutSoon==='function') _rzRelayoutSoon(60); }catch(e){}
@@ -3533,7 +3574,7 @@ function buildCondensedRow(group){
   return row;
 }
 function buildRow(msg){
-  const row=document.createElement('div'); row.className=`msg-row row-${msg.kind}`; row.dataset.ts=msg.ts; row.dataset.from=msg.from||''; row.dataset.fp=_msgFp(msg);
+  const row=document.createElement('div'); row.className=`msg-row row-${msg.kind}`; row.dataset.ts=msg.ts; row.dataset.from=msg.from||''; row.dataset.msgId=msg.id||0; row._jumpText=msg.text||''; row.dataset.fp=_msgFp(msg);
   if(msg.self) row.dataset.self='1';
   if(msg.mentioned) row.dataset.mentioned='1';
   // Built-in look, or the user's own strftime format if they set one. Escaped
@@ -8778,7 +8819,7 @@ rain(cv,ctx){
   const drops=[];
   for(let i=0;i<150;i++)drops.push({x:Math.random()*cv.width,y:Math.random()*cv.height,len:Math.random()*15+8,speed:Math.random()*4+6,opacity:Math.random()*0.15+0.05});
   (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const d of drops){ctx.beginPath();ctx.moveTo(d.x,d.y);ctx.lineTo(d.x+1,d.y+d.len);ctx.strokeStyle=`rgba(180,200,220,${d.opacity})`;ctx.lineWidth=0.8;ctx.stroke();d.y+=d.speed;d.x+=0.3;if(d.y>cv.height){d.y=-d.len;d.x=Math.random()*cv.width;}}_animId=requestAnimationFrame(draw);})();
-  _animTimers.push(setInterval(()=>{if(Math.random()<0.3){const flash=document.createElement('div');flash.className='anim-flash';flash.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.06);z-index:0;pointer-events:none;transition:opacity 0.15s;';document.body.appendChild(flash);setTimeout(()=>{flash.style.opacity='0';},80);setTimeout(()=>{flash.remove();if(Math.random()<0.5){const f2=document.createElement('div');f2.className='anim-flash';f2.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.04);z-index:0;pointer-events:none;transition:opacity 0.2s;';document.body.appendChild(f2);setTimeout(()=>{f2.style.opacity='0';},60);setTimeout(()=>f2.remove(),300);}},150);}},8000));
+  _animTimers.push(setInterval(()=>{if(Math.random()<0.3){const flash=document.createElement('div');flash.className='anim-flash';flash.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.06);z-index:0;pointer-events:none;transition:opacity 0.15s;';document.getElementById('anim-overlay')?.appendChild(flash);setTimeout(()=>{flash.style.opacity='0';},80);setTimeout(()=>{flash.remove();if(Math.random()<0.5){const f2=document.createElement('div');f2.className='anim-flash';f2.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.04);z-index:0;pointer-events:none;transition:opacity 0.2s;';document.getElementById('anim-overlay')?.appendChild(f2);setTimeout(()=>{f2.style.opacity='0';},60);setTimeout(()=>f2.remove(),300);}},150);}},8000));
 },
 deepspace(cv,ctx){
   const stars=[];for(let i=0;i<200;i++)stars.push({x:Math.random()*cv.width,y:Math.random()*cv.height,r:Math.random()*1.5+0.3,speed:Math.random()*0.2+0.05,tw:Math.random()*Math.PI*2});
@@ -8933,7 +8974,7 @@ lightning(cv,ctx){
   const bolts=[];const drops=[];for(let i=0;i<80;i++)drops.push({x:Math.random()*cv.width,y:Math.random()*cv.height,len:Math.random()*10+5,speed:Math.random()*3+4});
   function mkBolt(){const segs=[];let cx=Math.random()*cv.width,cy=0;for(let i=0;i<10;i++){cx+=(Math.random()-0.5)*60;cy+=cv.height/10;segs.push({x:cx,y:cy});}return{segs,a:0.7};}
   (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const d of drops){ctx.beginPath();ctx.moveTo(d.x,d.y);ctx.lineTo(d.x+0.5,d.y+d.len);ctx.strokeStyle='rgba(160,170,200,0.06)';ctx.lineWidth=0.6;ctx.stroke();d.y+=d.speed;if(d.y>cv.height){d.y=-d.len;d.x=Math.random()*cv.width;}}for(let i=bolts.length-1;i>=0;i--){const b=bolts[i];ctx.beginPath();ctx.moveTo(b.segs[0].x,0);for(const s of b.segs)ctx.lineTo(s.x,s.y);ctx.strokeStyle=`rgba(180,180,255,${b.a})`;ctx.lineWidth=2;ctx.stroke();ctx.strokeStyle=`rgba(220,220,255,${b.a*0.4})`;ctx.lineWidth=6;ctx.stroke();b.a-=0.025;if(b.a<=0)bolts.splice(i,1);}_animId=requestAnimationFrame(draw);})();
-  _animTimers.push(setInterval(()=>{if(Math.random()<0.3){bolts.push(mkBolt());const fl=document.createElement('div');fl.className='anim-flash';fl.style.cssText='position:fixed;inset:0;background:rgba(180,180,255,0.05);z-index:0;pointer-events:none;transition:opacity 0.15s;';document.body.appendChild(fl);setTimeout(()=>{fl.style.opacity='0';},80);setTimeout(()=>fl.remove(),300);}},5000));
+  _animTimers.push(setInterval(()=>{if(Math.random()<0.3){bolts.push(mkBolt());const fl=document.createElement('div');fl.className='anim-flash';fl.style.cssText='position:fixed;inset:0;background:rgba(180,180,255,0.05);z-index:0;pointer-events:none;transition:opacity 0.15s;';document.getElementById('anim-overlay')?.appendChild(fl);setTimeout(()=>{fl.style.opacity='0';},80);setTimeout(()=>fl.remove(),300);}},5000));
 },
 sandstorm(cv,ctx){
   const grains=[];for(let i=0;i<200;i++)grains.push({x:Math.random()*cv.width,y:Math.random()*cv.height,r:Math.random()*1.5+0.3,speed:Math.random()*3+1,vy:(Math.random()-0.5)*0.5,o:Math.random()*0.15+0.03});
@@ -9077,7 +9118,7 @@ meteorShower(cv,ctx){
 },
 lightningStorm(cv,ctx){
   (function draw(){ctx.fillStyle='rgba(8,12,24,0.02)';ctx.fillRect(0,0,cv.width,cv.height);_animId=requestAnimationFrame(draw);})();
-  _animTimers.push(setInterval(()=>{if(Math.random()<0.35){const x=cv.width*0.2+Math.random()*cv.width*0.6;ctx.save();ctx.strokeStyle=`rgba(200,220,255,${0.5+Math.random()*0.4})`;ctx.lineWidth=2;ctx.shadowColor='#c8d4ff';ctx.shadowBlur=20;ctx.beginPath();let cx=x,cy=0;ctx.moveTo(cx,cy);while(cy<cv.height*0.7){cx+=(Math.random()-0.5)*40;cy+=20+Math.random()*30;ctx.lineTo(cx,cy);}ctx.stroke();ctx.restore();const flash=document.createElement('div');flash.className='anim-flash';flash.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.12);z-index:0;pointer-events:none;transition:opacity 0.3s;';document.body.appendChild(flash);setTimeout(()=>flash.style.opacity='0',100);setTimeout(()=>flash.remove(),400);}},3000));
+  _animTimers.push(setInterval(()=>{if(Math.random()<0.35){const x=cv.width*0.2+Math.random()*cv.width*0.6;ctx.save();ctx.strokeStyle=`rgba(200,220,255,${0.5+Math.random()*0.4})`;ctx.lineWidth=2;ctx.shadowColor='#c8d4ff';ctx.shadowBlur=20;ctx.beginPath();let cx=x,cy=0;ctx.moveTo(cx,cy);while(cy<cv.height*0.7){cx+=(Math.random()-0.5)*40;cy+=20+Math.random()*30;ctx.lineTo(cx,cy);}ctx.stroke();ctx.restore();const flash=document.createElement('div');flash.className='anim-flash';flash.style.cssText='position:fixed;inset:0;background:rgba(200,220,255,0.12);z-index:0;pointer-events:none;transition:opacity 0.3s;';document.getElementById('anim-overlay')?.appendChild(flash);setTimeout(()=>flash.style.opacity='0',100);setTimeout(()=>flash.remove(),400);}},3000));
 },
 rainGlass(cv,ctx){
   const drops=[];for(let i=0;i<50;i++)drops.push({x:Math.random()*cv.width,y:Math.random()*cv.height*0.5,speed:1+Math.random()*3,trail:0,h:10+Math.random()*20});
@@ -14330,134 +14371,77 @@ function getChannelNonVoiced(conn_id, channel) {
 // Pending nav intent from a notification click — executed when networks are loaded.
 let _pendingNotifNav = null;
 
-function jumpToMessage(conn_id, target, ts, from){
-  if(!conn_id || !target) return;
-  // If networks haven't loaded yet (cold start from notification), stash the
-  // intent and let the state handler retry once state arrives.
-  if(!networks || networks.length === 0){
-    _pendingNotifNav = {conn_id, target, ts, from};
-    return;
+function _findJumpRow(ts,from,match){
+  const rows=[...document.querySelectorAll('#chat-area .msg-row')];
+  if(match?.id>0){const exact=rows.find(r=>Number(r.dataset.msgId)===Number(match.id));if(exact)return exact;}
+  const sender=stripPfx(String(from||'')).toLowerCase();
+  return rows.find(r=>Number(r.dataset.ts)===Number(ts) &&
+    (!sender || stripPfx(r.dataset.from||'').toLowerCase()===sender) &&
+    (typeof match?.text!=='string' || r._jumpText===match.text));
+}
+function _refreshJumpHighlight(){
+  const j=_messageJump;
+  if(!j || j.serial!==_messageJumpSerial || !active || bk(active.conn_id,active.target)!==j.key)return;
+  const remaining=j.until-Date.now();
+  if(remaining<=0)return;
+  const row=_findJumpRow(j.ts,j.from,j.match);
+  if(!row)return;
+  row.classList.add('flash');
+  setTimeout(()=>{if(_messageJumpSerial===j.serial)row.classList.remove('flash');},remaining);
+}
+function _restoreMessageJump(){
+  _refreshJumpHighlight();
+  const j=_messageJump;
+  if(!j || !_jumpAnchor || j.serial!==_messageJumpSerial || !active || bk(active.conn_id,active.target)!==j.key)return;
+  const row=_findJumpRow(j.ts,j.from,j.match);
+  if(row){row.scrollIntoView({behavior:'auto',block:'center'});_markProgrammaticScroll(document.getElementById('chat-area'));updateScrollBtn();}
+}
+function jumpToMessage(conn_id,target,ts,from,match){
+  if(!conn_id||!target)return;
+  ++_messageJumpSerial; _messageJump=null;
+  if(!networks?.some(n=>n.config.id===conn_id)){
+    _pendingNotifNav={conn_id,target,ts,from,match};return;
   }
-  const net = networks.find(n => n.config.id === conn_id);
-  if(!net){
-    // Network not available — stash and retry later
-    _pendingNotifNav = {conn_id, target, ts, from};
-    return;
-  }
-  setActive(conn_id, target);
-  const tsNum = (ts!=null && ts!=='') ? parseInt(ts,10) : null;
-
-  // Scan the rendered DOM for the target row. Matches on timestamp and, when a
-  // sender is known, on the row's `from` OR its rendered nick text (covers
-  // prefix/case quirks) so a correct row isn't rejected over a cosmetic diff.
-  const flash = el => { el.classList.add('flash'); setTimeout(()=>el.classList.remove('flash'), 3000); };
-  // Reveal + scroll to a row. Status messages (join/part/quit/nick/mode/…) are
-  // rendered as hidden children inside a collapsed `.status-condensed` block —
-  // they DO carry data-ts (built via buildRow) so the scan below matches them,
-  // but scrollIntoView on a display:none element does nothing. Expand the parent
-  // block first so the target is actually visible.
-  const reveal = r => {
-    const cond = r.closest('.status-condensed');
-    if(cond) cond.classList.add('expanded');
-    // Anchor the jump: kill any pending auto-scroll-to-bottom (scrollForce's
-    // delayed timers + ResizeObserver, armed by the setActive/prependLogs render
-    // that just ran) and mark us anchored + scrolled-away, so nothing yanks the
-    // view back to the bottom while the user reads/scrolls around the target.
-    // Released on the next intentional scrollForce or a real user scroll gesture.
-    _cancelScrollForce();
-    _jumpAnchor = true;
-    _jumpAnchorBk = bk(conn_id, target);
-    _jumpAnchorTs = Date.now();
-    _userScrolledAway = true;
-    // Instant jump (behavior:'auto'), not a slow smooth-scroll animation — the
-    // user wants to land on the message immediately.
-    r.scrollIntoView({behavior:'auto', block:'center'});
-    updateScrollBtn();
-    flash(r);
-  };
-  const tryFind = ()=>{
-    for(const r of document.querySelectorAll('.msg-row')){
-      if(r.dataset.ts !== String(ts)) continue;
-      if(from){
-        const nickEl = r.querySelector('.msg-nick');
-        const nickText = nickEl ? stripPfx(nickEl.textContent.trim().replace(/^\* /,'')) : '';
-        if(r.dataset.from !== from && nickText !== from) continue;
-      }
-      reveal(r);
-      return true;
-    }
-    return false;
-  };
-
-  // If the target isn't in the currently-loaded buffer, load the exact history
-  // window that contains it — get_logs before:(ts+1) returns the most-recent
-  // chunk of messages with ts <= target, so the target is guaranteed to be the
-  // newest message in that set. This reaches ANY depth in a single request and
-  // puts the channel into "history view" (see _enterHistoryView). One shot — no
-  // chunk-by-chunk paging, no depth cap.
-  const lk = conn_id + '/' + target;
-  const POLL = 100;          // fast re-check so we scroll the instant the window lands
-  const PEND_MAX = 12000;    // a pending log request older than this is presumed lost
-  const OFFLINE_MAX = 6000;  // max wait for the socket to (re)connect before giving up
-  let windowLoaded = false;  // have we already loaded the focused window this jump?
-  let noTsElapsed = 0;       // ms spent scanning when we have no ts to anchor on
-  let offlineWaited = 0;     // ms spent waiting for the socket to come back
-
-  const tick = ()=>{
-    // User navigated away while we were working — abandon quietly.
-    if(!isActive(conn_id, target)) return;
-    if(tryFind()) return;
-
-    // A log chunk (initial load or the window we asked for) is still in flight.
-    // A genuinely young request is worth waiting for (huge channels take seconds
-    // to decrypt), but a response can be silently dropped on iOS (WS zombie),
-    // stranding the key in _pendingLogs forever and hanging this tick. Tell them
-    // apart by the send-time: wait while the request is young; once it's older
-    // than PEND_MAX it's presumed lost — drop it and proceed so a jump can never
-    // hang. (_pendingLogs is a Map of key -> send-time for exactly this.)
-    if(_pendingLogs.has(lk)){
-      const sentAt = _pendingLogs.get(lk) || 0;
-      if(Date.now() - sentAt < PEND_MAX){ setTimeout(tick, POLL); return; }
-      _pendingLogs.delete(lk);
-    }
-
-    // No timestamp to anchor on — just scan for a few seconds while the initial
-    // load streams in, then give up silently (keeps old no-ts callers working).
-    if(tsNum == null){
-      noTsElapsed += POLL;
-      if(noTsElapsed < 4000) setTimeout(tick, POLL);
+  setActive(conn_id,target,{keepNotices:!!match?.notice});
+  const serial=_messageJumpSerial, tsNum=Number(ts), started=Date.now();
+  document.querySelectorAll('#chat-area .flash').forEach(r=>r.classList.remove('flash'));
+  if(ts==null||ts===''||!Number.isFinite(tsNum))return;
+  const lk=conn_id+'/'+target;
+  let windowLoaded=false,offlineWaited=0;
+  const tick=()=>{
+    if(serial!==_messageJumpSerial || !isActive(conn_id,target))return;
+    const row=_findJumpRow(tsNum,from,match);
+    if(row){
+      row.closest('.status-condensed')?.classList.add('expanded');
+      _cancelScrollForce(); _jumpAnchor=true; _jumpAnchorBk=bk(conn_id,target);
+      _jumpAnchorTs=Date.now(); _userScrolledAway=true;
+      row.scrollIntoView({behavior:'auto',block:'center'});
+      const area=document.getElementById('chat-area');_markProgrammaticScroll(area);
+      _messageJump={serial,key:bk(conn_id,target),ts:tsNum,from,match,until:Date.now()+3000};
+      _refreshJumpHighlight();updateScrollBtn();
+      if(match?.notice)clearNoticesForTarget(conn_id,target);
       return;
     }
-
+    if(Date.now()-started>25000){showToast('History is taking too long — try the notice again');return;}
+    const work=_processingLogs.get(lk);
+    if(work?.count || (_pendingLogs.has(lk) && Date.now()-(_pendingLogs.get(lk)||0)<12000)){
+      setTimeout(tick,100);return;
+    }
+    _pendingLogs.delete(lk);
     if(!windowLoaded){
-      // Need a live socket to fetch the window. If we're mid-reconnect, wait a
-      // bounded time for it to come back (the jump self-heals on reconnect)
-      // rather than failing immediately. Don't tear down the buffer until we can
-      // actually fetch — that would leave an empty channel.
-      if(!(ws && ws.readyState===1)){
-        offlineWaited += POLL;
-        if(offlineWaited < OFFLINE_MAX){ setTimeout(tick, POLL); return; }
-        showToast('Not connected — try again in a moment');
-        return;
+      if(!(ws&&ws.readyState===1)){
+        if((offlineWaited+=100)<6000){setTimeout(tick,100);return;}
+        showToast('Not connected — try the notice again');return;
       }
-      // Replace the buffer with the focused window around the target and enter
-      // history view. wsend() registers lk in _pendingLogs, so the next tick
-      // waits (bounded) for the window to land before scanning again.
-      windowLoaded = true;
-      _enterHistoryView(conn_id, target);
-      getBuf(conn_id, target).length = 0;
-      wsend({type:'get_logs', conn_id, target, limit:300, before:tsNum + 1});
-      setTimeout(tick, POLL);
-      return;
+      const buf=getBuf(conn_id,target), previous=buf.slice(), history=_historyView;
+      _enterHistoryView(conn_id,target);buf.length=0;
+      let sent=false;try{sent=wsend({type:'get_logs',conn_id,target,limit:300,before:Math.floor(tsNum)+1});}catch(_){}
+      if(!sent){buf.push(...previous);_historyView=history;renderChat();showToast('Not connected — try again');return;}
+      windowLoaded=true;setTimeout(tick,100);return;
     }
-    // Window loaded and its response processed, but the target still isn't
-    // present → it's genuinely gone (deleted/cleared). Leave the user in the
-    // window we loaded.
     showToast('Message no longer in history');
   };
-
-  // setActive renders synchronously; a short beat lets the DOM settle, then go.
-  setTimeout(tick, 60);
+  setTimeout(tick,60);
 }
 
 // ── History view: the active buffer holds a focused window from the past (loaded
@@ -14489,7 +14473,7 @@ function _drainPendingNotifNav(){
   if(!_pendingNotifNav) return;
   const p = _pendingNotifNav;
   _pendingNotifNav = null;
-  jumpToMessage(p.conn_id, p.target, p.ts, p.from);
+  jumpToMessage(p.conn_id, p.target, p.ts, p.from,p.match);
 }
 
 // Reads SW-cached notification click intent (fallback for when postMessage is
@@ -16911,10 +16895,18 @@ document.addEventListener('DOMContentLoaded',()=>{
 
 // ─── Mentions system ──────────────────────────────────────────────────────────
 let mentionsList=[];
+let _noticePointerHeld=false,_noticeRenderQueued=false;
+document.addEventListener('pointerdown',e=>{if(e.target.closest('#mentions-panel'))_noticePointerHeld=true;},true);
+function _releaseNoticePointer(){
+  _noticePointerHeld=false;
+  if(_noticeRenderQueued){_noticeRenderQueued=false;setTimeout(()=>{if(document.getElementById('mentions-panel')?.classList.contains('show'))renderMentionsList();},0);}
+}
+window.addEventListener('pointerup',_releaseNoticePointer);
+window.addEventListener('pointercancel',_releaseNoticePointer);
 try{mentionsList=JSON.parse(localStorage.getItem('cryptirc_mentions')||'[]');}catch(e){}
 function saveMentions(){try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));localStorage.setItem('cryptirc_mentions_ts',String(Date.now()));}catch(e){} savePrefsToServer();}
 function getHighlightWords(){try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}}
-function checkMention(conn_id,target,from,text,ts,record){
+function checkMention(conn_id,target,from,text,ts,record,id){
   // B2: `record` (default true) gates the SIDE EFFECT (adding to the Mentions inbox +
   // raising the badge). Replayed ring history / ZNC playback pass record=false so an
   // already-seen mention isn't re-injected + the badge isn't falsely re-raised on every
@@ -16932,9 +16924,9 @@ function checkMention(conn_id,target,from,text,ts,record){
   const isChan=target&&(target.startsWith('#')||target.startsWith('&')||target.startsWith('+')||target.startsWith('!'));
   // A muted channel (or muted network) must NOT light the Notices inbox / mentions
   // badge — muting means no alert of any kind for that channel.
-  if(mentioned && isChan && !_isBufMuted(conn_id,target) && record){
+  if(mentioned && isChan && !_isOwnMsg(conn_id,{from}) && !_isBufMuted(conn_id,target) && record){
     const net=networks.find(x=>x.config.id===conn_id);
-    mentionsList.unshift({type:'mention',conn_id,target,from,text,ts,network:net?.config.label||net?.config.server||conn_id});
+    mentionsList.unshift({type:'mention',conn_id,target,from,text,ts,id:id||0,network:net?.config.label||net?.config.server||conn_id});
     if(mentionsList.length>100)mentionsList.length=100;
     saveMentions(); updateMentionsBadge();
   }
@@ -16943,9 +16935,14 @@ function checkMention(conn_id,target,from,text,ts,record){
 function addPmNotice(conn_id,from,msg){
   if(!from||from==='*')return;
   const fL=from.toLowerCase();
-  if(mentionsList.some(m=>m.type==='pm'&&m.conn_id===conn_id&&(m.from||'').toLowerCase()===fL))return;
+  const i=mentionsList.findIndex(m=>m.type==='pm'&&m.conn_id===conn_id&&(m.from||'').toLowerCase()===fL);
+  if(i>=0){
+    const old=mentionsList[i];
+    if(old.ts>msg.ts || (old.ts===msg.ts && old.text===(msg.text||'')))return;
+    mentionsList.splice(i,1);
+  }
   const net=networks.find(x=>x.config.id===conn_id);
-  mentionsList.unshift({type:'pm',conn_id,target:from,from,text:msg.text||'',ts:msg.ts,network:net?.config.label||net?.config.server||conn_id});
+  mentionsList.unshift({type:'pm',conn_id,target:from,from,text:msg.text||'',ts:msg.ts,id:msg.id||0,network:net?.config.label||net?.config.server||conn_id});
   if(mentionsList.length>100)mentionsList.length=100;
   saveMentions(); updateMentionsBadge();
 }
@@ -16959,21 +16956,29 @@ function clearNoticesForTarget(conn_id,target){
   });
   if(mentionsList.length!==before){
     saveMentions(); updateMentionsBadge();
-    if(document.getElementById('mentions-panel')?.classList.contains('show'))renderMentionsList();
+
   }
 }
 let _unseenMentions=0;
 function updateMentionsBadge(){
   const btn=document.getElementById('mentions-btn');
   if(!btn)return;
-  btn.classList.toggle('has-unread', mentionsList.length>0);
+  const count=mentionsList.length;
+  btn.classList.toggle('has-unread',count>0);
+  btn.setAttribute('aria-label',count?'Notices, '+count+' unread':'Notices');
+  btn.title=count?'Notices — unread mentions and private messages':'Notices';
+  if(document.getElementById('mentions-panel')?.classList.contains('show'))renderMentionsList();
 }
 // ─── Search ───────────────────────────────────────────────────────────────────
 function toggleSearchPanel(){
   const p=document.getElementById('search-panel');
   // Close mentions if open
+  // Transfer the existing Back entry when swapping popovers. Calling
+  // history.back() and immediately pushState() races the browser traversal.
   document.getElementById('mentions-panel').classList.remove('show');
-  _overlayClose('mentionsPanel');
+  document.getElementById('mentions-btn').setAttribute('aria-expanded','false');
+  const noticeSlot=_overlayStack.find(o=>o.name==='mentionsPanel');
+  if(noticeSlot){noticeSlot.name='searchPanel';noticeSlot.closeFn=closeSearchPanel;}
   p.classList.toggle('show');
   if(p.classList.contains('show')){
     _overlayOpen('searchPanel', closeSearchPanel);
@@ -17048,50 +17053,75 @@ document.addEventListener('DOMContentLoaded',()=>{
 });
 // Close search on outside click
 document.addEventListener('click',e=>{
-  if(!e.target.closest('#search-panel')&&!e.target.closest('#search-btn'))
-    document.getElementById('search-panel')?.classList.remove('show');
+  if(!e.target.closest('#search-panel')&&!e.target.closest('#search-btn') && document.getElementById('search-panel')?.classList.contains('show'))closeSearchPanel();
 });
 
+function closeMentionsPanel(restoreFocus=false){
+  const panel=document.getElementById('mentions-panel');
+  panel.classList.remove('show');
+  document.getElementById('mentions-btn').setAttribute('aria-expanded','false');
+  _overlayClose('mentionsPanel');
+  if(restoreFocus)document.getElementById('mentions-btn').focus({preventScroll:true});
+}
 function toggleMentionsPanel(){
   const p=document.getElementById('mentions-panel');
-  p.classList.toggle('show');
-  if(p.classList.contains('show')){
-    _overlayOpen('mentionsPanel', ()=>{p.classList.remove('show'); _overlayClose('mentionsPanel');});
-    renderMentionsList();
-  } else {
-    _overlayClose('mentionsPanel');
+  if(p.classList.contains('show')){closeMentionsPanel();return;}
+  if(document.getElementById('search-panel')?.classList.contains('show')){
+    document.getElementById('search-panel').classList.remove('show');
+    const searchSlot=_overlayStack.find(o=>o.name==='searchPanel');
+    if(searchSlot){searchSlot.name='mentionsPanel';searchSlot.closeFn=()=>closeMentionsPanel();}
   }
+  p.classList.add('show');
+  document.getElementById('mentions-btn').setAttribute('aria-expanded','true');
+  _overlayOpen('mentionsPanel',()=>closeMentionsPanel());
+  renderMentionsList();
 }
 function renderMentionsList(){
+  if(_noticePointerHeld){_noticeRenderQueued=true;return;}
   const el=document.getElementById('mentions-list');
-  if(!mentionsList.length){el.innerHTML='<div class="mention-empty">Nothing new</div>';return;}
+  const oldRows=[...el.querySelectorAll('.mention-item')];
+  const focused=oldRows.find(r=>r===document.activeElement)?.dataset.noticeKey;
+  const top=el.getBoundingClientRect().top;
+  const anchor=oldRows.find(r=>r.getBoundingClientRect().bottom>top);
+  const anchorKey=anchor?.dataset.noticeKey, anchorTop=anchor?.getBoundingClientRect().top;
+  const scroll=el.scrollTop;
+  document.getElementById('mentions-clear').disabled=!mentionsList.length;
+  if(!mentionsList.length){el.innerHTML='<div class="mention-empty">You’re all caught up.<br><span>Mentions and unread private messages appear here.</span></div>';return;}
   el.innerHTML='';
   for(const m of mentionsList){
-    const d=document.createElement('div');d.className='mention-item';
-    const time=esc(_fmtMsgTs(m.ts,'locale')); // esc: lands in innerHTML below
-    const isPm=m.type==='pm';
-    const meta=isPm
-      ? `✉ PM from ${esc(m.from)} · ${esc(m.network)} · ${time}`
-      : `@ ${esc(m.from)} in ${esc(m.target)} · ${esc(m.network)} · ${time}`;
-    d.innerHTML=`<div class="mention-meta">${meta}</div><div class="mention-text">${esc(m.text)}</div>`;
+    const d=document.createElement('button'); d.type='button';d.className='mention-item';
+    d.dataset.noticeKey=JSON.stringify([m.conn_id,m.type,m.target,m.from,m.ts,m.id||0,m.text]);
+    const time=esc(_fmtMsgTs(m.ts,'locale'));
+    const meta=m.type==='pm'
+      ? `PM from ${esc(m.from)} · ${esc(m.network||'')} · ${time}`
+      : `${esc(m.from)} in ${esc(m.target)} · ${esc(m.network||'')} · ${time}`;
+    d.innerHTML=`<span class="mention-meta">${meta}</span><span class="mention-text">${esc(m.text)}</span>`;
     d.onclick=()=>{
-      document.getElementById('mentions-panel').classList.remove('show');
-      _overlayClose('mentionsPanel');
-      // If this target is popped out, focus the popup instead of navigating main.
+      closeMentionsPanel();
+      const match={id:m.id||0,text:m.text,notice:true};
       if(!_detMode && isDetached(m.conn_id,m.target)){
-        openDetachedWindow(m.conn_id,m.target);
+        openDetachedWindow(m.conn_id,m.target, {ts:m.ts,from:m.from,match});
         return;
       }
-      // Channel mention OR PM notice — jumpToMessage scrolls to the exact message,
-      // paging through history (windowed load) if it's older than the loaded
-      // buffer. PM buffers render rows with data-ts just like channels, so this
-      // takes you to the actual message for DMs too instead of only opening it.
-      jumpToMessage(m.conn_id,m.target,m.ts,m.from);
+      jumpToMessage(m.conn_id,m.target,m.ts,m.from,match);
     };
     el.appendChild(d);
   }
+  const rows=[...el.querySelectorAll('.mention-item')];
+  const anchored=rows.find(r=>r.dataset.noticeKey===anchorKey);
+  el.scrollTop=scroll;
+  if(scroll>0 && anchored)el.scrollTop+=anchored.getBoundingClientRect().top-anchorTop;
+  if(focused)rows.find(r=>r.dataset.noticeKey===focused)?.focus({preventScroll:true});
 }
-function clearMentions(){mentionsList=[];_unseenMentions=0;saveMentions();updateMentionsBadge();renderMentionsList();}
+function clearMentions(){mentionsList=[];_unseenMentions=0;saveMentions();updateMentionsBadge();}
+document.addEventListener('click',e=>{
+  if(!e.target.closest('#mentions-panel,#mentions-btn') && document.getElementById('mentions-panel')?.classList.contains('show'))closeMentionsPanel();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape' && !e.defaultPrevented && _overlayStack.at(-1)?.name==='mentionsPanel'){
+    e.preventDefault();closeMentionsPanel(true);
+  }
+});
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\\/g,'&#92;').replace(/`/g,'&#96;');}
 const MIRC_COLORS=['#fff','#000','#00007f','#009300','#ff0000','#7f0000','#9c009c','#fc7f00','#ffff00','#00fc00','#009393','#00ffff','#0000fc','#ff00ff','#7f7f7f','#d2d2d2'];
 // Grapheme segmenter (cached). Lets parseMircColors iterate by visible
