@@ -46,6 +46,14 @@ function isLocalOrLan(hostname) {
   return false;
 }
 
+// Only hand web links to the OS. Anything else (file:, smb:, custom app
+// protocols…) clicked in chat could launch local programs, so it is dropped.
+function openExternalSafe(u) {
+  let proto = '';
+  try { proto = new URL(u).protocol; } catch { return; }
+  if (proto === 'http:' || proto === 'https:' || proto === 'mailto:') shell.openExternal(u).catch(() => {});
+}
+
 // ─── App state ───────────────────────────────────────────────────────────────
 let mainWindow = null;
 let tray = null;
@@ -171,6 +179,31 @@ function showErrorPage(failedUrl, desc, code) {
   mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 }
 
+// ─── Navigation policy ───────────────────────────────────────────────────────
+// Same-origin pages stay in-app; everything else opens in the system browser.
+// Pastes are user-supplied content (an HTML paste is a runnable page), so they
+// always open externally — they must never get a top-level Electron window with
+// the electronAPI preload bridge.
+const sameOrigin = (a, b) => { try { return new URL(a).origin === new URL(b).origin; } catch { return false; } };
+const isPasteUrl = (u) => { try { return /\/paste\//.test(new URL(u).pathname); } catch { return false; } };
+const inApp = (u, appUrl) => sameOrigin(u, appUrl) && !isPasteUrl(u);
+
+// Apply the policy to a webContents and, recursively, to every window it opens
+// (detached channel windows included) — child windows otherwise get no guards.
+function hardenContents(wc, appUrl) {
+  wc.setWindowOpenHandler(({ url: linkUrl }) => {
+    if (!inApp(linkUrl, appUrl)) { openExternalSafe(linkUrl); return { action: 'deny' }; }
+    return { action: 'allow' };
+  });
+  const guardNav = (e, navUrl) => {
+    if (navUrl.startsWith('data:')) return; // our own error/setup chrome
+    if (!inApp(navUrl, appUrl)) { e.preventDefault(); openExternalSafe(navUrl); }
+  };
+  wc.on('will-navigate', guardNav);
+  wc.on('will-redirect', guardNav);
+  wc.on('did-create-window', (child) => hardenContents(child.webContents, appUrl));
+}
+
 // ─── Main window ─────────────────────────────────────────────────────────────
 function createWindow(url) {
   const cfg = loadConfig();
@@ -218,19 +251,8 @@ function createWindow(url) {
 
   mainWindow.loadURL(url);
 
-  // External links open in the browser; same-origin stays in-app.
-  const sameOrigin = (a, b) => { try { return new URL(a).origin === new URL(b).origin; } catch { return false; } };
-  mainWindow.webContents.setWindowOpenHandler(({ url: linkUrl }) => {
-    if (!sameOrigin(linkUrl, url)) { shell.openExternal(linkUrl); return { action: 'deny' }; }
-    return { action: 'allow' };
-  });
-  // Keep the shell pinned to the server origin; anything else opens externally.
-  const guardNav = (e, navUrl) => {
-    if (navUrl.startsWith('data:')) return; // our own error/setup chrome
-    if (!sameOrigin(navUrl, url)) { e.preventDefault(); shell.openExternal(navUrl); }
-  };
-  mainWindow.webContents.on('will-navigate', guardNav);
-  mainWindow.webContents.on('will-redirect', guardNav);
+  // External links / foreign navigation open in the browser (see hardenContents).
+  hardenContents(mainWindow.webContents, url);
 
   // Persist window bounds (debounced).
   const onBoundsChange = () => persistBounds();
@@ -274,13 +296,14 @@ function createWindow(url) {
     }
     if (params.linkURL) {
       if (items.length) items.push({ type: 'separator' });
-      items.push({ label: 'Open Link in Browser', click: () => shell.openExternal(params.linkURL) });
-      items.push({ label: 'Copy Link', click: () => require('electron').clipboard.writeText(params.linkURL) });
+      items.push({ label: 'Open Link in Browser', click: () => openExternalSafe(params.linkURL) });
+      // Electron 44: clipboard.writeText returns a Promise.
+      items.push({ label: 'Copy Link', click: () => { Promise.resolve(require('electron').clipboard.writeText(params.linkURL)).catch(() => {}); } });
     }
     if (params.hasImageContents) {
       if (items.length) items.push({ type: 'separator' });
       items.push({ label: 'Copy Image', click: () => mainWindow.webContents.copyImageAt(params.x, params.y) });
-      items.push({ label: 'Open Image in Browser', click: () => shell.openExternal(params.srcURL) });
+      items.push({ label: 'Open Image in Browser', click: () => openExternalSafe(params.srcURL) });
     }
     if (items.length) Menu.buildFromTemplate(items).popup({ window: mainWindow });
   });
