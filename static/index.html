@@ -46,7 +46,7 @@
   --text:#d0d0e8; --text2:#8888cc; --text3:#7d7db5;
   --accent:#00d4aa; --accent2:#0099ff;
   /* Hyperlink color in chat. Defaults to accent2 unless the user picks a custom link color. */
-  --link:#0099ff;
+  --link:#5ab4ff; --self-nick:#7ce5cf; --self-nick-list:#7ce5cf;
   --warn:#ffaa00; --error:#ff4466; --join:#44cc88; --part:#cc6644;
   --notice:#9988cc; --action:#ffcc44;
   --mono:'JetBrains Mono',monospace; --sans:'Syne',sans-serif;
@@ -58,6 +58,9 @@
   --sal: env(safe-area-inset-left,   0px);
   /* Dynamic viewport height — JS overrides this for iOS keyboard */
 }
+
+a { color:var(--link,var(--accent2)); }
+a:focus-visible { outline:2px solid var(--link); outline-offset:3px; }
 
 /* ── Reset ─────────────────────────────────────────────────────────────────── */
 *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
@@ -993,7 +996,7 @@ body.ts-custom .msg-ts { width:auto; min-width:72px; white-space:nowrap; }
 .msg-nick { width:auto; max-width:120px; flex-shrink:0; text-align:right; padding-right:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; cursor:pointer; }
 .msg-nick:hover { text-decoration:underline; }
 .msg-body { flex:1; min-width:0; word-break:break-word; overflow-wrap:anywhere; }
-.msg-body a { color:var(--link,var(--accent2)); text-decoration:none; }
+.msg-body a { color:var(--link,var(--accent2)); text-decoration:underline; text-underline-offset:3px; }
 .msg-body a:hover { text-decoration:underline; }
 .msg-media {
   display:block; margin-top:6px;
@@ -1075,7 +1078,10 @@ body.ts-custom .msg-ts { width:auto; min-width:72px; white-space:nowrap; }
 .status-condensed .sc-expand { display:none; }
 .status-condensed.expanded .sc-expand { display:block; }
 .status-condensed .sc-expand .msg-row { opacity:.92; }
-.nc-self { color:var(--accent) !important; }
+.nc-self { color:var(--self-nick,#7ce5cf) !important; }
+.nick-entry.nc-self { color:var(--self-nick-list,var(--self-nick)) !important; }
+.nc-self .nick-pfx { color:inherit; }
+.nick-entry.nc-self.nick-away { opacity:1; text-decoration:underline dotted; }
 .nick-mention { border-radius:2px; padding:0 2px; }
 .nick-mention:hover { text-decoration:underline; }
 #reply-bar { display:none; padding:4px 10px; background:var(--bg2); border-top:1px solid var(--border); border-left:2px solid var(--accent); font-size:11px; color:var(--text2); align-items:center; gap:6px; }
@@ -1121,7 +1127,7 @@ html[data-theme='mirc'] .msg-body{color:#000000}
 html[data-theme='mirc'] .msg-ts,html[data-theme='mirc'] .sc-ts{color:#7f7f7f}
 html[data-theme='mirc'] .row-privmsg .msg-nick::before{content:'<'}
 html[data-theme='mirc'] .row-privmsg .msg-nick::after{content:'>'}
-html[data-theme='mirc'] .nc-self{color:#000000!important}
+html[data-theme='mirc'] .nc-self{color:var(--self-nick)!important}
 html[data-theme='mirc'] .row-action .msg-body,html[data-theme='mirc'] .row-action .msg-nick{color:#9c009c;font-style:italic}
 html[data-theme='mirc'] .row-notice .msg-body{color:#7f0000}
 html[data-theme='mirc'] .row-join .msg-body{color:#007f00}
@@ -2322,6 +2328,33 @@ body.no-nicklist #nick-panel{display:none!important}
 }
 </style>
 <script>
+// Resolve CSS colors in the browser, then move low-contrast text toward black or
+// white without changing saved preferences. Both boot and runtime use this helper.
+function readableTextColor(color, background, minimum=4.8){
+  const ctx=readableTextColor._ctx||(readableTextColor._ctx=document.createElement('canvas').getContext('2d',{willReadFrequently:true}));
+  if(!ctx)return color;
+  const rgb=value=>{ctx.clearRect(0,0,1,1);ctx.fillStyle='#000000';ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
+  const bg=rgb(background),fg=rgb(color);
+  const base=bg.slice(0,3).map(v=>v*bg[3]/255);
+  const start=fg.slice(0,3).map((v,i)=>Math.round(v*fg[3]/255+base[i]*(1-fg[3]/255)));
+  const luminance=values=>values.map(v=>{v/=255;return v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4;}).reduce((sum,v,i)=>sum+v*[0.2126,0.7152,0.0722][i],0);
+  const bgL=luminance(base),contrast=values=>{const l=luminance(values);return (Math.max(l,bgL)+0.05)/(Math.min(l,bgL)+0.05);};
+  const hex=values=>'#'+values.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');
+  if(contrast(start)>=minimum)return hex(start);
+  const targets=[[0,0,0],[255,255,255]].sort((a,b)=>contrast(b)-contrast(a));
+  let best=null;
+  for(const target of targets){
+    if(contrast(target)<minimum)continue;
+    let lo=0,hi=1;
+    for(let i=0;i<14;i++){
+      const mix=(lo+hi)/2,values=start.map((v,n)=>Math.round(v+(target[n]-v)*mix));
+      if(contrast(values)>=minimum)hi=mix;else lo=mix;
+    }
+    if(!best||hi<best.mix)best={mix:hi,values:start.map((v,n)=>Math.round(v+(target[n]-v)*hi))};
+  }
+  return hex(best?best.values:targets[0]);
+}
+
 // Apply theme colors immediately — :root no longer sets theme defaults,
 // so this MUST run to provide bg/border/text/accent values.
 (function(){try{var c=JSON.parse(localStorage.getItem('cryptirc_appear')||'{}');
@@ -2341,8 +2374,11 @@ r.setProperty('--border',sc(t.border,'#2a3444'));r.setProperty('--border2',sc(t.
 // Accent/accent2/link: a custom theme carries its own; built-in themes use the global prefs.
 var accent=(mob&&c.mobileAccent)?c.mobileAccent:(ct?(ct.accent||c.accent):c.accent)||'#00d4aa';
 var accent2=(mob&&c.mobileAccent2)?c.mobileAccent2:(ct?(ct.accent2||c.accent2):c.accent2)||'#0099ff';
-var link=(mob&&c.mobileLink)?c.mobileLink:(ct?(ct.link||ct.accent2||accent2):(c.linkColor||accent2));
-r.setProperty('--accent',sc(accent,'#00d4aa'));r.setProperty('--accent2',sc(accent2,'#0099ff'));r.setProperty('--link',sc(link||'#0099ff','#0099ff'));
+var link=(mob&&c.mobileLink)?c.mobileLink:(c.linkColor||t.link||accent2);
+r.setProperty('--accent',sc(accent,'#00d4aa'));r.setProperty('--accent2',sc(accent2,'#0099ff'));
+r.setProperty('--link',readableTextColor(sc(link||'#0099ff','#0099ff'),sc(t.bg0,'#0b0d0f')));
+r.setProperty('--self-nick',readableTextColor(sc(c.selfNickColor||'#7ce5cf','#7ce5cf'),sc(t.bg0,'#0b0d0f')));
+r.setProperty('--self-nick-list',readableTextColor(sc(c.selfNickColor||'#7ce5cf','#7ce5cf'),sc(t.bg1,'#111418')));
 // Semantic colors: any theme carrying its own wins (matches applyThemeCSS).
 ['warn','error','join','part','notice','action'].forEach(function(k){if(t[k]){var _c=sc(t[k],'');if(_c)r.setProperty('--'+k,_c);}});
 // Background (no flash). Mirrors _resolveBackground() in app.js for the cases that
@@ -3182,7 +3218,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 
       <div class="appear-section">
         <div class="appear-section-title">Colors</div>
-        <div id="a-colors-customhint" style="display:none;font-size:10px;color:var(--text3);margin-bottom:8px;line-height:1.5">A custom theme is active — these accent/link colors come from the theme. Edit them with the ✎ on the theme card.</div>
+        <div id="a-colors-customhint" style="display:none;font-size:10px;color:var(--text3);margin-bottom:8px;line-height:1.5">A custom theme is active — accent colors come from the theme. Edit them with the ✎ on the theme card. Link and nickname colors below still apply.</div>
         <div class="appear-row">
           <span class="appear-label">Accent</span>
           <div class="color-input-wrap">
@@ -3198,11 +3234,20 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <span class="appear-label">Links <span id="a-link-match-hint" style="font-size:10px;color:var(--text3)"></span></span>
           <div class="color-input-wrap">
-            <span style="font-size:10px;color:var(--text3)">Match accent 2</span>
-            <button class="appear-toggle" id="a-link-match" onclick="this.classList.toggle('on');applyAppearance()" title="Use the Accent 2 color for hyperlinks"></button>
+            <span style="font-size:10px;color:var(--text3)">Theme default</span>
+            <button class="appear-toggle" id="a-link-match" onclick="this.classList.toggle('on');applyAppearance()" title="Use the theme link color, or Accent 2"></button>
             <div class="color-swatch" id="a-link-swatch"><input type="color" id="a-link-color" oninput="document.getElementById('a-link-match').classList.remove('on');applyAppearance()"></div>
           </div>
         </div>
+        <div class="appear-row">
+          <label class="appear-label" for="a-self-nick-color" style="color:var(--text)">My nickname</label>
+          <div class="color-input-wrap">
+            <span style="font-size:10px;color:var(--text)">Default</span>
+            <button type="button" class="appear-toggle" id="a-self-nick-default" role="switch" aria-label="Use default nickname color" aria-checked="true" onclick="this.classList.toggle('on');applyAppearance()"></button>
+            <div class="color-swatch" id="a-self-nick-swatch"><input type="color" id="a-self-nick-color" aria-describedby="a-self-nick-help" oninput="document.getElementById('a-self-nick-default').classList.remove('on');applyAppearance()"></div>
+          </div>
+        </div>
+        <div id="a-self-nick-help" style="font-size:11px;color:var(--text);margin:4px 0 12px;line-height:1.5">Your nickname color applies to chat and the user list on all devices. Link and nickname colors adapt to the theme for readability.</div>
         <div class="appear-row">
           <span class="appear-label">Brightness</span>
           <input type="range" class="appear-slider" id="a-brightness" min="50" max="150" step="5" oninput="applyAppearance()">

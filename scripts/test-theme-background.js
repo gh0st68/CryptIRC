@@ -7,7 +7,7 @@
  *
  * Covers:
  *   1. REGRESSION ORACLE — with the shipped defaults, background resolution is
- *      byte-identical to the pre-0.5.0 behavior for every one of the 224 themes
+ *      byte-identical to the pre-0.5.0 behavior for every one of the 227 themes
  *      and for a custom theme. This is the check that matters: the whole feature
  *      is opt-in and must be invisible until someone touches it.
  *   2. bgMode: theme / none / custom, including the "custom but no image set"
@@ -93,7 +93,7 @@ function oracle(themeName, t, isCustom) {
 }
 
 const themeKeys = Object.keys(A.THEMES);
-ok('theme table has 224 entries', themeKeys.length === 224, `got ${themeKeys.length}`);
+ok('theme table has 227 entries', themeKeys.length === 227, `got ${themeKeys.length}`);
 
 let drift = 0, driftEg = '';
 for (const k of themeKeys) {
@@ -104,7 +104,7 @@ for (const k of themeKeys) {
     drift++; if (!driftEg) driftEg = k;
   }
 }
-ok('defaults unchanged for all 224 built-ins', drift === 0, `${drift} differ, e.g. ${driftEg}`);
+ok('defaults unchanged for all 227 built-ins', drift === 0, `${drift} differ, e.g. ${driftEg}`);
 
 // Custom theme with its own uploaded background — must keep its own opacity/tiling.
 store = {}; store['cryptirc_cbg_abc'] = 'data:image/png;base64,AAAA';

@@ -3581,7 +3581,7 @@ function buildRow(msg){
   // because it lands in innerHTML below and the format string is user/synced input.
   const ts=esc(_fmtMsgTs(msg.ts,'row'));
   const isChat=msg.kind==='privmsg'||msg.kind==='action';
-  const isSelf=isChat&&active&&msg.from===getNick(active.conn_id);
+  const isSelf=isChat&&active&&(msg.from||'').toLowerCase()===getNick(active.conn_id).toLowerCase();
   const nc=isChat?(isSelf?'nc-self':`nc${nickHash(msg.from)}`):'';
   const isSys=['system','error','join','part','quit','nick','mode','topic','kick','notice','away','back'].includes(msg.kind)||msg.from==='*';
   // Get user's channel prefix (@, +, ~, &, %) for display
@@ -3748,7 +3748,8 @@ function renderNickPanel(names){
       const el=document.createElement('div');
       const awayKey=(active?active.conn_id:'')+'/'+nick;
       const isAway=window._awayNicks&&window._awayNicks[awayKey];
-      el.className=`nick-entry nc${nickHash(nick)}${isAway?' nick-away':''}`;
+      const own=active&&nick.toLowerCase()===getNick(active.conn_id).toLowerCase();
+      el.className=`nick-entry ${own?'nc-self':`nc${nickHash(nick)}`}${isAway?' nick-away':''}`;
       el.dataset.nick=nick;
       el.innerHTML=topPfx?`<span class="nick-pfx${'~&@'.includes(topPfx)?' op':''}">${topPfx}</span>${esc(nick)}`:esc(nick);
       el.style.cursor='pointer';
@@ -8072,6 +8073,33 @@ function _safeColor(v,fallback){
   }
   return fallback;
 }
+// Resolve CSS colors in the browser, then move low-contrast text toward black or
+// white without changing saved preferences. Both boot and runtime use this helper.
+function readableTextColor(color, background, minimum=4.8){
+  const ctx=readableTextColor._ctx||(readableTextColor._ctx=document.createElement('canvas').getContext('2d',{willReadFrequently:true}));
+  if(!ctx)return color;
+  const rgb=value=>{ctx.clearRect(0,0,1,1);ctx.fillStyle='#000000';ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
+  const bg=rgb(background),fg=rgb(color);
+  const base=bg.slice(0,3).map(v=>v*bg[3]/255);
+  const start=fg.slice(0,3).map((v,i)=>Math.round(v*fg[3]/255+base[i]*(1-fg[3]/255)));
+  const luminance=values=>values.map(v=>{v/=255;return v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4;}).reduce((sum,v,i)=>sum+v*[0.2126,0.7152,0.0722][i],0);
+  const bgL=luminance(base),contrast=values=>{const l=luminance(values);return (Math.max(l,bgL)+0.05)/(Math.min(l,bgL)+0.05);};
+  const hex=values=>'#'+values.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');
+  if(contrast(start)>=minimum)return hex(start);
+  const targets=[[0,0,0],[255,255,255]].sort((a,b)=>contrast(b)-contrast(a));
+  let best=null;
+  for(const target of targets){
+    if(contrast(target)<minimum)continue;
+    let lo=0,hi=1;
+    for(let i=0;i<14;i++){
+      const mix=(lo+hi)/2,values=start.map((v,n)=>Math.round(v+(target[n]-v)*mix));
+      if(contrast(values)>=minimum)hi=mix;else lo=mix;
+    }
+    if(!best||hi<best.mix)best={mix:hi,values:start.map((v,n)=>Math.round(v+(target[n]-v)*hi))};
+  }
+  return hex(best?best.values:targets[0]);
+}
+
 const APPEAR_DEFAULTS={
   theme:'discord', chatSize:13, sidebarFont:12, nickFont:12,
   sidebarW:220, nickW:100, nickPanelW:180, lineHeight:1.55,
@@ -8090,8 +8118,9 @@ const APPEAR_DEFAULTS={
   barUploadD:true, barUploadM:true, barPasteD:true, barPasteM:true, barColorD:false, barColorM:false,
   mobileChatSize:15, mobileNickW:60, mobileTimestamps:false,
   mobileTheme:'', mobileAccent:'', mobileAccent2:'',
-  // Hyperlink color. '' = follow Accent 2 (default). mobileLink '' = inherit desktop link.
-  linkColor:'', mobileLink:'',
+  // Empty linkColor uses the theme link / Accent 2. Empty selfNickColor uses
+  // the readable mint default. The saved choices are shared across devices.
+  linkColor:'', mobileLink:'', selfNickColor:'',
   // User-created themes, keyed by id. Selected via theme:'custom:<id>'.
   customThemes:{},
   // ── Background, independent of the theme ────────────────────────────────────
@@ -8260,8 +8289,9 @@ function applyAppearance(){
     inputH:     +el('a-input-h').value||prev.inputH||36,
     accent:     el('a-accent-color').value||prev.accent||'#00d4aa',
     accent2:    el('a-accent2-color').value||prev.accent2||'#0099ff',
-    // '' means "follow accent2" (the Match toggle is on).
+    // '' means use the theme link color / Accent 2.
     linkColor:  el('a-link-match')?.classList.contains('on') ? '' : (el('a-link-color')?.value||''),
+    selfNickColor: el('a-self-nick-default') ? (el('a-self-nick-default').classList.contains('on') ? '' : (el('a-self-nick-color')?.value||prev.selfNickColor||'')) : (prev.selfNickColor||''),
     // Custom themes are not represented by DOM inputs here — carry them through
     // untouched so a slider tweak never drops the user's saved themes.
     customThemes: prev.customThemes||{},
@@ -8341,12 +8371,20 @@ function applyAppearance(){
   el('a-mobile-nick-w-val').textContent=(cfg.mobileNickW||60)+'px';
   el('a-mobile-accent-swatch').style.background=cfg.mobileAccent||cfg.accent;
   el('a-mobile-accent2-swatch').style.background=cfg.mobileAccent2||cfg.accent2;
-  // Keep link swatches/pickers tracking the effective color (accent2 while matched).
-  const _lEff=cfg.linkColor||cfg.accent2||'#0099ff';
+  // Preview the selected theme color when there is no explicit link override.
+  if(el('a-self-nick-color')) el('a-self-nick-color').value=cfg.selfNickColor||'#7ce5cf';
+  if(el('a-self-nick-swatch')) el('a-self-nick-swatch').style.background=document.documentElement.style.getPropertyValue('--self-nick');
+  if(el('a-self-nick-default')){
+    el('a-self-nick-default').classList.toggle('on',!cfg.selfNickColor);
+    el('a-self-nick-default').setAttribute('aria-checked',String(!cfg.selfNickColor));
+  }
+  const _dt=resolveThemeObj(cfg.theme,cfg).t;
+  const _lEff=cfg.linkColor||_dt.link||_dt.accent2||cfg.accent2||'#0099ff';
   if(el('a-link-swatch')) el('a-link-swatch').style.background=_lEff;
   if(el('a-link-color')) el('a-link-color').value=_lEff;
-  if(el('a-link-match-hint')) el('a-link-match-hint').textContent=cfg.linkColor?'':'(using accent 2)';
-  const _mlEff=cfg.mobileLink||cfg.linkColor||cfg.accent2||'#0099ff';
+  if(el('a-link-match-hint')) el('a-link-match-hint').textContent=cfg.linkColor?'':'(theme default)';
+  const _mt=resolveThemeObj(cfg.mobileTheme||cfg.theme,cfg).t;
+  const _mlEff=cfg.mobileLink||cfg.linkColor||_mt.link||cfg.mobileAccent2||_mt.accent2||cfg.accent2||'#0099ff';
   if(el('a-mobile-link-swatch')) el('a-mobile-link-swatch').style.background=_mlEff;
 }
 function applyThemeCSS(cfg){
@@ -8373,9 +8411,15 @@ function applyThemeCSS(cfg){
   const accent=(mob&&cfg.mobileAccent)?cfg.mobileAccent:(t.accent||cfg.accent);
   const accent2=(mob&&cfg.mobileAccent2)?cfg.mobileAccent2:(t.accent2||cfg.accent2);
   r.setProperty('--accent',_safeColor(accent,'#00d4aa')); r.setProperty('--accent2',_safeColor(accent2,'#0099ff'));
-  // Hyperlink color: mobile override → theme link → custom accent2 / global linkColor → accent2.
-  const link=(mob&&cfg.mobileLink)?cfg.mobileLink:(t.link||(isCustom?(t.accent2||accent2):(cfg.linkColor||accent2)));
-  r.setProperty('--link',_safeColor(link||accent2,'#0099ff'));
+  // Explicit user choices win over theme colors; only the displayed color is
+  // adjusted, so theme switches never overwrite the user's saved preference.
+  const link=(mob&&cfg.mobileLink)?cfg.mobileLink:(cfg.linkColor||t.link||accent2);
+  const chatBg=themeName==='mirc'?'#ffffff':_safeColor(t.bg0,'#0b0d0f');
+  const listBg=themeName==='mirc'?'#ffffff':_safeColor(t.bg1,'#111418');
+  r.setProperty('--link',readableTextColor(_safeColor(link||accent2,'#0099ff'),chatBg));
+  const ownNick=_safeColor(cfg.selfNickColor||'#7ce5cf','#7ce5cf');
+  r.setProperty('--self-nick',readableTextColor(ownNick,chatBg));
+  r.setProperty('--self-nick-list',readableTextColor(ownNick,listBg));
   // Semantic message colors. Any theme carrying its own wins; everything else gets
   // the :root defaults, so always reset first then apply.
   // (Built-ins used to be excluded from this, which quietly made the warn/error/
@@ -8493,7 +8537,7 @@ function applyThemeCSS(cfg){
     .nick-entry { font-size:${_nickF}px; }
     ${cfg.statusMsg==='hide'?'.row-join,.row-part,.row-quit,.row-nick,.row-mode,.row-kick,.row-away,.row-back,.row-chghost,.status-condensed{display:none!important;}':''}
     ${cfg.compact?'.msg-row:hover{background:none;}':''}
-    ${cfg.coloredNicks===false?'.nc0,.nc1,.nc2,.nc3,.nc4,.nc5,.nc6,.nc7,.nc8,.nc9{color:var(--text2)!important;}.nc-self{color:var(--accent)!important;}':''}
+    ${cfg.coloredNicks===false?'.nc0,.nc1,.nc2,.nc3,.nc4,.nc5,.nc6,.nc7,.nc8,.nc9{color:var(--text2)!important;}':''}
     ${cfg.nickList===false?'#nick-panel{display:none!important;}':''}
   `;
   // Apply spellcheck setting to input
@@ -9212,8 +9256,15 @@ function populateAppearanceModal(cfg){
   el('a-accent2-color').value=cfg.accent2;
   el('a-accent-swatch').style.background=cfg.accent;
   el('a-accent2-swatch').style.background=cfg.accent2;
-  // Link color: empty linkColor => "Match accent 2" toggle on, swatch previews accent2.
-  const _linkEff=cfg.linkColor||cfg.accent2||'#0099ff';
+  // Empty linkColor follows the selected theme, falling back to Accent 2.
+  if(el('a-self-nick-color')) el('a-self-nick-color').value=cfg.selfNickColor||'#7ce5cf';
+  if(el('a-self-nick-swatch')) el('a-self-nick-swatch').style.background=document.documentElement.style.getPropertyValue('--self-nick');
+  if(el('a-self-nick-default')){
+    el('a-self-nick-default').classList.toggle('on',!cfg.selfNickColor);
+    el('a-self-nick-default').setAttribute('aria-checked',String(!cfg.selfNickColor));
+  }
+  const _dt=resolveThemeObj(cfg.theme,cfg).t;
+  const _linkEff=cfg.linkColor||_dt.link||_dt.accent2||cfg.accent2||'#0099ff';
   el('a-link-match').classList.toggle('on', !cfg.linkColor);
   el('a-link-color').value=_linkEff;
   el('a-link-swatch').style.background=_linkEff;
@@ -9252,7 +9303,8 @@ function populateAppearanceModal(cfg){
   el('a-mobile-accent2-color').value=cfg.mobileAccent2||cfg.accent2;
   el('a-mobile-accent2-swatch').style.background=cfg.mobileAccent2||cfg.accent2;
   // Mobile link: empty => "Inherit" toggle on, swatch previews the desktop link color.
-  const _mlEff=cfg.mobileLink||cfg.linkColor||cfg.accent2||'#0099ff';
+  const _mt=resolveThemeObj(cfg.mobileTheme||cfg.theme,cfg).t;
+  const _mlEff=cfg.mobileLink||cfg.linkColor||_mt.link||cfg.mobileAccent2||_mt.accent2||cfg.accent2||'#0099ff';
   el('a-mobile-link-inherit').classList.toggle('on', !cfg.mobileLink);
   el('a-mobile-link-color').value=_mlEff;
   el('a-mobile-link-swatch').style.background=_mlEff;
@@ -9331,8 +9383,8 @@ function populateAppearanceModal(cfg){
     card.onclick=()=>selectCard(card);
     grid.appendChild(card);
   }
-  // While a custom theme is active, the global accent/link pickers are inert
-  // (the theme owns those colors) — surface a hint so the controls don't look broken.
+  // Custom themes own their accents. Explicit link and nickname preferences
+  // remain available regardless of the selected theme.
   const _ch=el('a-colors-customhint');
   if(_ch) _ch.style.display=(typeof cfg.theme==='string'&&cfg.theme.indexOf('custom:')===0)?'':'none';
 }
