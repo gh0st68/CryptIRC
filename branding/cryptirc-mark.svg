@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192" role="img" aria-labelledby="title desc">
+  <title id="title">CryptIRC</title>
+  <desc id="desc">An IRC hash inside a mint conversation bubble on a dark rounded square.</desc>
+  <defs>
+    <linearGradient id="mint" x1="45" y1="40" x2="148" y2="144" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a5f3d5"/>
+      <stop offset="1" stop-color="#62d6cf"/>
+    </linearGradient>
+  </defs>
+  <rect width="192" height="192" rx="44" fill="#101820"/>
+  <path d="M59 38h74c14 0 25 11 25 25v53c0 14-11 25-25 25H83l-29 19v-24c-12-3-20-13-20-25V63c0-14 11-25 25-25Z" fill="url(#mint)"/>
+  <g fill="none" stroke="#101820" stroke-width="10" stroke-linecap="round">
+    <path d="m86 64-12 53m44-53-12 53M66 80h62m-67 23h62"/>
+  </g>
+</svg>

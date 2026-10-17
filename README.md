@@ -1,349 +1,248 @@
 <p align="center">
-  <img src="static/icon.svg" width="88" height="88" alt="CryptIRC">
+  <img src="branding/cryptirc-mark.svg" width="72" height="72" alt="CryptIRC logo">
 </p>
 
 <h1 align="center">CryptIRC</h1>
 
+<p align="center"><strong>IRC that stays connected.</strong><br>Self-hosted. Encrypted history. All your devices.</p>
+
 <p align="center">
-  <b>End-to-end encrypted IRC. Self-hosted. Always on.</b>
+  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.7-00b894?style=flat-square" alt="Version 0.5.7"></a>
+  <img src="https://img.shields.io/badge/server-Linux-5a7085?style=flat-square" alt="Linux server">
+  <img src="https://img.shields.io/badge/client-desktop%20%C2%B7%20mobile%20%C2%B7%20terminal-5a7085?style=flat-square" alt="Desktop, mobile, and terminal clients">
 </p>
 
 <p align="center">
-  <sub>Your server holds the connection. Your device holds the key.<br>
-  The server can't read a single thing it stores for you — and that's architectural, not a policy.</sub>
+  <a href="https://client.twistednet.org/cryptirc"><strong>Open the web client</strong></a> &nbsp;·&nbsp;
+  <a href="https://github.com/gh0st68/CryptIRC/releases/latest">Download an app</a> &nbsp;·&nbsp;
+  <a href="https://cryptirc.com/">Website</a> &nbsp;·&nbsp;
+  <a href="https://gh0st68.github.io/CryptIRC/">Theme gallery</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.5.7-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Version">
-  <img src="https://img.shields.io/badge/rust-1.78%2B-e43717?style=flat-square&labelColor=0b0d0f&logo=rust&logoColor=white" alt="Rust">
-  <img src="https://img.shields.io/badge/platform-linux-f0c040?style=flat-square&labelColor=0b0d0f&logo=linux&logoColor=white" alt="Linux">
-  <img src="https://img.shields.io/badge/PWA-installable-6c7ce0?style=flat-square&labelColor=0b0d0f&logo=pwa&logoColor=white" alt="PWA">
-  <img src="https://img.shields.io/badge/license-proprietary-6a7480?style=flat-square&labelColor=0b0d0f" alt="License">
+  <img src="screenshots/desktop.png?v=20261016" width="960" alt="CryptIRC desktop interface preview with example conversations and a grouped user list">
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/logs-AES--256--GCM-3ddc84?style=flat-square&labelColor=0b0d0f" alt="Encrypted logs">
-  <img src="https://img.shields.io/badge/DMs-Signal%20Protocol-2592e9?style=flat-square&labelColor=0b0d0f&logo=signal&logoColor=white" alt="Signal Protocol">
-  <img src="https://img.shields.io/badge/vault-Argon2id-9b59ff?style=flat-square&labelColor=0b0d0f" alt="Argon2id">
-  <img src="https://img.shields.io/badge/server-zero--knowledge-00d4aa?style=flat-square&labelColor=0b0d0f" alt="Zero knowledge">
-</p>
+CryptIRC keeps your IRC networks connected on your server while you move between devices. Catch up on encrypted history, join the conversation from a browser or app, and make the interface your own.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/themes-227-9b59ff?style=flat-square&labelColor=0b0d0f" alt="227 themes">
-  <img src="https://img.shields.io/badge/fonts-140-0099ff?style=flat-square&labelColor=0b0d0f" alt="140 fonts">
-  <img src="https://img.shields.io/badge/bots-19-ff8800?style=flat-square&labelColor=0b0d0f" alt="19 bots">
-  <img src="https://img.shields.io/badge/AI-9%20providers-00d4aa?style=flat-square&labelColor=0b0d0f" alt="9 AI providers">
-  <img src="https://img.shields.io/badge/commands-100%2B-e05555?style=flat-square&labelColor=0b0d0f" alt="100+ commands">
-  <img src="https://img.shields.io/badge/IRCv3-17%20caps-f0c040?style=flat-square&labelColor=0b0d0f" alt="IRCv3">
-</p>
+The web server and IRC daemon run separately, so routine web updates can leave your IRC connections running.
 
-<p align="center">
-  <a href="https://cryptirc.com"><b>cryptirc.com</b></a> &nbsp;·&nbsp;
-  <a href="https://gh0st68.github.io/CryptIRC/"><b>Theme Gallery</b></a> &nbsp;·&nbsp;
-  <a href="https://client.twistednet.org/cryptirc"><b>Hosted client</b></a> &nbsp;·&nbsp;
-  <a href="https://github.com/gh0st68/CryptIRC/releases"><b>Downloads</b></a>
-</p>
+**[Get started](#get-started)** · **[Clients](#clients)** · **[Features](#features)** · **[Privacy](#privacy-and-encryption)** · **[Commands](#commands-and-shortcuts)** · **[Configuration](#configuration)**
 
----
+<a id="quick-start"></a>
+<a id="deployment"></a>
 
-```console
-$ git clone https://github.com/gh0st68/CryptIRC.git && cd CryptIRC
-$ sudo bash deploy/deploy.sh yourdomain.com you@yourdomain.com
+## Get started
 
-  [✓] dependencies resolved        [✓] systemd units hardened
-  [✓] TLS provisioned (Caddy)      [✓] irc-core daemon online
-  [✓] both binaries built          [✓] https://yourdomain.com ready
-```
+**Use the hosted client:** open [client.twistednet.org/cryptirc](https://client.twistednet.org/cryptirc) and create an account. You can add TwistedNET and other IRC networks from the same client.
 
-<p align="center">
-  <sub><b>One command.</b> Debian · Ubuntu · Arch. Nothing else to configure.</sub>
-</p>
-
----
-
-<p align="center">
-  <b>Don't want to run your own? Use ours — free.</b><br>
-  <a href="https://client.twistednet.org/cryptirc"><code>client.twistednet.org/cryptirc</code></a><br>
-  <sub>Your vault key is derived from your passphrase <b>on your device</b>. The passphrase is <b>never</b> sent to the server or stored anywhere. Logs, DMs, credentials and notes are encrypted with that key before they touch disk — <b>even we can't read them.</b></sub>
-</p>
-
-<p align="center">
-  <b>Support · bugs · hanging out:</b> &nbsp;<code>irc.twistednet.org</code> &nbsp;→&nbsp; <b>#dev</b> · <b>#twisted</b><br>
-  <sub>👻 built by <b>gh0st</b></sub>
-</p>
-
-<p align="center">
-  <img src="screenshots/desktop.png" width="900" alt="CryptIRC — Desktop Client">
-</p>
-
-<p align="center">
-  <img src="screenshots/mobile.png" width="300" alt="CryptIRC — Mobile (PWA)">
-  <br>
-  <sub>Installable PWA — same client, on your phone.</sub>
-</p>
-
----
-
-## What is CryptIRC?
-
-CryptIRC is a **self-hosted, encrypted IRC client** that keeps you connected to IRC **24/7** from any device. Your server maintains persistent connections to all your IRC networks — so you never miss a message, even when all your devices are off. When you come back, your full history is waiting, encrypted and synced.
-
-No plugins. No telemetry. No third parties. **You own everything.**
-
-### 🤖 AI Assistant & Bots
-
-CryptIRC ships a full **server-side bot suite** that runs **24/7 on your connection** — even when every device is off — and replies as your own nick. Everything is off until you turn it on, each bot has its own access controls and per-channel scope, and all output is rate-limited server-side so it can't flood.
-
-**The AI chatbot** plugs into *any* major model — **OpenAI/ChatGPT, Anthropic/Claude, xAI/Grok, Google/Gemini, Perplexity, OpenRouter, Groq, Mistral**, or your own self-hosted OpenAI-compatible endpoint — or **sign in with your ChatGPT subscription (OAuth)** instead of pasting an API key. Then:
-
-- **Talk to it** in any channel, in DMs, or privately with `/ai`. Your key is **encrypted in your vault** — nobody else can read it.
-- **It's a real agent, not a parrot.** It knows its own nick and (opt-in) your channels, topics and who's in them — and it can actually *look around*: ask "who's in #dev?" and it runs `names`/`who`/`whois` or joins the channel, reads the result, then answers.
-- **Let it run the channel.** With `/aido` it can op, voice, kick, ban, set the topic and more — bounded to a **safe allowlist** by default (or fully unrestricted **YOLO** mode, owner-only). Every action lands in an encrypted audit log.
-- **Per-person memory** that auto-clears, a strong built-in persona, and a custom system prompt if you want one.
-
-**19 built-in bots**, all free and off by default:
-
-> 🤖 **AI Chatbot** · 🌦 Weather · 📖 Urban Dictionary · 📚 Wikipedia · 📗 Dictionary · 🪙 Crypto price · 🕐 World time · 💱 Currency · 😂 Jokes · 💬 Quotes · 🧠 Facts · 🎱 8-ball · 🎲 Dice · 🪙 Coin flip · 🗒 **Quote DB** · 👀 **Seen** · ✉️ **Tell** (offline messages) · 📝 **Notes** · ❓ **Help**
-
-**Channel protection & moderation** — **auto-op / auto-voice** on join, **flood protection** and a **bad-word filter** with a warn → kick → kick+ban ladder and an exempt list, and an **IP/host logger** that records joins to your private encrypted log. All per-channel, all audited.
-
-### Available Everywhere
-
-| Platform | How to Get It |
-|----------|---------------|
-| **Windows** | [Download installer](https://github.com/gh0st68/CryptIRC/releases) — native desktop app with system tray |
-| **Linux** | [Download AppImage](https://github.com/gh0st68/CryptIRC/releases) — `chmod +x` and run |
-| **macOS** | [Download zip](https://github.com/gh0st68/CryptIRC/releases) — extract and drag to Applications |
-| **Android** | Open in Chrome/Brave → Menu → **Add to Home Screen** (PWA) |
-| **iPhone / iPad** | Open in Safari → Share → **Add to Home Screen** (PWA) |
-| **Any browser** | Just visit your server URL — nothing to install |
-| **Terminal** | [`cryptirc-tui`](tui/) — build it and run it in any shell, over SSH, inside tmux |
-
-The desktop apps and PWA give you push notifications, offline caching, and a native app feel. The web version works anywhere with a browser. And when you'd rather stay in the terminal, there's a full TUI that connects to the **same account at the same time** — see below.
-
-### 🖥️ Terminal Client
-
-A real TUI — not a stripped-down fallback. It logs into the **same account** as the web app and runs
-**at the same time as your browser**: same messages, same vault, same encrypted logs, same server-side bots.
-
-<p align="center">
-  <img src="screenshots/terminal.png" width="900" alt="cryptirc-tui — buffer list grouped by network, chat with wrapped messages, nick list and status bar">
-</p>
-
-weechat-style layout — networks and channels on the left, members on the right, a status bar with your
-nick, lag and unread activity. **Mouse works**: click a buffer to switch, wheel to scroll. Plus
-`Alt+1..9` to jump, Tab to cycle nick completion, paged scrollback, and the full slash-command set
-built the way the web client builds it.
-
-**52 built-in themes** — real terminal colourschemes, switchable live with `/theme` and remembered:
-
-<p align="center">
-  <img src="screenshots/terminal-themes.png" width="900" alt="Four of the 52 terminal themes: dracula, nord, catppuccin-mocha and phosphor-amber">
-</p>
-
-```console
-$ cd tui && cargo build --release
-$ ./target/release/cryptirc-tui -s https://your.server/cryptirc -u yournick
-```
-
-It talks the same WebSocket protocol the browser does, so it needs **no changes to the server or the
-daemon** — [full details and key bindings](tui/).
-
-### Encryption — Everything is Encrypted
-
-CryptIRC encrypts **everything** before it touches disk. The server cannot read your messages, logs, or credentials.
-
-- **Encrypted logs** — every message stored on the server is encrypted with your personal vault key (AES-256-GCM). Even the server admin can't read them.
-- **Signal Protocol E2E for DMs** — private messages use the same encryption as Signal: X3DH key agreement + Double Ratchet with authenticated headers. Forward secrecy and deniability built in.
-- **Channel encryption** — set a pre-shared AES-256-GCM key on any channel. Only people with the key can read messages.
-- **Encrypted credentials** — IRC passwords, NickServ passwords, SASL secrets are all encrypted at rest with your vault key. Never stored in plaintext.
-- **Encrypted notepad** — private notes encrypted server-side with your vault key.
-- **Vault system** — your master passphrase derives an encryption key via Argon2id. Lock the vault and the key is zeroed from memory. Auto-lock after configurable idle time.
-- **Zero-knowledge architecture** — the server is a dumb relay. It cannot decrypt anything.
-
-### Key Features
-
-- **24/7 connectivity** — your server stays connected to IRC around the clock, logs everything encrypted, and syncs across all your devices
-- **Updates without disconnecting** — IRC connections live in a small, always-on background process, separate from the web server. Routine updates and restarts no longer part/rejoin you from every channel — only a change to that background process itself would ever require reconnecting
-- **Multi-network** — connect to as many IRC networks as you want simultaneously
-- **Multi-device sync** — messages, favorites, settings, unread counts sync across all your devices in real-time
-- **Push notifications** — get notified on your phone or desktop when someone DMs or mentions you, even when the app is closed
-- **227 themes** (64 animated — starfields, rain, aurora, Matrix code — plus a pixel-perfect **mIRC** Win95 skin and a **Discord** theme) + **140 fonts** and a live [theme gallery](https://gh0st68.github.io/CryptIRC/). **Customize any of them** — hit ✎ on any theme to fork it into your own editable copy — and **put your own picture behind any theme**, with opacity, blur and dim so your chat stays readable
-- **🐑🦀👻🐟👽 Desktop pets — 25 of them.** The five originals (the classic '95 **eSheep** that wanders, climbs walls, naps and gets abducted; a furious **Angry Crab**; a **Ghost**; a **Calm Fish** you can feed; a **Little Alien** flying saucer) plus **20 more** — jellyfish, paper plane, hot-air balloon, manta, moth, snail, firefly, hedgehog, teacup, desk lamp, wind-up key, rubber duck, survey probe, Lumen, Vesper relay, data wisp, ghost lantern, paper crane, toddle cap and a moody cloud — each with **50 different behaviours**. The new ones are deliberately unobtrusive: they keep to the edges and off the text you're reading, rest far more than they move, are silent, and clicks pass straight through. Up to three at a time, paused entirely when the window isn't focused, and off unless your system asks for reduced motion
-- **Resizable columns** — drag the divider at the edge of the channel list, the edge of the user list, or between the nicknames and the messages. Double-click a divider to reset it. Widths are remembered and sync across your devices
-- **In-app News & changelog** with an auto-versioning build badge, so you always see exactly what changed
-- **Full IRCv3 support** — 17 user-toggleable capabilities including typing indicators, away-notify, server-time, message-tags, plus SASL PLAIN/EXTERNAL and nick MONITOR
-- **100+ slash commands** — everything from `/ascii` art to `/ud` Urban Dictionary lookups
-- **Nick monitoring** — track when specific users come online/offline with push alerts
-- **Inline media** — images, videos, YouTube rich cards, audio player, link previews
-- **Mobile-first PWA** — swipe gestures, safe-area support, works perfectly on iOS and Android
-- **Deploy in one command** — the installer builds both binaries and sets everything up on any Linux server
-
-### Deployment
-- Two small Rust binaries — the web server and the always-on IRC daemon — one `cargo build` for both
-- Interactive deploy script for **Debian/Ubuntu** and **Arch Linux** with Caddy, Postfix, and systemd
-- Automatic **HTTPS** via Caddy + Let's Encrypt
-- Hardened systemd units with **full sandboxing** (ProtectSystem, PrivateTmp, restricted syscalls, no capabilities)
-- Routine `update.sh` redeploys restart only the web server — the IRC daemon (and everyone's connections) stays up
-- **Automatic backups** on update — last 5 snapshots of all user data kept in `/var/lib/cryptirc-backups/`
-- Existing Caddyfile backed up before overwriting — safe for servers already running Caddy
-
-## Quick Start
+**Run your own server:** on Debian or Ubuntu, clone the repository and run the interactive installer:
 
 ```bash
-# Clone
 git clone https://github.com/gh0st68/CryptIRC.git
 cd CryptIRC
-
-# Deploy (Debian/Ubuntu) — single command, sets up everything
-sudo bash deploy/deploy.sh yourdomain.com admin@yourdomain.com
+sudo bash deploy/deploy.sh
 ```
 
-That's it. Visit `https://yourdomain.com`, register an account, unlock your vault, and connect. You can sign in with either your username or your email.
+The installer walks through the domain or IP address, HTTPS, registration options, and first-user setup. It installs the Rust services, Caddy, and systemd units. Email setup is optional.
+
+For Arch Linux, use `sudo bash deploy/deploy-arch.sh` instead.
+
+See the [installation guide](INSTALL.md), [deployment notes](deploy/README.md), or [web install and update guide](https://cryptirc.com/install/) for requirements, manual installation, and updates. For a source build, use the current stable Rust toolchain.
+
+<a id="available-everywhere"></a>
+<a id="terminal-client"></a>
+<a id="️-terminal-client"></a>
+
+## Clients
+
+| Where you chat | How to use it |
+| --- | --- |
+| **Browser** | Open the [hosted client](https://client.twistednet.org/cryptirc), or your own CryptIRC instance. |
+| **Windows** | Download the [desktop installer](https://github.com/gh0st68/CryptIRC/releases/latest). |
+| **macOS** | Download the [Mac archive](https://github.com/gh0st68/CryptIRC/releases/latest), extract it, and move the app to Applications. Intel and Apple Silicon builds are available. |
+| **Linux desktop** | Download the [AppImage](https://github.com/gh0st68/CryptIRC/releases/latest), make it executable, and run it. |
+| **Android** | Open the client in a compatible browser and choose **Add to Home Screen** or **Install app**. |
+| **iPhone / iPad** | Open the client in Safari, then choose **Share → Add to Home Screen**. |
+| **Terminal / SSH / tmux** | Build and run [cryptirc-tui](tui/README.md). It can share an account with the web client. |
+
+Desktop releases support 64-bit Windows, macOS 13 or newer (Intel / Apple Silicon), and Linux.
+
+<details>
+<summary><strong>See mobile and terminal previews</strong></summary>
+
+<p align="center">
+  <img src="screenshots/mobile.png?v=20261016" width="280" alt="CryptIRC mobile interface preview with an example conversation">
+</p>
+
+The terminal client includes a network and channel list, wrapped scrollback, a member list, mouse support, and tab completion. It has **52 terminal themes**, switchable with `/theme`.
+
+<p align="center">
+  <img src="screenshots/terminal.png" width="900" alt="cryptirc-tui with a buffer list, conversation, and member list">
+</p>
+
+```bash
+cd tui
+cargo build --release
+./target/release/cryptirc-tui -s https://your.server/cryptirc -u yournick
+```
+
+<p align="center">
+  <img src="screenshots/terminal-themes.png" width="900" alt="Four terminal themes: Dracula, Nord, Catppuccin Mocha, and Phosphor Amber">
+</p>
+
+[Terminal setup, commands, and key bindings →](tui/README.md)
+
+</details>
+
+<a id="key-features"></a>
 
 ## Features
 
-### Themes & Personalization
+| | What you get |
+| --- | --- |
+| **Stay connected** | Multiple IRC networks, encrypted history, reconnect handling, and a separate IRC daemon that survives routine web-server updates. |
+| **Pick up anywhere** | Desktop apps, an installable mobile PWA, a terminal client, synced preferences, favorites, and unread markers. |
+| **Follow the conversation** | Unified Messages inbox, searchable history, Notices with message jumps, push alerts, custom highlights, mutes, and quiet hours. |
+| **Make it yours** | 227 themes, including 64 animated themes and classic IRC client skins, 140 font choices, editable palettes, backgrounds, and resizable columns. |
+| **Share more** | Inline images, video and audio, a GIF picker, link previews, file uploads, text / HTML / Markdown pastes, and a URL shortener. |
+| **Use familiar IRC tools** | SASL PLAIN/EXTERNAL, IRCv3 capabilities, nick monitoring, channel modes, moderation tools, and slash-command completion. |
 
-**227 built-in themes** — 163 static + 64 animated — each hand-tuned across a full palette: five background layers, two border tiers, three text weights, matched accents and its own status colors. 90 ship an illustrated backdrop drawn in SVG. Highlights include a pixel-perfect **mIRC** skin with real Windows-95 window chrome, **HexChat**, **XChat** and **irssi** skins that copy each client's actual layout, not just its palette (right-aligned nick column with the separator rule for the GTK pair; black terminal, `-!-` status lines and the cyan status bars for irssi, in the two-bar `adv_windowlist` arrangement most people run) and a **Discord** theme with its familiar dark UI.
+### Your IRC, your look
+
+Choose from **227 themes**: 163 static and 64 animated. There are editor favorites such as Dracula and Nord, classic mIRC / HexChat / XChat / irssi skins, illustrated backgrounds, and quieter minimal palettes.
+
+Customize a theme into your own saved copy, adjust fonts and column widths, or add a background image with opacity, blur, dim, and tiling controls. Mobile theme and layout overrides let your phone have its own setup. Optional desktop pets add a little company, with motion controls for quieter sessions.
 
 <p align="center">
-  <a href="https://gh0st68.github.io/CryptIRC/">
-    <img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC Theme Gallery — 227 live theme previews">
-  </a>
-  <br>
-  <b><a href="https://gh0st68.github.io/CryptIRC/">Browse the live Theme Gallery →</a></b><br>
-  <sub>every theme rendered as a live miniature IRC window in its own palette — search, filter and preview all 227</sub>
+  <a href="https://gh0st68.github.io/CryptIRC/"><img src="screenshots/theme-gallery.png" width="900" alt="CryptIRC theme gallery with searchable palette previews"></a>
 </p>
 
-#### Make any of them yours
+[Browse the theme gallery →](https://gh0st68.github.io/CryptIRC/)
 
-Hover any theme and hit **✎**. The editor opens on that exact theme — its colors, its animation, its artwork all loaded — and saving gives you your own copy, marked **★**. The original is never touched, so you can always go back.
+### Optional AI and bots
 
-**Your own background, on any theme.** Upload an image or paste an `https://` link and it sits behind every theme you switch to. Opacity, blur, dim and tiling are all on sliders — and they work on the built-in artwork too, so a theme you liked but found too busy can simply be turned down. Uploads stay on that device; a linked image follows you everywhere.
+Connect a supported AI provider or an OpenAI-compatible endpoint for channel, DM, or private `/ai` conversations. Opt-in context and bounded IRC actions let the assistant work with your channels; provider requests go to the service you configure.
 
-| Family | Examples |
-|---|---|
-| **Editor classics** | Dracula · Monokai · Nord · Gruvbox · One Dark · Catppuccin · Solarized · Tokyo Night |
-| **App-inspired** | Discord · mIRC *(full Win95 chrome)* · HexChat · XChat · irssi *(each with its real menubar/statusbar chrome)* |
-| **Neon / cyberpunk** | Cyberpunk · Outrun · Blade Runner · Vaporwave · Hotline Miami · Neon Tokyo |
-| **Terminal / hacker** | Matrix · Hacker · Retro Terminal · Cyberdeck · CRT Terminal · Oscilloscope · Sonar |
-| **Materials & craft** | Blueprint · Carbon Fiber · Damascus Steel · Verdigris · Marble · Letterpress · Circuit Etch |
-| **Weather & light** | Blue Hour · Fog Bank · Heat Haze · Monsoon · Eclipse · Harvest Moon · Aurora · Snowfall |
-| **Living world** | Coral Reef · Mycelium · Butterfly Wing · Peacock · Tide Pool · Cherry Blossom · Forest Rain |
-| **Art & culture** | Ukiyo-e · Byzantine Gold · Kintsugi · Zellij · Sumi Ink · Runestone · Bauhaus · Art Deco |
-| **Print & optical** | Risograph · Halftone · Venetian · Infrared · X-Ray · Liquid Metal · Dreamcore |
-| **Mono / metal** | Stealth · Charcoal · Graphite · Slate · Noir · Obsidian |
-| **Warm / edible** | Matcha · Citrus Grove · Berry · Honeycomb · Cacao · Neapolitan · Golden Hour |
+The server also includes **19 bots** for weather, lookups, quotes, seen records, offline tells, notes, and other utilities. Bot controls include triggers, access rules, cooldowns, and per-channel settings. Channel protection adds auto-op/voice, flood controls, and word filtering.
 
-…and ~180 more — [see them all in the gallery](https://gh0st68.github.io/CryptIRC/).
+<details>
+<summary><strong>Detailed IRC, interface, and admin features</strong></summary>
 
-### Encryption & Security
-- **Per-user vaults** -- each user has their own passphrase and encryption key (Argon2id KDF + AES-256-GCM)
-- **Signal-protocol E2E** for direct messages -- X3DH key agreement + Double Ratchet with authenticated headers
-- **Channel encryption** -- pre-shared AES-256-GCM keys for group channels
-- **Encrypted logs** -- every line encrypted at rest with the user's vault key
-- **Encrypted notepad** -- private encrypted notes stored server-side
-- **Encrypted credential storage** -- IRC passwords, NickServ passwords, and SASL secrets never stored in plaintext
-- **Vault lock/unlock** -- locking the vault zeros the key from memory and disconnects IRC
-- **Vault auto-lock** -- configurable idle timer (5min–2hrs) automatically locks the vault
-- **Client TLS certificates** -- generate and manage ECDSA P-256 certs for SASL EXTERNAL
-- **Zero-knowledge architecture** -- the server cannot read your messages or credentials
-- **SASL PLAIN protection** -- refuses to send credentials over unencrypted connections
-- **Upload metadata stripping** -- all uploads are automatically scrubbed of metadata before being saved to disk:
-  - **JPEG**: strips all APP1–APP15 markers (EXIF, XMP, IPTC, GPS coordinates, camera make/model, lens info, timestamps) while preserving APP0 (JFIF), quantization tables, Huffman tables, and image data
-  - **PNG**: removes all ancillary chunks (tEXt, iTXt, zTXt, eXIf, dSIG, tIME) while preserving critical chunks (IHDR, PLTE, IDAT, IEND) and safe ancillary chunks (tRNS, gAMA, cHRM, sRGB, iCCP, pHYs)
-  - **Video/Audio** (MP4, WebM, MP3, OGG, WAV, FLAC): uses ffmpeg to strip all metadata containers (`-map_metadata -1`) while copying streams untouched — no re-encoding, no quality loss
-- **Block private messages** -- +g mode with one-time notification per sender (3-hour cooldown)
-- **Session manager** -- view and revoke active sessions across devices
-- **Message expiry** -- configurable auto-delete of local message buffers (1hr–7days)
-- **Client-side rate limiting** -- configurable flood protection (200ms–3sec between messages)
-- **Timing-safe comparisons** -- registration codes use constant-time comparison with no length oracle
-- **XSS hardened** -- no inline onclick injection, prototype-pollution-safe E2E objects, comprehensive HTML escaping
-- **CSP headers** -- Content-Security-Policy, X-Frame-Options, X-Content-Type-Options, Referrer-Policy
-- **Password complexity** -- requires uppercase, lowercase, digit, and special character
-
-### IRC & IRCv3
-- Full IRC protocol support -- channels, DMs, modes, kicks, bans, CTCP, the works
+#### IRC and IRCv3
+- IRC support — channels, DMs, modes, kicks, bans, CTCP, the works
 - **IRCv3 capabilities** (17 user-toggleable): away-notify, account-notify, extended-join, server-time, multi-prefix, cap-notify, message-tags, batch, echo-message, invite-notify, setname, account-tag, userhost-in-names, chghost, labeled-response, typing indicators, standard-replies (plus SASL, negotiated separately; nick MONITOR is a separate feature)
-- **IRCv3 CAP toggle** -- enable/disable individual capabilities per network in settings
+- **IRCv3 CAP toggle** — enable/disable individual capabilities per network in settings
 - **SASL PLAIN & EXTERNAL** authentication
-- Multi-network support -- connect to as many networks as you want simultaneously
-- **Nick monitoring** -- track when users come online/offline with push notifications
-- **KeepNick** -- irssi-style nick keeper with ISON polling, QUIT/NICK event detection, and auto-reclaim
-- **Auto-identify** -- automatically send NickServ IDENTIFY on connect (encrypted credential storage)
-- **Auto-rejoin on kick** -- automatically rejoin channels after being kicked (with saved channel keys)
-- **Channel key manager** -- store and auto-send channel keys (+k) when joining
-- **Multi-device sync** -- messages you send on one device appear on all your other devices
-- **Typing indicators** -- see when someone is typing (IRCv3 draft/typing)
-- **Server-time** -- accurate timestamps from the IRC server
-- **ZNC playback detection** -- detects and batches ZNC buffer playback with summary markers
-- **Self-signed cert detection** -- popup warning with one-click fix for ZNC/bouncer TLS errors
-- **Status message condensing** -- Lounge-style grouped join/part/quit (Show All / Condense / Hide)
+- Multi-network support — connect to multiple networks simultaneously
+- **Nick monitoring** — track when users come online/offline with push notifications
+- **KeepNick** — irssi-style nick keeper with ISON polling, QUIT/NICK event detection, and auto-reclaim
+- **Auto-identify** — automatically send NickServ IDENTIFY on connect (encrypted credential storage)
+- **Auto-rejoin on kick** — automatically rejoin channels after being kicked (with saved channel keys)
+- **Channel key manager** — store and auto-send channel keys (+k) when joining
+- **Multi-device sync** — messages you send on one device appear on all your other devices
+- **Typing indicators** — see when someone is typing (IRCv3 draft/typing)
+- **Server-time** — accurate timestamps from the IRC server
+- **ZNC playback detection** — detects and batches ZNC buffer playback with summary markers
+- **Self-signed cert detection** — popup warning with one-click fix for ZNC/bouncer TLS errors
+- **Status message condensing** — Lounge-style grouped join/part/quit (Show All / Condense / Hide)
 - Configurable join/part/quit message filtering
-- **Infinite scroll** -- load older messages from encrypted server logs on demand
+- **Infinite scroll** — load older messages from encrypted server logs on demand
 
-### Interface
-- **Lounge-style layout** -- clean input bar, grouped nick list, collapsible panels
-- **Mobile-first PWA** -- installable on iOS/Android with swipe gestures and safe-area support
-- **iOS PWA keyboard handling** -- works perfectly with iOS keyboard accessory bar
-- **Collapsible panels** -- sidebar and nick list collapse on desktop with persistent state
-- **Nick list grouped by role** -- Owners, Admins, Operators, Half-Ops, Voiced, Users
-- **Nick context menu** -- whois, query, slap, monitor, notes, kick/ban/voice/op based on power level
-- **Clickable nicks in messages** -- nick mentions in chat text are colored and clickable
-- **Smart tab completion** -- prioritizes most recent speakers, with Tab cycling
-- **@nick autocomplete** -- type `@` to search and insert channel nicks
-- **#channel autocomplete** -- type `#` to autocomplete channel names
-- **Inline media previews** -- images, videos (.mp4/.webm/.mov), YouTube rich cards with title/author
-- **Inline audio player** -- .mp3, .ogg, .flac, .wav, .m4a, .aac, .opus with playback controls
-- **GIF picker** -- type `/gif <search>` (or `/giphy`) for a smooth in-line grid of results, navigable by tap or arrow keys + Enter. Powered by **Giphy or Tenor** -- the admin picks the provider and can set a shared key so it works for everyone with no setup, or each user can supply their own
-- **Image lightbox** -- click to zoom, scroll wheel zoom, pinch-to-zoom on mobile, pan when zoomed
-- **Link previews** -- server-side metadata fetcher with admin whitelist (SSRF protected)
-- **Pastebin** -- share text snippets with password protection and expiration
-- **URL shortener** -- built-in `/shorten` command creates short redirect URLs with interstitial page
-- **Smart paste** -- paste multi-line text and it auto-offers "send as pastebin?" instead of flooding
-- **Split view** -- view two channels side by side on desktop (`/split`)
-- **Read markers** -- "new messages since you were away" divider line in channels
-- **User notes** -- attach private notes to any nick (right-click menu or `/note`)
-- **Seen database** -- `/seen nick` tracks last message time and channel
-- **Channel stats dashboard** -- most active users with bar chart (`/stats`)
-- **ASCII art generator** -- `/ascii text` sends block-letter art to channel
-- **Urban Dictionary** -- `/ud word` looks up and sends definitions
-- **DND mode** -- Do Not Disturb with scheduled quiet hours (`/dnd`)
-- **Encrypted notepad** -- private auto-saving notes, encrypted with vault key
-- **mIRC color formatting** -- Ctrl+K color picker, Ctrl+B/U/I/O for bold/underline/italic/reset
+#### Chat and interface
+- **Lounge-style layout** — clean input bar, grouped nick list, collapsible panels
+- **Mobile-first PWA** — installable on iOS/Android with swipe gestures and safe-area support
+- **iOS PWA keyboard handling** — adapts to the iOS keyboard and accessory bar
+- **Collapsible panels** — sidebar and nick list collapse on desktop with persistent state
+- **Nick list grouped by role** — Owners, Admins, Operators, Half-Ops, Voiced, Users
+- **Nick context menu** — whois, query, slap, monitor, notes, kick/ban/voice/op based on power level
+- **Clickable nicks in messages** — nick mentions in chat text are colored and clickable
+- **Smart tab completion** — prioritizes most recent speakers, with Tab cycling
+- **@nick autocomplete** — type `@` to search and insert channel nicks
+- **#channel autocomplete** — type `#` to autocomplete channel names
+- **Inline media previews** — images, videos (.mp4/.webm/.mov), YouTube rich cards with title/author
+- **Inline audio player** — .mp3, .ogg, .flac, .wav, .m4a, .aac, .opus with playback controls
+- **GIF picker** — type `/gif <search>` (or `/giphy`) for a smooth in-line grid of results, navigable by tap or arrow keys + Enter. Powered by **Giphy or Tenor** — the admin picks the provider and can set a shared key so it works for everyone with no setup, or each user can supply their own
+- **Image lightbox** — click to zoom, scroll wheel zoom, pinch-to-zoom on mobile, pan when zoomed
+- **Link previews** — server-side metadata fetcher with admin whitelist (SSRF protected)
+- **Pastebin** — share text snippets with password protection and expiration
+- **URL shortener** — built-in `/shorten` command creates short redirect URLs with interstitial page
+- **Smart paste** — paste multi-line text and it auto-offers "send as pastebin?" instead of flooding
+- **Split view** — view two channels side by side on desktop (`/split`)
+- **Read markers** — "new messages since you were away" divider line in channels
+- **User notes** — attach private notes to any nick (right-click menu or `/note`)
+- **Seen database** — `/seen nick` tracks last message time and channel
+- **Channel stats dashboard** — most active users with bar chart (`/stats`)
+- **ASCII art generator** — `/ascii text` sends block-letter art to channel
+- **Urban Dictionary** — `/ud word` looks up and sends definitions
+- **DND mode** — Do Not Disturb with scheduled quiet hours (`/dnd`)
+- **Encrypted notepad** — private auto-saving notes, encrypted with vault key
+- **mIRC color formatting** — Ctrl+K color picker, Ctrl+B/U/I/O for bold/underline/italic/reset
 - **Topic bar** with mIRC color rendering and edit/copy/view menu
 - **Emoji picker** with colon autocomplete (`:wave:` style)
-- **Slash command autocomplete** -- type `/` to see all 100+ commands
-- **Search** -- search messages in current channel with highlighted results
-- **File uploads** -- drag-and-drop or paperclip, with automatic metadata stripping for images, video, and audio (configurable max size from admin panel)
-- **My Uploads panel** -- view, manage, and delete your uploaded files
-- **Desktop & mobile push notifications** -- iOS PWA support, suppressed when app is focused or DND active
-- **Smart unread badges** -- gray for regular messages, red for mentions and DMs
-- **Mentions panel** -- chat bubble icon with red dot badge for unseen mentions
-- **Custom highlight words** -- tag-based UI to add/remove trigger words for notifications
-- **Persistent state** -- everything syncs server-side (themes, favorites, unread, mentions, notes, keys, etc.)
-- **Network drag-and-drop** -- reorder networks with all their channels (desktop drag + mobile hold-to-drag)
-- **Channel drag-and-drop** -- reorder channels within a network
-- **Favorites filter** -- funnel icon filter bar to show only favorited channels
-- **Messages inbox** -- an optional pinned tab at the top of the sidebar that gathers every DM from all your networks into one unified inbox, iMessage-style (toggle in Appearance ▸ Messages tab)
-- **Encryption indicators** -- SVG lock/unlock icons on every channel and DM in the sidebar
-- **Mobile lag indicator** -- ping time shown next to channel name in topbar
-- **SVG icon settings menu** -- clean Lucide-style line icons, scrollable on small screens
-- **Standalone security panel** -- vault auto-lock, message expiry, rate limit, PM blocking, spellcheck, link previews
-- **140 fonts** -- monospace, sans-serif, serif, display, and cursive/handwriting, mostly from Google Fonts
-- **Clear all data** -- one-click deletion of logs, notepad, and pastes with confirmation
+- **Slash command autocomplete** — type `/` to see all 100+ commands
+- **Search** — search messages in current channel with highlighted results
+- **File uploads** — drag-and-drop or paperclip, with automatic metadata stripping for images, video, and audio (configurable max size from admin panel)
+- **My Uploads panel** — view, manage, and delete your uploaded files
+- **Desktop and mobile notifications** — background Web Push, foreground alerts, per-conversation mutes, and Do Not Disturb
+- **Smart unread badges** — gray for regular messages, red for mentions and DMs
+- **Notices panel** — mentions and unread PMs, with links to the matching message
+- **Custom highlight words** — tag-based UI to add/remove trigger words for notifications
+- **Synced preferences** — themes, favorites, unread markers, notices, notes, and saved keys
+- **Network drag-and-drop** — reorder networks with all their channels (desktop drag + mobile hold-to-drag)
+- **Channel drag-and-drop** — reorder channels within a network
+- **Favorites filter** — funnel icon filter bar to show only favorited channels
+- **Messages inbox** — an optional pinned tab at the top of the sidebar that gathers every DM from all your networks into one unified inbox, iMessage-style (toggle in Appearance ▸ Messages tab)
+- **Encryption indicators** — SVG lock/unlock icons on every channel and DM in the sidebar
+- **Mobile lag indicator** — ping time shown next to channel name in topbar
+- **SVG icon settings menu** — clean Lucide-style line icons, scrollable on small screens
+- **Standalone security panel** — vault auto-lock, message expiry, rate limit, PM blocking, spellcheck, link previews
+- **140 font choices** — monospace, sans-serif, serif, display, and cursive/handwriting, mostly from Google Fonts
+- **Clear all data** — one-click deletion of logs, notepad, and pastes with confirmation
 
-### Admin
-- **Admin panel** -- user management, live stats (total / online), registration settings
-- **GIF Picker settings** -- choose the provider (**Giphy** or **Tenor**), the mode (Off / per-user own-key / shared server key), and store the server-held Giphy + Tenor API keys (never exposed to users)
-- **Max upload size** -- admin-set per-file upload cap (1–500 MB)
-- **Link preview controls** -- pick a mode (Off / Whitelist approved-domains-only / All HTTPS links, with private IPs blocked) plus the domain whitelist
-- **Registration modes** -- open, invite-code, or closed (persists across reboots)
-- **User management** -- disable, delete, promote to admin, toggle upload permission
+#### Administration
+- **Admin panel** — user management, live stats (total / online), registration settings
+- **GIF Picker settings** — choose the provider (**Giphy** or **Tenor**), the mode (Off / per-user own-key / shared server key), and store the server-held Giphy + Tenor API keys (never exposed to users)
+- **Max upload size** — admin-set per-file upload cap (1–500 MB)
+- **Link preview controls** — pick a mode (Off / Whitelist approved-domains-only / All HTTPS links, with private IPs blocked) plus the domain whitelist
+- **Registration modes** — open, invite-code, or closed (persists across reboots)
+- **User management** — disable, delete, promote to admin, toggle upload permission
 - **All admin settings persist** to disk with mutex protection (survives server restarts)
 
-### Commands
+</details>
+
+<a id="encryption--security"></a>
+
+## Privacy and encryption
+
+CryptIRC provides encryption for stored data and optional end-to-end protection for conversations. These protect different parts of the system.
+
+| Protection | Scope |
+| --- | --- |
+| **Encrypted storage** | Per-user vaults protect chat logs, saved IRC credentials, and private notes with AES-256-GCM. Argon2id protects the vault master key. |
+| **End-to-end encrypted DMs** | Compatible clients can use Signal Protocol encryption with X3DH and Double Ratchet. Enable E2E for the conversation. |
+| **Shared channel encryption** | Optional AES-256-GCM encryption uses a shared channel key. |
+| **IRC connection security** | TLS and SASL PLAIN/EXTERNAL support, with client certificate management and a guard against sending SASL PLAIN over an unencrypted connection. |
+| **Account controls** | Vault locking, configurable auto-lock, session revocation, PM blocking, and administrative account controls. |
+
+The server handles ordinary IRC traffic and unlocks the storage vault, so run CryptIRC on a server you trust. Encrypted storage does **not** make ordinary IRC traffic end-to-end encrypted or make the server unable to read unlocked data. AI providers, GIF services, and link previews are optional external integrations.
+
+## Commands and shortcuts
+
+Type `/` in the composer to browse commands, or use `/help` for the in-app reference.
+
+| Start with | Action |
+| --- | --- |
+| `/join #channel` | Join a channel. |
+| `/query nick` | Open a private conversation. |
+| `/whois nick` | Look up a user. |
+| `/dnd on` | Enable Do Not Disturb. |
+| `/split` | Open a second conversation beside the first. |
+| `Tab` | Complete a nickname. |
+| `@`, `#`, `:` | Find nicknames, channels, or emoji. |
+
+<details>
+<summary><strong>Full command and keyboard reference</strong></summary>
 
 All 100+ commands show in the `/` autocomplete dropdown. Type `/` to browse.
 
@@ -533,7 +432,10 @@ All 100+ commands show in the `/` autocomplete dropdown. Type `/` to browse.
 | `↑` / `↓` | Input history navigation |
 | `Enter` | Send message |
 
-### Settings
+</details>
+
+<details>
+<summary><strong>Settings panels</strong></summary>
 
 Accessible from the sidebar gear menu:
 
@@ -553,54 +455,36 @@ Accessible from the sidebar gear menu:
 | Help | Complete command reference, features list, keyboard shortcuts |
 | Admin | User management, registration settings, link-preview mode (off/whitelist/all), GIF picker (provider/mode/keys), max upload size |
 
-### Deployment
-- Two small Rust binaries (web server + always-on IRC daemon) -- one `cargo build` for both
-- Interactive deploy script for Debian/Ubuntu and Arch Linux with Caddy, Postfix, and systemd
-- Automatic HTTPS via Caddy + Let's Encrypt
-- Hardened systemd units with full sandboxing
-- Routine updates restart only the web server -- IRC connections stay up through them
+</details>
 
 ## Architecture
 
-The IRC connection itself lives in a small always-on daemon (`irc-core`), separate
-from the web server (`cryptirc`) that does everything else. Routine web-server
-updates and restarts never touch the daemon, so nobody's IRC connection drops.
+The `cryptirc` web server handles the API, sessions, encrypted storage, uploads, and notifications. The `irc-core` daemon owns the IRC connections. A local Unix socket connects the two services.
 
-The terminal client speaks that same WebSocket protocol, so a browser and a TUI can be signed into one
-account simultaneously — the web server fans every event out to all of a user's sessions.
-
-```
-Browser (PWA) ------.
-cryptirc-tui -------+   (both, at the same time, same account)
-  |-- E2E encryption (Signal protocol, Web Crypto API)
-  |-- Per-user vault unlock (Argon2id KDF -> AES-256-GCM)
-  '-- WebSocket --> cryptirc (Rust/Axum, web server)
-                      |-- Per-user encrypted log storage
-                      |-- Push notifications (Web Push / VAPID)
-                      |-- Pastebin with password protection
-                      |-- URL shortener with interstitial page
-                      |-- File uploads with metadata stripping
-                      |-- Session management
-                      |-- Email verification (Postfix)
-                      '-- Unix socket --> irc-core (always-on daemon)
-                                            |-- IRC connections (TLS + IRCv3)
-                                            |-- SASL / registration / CAP negotiation
-                                            |-- Reconnect + backoff
-                                            '-- Survives web server restarts
+```text
+Browser / PWA / desktop app / terminal
+                  │
+          HTTPS + WebSocket
+                  │
+         cryptirc (Rust / Axum)
+                  │
+             Unix socket
+                  │
+       irc-core (persistent IRC)
+                  │
+           TLS / IRC networks
 ```
 
-## Tech Stack
+Routine web-server updates restart `cryptirc` while `irc-core` keeps running. Updating or stopping the IRC daemon itself can reconnect those IRC sessions.
 
 | Layer | Technology |
-|-------|-----------|
-| Backend | Rust, Tokio, Axum |
-| Encryption | AES-256-GCM, Argon2id, HKDF-SHA256, Signal Protocol (X3DH + Double Ratchet + Authenticated Headers) |
-| TLS | OpenSSL (client certs), native-tls (IRC connections), rustls (outbound HTTP: link previews, GIF search, Web Push) |
-| Frontend | Vanilla JS, Web Crypto API, SVG icons (Lucide), CSS custom properties |
-| Push | Web Push with VAPID (RFC 8292), iOS PWA support |
-| IRC | IRCv3.2 with CAP negotiation (17 capabilities, user-toggleable) |
-| Reverse Proxy | Caddy (automatic HTTPS via Let's Encrypt) |
-| Mail | Postfix (local relay) |
+| --- | --- |
+| Server | Rust, Tokio, Axum |
+| Web client | JavaScript, Web Crypto API, CSS custom properties |
+| Desktop | Electron |
+| Encryption | AES-256-GCM, Argon2id, HKDF-SHA256, Signal Protocol |
+| Notifications | Web Push / VAPID and desktop notifications |
+| Deployment | Caddy, systemd, optional Postfix integration |
 
 ## Configuration
 
@@ -617,13 +501,14 @@ cryptirc-tui -------+   (both, at the same time, same account)
 | `CRYPTIRC_IPC_SOCK` | `$CRYPTIRC_DATA/irc-core.sock` | Unix socket path between the web server and the `irc-core` daemon |
 | `RUST_LOG` | `info` | Log level |
 
-## Requirements
+For registration, HTTPS, service configuration, and backups, see [INSTALL.md](INSTALL.md) and the [deployment guide](deploy/README.md).
 
-- Rust 1.78+
-- Linux — Debian 12, Ubuntu 22.04+, or Arch Linux (dedicated installer for each)
-- A domain name with an A record pointing to your server (or a bare IP for a self-signed cert)
-- Ports 80 and 443 open
+## Community
+
+Questions, bugs, or ideas? Join **#dev** or **#twisted** on `irc.twistednet.org` (TLS port **6697**), or [open a GitHub issue](https://github.com/gh0st68/CryptIRC/issues).
+
+Built by **gh0st** at [TwistedNET](https://twistednet.org/).
 
 ## License
 
-Private. All rights reserved.
+Proprietary. All rights reserved.
