@@ -29,11 +29,25 @@ use argon2::{
     password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const MAX_PASTE_SIZE: usize = 500_000; // 500KB max
+
+/// r5 (codex P1 paste.rs:230): per-account paste quota — pastes on disk (expired ones count
+/// until they are swept) and their bytes. Defaults 500 pastes / 200 MiB; override with
+/// CRYPTIRC_PASTE_QUOTA_COUNT and CRYPTIRC_PASTE_QUOTA_MB (0 = no limit of that kind).
+const DEFAULT_PASTE_QUOTA_COUNT: usize = 500;
+const DEFAULT_PASTE_QUOTA_MB: u64 = 200;
+fn paste_quota() -> (usize, u64) {
+    let num = |k: &str| std::env::var(k).ok().and_then(|v| v.trim().parse::<u64>().ok());
+    let count = num("CRYPTIRC_PASTE_QUOTA_COUNT").map_or(DEFAULT_PASTE_QUOTA_COUNT, |v| v as usize);
+    let mb = num("CRYPTIRC_PASTE_QUOTA_MB").unwrap_or(DEFAULT_PASTE_QUOTA_MB);
+    (count, mb.saturating_mul(1024 * 1024))
+}
 
 /// Render type of a paste: how the `/paste/<id>` view presents the stored content.
 /// `Text` (the historical default) keeps the escaped-`<pre>` view, `Markdown`
@@ -109,6 +123,36 @@ pub struct CreatePasteRequest {
 
 pub struct PasteStore {
     dir: PathBuf,
+    /// id → on-disk path. Built once at startup (one dir scan) and kept current by
+    /// create/get/cleanup, so a view is an O(1) lookup instead of a full `read_dir`
+    /// of the pastes dir per request (rust-content LOW; the filename carries the
+    /// expiry epoch, so the path can't be rebuilt from the id alone).
+    index: DashMap<String, PathBuf>,
+    /// Last full rescan triggered by an index miss. A miss (unknown id, or a file
+    /// placed in the dir out of band) rescans at most once per MISS_RESCAN_EVERY,
+    /// so unknown-id probing can't turn back into a dir walk per request.
+    last_rescan: std::sync::Mutex<Option<Instant>>,
+    /// r5: id → (author, bytes on disk), for the per-account quota. Filled by one full scan
+    /// on first use (the author is inside the file) and kept current by create / delete /
+    /// expiry; a file dropped in out of band is simply not counted.
+    owners: DashMap<String, (String, u64)>,
+    owners_scanned: tokio::sync::OnceCell<()>,
+    /// Serializes quota check + write, so two concurrent creates can't both pass the check.
+    quota_lock: tokio::sync::Mutex<()>,
+    /// (max pastes, max bytes) per account, read from the environment at startup.
+    quota: (usize, u64),
+}
+
+/// Minimum spacing between miss-triggered rescans of the pastes dir.
+const MISS_RESCAN_EVERY: Duration = Duration::from_secs(30);
+
+/// The paste id of a stored file name: `<id>.<expiry>.json` (current) or
+/// `<id>.json` (pre-#47 legacy). Ids never contain a dot.
+fn id_from_name(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".json")?;
+    let id = stem.split('.').next()?;
+    if id.is_empty() || !id.chars().all(|c| c.is_alphanumeric() || c == '-') { return None; }
+    Some(id)
 }
 
 impl PasteStore {
@@ -130,7 +174,17 @@ impl PasteStore {
         {
             std::fs::create_dir_all(&dir).ok();
         }
-        Self { dir }
+        let index = DashMap::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                if let Some(name) = e.file_name().to_str() {
+                    if let Some(id) = id_from_name(name) { index.insert(id.to_string(), e.path()); }
+                }
+            }
+        }
+        Self { dir, index, last_rescan: std::sync::Mutex::new(None), owners: DashMap::new(),
+               owners_scanned: tokio::sync::OnceCell::new(), quota_lock: tokio::sync::Mutex::new(()),
+               quota: paste_quota() }
     }
 
     pub async fn create(&self, req: &CreatePasteRequest, author: &str) -> Result<Paste> {
@@ -198,12 +252,57 @@ impl PasteStore {
         // and JSON-parsing every paste body.
         let path = self.dir.join(Self::file_name(&id, expires_at));
         let json = serde_json::to_string_pretty(&paste)?;
+        // r5 (codex P1 paste.rs:230): per-account quota and the server's free-space floor
+        // (the uploads' MIN_FREE_DISK_BYTES), checked and committed under one lock.
+        let _q = self.quota_lock.lock().await;
+        let (count, bytes) = self.author_usage(author).await;
+        let (max_count, max_bytes) = self.quota;
+        if max_count > 0 && count >= max_count {
+            anyhow::bail!("Paste limit reached ({} pastes). Expired pastes are removed automatically; Clear All Data deletes yours.", max_count);
+        }
+        if max_bytes > 0 && bytes.saturating_add(json.len() as u64) > max_bytes {
+            anyhow::bail!("Paste storage limit reached ({} MB). Expired pastes are removed automatically; Clear All Data deletes yours.", max_bytes / (1024 * 1024));
+        }
+        if let Some(avail) = crate::upload::available_disk_bytes(&self.dir) {
+            if avail < crate::upload::MIN_FREE_DISK_BYTES.saturating_add(json.len() as u64) {
+                anyhow::bail!("Server storage is nearly full — try again later");
+            }
+        }
+        let size = json.len() as u64;
         tokio::fs::write(&path, json).await?;
         // audit #46: restrict the freshly written file to 0600 — it contains an
         // Argon2 password hash and the plaintext paste body.
         set_secret_mode(&path).await;
+        self.index.insert(id.clone(), path);
+        self.owners.insert(id.clone(), (author.to_string(), size));
 
         Ok(paste)
+    }
+
+    /// r5: (pastes, bytes) `author` has on disk, per the owners map (scanned once on first use).
+    pub async fn author_usage(&self, author: &str) -> (usize, u64) {
+        self.owners_scanned.get_or_init(|| self.scan_owners()).await;
+        self.owners.iter().filter(|e| e.value().0 == author)
+            .fold((0usize, 0u64), |(n, b), e| (n + 1, b + e.value().1))
+    }
+
+    /// r5: read every paste file once to learn its author (unreadable files are skipped).
+    async fn scan_owners(&self) {
+        let Ok(mut rd) = tokio::fs::read_dir(&self.dir).await else { return };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let Some(name) = entry.file_name().to_str().map(|n| n.to_string()) else { continue };
+            let Some(id) = id_from_name(&name).map(|i| i.to_string()) else { continue };
+            let Ok(json) = tokio::fs::read_to_string(entry.path()).await else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else { continue };
+            let Some(a) = v.get("author").and_then(|a| a.as_str()) else { continue };
+            self.owners.entry(id).or_insert((a.to_string(), json.len() as u64));
+        }
+    }
+
+    /// r5: drop an id from the index and the quota map (the file is gone or being removed).
+    fn forget(&self, id: &str) {
+        self.index.remove(id);
+        self.owners.remove(id);
     }
 
     /// Build the on-disk filename for a paste: `<id>.<expiry_epoch>.json`.
@@ -234,7 +333,11 @@ impl PasteStore {
 
         let json = match tokio::fs::read_to_string(&path).await {
             Ok(j) => j,
-            Err(_) => return Ok(None),
+            Err(_) => {
+                // Vanished from disk (deleted out of band) — drop the stale entry.
+                self.forget(&safe_id);
+                return Ok(None);
+            }
         };
         let paste: Paste = serde_json::from_str(&json)?;
 
@@ -243,6 +346,7 @@ impl PasteStore {
             if chrono::Utc::now().timestamp() > exp {
                 // Expired — delete it
                 let _ = tokio::fs::remove_file(&path).await;
+                self.forget(&safe_id);
                 return Ok(None);
             }
         }
@@ -250,20 +354,47 @@ impl PasteStore {
         Ok(Some(paste))
     }
 
-    /// Find the on-disk path for a paste id by matching the `<id>.` filename
-    /// prefix (the suffix carries the expiry epoch — audit #47).
+    /// Find the on-disk path for a paste id (the `<id>.` filename prefix — the
+    /// suffix carries the expiry epoch, audit #47). O(1) via the in-memory index;
+    /// on a miss, at most one rescan per MISS_RESCAN_EVERY picks up files that
+    /// appeared out of band.
     async fn find_path(&self, safe_id: &str) -> Option<PathBuf> {
-        let prefix = format!("{}.", safe_id);
+        if let Some(p) = self.index.get(safe_id) { return Some(p.clone()); }
+        let due = {
+            let mut last = self.last_rescan.lock().unwrap_or_else(|e| e.into_inner());
+            let due = last.map_or(true, |t| t.elapsed() >= MISS_RESCAN_EVERY);
+            if due { *last = Some(Instant::now()); }
+            due
+        };
+        if due { self.rescan().await; }
+        self.index.get(safe_id).map(|p| p.clone())
+    }
+
+    /// Re-read the pastes dir into the index (adds new files; entries whose file
+    /// is gone are dropped). Returns nothing; best-effort.
+    async fn rescan(&self) {
+        let mut seen = std::collections::HashSet::new();
         if let Ok(mut rd) = tokio::fs::read_dir(&self.dir).await {
             while let Ok(Some(entry)) = rd.next_entry().await {
                 if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with(&prefix) && name.ends_with(".json") {
-                        return Some(entry.path());
+                    if let Some(id) = id_from_name(name) {
+                        seen.insert(id.to_string());
+                        self.index.insert(id.to_string(), entry.path());
                     }
                 }
             }
+        } else {
+            return;
         }
-        None
+        // Only drop entries we didn't see whose file is really gone — a paste
+        // created mid-scan is in the index but may not have been listed.
+        let unseen: Vec<(String, PathBuf)> = self.index.iter()
+            .filter(|e| !seen.contains(e.key()))
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        for (id, path) in unseen {
+            if tokio::fs::metadata(&path).await.is_err() { self.forget(&id); }
+        }
     }
 
     /// Author of a paste. Exposed so the route layer (main.rs) can enforce an
@@ -285,6 +416,40 @@ impl PasteStore {
         }
     }
 
+    /// r4 C1-7 (codex P1 main.rs:326): delete every paste whose `author` is exactly
+    /// `author` (the canonical, lower-case account name the create route stores), the same
+    /// match Clear All Data uses. Account deletion calls this so an erased account's pastes
+    /// stop being served and can never be attributed to (or deleted by) a later account that
+    /// registers the same name. Reads each file (the author is not in the file name); files
+    /// that can't be read or parsed are left alone. Returns how many were removed.
+    pub async fn delete_by_author(&self, author: &str) -> usize {
+        if author.is_empty() { return 0; }
+        let mut removed = 0;
+        let Ok(mut rd) = tokio::fs::read_dir(&self.dir).await else { return 0 };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let path = entry.path();
+            let Some(name) = entry.file_name().to_str().map(|n| n.to_string()) else { continue };
+            let Some(id) = id_from_name(&name).map(|i| i.to_string()) else { continue };
+            let Ok(json) = tokio::fs::read_to_string(&path).await else { continue };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) else { continue };
+            if v.get("author").and_then(|a| a.as_str()) != Some(author) { continue; }
+            if tokio::fs::remove_file(&path).await.is_ok() {
+                self.forget(&id);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    /// Remove one paste by id (r4 C1-7: a paste whose author account was deleted while it
+    /// was being created). Returns true if a file was removed.
+    pub async fn delete(&self, id: &str) -> bool {
+        let Some(path) = self.find_path(id).await else { return false };
+        let ok = tokio::fs::remove_file(&path).await.is_ok();
+        self.forget(id);
+        ok
+    }
+
     /// Clean up expired pastes (call periodically).
     ///
     /// audit #47: the expiry epoch is encoded in the filename
@@ -302,11 +467,15 @@ impl PasteStore {
                 if let Some(exp) = Self::expiry_from_name(&name) {
                     // exp == 0 means "never expires" — skip.
                     if exp != 0 && now > exp {
-                        let _ = tokio::fs::remove_file(entry.path()).await;
+                        if tokio::fs::remove_file(entry.path()).await.is_ok() {
+                            if let Some(id) = id_from_name(&name) { self.forget(id); }
+                        }
                     }
                 }
             }
         }
+        // Same hourly cadence: reconcile the index with the directory.
+        self.rescan().await;
     }
 
     /// Parse the expiry epoch out of a `<id>.<expiry_epoch>.json` filename.
@@ -432,6 +601,103 @@ mod tests {
         let (store, dir) = test_store();
         assert!(store.create(&req("hello".into(), Some("exe")), "tester").await.is_err());
         assert!(store.create(&req("hello".into(), Some("HTML")), "tester").await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn index_finds_existing_new_and_legacy_files_without_scanning() {
+        let dir = std::env::temp_dir().join(format!("cryptirc-paste-idx-{}", Uuid::new_v4()));
+        let pastes = dir.join("pastes");
+        std::fs::create_dir_all(&pastes).unwrap();
+        // A legacy `<id>.json` and a current `<id>.<exp>.json` present at startup.
+        let legacy = Paste { id: "legacyid".into(), ..full_paste(PasteKind::Text) };
+        std::fs::write(pastes.join("legacyid.json"), serde_json::to_string(&legacy).unwrap()).unwrap();
+        let cur = Paste { id: "curid".into(), ..full_paste(PasteKind::Markdown) };
+        std::fs::write(pastes.join("curid.0.json"), serde_json::to_string(&cur).unwrap()).unwrap();
+        let store = PasteStore::new(dir.to_str().unwrap());
+        assert!(store.get("legacyid").await.unwrap().is_some());
+        assert_eq!(store.get("curid").await.unwrap().unwrap().content_type, PasteKind::Markdown);
+        // Created after startup → in the index immediately.
+        let p = store.create(&req("x".into(), None), "t").await.unwrap();
+        assert!(store.get(&p.id).await.unwrap().is_some());
+        // Unknown id → None (one rate-limited rescan at most).
+        assert!(store.get("nope").await.unwrap().is_none());
+        // A file dropped out of band is NOT seen until the rescan window passes,
+        // proving a miss doesn't scan the directory every time …
+        let oob = Paste { id: "oobid".into(), ..full_paste(PasteKind::Text) };
+        std::fs::write(pastes.join("oobid.0.json"), serde_json::to_string(&oob).unwrap()).unwrap();
+        assert!(store.get("oobid").await.unwrap().is_none());
+        // … but the hourly cleanup reconciles it, and drops deleted files.
+        std::fs::remove_file(pastes.join("curid.0.json")).unwrap();
+        store.cleanup_expired().await;
+        assert!(store.get("oobid").await.unwrap().is_some());
+        assert!(store.index.get("curid").is_none());
+        // Expired paste: deleted on view and removed from the index.
+        let exp = Paste { id: "expid".into(), expires_at: Some(1), ..full_paste(PasteKind::Text) };
+        std::fs::write(pastes.join("expid.1.json"), serde_json::to_string(&exp).unwrap()).unwrap();
+        store.index.insert("expid".into(), pastes.join("expid.1.json"));
+        assert!(store.get("expid").await.unwrap().is_none());
+        assert!(!pastes.join("expid.1.json").exists());
+        assert!(store.index.get("expid").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// r4 C1-7: account deletion removes exactly that account's pastes (files + index), so
+    /// their links stop working; other authors' pastes (incl. a name that merely starts the
+    /// same) and unparseable files are untouched.
+    #[tokio::test]
+    async fn r4_delete_by_author_removes_only_that_accounts_pastes() {
+        let (store, dir) = test_store();
+        let a1 = store.create(&req("alice one".into(), None), "alice").await.unwrap();
+        let a2 = store.create(&CreatePasteRequest { expires_in: Some(3600), ..req("alice two".into(), Some("markdown")) }, "alice").await.unwrap();
+        let b = store.create(&req("bob".into(), None), "bob").await.unwrap();
+        let al = store.create(&req("alice2".into(), None), "alice2").await.unwrap();
+        std::fs::write(dir.join("pastes").join("junk.0.json"), b"{not json").unwrap();
+        assert_eq!(store.delete_by_author("alice").await, 2);
+        assert!(store.get(&a1.id).await.unwrap().is_none());
+        assert!(store.get(&a2.id).await.unwrap().is_none());
+        assert!(store.index.get(&a1.id).is_none() && store.index.get(&a2.id).is_none());
+        assert!(store.get(&b.id).await.unwrap().is_some());
+        assert!(store.get(&al.id).await.unwrap().is_some());
+        assert!(dir.join("pastes").join("junk.0.json").exists());
+        assert_eq!(store.delete_by_author("alice").await, 0, "idempotent");
+        assert_eq!(store.delete_by_author("").await, 0);
+        // Single delete by id.
+        assert!(store.delete(&b.id).await);
+        assert!(store.get(&b.id).await.unwrap().is_none());
+        assert!(!store.delete(&b.id).await);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// r5 (codex P1 paste.rs:230): the per-account quota counts pastes already on disk
+    /// (learned by the one-time scan), refuses beyond it, is per author, and frees up when
+    /// pastes are deleted.
+    #[tokio::test]
+    async fn r5_per_account_paste_quota() {
+        let (mut store, dir) = test_store();
+        // Two pastes by "heavy" already on disk before this process (out of band).
+        for id in ["oldaa", "oldbb"] {
+            let p = Paste { id: id.into(), author: "heavy".into(), ..full_paste(PasteKind::Text) };
+            std::fs::write(dir.join("pastes").join(format!("{}.0.json", id)), serde_json::to_string(&p).unwrap()).unwrap();
+        }
+        store.quota = (3, 1_000_000);
+        let a = store.create(&req("one".into(), None), "heavy").await;
+        assert!(a.is_ok(), "{:?}", a.as_ref().err());
+        let b = store.create(&req("two".into(), None), "heavy").await;
+        let e = b.err().map(|e| e.to_string()).unwrap_or_default();
+        println!("R5 paste quota: 4th paste of an account limited to 3 -> {e}");
+        assert!(e.contains("Paste limit reached"), "{e}");
+        assert!(store.create(&req("other".into(), None), "light").await.is_ok(), "per author");
+        assert_eq!(store.author_usage("heavy").await.0, 3);
+        // Bytes: a big paste over the byte quota is refused.
+        store.quota = (100, 50_000);
+        let big = store.create(&req("a".repeat(60_000), None), "light").await;
+        assert!(big.err().map(|e| e.to_string()).unwrap_or_default().contains("storage limit"));
+        // Deleting frees the slot.
+        store.quota = (3, 1_000_000);
+        assert_eq!(store.delete_by_author("heavy").await, 3);
+        assert_eq!(store.author_usage("heavy").await, (0, 0));
+        assert!(store.create(&req("again".into(), None), "heavy").await.is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

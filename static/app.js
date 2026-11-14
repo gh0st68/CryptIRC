@@ -9,6 +9,10 @@
     const orig = localStorage.setItem.bind(localStorage);
     let _lastQuotaToast = 0;
     localStorage.setItem = function(k, v){
+      // While sign-out / account-switch is wiping this account's local data, drop
+      // late CryptIRC writes from timers/unload handlers so nothing is re-persisted
+      // for the next account (see _wipeCryptircData).
+      if(window._cryptircWiping && _isCryptircKey(k)) return;
       try { return orig(k, v); }
       catch(e){
         const isQuota = e && (e.name === 'QuotaExceededError'
@@ -29,6 +33,20 @@
     };
   }catch(_){}
 })();
+// Every browser-storage key CryptIRC writes starts with "cryptirc" (localStorage
+// keys, IndexedDB/Cache names) or is a PM-protection cooldown stamp "bp:<conn>:<nick>".
+// The app shares its origin with whatever else is hosted on the domain, so sign-out
+// wipes exactly this namespace rather than the whole origin.
+function _isCryptircKey(k){ return typeof k==='string' && (k.indexOf('cryptirc')===0 || k.indexOf('bp:')===0); }
+// Which account the CryptIRC data in this browser belongs to. Upgrade path: older
+// builds only kept `cryptirc_user` (set at login, removed at sign-out), so adopt it
+// once — at load, before a new login can overwrite it.
+try{
+  if(localStorage.getItem('cryptirc_data_owner')==null){
+    const _u=localStorage.getItem('cryptirc_user');
+    if(_u) localStorage.setItem('cryptirc_data_owner',_u);
+  }
+}catch(_){}
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let ws=null, sessionToken=null, currentUser=null;
@@ -68,11 +86,13 @@ try{const ua=JSON.parse(localStorage.getItem('cryptirc_unread_asof')||'{}');for(
     try{const oa={};for(const[k,v] of unreadAsOf)oa[k]=v;localStorage.setItem('cryptirc_unread_asof',JSON.stringify(oa));}catch(e){}
   }
 }
-function saveUnread(){
+// `low`: an unread bump from a background line (every other open device counts it
+// too) — a background save; clears/reads stay normal saves.
+function saveUnread(low){
   try{
     const o={};for(const[k,v] of unread)o[k]=v;localStorage.setItem('cryptirc_unread',JSON.stringify(o));
     const oa={};for(const[k,v] of unreadAsOf)oa[k]=v;localStorage.setItem('cryptirc_unread_asof',JSON.stringify(oa));
-  }catch(e){} savePrefsToServer();
+  }catch(e){} savePrefsToServer(low===true);
 }
 // The two mutation sites every unread change must go through, so `unread` and
 // `unreadAsOf` (its freshness timestamp) never drift apart.
@@ -113,6 +133,24 @@ function _allLastReadTs(){
     }
   }catch(e){}
   return o;
+}
+// r7 (codex-p3 app.js:3175): at most this many open private conversations per network
+// receive NEW incoming nicks; past it they go to OVERFLOW_Q (same name and limit as the
+// TUI; the server logs over-budget lines under the same name). /query <nick> opens one.
+const MAX_AUTO_QUERIES_PER_NET=200, OVERFLOW_Q='*overflow*';
+const _overflowNoticed=new Set();
+function _strangerOverflow(conn_id,target){
+  const lc=String(target||'').toLowerCase();
+  if(!lc||lc===OVERFLOW_Q||target===_STATUS_NICK_Q) return false;
+  const m=queryBufs[conn_id];
+  if(m&&m.has(lc)) return false;                                   // an open conversation
+  const b=buffers[bk(conn_id,target)]; if(b&&b.length) return false;   // known (history / closed query)
+  if(!m||m.size-(m.has(OVERFLOW_Q)?1:0)<MAX_AUTO_QUERIES_PER_NET) return false;   // r8: the overflow window takes no slot
+  if(!_overflowNoticed.has(conn_id)){
+    _overflowNoticed.add(conn_id);
+    try{ sysMsg(conn_id,'status',`⚠ Too many open private conversations on this network (${MAX_AUTO_QUERIES_PER_NET}) — messages from new nicks are shown in ${OVERFLOW_Q}, prefixed with the nick. Close conversations you don't need, or /query <nick> to open one.`,'system'); }catch(_){}
+  }
+  return true;
 }
 // Persist open DM windows across refresh
 function saveQueryBufs(){
@@ -181,8 +219,9 @@ function openDetachedWindow(conn_id,target,jump){
   const k=_detKey(conn_id,target);
   const existing=_detachedWindows[k];
   if(existing && !existing.closed){try{existing.focus();if(jump&&typeof existing.jumpToMessage==='function')existing.jumpToMessage(conn_id,target,jump.ts,jump.from,jump.match);}catch(_){} return;}
-  const basePath=(document.location.pathname.match(/^\/[^\/]+/)||[''])[0]||'';
-  const url=basePath+'/?detached=1&conn='+encodeURIComponent(conn_id)+'&target='+encodeURIComponent(target)+(jump?'&ts='+encodeURIComponent(jump.ts)+'&from='+encodeURIComponent(jump.from||''):'');
+  // '/cryptirc/' is rewritten server-side to the configured base path (any depth,
+  // or '/' for a root install), unlike guessing it from the first path segment.
+  const url='/cryptirc/?detached=1&conn='+encodeURIComponent(conn_id)+'&target='+encodeURIComponent(target)+(jump?'&ts='+encodeURIComponent(jump.ts)+'&from='+encodeURIComponent(jump.from||''):'');
   const name='cryptirc-d-'+conn_id+'-'+target.toLowerCase().replace(/[^a-z0-9_-]/g,'_');
   const w=window.open(url,name,'width=900,height=700,resizable=yes,scrollbars=yes');
   if(w){
@@ -236,6 +275,7 @@ if(_detachedChannel){
 // Detached-window bootstrap: emit `bye` on close; auto-setActive handled in state handler.
 if(_detMode && _detachedChannel){
   window.addEventListener('beforeunload',()=>{
+    if(window._updateReloading) return;   // r10: reloading for an update — it comes straight back
     try{_detachedChannel.postMessage({type:'bye',conn_id:_detConn,target:_detTarget});}catch(_){}
   });
 }
@@ -253,6 +293,174 @@ function _canPopOut(){return !_detMode && !!_detachedChannel && !window.matchMed
 
 let inputHistory=[], historyIdx=-1;
 try{inputHistory=(JSON.parse(localStorage.getItem('cryptirc_input_history')||'[]')||[]).map(redactSensitive);}catch(e){}
+// ── E2E plaintext stays out of the synced prefs blob ──────────────────────────
+// The prefs blob is encrypted by the SERVER (with the vault key it holds), so
+// anything in it is readable server-side. Decrypted E2E messages and lines typed
+// into E2E conversations must therefore never be uploaded in it: input history,
+// Notices, the blocked-PM log and the nick monitor keep them on this device only
+// and the synced copy carries a placeholder (see _scrubE2eForSync).
+//
+// Input-history lines this device may upload. A line is added only when it was
+// typed here to a conversation with no E2E state; lines of unknown origin (written
+// before this rule, or adopted from an old client's blob) stay local.
+let _histSyncOk=new Set();
+try{ const a=JSON.parse(localStorage.getItem('cryptirc_input_history_sync')||'[]'); if(Array.isArray(a)) _histSyncOk=new Set(a.filter(x=>typeof x==='string')); }catch(_){}
+// r4 (codex-p3 HIGH app.js:6099, integrator decision C3-1): is the E2E engine (e2e.js, a
+// separate deferred script) loaded? It ran (or failed) before DOMContentLoaded, i.e.
+// before init()/checkAuth()/connectWs(), so by the time anything is sent the answer is
+// final. Without it the page cannot tell which conversations are encrypted, so it must
+// fail closed: no `e2e:2` in the auth frame (the server's outdated-tab guard then
+// applies), no chat line sent, no input history / settings uploaded (see
+// _e2eEngineFailed and its callers). E2E._engineLoaded is false while e2e.js is still
+// running its top level and true once it reached its last line; an older e2e.js has no
+// such field (undefined) and counts as loaded. e2eTargetState exists in every e2e.js
+// since r2 — an older cached copy (no e2eTargetState) can't do the current protocol.
+function _e2eEngineOk(){
+  try{
+    const E=window.E2E;
+    return !!E && typeof E==='object' && E._engineLoaded!==false
+      && typeof e2eEncryptOutgoing==='function' && typeof e2eDecryptIncoming==='function' && typeof e2eTargetState==='function';
+  }catch(_){ return false; }
+}
+const _E2E_ENGINE_FAIL_TEXT='Encryption engine failed to load — reload the page (Ctrl+Shift+R, or close and reopen the app).';
+let _e2eEngineFailToastAt=0;
+// Show (once) a banner that stays up, plus a toast; `conn_id`/`target`: also a line in
+// that window (a refused send).
+function _e2eEngineFailNotice(conn_id,target){
+  try{
+    if(!document.getElementById('e2e-engine-fail')){
+      const b=document.createElement('div'); b.id='e2e-engine-fail'; b.setAttribute('role','alert');
+      b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:10000;background:var(--red,#c0392b);color:#fff;font-size:13px;line-height:1.4;padding:8px 12px;padding-top:max(8px,var(--sat,0px));display:flex;gap:10px;align-items:center;justify-content:center;flex-wrap:wrap;text-align:center';
+      const t=document.createElement('span'); t.textContent='🔒 '+_E2E_ENGINE_FAIL_TEXT+' Until then no chat message, typing notice or search leaves this device.';
+      const r=document.createElement('button'); r.type='button'; r.textContent='Reload';
+      r.style.cssText='background:#fff;color:#000;border:0;border-radius:6px;padding:4px 12px;font-weight:600;cursor:pointer';
+      r.onclick=()=>{ try{ location.reload(); }catch(_){} };
+      b.appendChild(t); b.appendChild(r); document.body.appendChild(b);
+    }
+  }catch(_){}
+  const now=Date.now();
+  if(now-_e2eEngineFailToastAt>5000){ _e2eEngineFailToastAt=now; try{ showToast('🔒 Not sent: '+_E2E_ENGINE_FAIL_TEXT); }catch(_){} }
+  if(conn_id&&target){ try{ sysMsg(conn_id,target,'🔒 Message not sent — '+_E2E_ENGINE_FAIL_TEXT,'error'); }catch(_){} }
+}
+// Has e2e.js learned which conversations are encrypted (the server's keyring list)?
+// Until then nothing typed is treated as safe to sync. r4 (C3-1): without the engine
+// that is never learned (it used to count as "known, nothing encrypted").
+function _e2eKnown(){ try{ return _e2eEngineOk() && !!window.E2E._krReceived; }catch(_){ return false; } }
+// Is `target` an end-to-end encrypted conversation for this account? Definitive
+// signals only (a key or session held, E2E switched on, or the server's list).
+// r4 (codex-p3 HIGH app.js:297 + agy-flash F3-1): `target` is first resolved the way the
+// send path resolves it (e2e.js e2eTargetState): an RFC1459 spelling of an E2E name
+// (#secret{ for #secret[) is that name (_e2eCanon; ambiguous → treated as E2E), and the
+// channel behind a STATUSMSG prefix (@#chan) / the nick of nick!user@host is checked
+// too (_e2eAliasesOf). `/msg #secret{ …` encrypts with #secret['s key, so the typed line
+// must stay local like one typed in #secret[ itself. `cid` = the connection (its
+// CASEMAPPING / STATUSMSG); without it the widest rules apply (RFC1459, default prefixes).
+function _isE2eConvName(E,k){
+  if((E.channelKeys&&E.channelKeys[k])||(E.dmSessions&&E.dmSessions[k])||(E.chanRemoved&&E.chanRemoved[k])) return true;
+  const st=E.state;
+  if(st&&((st.dm&&st.dm[k]&&st.dm[k].on)||(st.ch&&st.ch[k]&&st.ch[k].on))) return true;
+  const sh=E._serverHints;
+  if(sh&&((Array.isArray(sh.peers)&&sh.peers.includes(k))||(Array.isArray(sh.channels)&&sh.channels.includes(k)))) return true;
+  if(typeof _e2eHints==='function'){ const h=_e2eHints(); if(h.dm.includes(k)||h.ch.includes(k)) return true; }
+  // "/encrypt on" in progress (e2eTargetState blocks sends to it the same 2 minutes).
+  const pend=E._pendingOn&&E._pendingOn[k]; if(pend&&(pend.answered||Date.now()-(pend.t||0)<120000)) return true;   // r6: answered = being set up
+  return false;
+}
+function _isE2eConvResolved(E,t,cid){
+  const k=t.toLowerCase();
+  if(_isE2eConvName(E,k)) return true;
+  if(typeof _e2eCanon==='function'){
+    const c=_e2eCanon(t,cid||null);
+    if(c===null) return true;                       // fold-equal to several E2E names / a distinct one: E2E
+    if(c!==k && _isE2eConvName(E,c)) return true;
+  }
+  return false;
+}
+function _isE2eConversation(target,cid){
+  try{
+    const E=window.E2E; if(!E||!target) return false;
+    const t=String(_e2eRealTarget(target));
+    if(_isE2eConvResolved(E,t,cid)) return true;
+    if(typeof _e2eAliasesOf==='function'){
+      for(const a of _e2eAliasesOf(t,cid||null)) if(a && a!==t && _isE2eConvResolved(E,String(a),cid)) return true;
+    }
+    // …and whatever the send path itself would not send in cleartext (e2eTargetState:
+    // encrypted, or blocked — incl. an alias / ambiguous spelling). `incoming` = no
+    // discovery kick and no "status not known yet" block (_e2eKnown covers that).
+    if(typeof e2eTargetState==='function'){
+      const st=e2eTargetState(t,{conn_id:cid||null,incoming:true});
+      if(st&&st.mode&&st.mode!=='none') return true;
+    }
+  }catch(_){}
+  return false;
+}
+// Every conversation a typed line may send text to: the active window (plain lines and
+// any slash command not known to send nothing there), plus the explicit target(s) of a
+// message command (comma lists split; /quote|/raw PRIVMSG|NOTICE <t>).
+const _HIST_NO_TEXT_CMDS=new Set(['JOIN','J','PART','LEAVE','CYCLE','REJOIN','NICK','WHOIS','WI','WHO','WHOWAS','MONITOR','WATCH','UNMONITOR','UNWATCH','IGNORE','UNIGNORE','AWAY','BACK','MODE','OP','DEOP','VOICE','DEVOICE','INVITE','NAMES','LIST','CLEAR','HELP','ENCRYPT','E2E','KEY','CHANKEY','SEEN','PING','LAG','VERSION','TIME','MOTD','LINKS']);
+const _HIST_TARGET_CMDS=new Set(['MSG','PRIVMSG','QUERY','NOTICE','CTCP','DESCRIBE']);
+function _histTargetsOf(raw,act){
+  const out=[]; const cur=act&&act.target;
+  if(!raw.startsWith('/')){ if(cur) out.push(cur); return out; }
+  const p=raw.slice(1).split(/\s+/), cmd=(p[0]||'').toUpperCase();
+  if(cur && !_HIST_NO_TEXT_CMDS.has(cmd)) out.push(cur);
+  let tg='';
+  if(_HIST_TARGET_CMDS.has(cmd)) tg=p[1]||'';
+  else if((cmd==='QUOTE'||cmd==='RAW') && /^(privmsg|notice)$/i.test(p[1]||'')) tg=p[2]||'';
+  for(const x of tg.split(',')) if(x) out.push(x);
+  return out;
+}
+function _histLineIsE2e(raw,act){ const cid=act&&act.conn_id; return !_e2eKnown() || _histTargetsOf(raw,act).some(t=>_isE2eConversation(t,cid)); }
+// r3 (codex-p3 HIGH app.js:13542): lines typed while a target WAS encrypted must stay
+// local for good — also after "/encrypt off" removes the last E2E conversation (the
+// "no E2E conversation at all" shortcut below used to upload them then). Two records:
+//  - _histLocal: lines typed to a conversation with E2E state. Never uploaded, even if
+//    the same text is also on the sync list (a local-only mark always wins).
+//  - the "E2E seen" flag: this device has seen this account use E2E, so lines of
+//    unknown origin (typed before the server's E2E list arrived, or kept from an older
+//    app.js that did not record any of this) stay local too.
+let _histLocal=new Set();
+try{ const a=JSON.parse(localStorage.getItem('cryptirc_input_history_local')||'[]'); if(Array.isArray(a)) _histLocal=new Set(a.filter(x=>typeof x==='string')); }catch(_){}
+// Definite evidence (never a guess) that this account uses or used E2E: a conversation
+// with E2E on/listed/held now, an explicit "off" recorded in the E2E state, or a pinned
+// peer identity.
+function _e2eEverUsed(){
+  try{
+    const E=window.E2E; if(!E) return false;
+    const sh=E._serverHints;
+    if(sh&&(((sh.peers||[]).length)||((sh.channels||[]).length))) return true;
+    if(Object.keys(E.dmSessions||{}).length||Object.keys(E.channelKeys||{}).length||Object.keys(E.chanRemoved||{}).length) return true;
+    const st=E.state;
+    if(st&&(Object.keys(st.dm||{}).length||Object.keys(st.ch||{}).length||Object.keys(st.trust||{}).length)) return true;
+    if(Object.keys(E.trustStore||{}).length) return true;
+    if(typeof _e2eHints==='function'){ const h=_e2eHints(); if(h.dm.length||h.ch.length) return true; }
+  }catch(_){}
+  return false;
+}
+function _histE2eSeen(){
+  try{ if(localStorage.getItem('cryptirc_input_history_e2e_seen')) return true; }catch(_){}
+  if(_histLocal.size||_e2eEverUsed()){ try{ localStorage.setItem('cryptirc_input_history_e2e_seen','1'); }catch(_){} return true; }
+  return false;
+}
+// A command that never sends text to any conversation is safe to sync whatever window
+// it was typed in — so such lines keep syncing even when their origin is unknown.
+function _histNoTextCmd(l){ return typeof l==='string' && l.charAt(0)==='/' && _HIST_NO_TEXT_CMDS.has((l.slice(1).split(/\s+/)[0]||'').toUpperCase()); }
+function _histSyncable(l){ return !_histLocal.has(l) && (_histSyncOk.has(l) || _histNoTextCmd(l)); }
+// No E2E conversation exists for this account at all (none on the server's list, none
+// held or switched on here): then no history line can be E2E plaintext, whatever its origin.
+function _e2eNoConversations(){
+  try{
+    if(!_e2eKnown()) return false;
+    const E=window.E2E; if(!E) return true;
+    const sh=E._serverHints||{};
+    if((sh.peers||[]).length||(sh.channels||[]).length) return false;
+    if(Object.keys(E.dmSessions||{}).length||Object.keys(E.channelKeys||{}).length) return false;
+    const st=E.state; if(st&&(Object.values(st.dm||{}).some(x=>x&&x.on)||Object.values(st.ch||{}).some(x=>x&&x.on))) return false;
+    if(typeof _e2eHints==='function'){ const h=_e2eHints(); if(h.dm.length||h.ch.length) return false; }
+    return true;
+  }catch(_){ return false; }
+}
+const _E2E_HIDDEN_TEXT='🔒 Encrypted message (not synced to other devices)';
 // Strip credentials from any command line that may carry a password/secret
 // before it is stored in history, persisted to localStorage, or uploaded to
 // the server. The visible/sent command is unaffected — only the stored copy
@@ -277,7 +485,9 @@ function redactSensitive(line){
   // Require a channel token AND a key token before masking so the keyless form `/join #chan`
   // keeps its channel name in history (mirrors the /key rule above). Only the persisted/
   // uploaded history copy is affected — the dispatched JOIN uses the raw line.
+  // `/encrypt add <32 words>` (alias /e2e) imports an E2E channel/DM key: mask the words.
   line=line.replace(/^(\/(?:key|chankey)\s+\S+)\s+\S[\s\S]*$/i,'$1 •••')
+           .replace(/^(\/(?:encrypt|e2e)\s+add)\s+\S[\s\S]*$/i,'$1 •••')
            .replace(/^(\/gif\s+key)\s+\S[\s\S]*$/i,'$1 •••')
            .replace(/^(\/join\s+\S+)\s+\S[\s\S]*$/i,'$1 •••');
   // Mask credentials before a line is stored in input history / uploaded to the server.
@@ -311,10 +521,17 @@ function redactSensitive(line){
   r=r.replace(/^(\/(?:squery|(?:quote|raw)\s+squery)\s+\S+)\s+\S[\s\S]*$/i,'$1 •••');
   return r;
 }
+// r3: the local-only marks, bounded to the lines still in history (like the sync list).
+function _saveHistLocal(){
+  try{ const keep=new Set(inputHistory); for(const l of [..._histLocal]) if(!keep.has(l)) _histLocal.delete(l); localStorage.setItem('cryptirc_input_history_local',JSON.stringify([..._histLocal].slice(-500))); }catch(_){}
+}
 function saveInputHistory(){
   // Redact credentials, then keep the most recent 100 lines.
   const safe=inputHistory.map(redactSensitive).slice(-100);
   try{localStorage.setItem('cryptirc_input_history',JSON.stringify(safe));}catch(e){}
+  // Keep the sync allow-list to lines still in history (bounded like the history).
+  try{ const keep=new Set(inputHistory); for(const l of [..._histSyncOk]) if(!keep.has(l)) _histSyncOk.delete(l); localStorage.setItem('cryptirc_input_history_sync',JSON.stringify([..._histSyncOk].slice(-500))); }catch(e){}
+  _saveHistLocal();
   savePrefsToServer();
 }
 let lagMap={};
@@ -565,6 +782,7 @@ async function loadLoginCaptcha(){
 }
 async function doLogout() {
   if(!(await customConfirm('Sign out?','Sign out'))) return;
+  try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){}
   // #6/F25: unsubscribe push BEFORE the logout POST (and before dropping the token).
   // DELETE /cryptirc/push/subscribe needs the Bearer token to remove the server
   // record (data/push/<user>.json), and the logout POST invalidates that token — if
@@ -573,21 +791,164 @@ async function doLogout() {
   // still-registered endpoint (push gate opens once the WS closes) and the SW
   // showing them on this shared device for the next user to read.
   try{ await unsubscribePush(); }catch(_){}
-  if(sessionToken) fetch('/cryptirc/auth/logout',{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}}).catch(()=>{});
+  // Awaited (bounded) because a hard reload follows: a fire-and-forget POST could be
+  // cancelled by the navigation and leave the session valid server-side.
+  if(sessionToken){
+    try{ await Promise.race([
+      fetch('/cryptirc/auth/logout',{method:'POST',keepalive:true,headers:{'Authorization':'Bearer '+sessionToken}}).catch(()=>{}),
+      new Promise(r=>setTimeout(r,3000)),
+    ]); }catch(_){}
+  }
   // #75: clear the SW notif-intent cache (last notification's conn_id/from/ts) so it
   // doesn't persist on disk across logout / to the next user.
   try{ navigator.serviceWorker?.controller?.postMessage({type:'clear_notif_intent'}); }catch(_){}
   sessionToken=null; currentUser=null;
-  localStorage.removeItem('cryptirc_token'); localStorage.removeItem('cryptirc_user');
-  if(ws) ws.close();
+  if(ws){ try{ ws.onclose=null; ws.onerror=null; ws.close(); }catch(_){} }
   document.getElementById('auth-screen').style.display='flex';
   document.getElementById('app').style.display='none';
   document.getElementById('vault-overlay').classList.remove('show');
-  // Logout swaps to the auth screen WITHOUT a reload: tear down the PWA install
-  // banner and gate so it can't linger over (or pop up on) the login screen.
   window._appShown=false;
   try{ _hidePwaBanner(); }catch(_){}
+  // Shared/family device: the next account must not inherit ANYTHING from this one
+  // (open buffers, input history, Notices incl. decrypted E2E text, notes, channel
+  // keys, GIF API keys, ignore/PM lists, upload blobs, E2E key store...). Wipe all
+  // CryptIRC browser storage, then hard-reload so no in-memory state survives.
+  await _wipeCryptircData(null);
+  _cryptircHardReload();
 }
+
+// ─── Per-account local data: sign-out wipe + account-switch guard ────────────
+// Device-level keys that hold no account data and survive a wipe. Kept tiny:
+//   cryptirc_pwa_dismissed — "don't offer Install App again" timestamp for this device.
+const _CRYPTIRC_KEEP_KEYS=new Set(['cryptirc_pwa_dismissed']);
+// Keys that identify the session itself rather than hold user data.
+const _CRYPTIRC_SESSION_KEYS=new Set(['cryptirc_token','cryptirc_user','cryptirc_data_owner','cryptirc_wipe_pending']);
+function _cryptircStoreKeys(st){
+  const out=[];
+  try{ for(let i=0;i<st.length;i++){ const k=st.key(i); if(_isCryptircKey(k)) out.push(k); } }catch(_){}
+  return out;
+}
+// True if this browser holds CryptIRC user data (anything beyond session/device keys).
+function _hasCryptircUserData(){
+  return _cryptircStoreKeys(localStorage).some(k=>!_CRYPTIRC_KEEP_KEYS.has(k)&&!_CRYPTIRC_SESSION_KEYS.has(k));
+}
+function _deleteIdb(name){
+  return new Promise(res=>{
+    let done=false; const fin=()=>{ if(!done){ done=true; res(); } };
+    try{
+      const rq=indexedDB.deleteDatabase(name);
+      rq.onsuccess=fin; rq.onerror=fin;
+      // Blocked by a connection that ignores versionchange: the delete stays queued
+      // and completes once the page unloads; the next boot also re-runs it.
+      rq.onblocked=()=>setTimeout(fin,500);
+    }catch(_){ fin(); }
+    setTimeout(fin,3000);
+  });
+}
+async function _wipeCryptircIdb(){
+  if(!self.indexedDB) return;
+  try{ if(_idbReady){ const db=await _idbReady.catch(()=>null); _idbReady=null; if(db) db.close(); } }catch(_){}
+  const names=new Set(['cryptirc-uploads','cryptirc-e2e']);
+  try{
+    if(indexedDB.databases){
+      for(const d of (await indexedDB.databases())||[]){
+        if(d && typeof d.name==='string' && /^cryptirc/i.test(d.name)) names.add(d.name);
+      }
+    }
+  }catch(_){}
+  await Promise.all([...names].map(_deleteIdb));
+}
+async function _wipeCryptircCaches(){
+  if(!self.caches) return;
+  try{
+    for(const name of await caches.keys()){
+      if(name==='cryptirc-notif-intent'||name==='cryptirc-push-resub'){ await caches.delete(name); continue; }
+      if(name.indexOf('cryptirc')!==0) continue;
+      // App-shell cache: keep the shell (offline boot) but drop every navigation copy
+      // whose URL carries a query (?conn=…&target=<nick>&from=… / ?detached=…).
+      const c=await caches.open(name);
+      for(const req of await c.keys()){ try{ if(new URL(req.url).search) await c.delete(req); }catch(_){} }
+    }
+  }catch(_){}
+}
+// Remove every CryptIRC key from localStorage/sessionStorage (minus the device-level
+// allowlist), the session cookie, CryptIRC IndexedDB databases (upload blobs, E2E key
+// store) and user-bearing CacheStorage entries. `keep` = {key:value} written back
+// afterwards (account switch keeps the NEW session). Late writes from timers and
+// unload handlers are dropped while window._cryptircWiping is set (the page is about
+// to be reloaded, so the flag is never cleared).
+async function _wipeCryptircData(keep){
+  window._cryptircWiping=true;
+  for(const st of [localStorage, sessionStorage]){
+    try{ for(const k of _cryptircStoreKeys(st)) if(!_CRYPTIRC_KEEP_KEYS.has(k)) st.removeItem(k); }catch(_){}
+  }
+  try{ Storage.prototype.setItem.call(localStorage,'cryptirc_wipe_pending','1'); }catch(_){}
+  try{ for(const k in (keep||{})) Storage.prototype.setItem.call(localStorage,k,String(keep[k])); }catch(_){}
+  try{
+    document.cookie='cryptirc_token=;max-age=0;path=/cryptirc';
+    document.cookie='cryptirc_token=;max-age=0;path=/';
+  }catch(_){}
+  await _wipeCryptircIdb();
+  await _wipeCryptircCaches();
+}
+// Boot half of the wipe: IndexedDB deletes that were blocked by an open connection
+// at sign-out are retried before anything reopens the databases.
+async function _finishPendingWipe(){
+  try{
+    if(localStorage.getItem('cryptirc_wipe_pending')!=='1') return;
+    await _wipeCryptircIdb();
+    localStorage.removeItem('cryptirc_wipe_pending');
+  }catch(_){}
+}
+function _cryptircHardReload(){
+  // Drop the query string too (notification targets, detached-window params).
+  try{ location.replace(location.pathname); }catch(_){ location.reload(); }
+}
+// Account switch WITHOUT sign-out (session expired → someone else signs in on the
+// login screen): if the local data belongs to a different account — or to an
+// unknown one (left behind by an older build's sign-out) — wipe it and reload as
+// the new account before anything is rendered or synced into its server prefs.
+function _localDataBelongsElsewhere(user){
+  try{
+    if(!user) return false;
+    // Never loop: one wipe+reload per tab per 15 s at most.
+    if(Date.now()-(+sessionStorage.getItem('cryptirc_switch_wipe')||0)<15000) return false;
+    const owner=localStorage.getItem('cryptirc_data_owner');
+    if(owner!=null) return owner.toLowerCase()!==String(user).toLowerCase();
+    return _hasCryptircUserData();
+  }catch(_){ return false; }
+}
+async function _switchAccountWipe(user,token){
+  try{ if(ws){ ws.onclose=null; ws.onerror=null; ws.close(); } }catch(_){}
+  // The previous account's browser push subscription would keep delivering ITS
+  // DMs/mentions to this device (it never signed out). Kill it browser-side; the
+  // new account re-subscribes on connect if it has notifications on.
+  try{
+    const reg=(typeof swRegistration!=='undefined'&&swRegistration)||await navigator.serviceWorker?.getRegistration('/cryptirc/');
+    const sub=await reg?.pushManager?.getSubscription();
+    if(sub) await sub.unsubscribe();
+  }catch(_){}
+  await _wipeCryptircData({cryptirc_token:token, cryptirc_user:user, cryptirc_data_owner:user});
+  try{ sessionStorage.setItem('cryptirc_switch_wipe',String(Date.now())); }catch(_){}
+  _cryptircHardReload();
+}
+// Another tab signed out (its token removed / storage cleared) or switched account:
+// this tab's in-memory state belongs to a dead session — reload instead of letting it
+// keep writing the old account's data back into storage.
+window.addEventListener('storage',e=>{
+  try{
+    const mine=window._tabUser;   // account whose state this tab holds in memory
+    if(window._cryptircWiping || !mine) return;
+    if(e.storageArea && e.storageArea!==localStorage) return;
+    const signedOut = e.key===null || (e.key==='cryptirc_token' && e.newValue==null && !!sessionToken && e.oldValue===sessionToken);
+    const switched = e.key==='cryptirc_data_owner' && !!e.newValue && e.newValue.toLowerCase()!==mine.toLowerCase();
+    if(signedOut||switched){
+      window._cryptircWiping=true;
+      try{ if(ws){ ws.onclose=null; ws.onerror=null; ws.close(); } }catch(_){}
+      _cryptircHardReload();
+    }
+  }catch(_){}
+});
 function setErr(id,msg){document.getElementById(id).textContent=msg;}
 
 // ── Boot splash (Starfield Warp) ─────────────────────────────────────────────
@@ -662,6 +1023,7 @@ function hideBootSplash(){
 })();
 
 async function checkAuth() {
+  await _finishPendingWipe();
   // Check if registration is open
   try{
     const sr=await fetch('/cryptirc/auth/status');
@@ -701,6 +1063,14 @@ async function checkAuth() {
   } catch(e){hideBootSplash();document.getElementById('auth-screen').style.display='flex';}
 }
 function showApp() {
+  if(_localDataBelongsElsewhere(currentUser)){ _switchAccountWipe(currentUser,sessionToken); return; }
+  // This tab still holds another account's in-memory state (its session ended and a
+  // different account signed in on the login screen): start clean.
+  if(window._tabUser && window._tabUser.toLowerCase()!==String(currentUser).toLowerCase()){
+    window._cryptircWiping=true; _cryptircHardReload(); return;
+  }
+  window._tabUser=String(currentUser);
+  try{ localStorage.setItem('cryptirc_data_owner',currentUser); }catch(_){}
   hideBootSplash();
   document.getElementById('auth-screen').style.display='none';
   document.getElementById('app').style.display='flex';
@@ -745,8 +1115,14 @@ function showApp() {
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 let _wsRetries=0;
 let _lastWsActivity=Date.now();
+// True only between this socket's auth_ok and its close. The server drops (and
+// closes on) anything that arrives before the auth frame, so queued chat lines
+// must not drain on a merely-OPEN socket (see drainRateQueue).
+let _wsAuthed=false;
+function _wsReady(){ return !!(ws && ws.readyState===1 && _wsAuthed); }
 function connectWs() {
   if(!sessionToken) return;
+  _wsAuthed=false;
   // Close any existing connection to prevent duplicate event streams
   if(ws){try{ws.onclose=null;ws.onerror=null;ws.onmessage=null;ws.close();}catch(e){}}
   const proto=location.protocol==='https:'?'wss':'ws';
@@ -763,8 +1139,110 @@ function connectWs() {
     if(!_gifCfgOk) _loadGifConfig();
   };
   ws.onmessage=e=>{_lastWsActivity=Date.now();_rxBytes+=(e.data||'').length;_rxCount++;flashLed('rx');updateStarfieldTitle();try{handleEvent(JSON.parse(e.data));}catch(err){console.error('WS parse error:',err);}};
-  ws.onclose=()=>{_rateQueue=[];if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}const d=Math.min(1000*Math.pow(2,_wsRetries),60000);setTimeout(connectWs,d+Math.random()*1000);_wsRetries++;};
+  // The outgoing queue SURVIVES a close (it used to be wiped here, silently losing
+  // lines typed during an outage that were already shown as sent). Stop the drain
+  // poll, flag the still-queued rows as pending, and flush once auth_ok arrives.
+  ws.onclose=()=>{_wsAuthed=false;if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}_markRateQueuePending();const d=Math.min(1000*Math.pow(2,_wsRetries),60000);setTimeout(connectWs,d+Math.random()*1000);_wsRetries++;};
   ws.onerror=()=>ws.close();
+}
+// ── Outgoing chat lines vs. the rate queue ──
+// An optimistic row is shown the moment the user hits Enter. While its line waits
+// in _rateQueue for a (re)authenticated socket it renders as "pending"; if it can
+// never be sent (session ended) it is marked "not sent" instead of silently
+// pretending it went out.
+const _rateRows=new WeakMap();          // queued WS payload -> optimistic msg object
+// r9: a line to several recipients (/msg a,b text, unencrypted: ONE payload) has a row in
+// each recipient's buffer — the first row is the tracked one, the others follow its state.
+const _rowTwins=new WeakMap();          // first row -> [the other recipients' rows]
+function _queueChatSend(payload,msg){
+  rateLimitedSend(payload);
+  if(_rateQueue.includes(payload)){
+    _rateRows.set(payload,msg);
+    if(!_wsReady()) msg.sendState='pending';
+  }
+}
+function _rateSent(payload){
+  const m=_rateRows.get(payload); if(!m) return;
+  _rateRows.delete(payload);
+  delete m.waitE2e;
+  if(m.sendState==='pending'){
+    // Delivered late: show the real send time (it is also what the server logs and
+    // echoes, so later history merges reconcile with this row).
+    for(const x of [m,...(_rowTwins.get(m)||[])]){
+      x.ts=Math.max(x.ts||0, Date.now()/1000|0);
+      try{ document.querySelectorAll('#chat-area .msg-row').forEach(r=>{ if(r._msgRef===x){ r.dataset.ts=x.ts; const t=r.querySelector('.msg-ts'); if(t) t.textContent=_fmtMsgTs(x.ts,'row'); } }); }catch(_){}
+    }
+  }
+  if(m.sendState) _setMsgSendState(m,null);
+}
+function _markRateQueuePending(e2eWait){
+  for(const p of _rateQueue){
+    const m=_rateRows.get(p); if(!m) continue;
+    const w=!!e2eWait;
+    if(m.sendState!=='pending'||!!m.waitE2e!==w){ if(w) m.waitE2e=true; else delete m.waitE2e; _setMsgSendState(m,'pending'); }
+  }
+}
+// r7: on the unlock screen — how many queued lines wait for the unlock.
+function _queueHoldNotice(on){
+  try{
+    let el=document.getElementById('vault-queue-note');
+    const n=new Set(_rateQueue.map(p=>_rateRows.get(p)).filter(Boolean)).size;
+    if(!on||!n){ if(el) el.style.display='none'; return; }
+    if(!el){
+      const box=document.querySelector('#vault-overlay .vault-box'); if(!box) return;
+      el=document.createElement('div'); el.id='vault-queue-note';
+      el.style.cssText='margin-top:12px;font-size:12px;color:var(--text2);text-align:center;line-height:1.5';
+      box.appendChild(el);
+    }
+    el.textContent=`⏳ ${n} message${n===1?'':'s'} you typed earlier ${n===1?'is':'are'} waiting and will be sent after you unlock (whether ${n===1?'its':'their'} conversation is end-to-end encrypted can't be checked while the vault is locked).`;
+    el.style.display='';
+  }catch(_){}
+}
+// Session gone for good (auth_failed): nothing queued can be delivered by it.
+function _failRateQueue(){
+  let n=0;
+  for(const p of _rateQueue){ const m=_rateRows.get(p); if(m){ _rateRows.delete(p); _setMsgSendState(m,'failed'); n++; } }
+  _rateQueue=[]; if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}
+  if(n){ try{ showToast(`${n} queued message${n===1?' was':'s were'} NOT sent — your session ended. They are marked "not sent".`); }catch(_){} }
+}
+// Called on every successful auth_ok: flush whatever queued up while we were away.
+function _kickRateQueue(){
+  if(!_rateQueue.length) return;
+  if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}
+  drainRateQueue();
+}
+function _applySendState(row,msg){
+  row.classList.toggle('msg-pending',msg.sendState==='pending');
+  row.classList.toggle('msg-send-failed',msg.sendState==='failed');
+  row.style.opacity=msg.sendState==='pending'?'.55':'';
+  row.title=msg.sendState==='pending'?(msg.waitE2e?'Waiting until it is known whether this conversation is end-to-end encrypted (if the vault is locked: unlock to send) — it is sent then':'Waiting for connection — will send when reconnected'):msg.sendState==='failed'?'This message was NOT delivered':'';
+  const old=row.querySelector('.msg-send-flag'); if(old) old.remove();
+  if(msg.sendState){
+    const f=document.createElement('span'); f.className='msg-send-flag';
+    f.textContent=msg.sendState==='pending'?' ⏳':' ⚠ not sent';
+    f.style.cssText='margin-left:6px;font-size:11px;flex-shrink:0;'+(msg.sendState==='failed'?'color:var(--red,#e5534b);font-weight:600':'color:var(--text3)');
+    (row.querySelector('.msg-body')||row).appendChild(f);
+  }
+}
+function _setMsgSendState(msg,state){
+  if(state) msg.sendState=state; else delete msg.sendState;
+  try{ document.querySelectorAll('#chat-area .msg-row').forEach(r=>{ if(r._msgRef===msg) _applySendState(r,msg); }); }catch(_){}
+  const tw=_rowTwins.get(msg); if(tw) for(const x of tw){ if(msg.waitE2e) x.waitE2e=true; else delete x.waitE2e; _setMsgSendState(x,state); }
+}
+// Direct (non-queued) chat sends that wsend() refused while offline: the caller
+// still adds its optimistic row right after, synchronously — mark that row failed.
+let _unsentChat=[];
+function _noteUnsentChat(obj){
+  try{
+    const m=/^(PRIVMSG|NOTICE) (\S+) :/i.exec(obj.raw||''); if(!m) return;
+    const now=Date.now(); _unsentChat=_unsentChat.filter(u=>now-u.t<1500);
+    _unsentChat.push({t:now,conn:obj.conn_id,target:m[2].toLowerCase()});
+  }catch(_){}
+}
+function _claimUnsentChat(conn_id,target){
+  const now=Date.now(), lt=String(target||'').toLowerCase();
+  const i=_unsentChat.findIndex(u=>now-u.t<1500&&u.conn===conn_id&&u.target===lt);
+  if(i<0) return false; _unsentChat.splice(i,1); return true;
 }
 // React to browser-level network state changes so the user sees a reconnect
 // happen immediately instead of waiting 30-90s for the WS to notice.
@@ -821,7 +1299,10 @@ function _syncActiveChannel(){
   if(isMessagesConn(active.conn_id)||isUploadsConn(active.conn_id))return;
   const _sk=bk(active.conn_id,active.target),_lid=_lastMsgId[_sk];
   if(_lid>0) wsend({type:'sync',conn_id:active.conn_id,target:active.target,after_id:_lid});
-  else wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:50});
+  // (r3: not re-polled every 5 s for the user "status"'s window while it has no line with
+  // an id: its history request scans the shared "status" log for that user's lines. It
+  // is loaded on open; once a line with an id is in, the Sync above takes over.)
+  else if(active.target!==_STATUS_NICK_Q) wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:50});
 }
 setInterval(()=>{
   _syncActiveChannel();
@@ -921,7 +1402,9 @@ _resetIdleTimer();
 // ─── Starfield (Ubiquiti-style) ───────────────────────────────────────────────
 let _starBurst=0,_txBytes=0,_rxBytes=0,_txCount=0,_rxCount=0;
 try{const sc=JSON.parse(localStorage.getItem('cryptirc_stats')||'{}');_txBytes=sc.tx||0;_rxBytes=sc.rx||0;_txCount=sc.tc||0;_rxCount=sc.rc||0;}catch(e){}
-function saveStats(){try{localStorage.setItem('cryptirc_stats',JSON.stringify({tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount}));}catch(e){} savePrefsToServer();}
+// Traffic counters change with every WS frame (lag pings included): never a reason
+// to save on their own — they ride along with the next real prefs save.
+function saveStats(){try{localStorage.setItem('cryptirc_stats',JSON.stringify({tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount}));}catch(e){} savePrefsToServer(true);}
 function flashLed(dir){
   _starBurst=dir==='tx'?1:2;
   setTimeout(()=>{_starBurst=0;},300);
@@ -1003,12 +1486,209 @@ let _suppressLastReadAdvance=false;
 // OBJECT, so a naive `wire ? sendEnc : sendPlain` would leak "[object Object]" to IRC.
 // Every call site must intercept it: drop the send and warn — never send plaintext.
 function _e2eBlocked(w){ return !!(w && w.e2eBlocked===true); }
-function _e2eBlockedWarn(w){ if(!_e2eBlocked(w)) return false; try{ showToast('🔒 Encrypted session not ready yet — message not sent. Try again in a moment.'); }catch(_){} return true; }
+function _e2eBlockedWarn(w){ if(!_e2eBlocked(w)) return false; try{ const r=window.E2E&&window.E2E.lastBlockReason; showToast('🔒 Not sent: '+(r||'encrypted session not ready yet — try again in a moment.')); if(r&&active) sysMsg(active.conn_id,active.target,'🔒 Message not sent — '+r,'error'); }catch(_){} return true; }
+// Per-network ISUPPORT bits the mode parser needs (PREFIX, CHANMODES), sniffed from
+// the 005 lines the server forwards to the status buffer. Persisted because a web
+// reload reattaches to the long-lived IRC connection without a fresh 005.
+const _isupport=(()=>{ try{ const o=JSON.parse(localStorage.getItem('cryptirc_isupport')||'{}'); return (o&&typeof o==='object')?o:{}; }catch(_){ return {}; } })();
+// r4 (agy-flash F3-2): which status lines are a network's 005 (RPL_ISUPPORT)? irc.rs
+// forwards EVERY numeric it doesn't handle itself to "status" with from "*" (live) and
+// logs it with from "*" (history) — 005 included (its generic numeric arm, irc.rs
+// `cmd if cmd.chars().all(|c| c.is_ascii_digit())`; only non-numeric commands get
+// from = the prefix). A non-numeric line never has from "*" unless the server sent it
+// without a prefix. But other "*" lines can carry text a remote user controls — e.g. a
+// /who reply forwarded to status ends in that user's realname — so merely CONTAINING the
+// 005 phrase is not enough: the whole line must have the 005 shape, i.e. only ISUPPORT
+// tokens (NAME, -NAME, NAME=value) followed by the closing phrase. (ngIRCd says "are
+// supported on this server", Bahamut "are available on this server".)
+const _ISUPPORT_TAIL=/\s:?are (?:supported|available) (?:by|on) this server\.?\s*$/i;
+function _isIsupportLine(text){
+  if(typeof text!=='string'||text.length>4096) return false;
+  const m=_ISUPPORT_TAIL.exec(text); if(!m) return false;
+  const head=text.slice(0,m.index).trim(); if(!head) return false;
+  return head.split(/\s+/).every(t=>/^-?[A-Za-z0-9][A-Za-z0-9\/._-]{0,63}(?:=\S*)?$/.test(t));
+}
+function _sniffIsupport(conn_id,text){
+  try{
+    const cur=Object.assign({},_isupport[conn_id]||{}); let hit=false;
+    for(const tok of text.split(' ')){
+      let m=/^PREFIX=\(([A-Za-z]*)\)(\S*)$/.exec(tok);
+      if(m && m[1].length===m[2].length){ const p={}; for(let i=0;i<m[1].length;i++) p[m[1][i]]=m[2][i]; cur.prefix=p; hit=true; continue; }
+      m=/^CHANMODES=([A-Za-z]*),([A-Za-z]*),([A-Za-z]*),([A-Za-z]*)/.exec(tok);
+      if(m){ cur.A=m[1]; cur.B=m[2]; cur.C=m[3]; hit=true; continue; }
+      // r3 (e2e, codex-p3 HIGH e2e.js:2816): e2e.js resolves other spellings of an
+      // encrypted target (#foo[ ~ #foo{, @#chan) under these.
+      // r4 (verifier w3-web N2): UTF8MAPPING too — Ergo with `casemapping: precis` says
+      // CASEMAPPING=ascii + UTF8MAPPING=rfc8265; e2e.js's RECEIVE rule uses it.
+      m=/^(CASEMAPPING|STATUSMSG|UTF8MAPPING)=(\S{1,32})$/i.exec(tok);
+      if(m){ const n=m[1].toUpperCase(); cur[m[1].toLowerCase()]=(n==='CASEMAPPING'||n==='UTF8MAPPING')?m[2].toLowerCase():m[2]; hit=true; }
+    }
+    if(!hit) return;
+    _isupport[conn_id]=cur;
+    localStorage.setItem('cryptirc_isupport',JSON.stringify(_isupport));
+  }catch(_){}
+}
+// Notice senders that are never subject to PM protection: network services and
+// bouncer modules (their notices are replies the user asked for, e.g. NickServ).
+const _SERVICE_NICKS=new Set(['nickserv','chanserv','memoserv','operserv','hostserv','botserv','saslserv','helpserv','groupserv','infoserv','statserv','authserv','alis','global','q','x']);
+function _isServiceNick(n){ n=String(n||'').toLowerCase(); return _SERVICE_NICKS.has(n) || n.charAt(0)==='*'; }
+const _ctcpAsked={};   // conn|nick -> ms of our last CTCP request to that nick
+function _isAskedCtcpReply(conn_id,nick,text){
+  if(typeof text!=='string'||text.charCodeAt(0)!==1) return false;
+  const t=_ctcpAsked[conn_id+'|'+String(nick||'').toLowerCase()];
+  return !!t && Date.now()-t<120000;
+}
+// ── A real user whose nick is "status" ──────────────────────────────────────────
+// The server files its own output under target "status" (sender "*", a dotted server
+// name, "links", or nothing — exactly the values src/irc.rs uses), and routes a DM to
+// the SENDER's nick — so a DM from the user "status" also arrives with target
+// "status" and used to land in the status window, looking like server output. That
+// user's conversation gets its own query window under an internal name the status
+// window can never have ("status" behind a zero-width space: it displays as
+// "status"); wsend() puts the real nick back on the wire.
+const _STATUS_NICK_Q='\u200bstatus';
+function _isServerOrigin(from){ const f=String(from==null?'':from); return f===''||f==='*'||f==='links'||f.indexOf('.')>=0; }
+// The buffer target for a conversation with `nick` ("status" → its query window).
+function _dmTarget(nick){ return String(nick||'').toLowerCase()==='status' ? _STATUS_NICK_Q : nick; }
+// A line of the shared "status" log that belongs to the user "status" (their DMs /
+// notices, or ours to them) rather than to the server.
+function _isStatusNickLogLine(conn_id,l){
+  if(!l||!/^(privmsg|action|notice)$/i.test(String(l.kind||''))) return false;
+  const f=String(l.from||'');
+  return f.toLowerCase()==='status' || (f!=='' && f===getNick(conn_id));
+}
+// The alias is ONLY a display/buffer key. Everything E2E (keys, sessions, the lock,
+// the encrypt decision) and everything on the wire uses the real nick "status".
+function _e2eRealTarget(t){ return t===_STATUS_NICK_Q ? 'status' : t; }
+// app.js ↔ e2e.js boundary: e2e.js (deferred, loads after this file) is wrapped once
+// so a target equal to the alias is translated to the real nick BEFORE any E2E
+// decision — never after. e2e.js treats a literal "status" target as the status
+// window in two places (its lock icon and "/encrypt on" default), handled below.
+function _installStatusNickE2eShims(){
+  if(window.__statusNickShims || typeof window.e2eEncryptOutgoing!=='function') return;
+  window.__statusNickShims=true;
+  const wrap=(name,mk)=>{ const o=window[name]; if(typeof o==='function') window[name]=mk(o); };
+  // r3 (codex-p3 MED app.js:1392, w-web MED): every wrapper forwards ALL arguments
+  // (...rest) and changes only the alias. The fixed old parameter lists dropped the
+  // arguments e2e.js gained in round 2 (connId and {verb} for sends, {conn_id, live,
+  // held} for incoming lines, {incoming} for the state check) — for every user, and
+  // for e2e.js's own internal calls too, since the wrappers replace the globals.
+  wrap('e2eEncryptOutgoing',o=>function(target,...rest){ return o.call(this,_e2eRealTarget(target),...rest); });
+  wrap('e2eTargetState',o=>function(target,...rest){ return o.call(this,_e2eRealTarget(target),...rest); });
+  wrap('e2eDecryptIncoming',o=>function(from,target,...rest){ return o.call(this,from,_e2eRealTarget(target),...rest); });
+  wrap('handleEncryptCommand',o=>function(args,conn_id,target,...rest){
+    if(target===_STATUS_NICK_Q){
+      target='status';
+      // e2e.js only defaults these to the window's nick when it is not "status".
+      const sub=String((args&&args[0])||'').toLowerCase();
+      if(['verify','trust','accept','reject','off','stop'].includes(sub)&&!args[1]) args=[args[0],'status',...args.slice(2)];
+    }
+    return o.call(this,args,conn_id,target,...rest);
+  });
+  // E2E notices about the user "status" belong in its window while that window is open.
+  wrap('e2eSysMsg',o=>function(target,...rest){ try{ if(target==='status'&&active&&active.target===_STATUS_NICK_Q) target=_STATUS_NICK_Q; }catch(_){} return o.call(this,target,...rest); });
+  wrap('updateE2EIndicator',o=>function(){ const r=o.apply(this,arguments); try{ _statusNickLock(); }catch(_){} return r; });
+}
+document.addEventListener('DOMContentLoaded',_installStatusNickE2eShims);
+window.addEventListener('load',_installStatusNickE2eShims);
+// e2e.js's lock icon skips a target named "status" (it means the status window
+// there): draw it for the real nick when the user "status"'s window is open.
+function _statusNickLock(){
+  const lock=document.getElementById('e2e-lock');
+  if(!lock||!active||active.target!==_STATUS_NICK_Q||typeof e2eTargetState!=='function') return;
+  const st=e2eTargetState('status');
+  const tr=window.E2E&&E2E.trustStore?E2E.trustStore['status']:null;
+  const enc=st.mode==='psk'||st.mode==='dm', blocked=st.mode==='blocked';
+  lock.innerHTML=(enc||blocked)
+    ?'<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2"/></svg>'
+    :'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9 0" fill="none"/></svg>';
+  lock.style.color=blocked?'var(--red, #e5484d)':(enc&&!(tr&&tr.keyChanged))?'var(--accent)':enc?'var(--red, #e5484d)':'var(--text2)';
+  lock.title=blocked?('Encryption ON but unavailable — messages are blocked: '+st.reason)
+    :enc?(tr&&tr.keyChanged?'KEY CHANGED (not accepted) — verify, then /encrypt accept':st.mode==='psk'?'Encrypted (shared key)':tr&&tr.verified?'E2E verified':'E2E encrypted (TOFU)')
+    :'Not encrypted — click to set up';
+}
+// Fail-closed backstop at the wire: plaintext addressed to the user "status" is never
+// sent while that nick has any E2E state, whatever code path built the line.
+function _statusNickPlainBlocked(raw){
+  const m=/^(?:@\S+ +)?(?::\S+ +)?(PRIVMSG|NOTICE) +(\S+) +:?([\s\S]*)$/i.exec(String(raw||''));
+  if(!m||!m[2].split(',').includes(_STATUS_NICK_Q)) return false;
+  const txt=m[3]||'';
+  if(!txt||/^\x01(?!ACTION )/.test(txt)) return false;   // empty / CTCP request (not /me)
+  if(/^(\[e2edm2\]|sd8~|\[e2ex3dh\])/.test(txt)) return false;   // already E2E wire format
+  if(typeof e2eTargetState!=='function') return false;     // no E2E engine at all
+  try{ return e2eTargetState('status').mode!=='none'; }catch(_){ return true; }
+}
+function _wireRaw(raw){
+  const m=/^((?:@\S+ +)?(?::\S+ +)?(?:PRIVMSG|NOTICE|TAGMSG) +)(\S+)/i.exec(raw);
+  if(!m||m[2].indexOf(_STATUS_NICK_Q)<0) return raw;
+  return m[1]+m[2].split(',').map(t=>t===_STATUS_NICK_Q?'status':t).join(',')+raw.slice(m[0].length);
+}
+// F9: the server refuses (sends nothing for) a PRIVMSG/NOTICE to more than 20
+// comma-separated targets (MAX_SEND_TARGETS / send_target_count in main.rs). Refuse it
+// here first, so the optimistic row is marked "not sent" instead of looking delivered.
+const MAX_SEND_TARGETS=20;
+function _sendTargetCount(raw){
+  let r=String(raw||'').trimStart();
+  if(r.startsWith('@')){ const i=r.indexOf(' '); r=i<0?'':r.slice(i+1).trimStart(); }
+  if(r.startsWith(':')){ const i=r.indexOf(' '); r=i<0?'':r.slice(i+1).trimStart(); }
+  const p=r.split(' ');
+  if(!/^(privmsg|notice)$/i.test(p[0]||'')) return 1;
+  return Math.max(1,(p[1]||'').split(',').filter(Boolean).length);
+}
+// r4 (C3-1): 'PRIVMSG' / 'NOTICE' when a raw send line is a chat line (after optional
+// @tags and :prefix, any case — the server's e2e_split_chat_line tokenizes the same
+// way, on runs of spaces), else ''.
+function _sendRawVerb(raw){
+  let r=String(raw||'').replace(/^[ \t]+/,'');
+  if(r.startsWith('@')){ const m=/^\S*[ \t]+/.exec(r); r=m?r.slice(m[0].length):''; }
+  if(r.startsWith(':')){ const m=/^\S*[ \t]+/.exec(r); r=m?r.slice(m[0].length):''; }
+  const v=(/^\S+/.exec(r)||[''])[0].toUpperCase();
+  return (v==='PRIVMSG'||v==='NOTICE')?v:'';
+}
+// Frames wsend() refused for good (not an outage): the rate queue must not retry them.
+const _refusedFrames=new WeakSet();
+// r2: per-conversation ordered queue for incoming chat that may need E2E work.
+const _e2eQueues=new Map();
+function _e2eEnqueue(conn_id,conv,fn){
+  const k=String(conn_id||'')+'\n'+String(conv||'').toLowerCase();
+  const q=(_e2eQueues.get(k)||Promise.resolve()).catch(()=>{}).then(fn);
+  _e2eQueues.set(k,q);
+  q.catch(()=>{}).finally(()=>{ if(_e2eQueues.get(k)===q) _e2eQueues.delete(k); });
+  return q;
+}
 function wsend(obj){
+  // Signing out / switching account: the page is about to reload — nothing more
+  // (e.g. the beforeunload prefs flush of the OLD account's data) may go out.
+  if(window._cryptircWiping) return false;
+  if(obj&&obj.type==='send'&&typeof obj.raw==='string'){
+    // r4 (C3-1): backstop for every sender (typed lines, emotes, uploads, CTCP, auto-
+    // replies, /quote): no PRIVMSG/NOTICE leaves a page whose E2E engine is not loaded.
+    if(_sendRawVerb(obj.raw)!=='' && !_e2eEngineOk()){
+      _refusedFrames.add(obj); _noteUnsentChat(obj); _e2eEngineFailNotice();
+      return false;
+    }
+    if(!_e2eEngineOk() && /^\s*(@\S*\s+)?(:\S*\s+)?TAGMSG\s/i.test(obj.raw)){ _refusedFrames.add(obj); return false; }   // r5: typing notices too (silently)
+    if(obj.raw.indexOf(_STATUS_NICK_Q)>=0 && _statusNickPlainBlocked(obj.raw)){
+      _refusedFrames.add(obj); _noteUnsentChat(obj);
+      try{ showToast('🔒 Not sent: end-to-end encryption is on for status, and this line was not encrypted.'); }catch(_){}
+      return false;
+    }
+    const n=_sendTargetCount(obj.raw);
+    if(n>MAX_SEND_TARGETS){
+      _refusedFrames.add(obj); _noteUnsentChat(obj);
+      const now=Date.now();
+      if(now-(window._tooManyTargetsToast||0)>3000){ window._tooManyTargetsToast=now; try{ showToast(`⚠ Too many recipients in one message (${n}; max ${MAX_SEND_TARGETS}). Nothing was sent.`); }catch(_){} }
+      return false;
+    }
+  }
   if(ws&&ws.readyState===1){
-    const s=JSON.stringify(obj);_txBytes+=s.length;_txCount++;ws.send(s);flashLed('tx');updateStarfieldTitle();
+    // r3: history of the user "status"'s query window = the "query" side of the shared
+    // "status" log (the pending marker below stays under the window's own name).
+    const _sq=obj&&(obj.type==='get_logs'||obj.type==='sync')&&obj.target===_STATUS_NICK_Q;
+    const s=JSON.stringify(_sq?{...obj,target:'status',status_view:'query'}:(obj&&obj.type==='send'&&typeof obj.raw==='string'&&obj.raw.indexOf(_STATUS_NICK_Q)>=0)?{...obj,raw:_wireRaw(obj.raw)}:obj);_txBytes+=s.length;_txCount++;ws.send(s);flashLed('tx');updateStarfieldTitle();
     // Track log/sync requests from THIS session
     if(obj.type==='get_logs') _pendingLogs.set(obj.conn_id+'/'+obj.target, Date.now());
+    if(obj.type==='add_network'||obj.type==='update_network') _netSavePendingAt=Date.now();   // r3: see _onServerError
     if(obj.type==='sync') _pendingSyncs.add(obj.conn_id+'/'+obj.target);
     // Track sent PRIVMSG/NOTICE for irc_echo dedup
     if(obj.type==='send'&&obj.raw){
@@ -1021,6 +1701,8 @@ function wsend(obj){
           if(txt.startsWith('\x01ACTION ')&&txt.endsWith('\x01')) txt=txt.slice(8,-1);
           if(!window._sentMsgs) window._sentMsgs=[];
           window._sentMsgs.push({t:Date.now(),conn:obj.conn_id,target:parts[1],text:txt});
+          // Remember CTCP requests so their NOTICE replies get past PM protection.
+          if(upper.startsWith('PRIVMSG ')&&txt.charCodeAt(0)===1&&!txt.startsWith('\x01ACTION ')) _ctcpAsked[obj.conn_id+'|'+parts[1].toLowerCase()]=Date.now();
           // Bound the list: the TTL filter only runs when an echo arrives, so cap
           // here in case echoes stop coming (offline/zombie WS) — keep the newest 100.
           if(window._sentMsgs.length>100) window._sentMsgs.splice(0,window._sentMsgs.length-100);
@@ -1041,6 +1723,7 @@ function wsend(obj){
     'clear_all_data','clear_target_logs','delete_account',
     'upload_remove','search_logs',
   ]);
+  if(obj && obj.type==='send') _noteUnsentChat(obj);
   if(obj && _toastTypes.has(obj.type)){
     const now = Date.now();
     if(now - (window._lastSendFailToast||0) > 3000){
@@ -1054,7 +1737,15 @@ function wsend(obj){
 // ─── Events ───────────────────────────────────────────────────────────────────
 function handleEvent(ev) {
   switch(ev.type){
-    case 'auth_required': wsend({type:'auth',token:sessionToken||''}); break;
+    // e2e:2 — this app speaks the current E2E protocol (the server protects OLDER
+    // cached app.js tabs from sending cleartext to encrypted targets; see main.rs
+    // e2e_legacy_send_blocked). Old servers ignore the field.
+    // r4 (C3-1): only while the E2E engine is loaded — a page without it is treated
+    // by the server like an outdated tab (its guard refuses cleartext to E2E targets).
+    case 'auth_required':
+      if(_e2eEngineOk()) wsend({type:'auth',token:sessionToken||'',e2e:2});
+      else { wsend({type:'auth',token:sessionToken||''}); _e2eEngineFailNotice(); }
+      break;
     case 'bot_config':
       try{_botCfg=JSON.parse(ev.config||'{}');}catch(_){_botCfg={};}
       if(document.getElementById('bot-overlay')?.classList.contains('show')) _renderBotPanel(_botCfg);
@@ -1070,9 +1761,16 @@ function handleEvent(ev) {
       break;
     case 'auth_ok':
       currentUser=ev.username;
+      _checkFrontendId(ev.assets);   // r10: redeployed while this page stayed open? → reload banner
       // If idle on reconnect, tell server immediately after auth
       if(_isIdle&&ws&&ws.readyState===1)ws.send(JSON.stringify({type:'idle'}));
       wsend({type:'load_appearance'}); wsend({type:'load_preferences'}); wsend({type:'upload_list_get'});
+      // r6 (codex-p3 HIGH e2e.js:1007): E2E re-syncs with the server after every
+      // (re)connect; until then its targets are blocked and queued lines are held
+      // (drainRateQueue). Must run BEFORE the queue is kicked.
+      try{ if(typeof e2eOnSocketAuthed==='function') e2eOnSocketAuthed(); }catch(_){}
+      // Authenticated: chat lines queued during an outage may go out now (once).
+      _wsAuthed=true; _kickRateQueue();
       fetchNews();  // pull the live news feed on connect so the "new news" dot can show without opening the tab
       // Re-check push subscription after auth
       setTimeout(async()=>{
@@ -1096,7 +1794,11 @@ function handleEvent(ev) {
       break;
     // auth_failed swaps back to the login screen without a reload — same PWA-banner
     // teardown as doLogout, so the banner can't linger over (or pop up on) it.
-    case 'auth_failed': hideBootSplash(); sessionToken=null; localStorage.removeItem('cryptirc_token'); document.getElementById('auth-screen').style.display='flex'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break;
+    // Also: lines still queued from an outage can never be sent by this session —
+    // mark them "not sent"; hide the previous account's UI behind the login screen;
+    // and only drop the stored token if it is the one that failed (another tab may
+    // already hold a newer one, e.g. after a password change).
+    case 'auth_failed': { hideBootSplash(); try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){} const _ft=sessionToken; sessionToken=null; _wsAuthed=false; _failRateQueue(); try{ if(localStorage.getItem('cryptirc_token')===_ft){ localStorage.removeItem('cryptirc_token'); document.cookie='cryptirc_token=;max-age=0;path=/cryptirc'; } }catch(_){} document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break; }
     case 'vault_unlocked': {
       // Locked→unlocked transition (overlay still up ⇒ we were locked): Messages
       // preview get_logs sent while locked got EMPTY log_lines replies (read_logs
@@ -1109,7 +1811,9 @@ function handleEvent(ev) {
       if(_vo.classList.contains('show')){ _msgsPreviewAsked.clear(); if(isMessagesActive()) _scheduleMessagesRender(); }
       _vo.classList.remove('show'); renderSidebar();
       {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
-      if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key);
+      // C1: E2E derives its own key (client-held keyring); the event only carries the
+      // pepper/legacy key for a passphrase-proven unlock. Always hand it to e2e.js.
+      if(typeof e2eOnVaultUnlocked==='function') e2eOnVaultUnlocked(ev); else if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key);
       if(!_chanStatsLoaded) loadStatsFromServer();
       // Prefs are server-side encrypted; the initial load_preferences fired
       // before unlock returned empty. Re-request now that vault is open so
@@ -1119,11 +1823,17 @@ function handleEvent(ev) {
       // before vault_unlocked — no need to request logs here (avoids double delivery)
       break;
     }
-    case 'vault_error': document.getElementById('vault-err').textContent=ev.message; break;
+    case 'vault_error': document.getElementById('vault-err').textContent=ev.message; if(typeof e2eOnVaultError==='function') e2eOnVaultError(ev.message); break;
+    // Vault locked server-side (manual Lock on any session): E2E drops its keys + this browser's cached key (e2e), app2 shows the lock UI.
+    case 'vault_locked': if(typeof e2eOnVaultLocked==='function') e2eOnVaultLocked(); _onVaultLocked(); break;
     case 'state':
       networks=ev.networks||[];
-      if(!ev.vault_unlocked) document.getElementById('vault-overlay').classList.add('show');
+      try{ _runPendingCycles(ev); }catch(_){}   // r3: /cycle waits for a fresh State (key)
+      if(!ev.vault_unlocked){ const _vo0=document.getElementById('vault-overlay'); if(!_vo0.classList.contains('show')) _closeSecretPanels(); _vo0.classList.add('show'); if(typeof e2eOnVaultLocked==='function'&&window.E2E&&(E2E.keyReady||E2E.identityReady)) e2eOnVaultLocked(); }
       else {
+        // C1: vault unlocked (maybe by another device) — let E2E start from this
+        // browser's cached key (or ask for the passphrase). Idempotent.
+        if(typeof e2eOnVaultStateUnlocked==='function') e2eOnVaultStateUnlocked();
         const _vo=document.getElementById('vault-overlay');
         // Unlock observed via State only (cross-session unlock: the vault_unlocked
         // event goes solely to the unlocking socket). Same preview-guard reset as
@@ -1136,6 +1846,7 @@ function handleEvent(ev) {
         if(!_chanStatsLoaded)loadStatsFromServer();
       }
       renderSidebar();
+      try{ _onNetworksState(ev); }catch(_){}   // app2: #7 Add&Connect target + H2 TLS-verify offer
       // Detached-mode auto-activation: force the requested target; ignore any
       // saved last-active so the popup always lands on the chat it was opened for.
       if(_detMode && _detConn && _detTarget){
@@ -1166,6 +1877,7 @@ function handleEvent(ev) {
           }
         }
       }
+      try{ if(active&&typeof _restoreReloadDraft==='function') _restoreReloadDraft(active.conn_id,active.target); }catch(_){}   // r10
       // Load logs for all channels + status when vault is unlocked
       if(ev.vault_unlocked){
         for(const net of networks){
@@ -1210,6 +1922,8 @@ function handleEvent(ev) {
     case 'lag_update': lagMap[ev.conn_id]=ev.ms; if(active&&active.conn_id===ev.conn_id) updateLagDisplay(); break;
     case 'sasl_status': sysMsg(ev.conn_id,'status', ev.success?`✓ SASL: ${ev.message}`:`✗ SASL failed: ${ev.message}`, ev.success?'system':'error'); break;
     case 'irc_echo': {
+      // An echo is always our own message: target "status" is the user "status".
+      if(ev.target==='status') ev.target=_STATUS_NICK_Q;
       trackMsgId(ev.conn_id,ev.target,ev.msg_id||0);
       // Server-side echo of our own sent message — for multi-device sync
       // Skip if this device already displayed it (tracked by _sentMsgs)
@@ -1262,20 +1976,28 @@ function handleEvent(ev) {
       // dedup on the DECRYPTED text. If the key isn't loaded yet we keep the
       // ciphertext so redecryptChannelHistory fixes it when the key arrives.
       {
-        const _eConn=ev.conn_id, _eTarget=ev.target, _eText=ev.text;
-        const _eFrom=ev.from, _eTs=ev.ts, _eId=ev.msg_id||0, _eKind=ev.kind;
-        if(!window._e2eQueue) window._e2eQueue=Promise.resolve();
+        const _eConn=ev.conn_id, _eText=ev.text;
+        let _eTarget=ev.target, _ePre='';
+        // r8 (codex-p3 app.js:2126): our own NOTICE to a nick past the conversation cap
+        // (PM protection's auto-reply, echoed from another device) opens no window either.
+        if(ev.kind==='Notice'&&_eTarget!==_STATUS_NICK_Q&&!/^[#&+!]/.test(_eTarget)&&_strangerOverflow(_eConn,_eTarget)){ _ePre=`[→ ${_eTarget}] `; _eTarget=OVERFLOW_Q; }
+        const _eFrom=ev.from, _eTs=ev.ts, _eId=ev.msg_id||0;
+        let _eKind=ev.kind;
         // .catch(()=>{}) BEFORE .then heals a previously-rejected queue: if any
         // iteration's body throws (e.g. a malformed event), the chain would stay
         // permanently rejected and silently drop ALL later messages. This resets it.
-        window._e2eQueue=window._e2eQueue.catch(()=>{}).then(async()=>{
+        _e2eEnqueue(_eConn,_eTarget,async()=>{
+          // X3DH header lines (single or fragmented) are protocol plumbing, not chat.
+          if(typeof _eText==='string'&&_eText.startsWith('[e2ex3dh]')) return;
           let dtext=_eText, enc=false;
           if(typeof _eText==='string'&&_eText.startsWith('sd8~')&&typeof channelDecrypt==='function'){
             try{
-              const kn=(typeof _resolveChanKeyName==='function')?_resolveChanKeyName(_eTarget):null;
-              if(kn){ const pt=await channelDecrypt(kn,_eText); if(pt!==null){dtext=pt;enc=true;} }
+              const kn=(typeof _resolveChanKeyName==='function')?_resolveChanKeyName(_eTarget,_eConn):null;
+              if(kn){ const pt=await channelDecrypt(kn,_eText,_eFrom); if(pt!==null){dtext=pt;enc=true;} }
             }catch(_){}
           }
+          if(enc&&typeof e2eSplitAction==='function'){ const _a=e2eSplitAction(dtext); if(_a.action){ dtext=_a.text; _eKind='Action'; } }
+          if(_ePre) dtext=_ePre+dtext;
           const echoBuf=getBuf(_eConn,_eTarget);
           const echoKey=_eTs+'|'+_eFrom+'|'+(dtext||'').slice(0,50);
           if(echoBuf.some(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)===echoKey)) return;
@@ -1295,15 +2017,31 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_message':
+      // A DM / notice from the user "status" (not server output): its own query window.
+      if(ev.target==='status'&&String(ev.from||'').toLowerCase()==='status') ev.target=_STATUS_NICK_Q;
       trackMsgId(ev.conn_id,ev.target,ev.msg_id||0);
       // Route incoming user notices to the active channel instead of opening a PM
       // (e.g. NickServ, ChanServ replies) — but let our OWN outgoing notices
       // go to the target's PM window (e.g. PM protection responses)
-      if(ev.kind==='Notice'&&ev.target&&ev.target!=='status'&&!ev.target.startsWith('#')&&!ev.target.startsWith('&')&&ev.from&&ev.from!=='*'&&!ev.from.includes('.')){
+      // A private notice from a (non-services) nick we already have an OPEN conversation
+      // with stays in that conversation (where the server's log files it too). Rows render the
+      // sender as -nick- (buildRow), so a rerouted notice can't pass as a system line.
+      let _privNotice=false;
+      // r7 (codex-p3 app.js:1983): the conversation the line BELONGS to (a private notice:
+      // its sender) — decryption and its per-conversation queue use it; the reroute below
+      // only chooses where it is shown (it used to make e2e.js see channel traffic in a
+      // channel view and skip the DM ratchet: ciphertext on screen).
+      const _realTarget=ev.target;
+      if(ev.kind==='Notice'&&ev.target&&ev.target!=='status'&&!/^[#&+!]/.test(ev.target)&&ev.from&&ev.from!=='*'&&!ev.from.includes('.')){
         if(ev.from!==getNick(ev.conn_id)){
-          ev.target=active&&active.conn_id===ev.conn_id?active.target:'status';
+          _privNotice=true;
+          const _nlc=ev.from.toLowerCase();
+          const _nq=!!(queryBufs[ev.conn_id]&&queryBufs[ev.conn_id].has(_nlc)&&closedQueries[ev.conn_id+'|'+_nlc]==null);
+          // Services replies keep showing where the user is (as before) — no new DM pings.
+          if(!_nq || _isServiceNick(ev.from)) ev.target=active&&active.conn_id===ev.conn_id?active.target:'status';
         }
       }
+      if(ev.target==='status'&&ev.from==='*'&&_isIsupportLine(ev.text)) _sniffIsupport(ev.conn_id,ev.text);
       // Suppress noisy server errors (typing on unsupported networks, offline nicks, etc).
       // #61: gate on a NON-user-message kind so a legitimate user PRIVMSG that merely
       // *contains* one of these phrases isn't silently dropped — only server-originated
@@ -1331,30 +2069,56 @@ function handleEvent(ev) {
         delete _keepnickIsonPending[ev.conn_id]; // Expire stale pending flag
       }
       // Intercept links data for /links overlay
-      if(ev.from==='links'&&window._linksData!=null){
-        if(ev.text==='End of /LINKS'){renderLinksOverlay();}
+      // Only the server's own 364/365 relay matches (status target, Notice, no msg_id) —
+      // a real user nicked "links" can never produce that shape — and the capture
+      // window closes at End of /LINKS (or when the overlay closes).
+      if(ev.from==='links'&&ev.target==='status'&&ev.kind==='Notice'&&!ev.msg_id&&window._linksData!=null&&(!window._linksConnId||window._linksConnId===ev.conn_id)){
+        if(ev.text==='End of /LINKS'){renderLinksOverlay();window._linksData=null;}
         else{addLinkEntry(ev.text);}
         break;
       }
-      // Serialize E2E decrypt to prevent race between x3dh header and encrypted message
-      if(!window._e2eQueue) window._e2eQueue=Promise.resolve();
+      // Serialize E2E decrypt to prevent race between x3dh header and encrypted message.
+      // r2 (codex-p3 MED e2e.js:2485): one queue PER CONVERSATION (not one for all
+      // traffic), so a peer whose encrypted line waits for its key exchange can no
+      // longer hold up every other channel and DM. Order within a conversation — header
+      // before message — is unchanged.
       // .catch(()=>{}) BEFORE .then heals a rejected queue so one throwing event
       // (e.g. a null/non-string ev.text) can't permanently poison the chain and
       // silently drop every subsequent incoming message.
-      window._e2eQueue=window._e2eQueue.catch(()=>{}).then(async()=>{
+      _e2eEnqueue(ev.conn_id,(/^[#&+!]/.test(_realTarget||'')?_realTarget:ev.from),async()=>{
         // #62: coerce ev.text to a string up front so a null/non-string value from the
         // server can't throw inside e2eDecryptIncoming/startsWith and silently drop the
         // message via the queue's catch.
         const _txt = String(ev.text||'');
-        const { plaintext, encrypted } = await e2eDecryptIncoming(ev.from, ev.target, _txt);
+        const _dr = await e2eDecryptIncoming(ev.from, _realTarget, _txt, { conn_id: ev.conn_id, live: !ev.replayed, prefix: ev.prefix || undefined, kind: ev.kind });
+        const { plaintext, encrypted } = _dr;
+        // A repeat of an encrypted channel line already shown (replayed copy): drop it.
+        if (_dr.duplicate) return;
         // Suppress x3dh header messages (handled internally, not displayed)
         if (plaintext === null && !encrypted && _txt.startsWith('[e2ex3dh]')) return;
-        const displayText = plaintext !== null ? plaintext : ev.text;
+        // INFO-3: a decrypted /me ("\x01ACTION …\x01") is an action, not "ACTION …".
+        const _act = (encrypted && typeof plaintext === 'string' && typeof e2eSplitAction === 'function') ? e2eSplitAction(plaintext) : null;
+        let displayText = _act && _act.action ? _act.text : (plaintext !== null ? plaintext : ev.text);
+        // /ignore first (after decrypt, so E2E ratchet state still advances): an ignored
+        // sender must not reach checkMention's Notices inbox, PM Protection's auto-reply
+        // + blocked log, or the replay row creation below. Same rule the addMessage wrapper applies.
+        if(ev.from&&ev.from!=='*'&&isIgnored(ev.from,ev.prefix)) return;
         // Block PMs if enabled — per-network settings with global fallback; allow list bypasses
         // All four channel prefixes (#&+!) — matches addMessage's isDM; previously missed
         // +/! so IRCnet-style channels could be misclassified as DMs by the paths below.
+        // r7 (codex-p3 app.js:3175): private messages from NEW nicks past the per-network cap
+        // of open conversations go to one "*overflow*" window (prefixed with the nick), like
+        // the TUI and the server's log budget — a spam flood under changing nicks no longer
+        // creates a conversation (buffer, sidebar row, Messages entry, stored list) each.
+        if(ev.target!=='status'&&!/^[#&+!]/.test(ev.target)&&ev.from!==getNick(ev.conn_id)&&ev.from!=='*'&&_strangerOverflow(ev.conn_id,ev.target)){
+          displayText=`[${ev.target}] ${displayText}`; ev.target=OVERFLOW_Q;
+        }
         const _isDmIncoming=ev.target!=='status'&&!/^[#&+!]/.test(ev.target)&&ev.from!==getNick(ev.conn_id)&&ev.from!=='*';
-        if(_isDmIncoming){
+        // Private NOTICEs are private messages too (they used to bypass PM protection
+        // whenever they were rerouted into the open channel). Services keep working:
+        // NickServ/ChanServ/… and bouncer (*status) notices are never blocked.
+        const _isNoticeIn = ev.kind==='Notice';
+        if((_isDmIncoming||_privNotice) && !(_isNoticeIn && (_isServiceNick(ev.from)||_isAskedCtcpReply(ev.conn_id,ev.from,_txt)))){
           const _pm=getPmSettings(ev.conn_id);
           if(_pm.enabled&&!isPmAllowedFor(ev.conn_id,ev.from)){
             const cooldownHrs=_pm.cooldown;
@@ -1365,26 +2129,31 @@ function handleEvent(ev) {
             const _bpFirst=Date.now()-_bpLast>cooldownHrs*3600*1000;
             if(_bpFirst){
               localStorage.setItem(_bpKey,String(Date.now()));
-              if(notify){
+              // Never auto-reply to a NOTICE (RFC 1459/2812): two auto-responders
+              // would bounce notices at each other forever.
+              if(notify && !_isNoticeIn){
                 const hrTxt=cooldownHrs===1?'hour':cooldownHrs<24?cooldownHrs+' hours':cooldownHrs===24?'24 hours':Math.round(cooldownHrs/24)+' days';
                 const _pmOffText=`This CryptIRC user has their private messages turned off.${deliverFirst?' They will receive your first message and if they feel like it they will get back to you.':''} All${deliverFirst?' further':''} messages from you will be silently dropped for the next ${hrTxt}.`;
                 wsend({type:'send',conn_id:ev.conn_id,raw:`NOTICE ${ev.from} :${_pmOffText}`});
                 // Echo the auto-notice into the sender's PM window so the user
-                // can see what their client replied with.
-                addMessage(ev.conn_id, ev.from, {
+                // can see what their client replied with. r8 (codex-p3 app.js:2126): a
+                // sender past the conversation cap gets no window of its own — the echo
+                // goes to the overflow window too (it opened one conversation per nick).
+                const _ovf=ev.target===OVERFLOW_Q;
+                addMessage(ev.conn_id, _ovf?OVERFLOW_Q:ev.from, {
                   ts: Math.floor(Date.now()/1000),
                   from: getNick(ev.conn_id),
-                  text: _pmOffText,
+                  text: _ovf?`[→ ${ev.from}] ${_pmOffText}`:_pmOffText,
                   kind: 'notice',
                 });
               }
               if(!deliverFirst){
-                recordBlockedPm(ev.conn_id, ev.from, displayText, ev.ts);
+                recordBlockedPm(ev.conn_id, ev.from, displayText, ev.ts, encrypted);
                 return; // drop even the first message
               }
               // Let the first message through — don't return
             } else {
-              recordBlockedPm(ev.conn_id, ev.from, displayText, ev.ts);
+              recordBlockedPm(ev.conn_id, ev.from, displayText, ev.ts, encrypted);
               return; // silently drop all further messages during cooldown
             }
           }
@@ -1394,7 +2163,7 @@ function handleEvent(ev) {
         // so they get the same silent treatment as join/part (no unread/red/sound)
         // and condense, instead of landing as a chat notice.
         const _isHostChange = ev.from==='*' && /^\*\*\* \S+ has changed hostname to /.test(displayText);
-        const _msgKind = _isHostChange ? 'chghost' : (ev.kind==='Action'?'action':ev.kind==='Notice'?'notice':'privmsg');
+        const _msgKind = _isHostChange ? 'chghost' : ((ev.kind==='Action'||(_act&&_act.action))?'action':ev.kind==='Notice'?'notice':'privmsg');
         // Server/system notices (from '*') are never real mentions — skip detection so
         // they don't turn channels red or spam the Mentions panel.
         // B2: suppress the mentions-inbox/badge SIDE EFFECT only for DETERMINISTIC ring
@@ -1406,7 +2175,7 @@ function handleEvent(ev) {
         // one. (Genuine ZNC-bouncer playback mentions may re-appear on reconnect; that's the
         // accepted lesser evil.) `mentioned` is still computed for highlight rendering.
         const _recordMention = !ev.replayed;
-        const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts,_recordMention,ev.msg_id);
+        const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts,_recordMention,ev.msg_id,encrypted);
         // ZNC playback detection — batch old messages silently
         const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null};
         // Daemon ring-buffer replay (a cryptirc.service restart reattaching to the
@@ -1484,9 +2253,9 @@ function handleEvent(ev) {
             if(!(_rClosedTs && (zncMsg.ts||0)<=_rClosedTs)){
               if(_rClosedTs) clearQueryClosed(ev.conn_id,_rlc);
               if(!queryBufs[ev.conn_id])queryBufs[ev.conn_id]=new Map();
-              const _rNew=!queryBufs[ev.conn_id].has(_rlc);
+              const _rNew=!queryBufs[ev.conn_id].has(_rlc), _rChg=queryBufs[ev.conn_id].get(_rlc)!==ev.target;
               queryBufs[ev.conn_id].set(_rlc, ev.target);
-              saveQueryBufs();
+              if(_rNew||_rChg) saveQueryBufs();   // r7: not on every line (it serializes the whole list)
               if(_rNew){ renderSidebar(); if(isMessagesActive()) renderMessagesView(); }
             }
           }
@@ -1521,6 +2290,10 @@ function handleEvent(ev) {
     case 'e2e_trust':
     case 'e2e_otpk_low':
     case 'e2e_x3dh_header':
+    case 'e2e_keyring':
+    case 'e2e_keyring_stored':
+    case 'e2e_session_list':
+    case 'e2e_session_moved':
       // .catch: e2eHandleEvent is async + fire-and-forget; a malformed server-supplied
       // bundle/header parsing throw would otherwise be an unhandled promise rejection.
       if (window.E2E) e2eHandleEvent(ev).catch(e=>{try{console.error('e2e event error:',e);}catch(_){}});
@@ -1661,11 +2434,18 @@ function handleEvent(ev) {
       break;
     case 'irc_mode': {
       // Parse setter|modes format (e.g. "gh0st|+v felon_1" or just "+v felon_1")
-      let modeSetter='', rawModes=ev.modes;
-      if(ev.modes.includes('|')){
-        const pipeIdx=ev.modes.indexOf('|');
-        modeSetter=ev.modes.slice(0,pipeIdx);
-        rawModes=ev.modes.slice(pipeIdx+1);
+      // The separator is the LAST '|' in the first space-delimited token: nicks may
+      // contain '|' (dan|away) but a mode string never does, and mode ARGUMENTS
+      // (ban masks with '|') only come after the first space.
+      let modeSetter='', rawModes=ev.modes||'';
+      {
+        const sp=rawModes.indexOf(' ');
+        const head=sp<0?rawModes:rawModes.slice(0,sp);
+        const pipeIdx=head.lastIndexOf('|');
+        if(pipeIdx>=0){
+          modeSetter=rawModes.slice(0,pipeIdx);
+          rawModes=rawModes.slice(pipeIdx+1);
+        }
       }
       const modeDisplay=modeSetter?`${modeSetter} sets mode ${rawModes}`:`MODE ${rawModes}`;
       sysMsg(ev.conn_id,ev.target,modeDisplay,'mode',{ts:ev.ts,from:modeSetter||'*',self:modeSetter===getNick(ev.conn_id),rawModes:rawModes,subject:modeSetter||''});
@@ -1673,14 +2453,21 @@ function handleEvent(ev) {
       const mNet=networks.find(n=>n.config.id===ev.conn_id);
       const mCh=mNet?.channels?.find(c=>_sameChan(c.name,ev.target));
       if(mCh){
-        const modeMap={o:'@',v:'+',h:'%',a:'&',q:'~'};
+        // Which letters are nick prefixes and which take an argument: from the
+        // network's 005 (PREFIX / CHANMODES, see _sniffIsupport) when we saw it,
+        // else common defaults. Type A (lists) and B always take an argument; type C
+        // (e.g. +l, +f, +j) only when being set.
+        const _isu=_isupport[ev.conn_id];
+        const modeMap=(_isu&&_isu.prefix)||{o:'@',v:'+',h:'%',a:'&',q:'~'};
+        const _argAlways=_isu&&_isu.A!=null?_isu.A+_isu.B:'beIk';
+        const _argOnSet=_isu&&_isu.C!=null?_isu.C:'lfj';
         const parts=rawModes.split(' ');
         const modeStr=parts[0]||'';
         let argIdx=1,adding=true;
         for(const c of modeStr){
           if(c==='+'){adding=true;continue;}
           if(c==='-'){adding=false;continue;}
-          if('ovhaq'.includes(c)){
+          if(modeMap[c]&&'~&@%+'.includes(modeMap[c])){
             const tNick=parts[argIdx++];
             if(!tNick)continue;
             const pfxChar=modeMap[c];
@@ -1701,7 +2488,7 @@ function handleEvent(ev) {
             } else {
               mCh.names[idx]=oldPfx.replace(pfxChar,'')+bare;
             }
-          } else if('beIkl'.includes(c)){argIdx++;} // modes that consume an arg
+          } else if(modeMap[c]||_argAlways.includes(c)||(adding&&_argOnSet.includes(c))){argIdx++;} // modes that consume an arg
         }
         renderSidebar(); refreshUserCount(ev.conn_id,ev.target);
         if(isActive(ev.conn_id,ev.target)) renderNickPanel(mCh.names);
@@ -1955,13 +2742,17 @@ function handleEvent(ev) {
       break;
     }
     case 'log_lines': {
-      const _lk=ev.conn_id+'/'+ev.target;
+      // r3: target "status" may answer the user "status"'s query window (its request goes
+      // out as "status" + status_view "query"; see wsend) — routed to that window.
+      const _sq=ev.target==='status'&&_statusReplyForQuery(ev.conn_id,ev.lines,_pendingLogs);
+      const _lk=ev.conn_id+'/'+(_sq?_STATUS_NICK_Q:ev.target);
       if(!_pendingLogs.has(_lk)) break; // Response from another session — ignore
       _pendingLogs.delete(_lk);
       // Receipt is not completion: E2E decryption and rendering are asynchronous.
       const work=_processingLogs.get(_lk)||{count:0,started:Date.now()};
       work.count++; _processingLogs.set(_lk,work);
-      Promise.resolve(prependLogs(ev.conn_id,ev.target,ev.lines)).catch(()=>{
+      const _sqp=_sq&&_statusQueryReplyLines(ev.conn_id,ev.lines);
+      Promise.resolve(_sq?prependLogs(ev.conn_id,_STATUS_NICK_Q,_sqp.dm).then(()=>_sqp.rest.length?prependLogs(ev.conn_id,'status',_sqp.rest):null):prependLogs(ev.conn_id,ev.target,ev.lines)).catch(()=>{
         showToast('Could not load message history — try again');
       }).finally(()=>{
         if(_processingLogs.get(_lk)===work && --work.count===0) _processingLogs.delete(_lk);
@@ -1971,8 +2762,9 @@ function handleEvent(ev) {
     case 'search_results': {
       // Drop stale/late responses (newer query typed, or channel switched).
       const sr=window._searchReq;
-      if(!sr || sr.conn_id!==ev.conn_id || sr.target!==ev.target || sr.query!==ev.query) break;
-      renderSearchResults(ev.conn_id,ev.target,ev.query,ev.lines);
+      if(!sr || sr.conn_id!==ev.conn_id || (sr.wire||sr.target)!==ev.target || sr.query!==ev.query) break;
+      // The user "status"'s conversation: only its lines of the shared "status" log.
+      renderSearchResults(ev.conn_id,sr.target,ev.query,sr.target===_STATUS_NICK_Q?(ev.lines||[]).filter(_isStatusQueryViewLine):ev.lines);
       break;
     }
     case 'sync_lines': {
@@ -1985,6 +2777,13 @@ function handleEvent(ev) {
       // dedups by id (and fuzzy for id===0) and merges into the target's buffer, so
       // it is safe & correct to always merge any SyncLines for the target; just
       // clear our own pending marker when present. (sync-audit fix)
+      // r3: a "status" reply to the user "status"'s query window (see log_lines).
+      if(ev.target==='status'&&_statusReplyForQuery(ev.conn_id,ev.lines,_pendingSyncs)){
+        _pendingSyncs.delete(ev.conn_id+'/'+_STATUS_NICK_Q);
+        const p=_statusQueryReplyLines(ev.conn_id,ev.lines);
+        Promise.resolve(appendSyncLines(ev.conn_id,_STATUS_NICK_Q,p.dm)).then(()=>p.rest.length?appendSyncLines(ev.conn_id,'status',p.rest):null).catch(()=>{});
+        break;
+      }
       _pendingSyncs.delete(_sk);
       appendSyncLines(ev.conn_id,ev.target,ev.lines);
       break;
@@ -2014,7 +2813,7 @@ function handleEvent(ev) {
       break;
     case 'notepad': {
       const ta=document.getElementById('notepad-area');
-      if(ta) ta.value=ev.content||'';
+      if(ta){ ta.value=ev.content||''; _notepadLoaded=true; _notepadEdited=false; }
       break;
     }
     case 'data_cleared':
@@ -2045,13 +2844,15 @@ function handleEvent(ev) {
       break;
     }
     case 'account_deleted':
-      customAlert('Your account has been deleted.').then(()=>{
-        localStorage.clear();
-        document.cookie='cryptirc_token=;max-age=0;path=/cryptirc';document.cookie='cryptirc_token=;max-age=0;path=/';
-        location.reload();
+      // Same wipe as sign-out: all CryptIRC storage (incl. IndexedDB upload blobs / E2E
+      // key store and the cookie) — but NOT localStorage.clear(), which also erased
+      // every other app hosted on this origin.
+      customAlert('Your account has been deleted.').then(async()=>{
+        try{ await _wipeCryptircData(null); }catch(_){}
+        _cryptircHardReload();
       });
       break;
-    case 'error':      console.error(ev.message); break;
+    case 'error':      if(_lockRaceRefusal(ev.message)) console.info('[vault locked] '+ev.message); else console.error(ev.message); try{ if(!(typeof e2eOnServerError==='function' && e2eOnServerError(ev.message))) _onServerError(ev.message); }catch(_){} break;
   }
 }
 
@@ -2412,6 +3213,8 @@ function addMessage(conn_id,target,msg){
       if(b && _isStatusKind(b.kind) && _statusKey(b)===_sk) return;
     }
   }
+  // Optimistic own line whose direct wsend() was refused (offline): show it as not sent.
+  if(_unsentChat.length && !msg.sendState && !msg.id && (msg.kind==='privmsg'||msg.kind==='action'||msg.kind==='notice') && _isOwnMsg(conn_id,msg) && _claimUnsentChat(conn_id,target)) msg.sendState='failed';
   buf.push(msg);
   if(buf.length>2000)buf.splice(0,buf.length-2000);
   // Track channel stats and seen database
@@ -2436,9 +3239,11 @@ function addMessage(conn_id,target,msg){
     // the next unrelated render (felt like a ~30s lag). renderSidebar is debounced,
     // so it won't double-render with the non-active else-branch. Existing
     // conversations don't re-render here (their row already exists).
-    const _newQueryRow=!queryBufs[conn_id].has(_lc);
+    const _newQueryRow=!queryBufs[conn_id].has(_lc), _spellChg=queryBufs[conn_id].get(_lc)!==target;
     queryBufs[conn_id].set(_lc, target);
-    saveQueryBufs();
+    // r7 (codex-p3 app.js:3175): saved when the list changes — it used to be serialized in
+    // full (and a prefs save scheduled) on EVERY private line.
+    if(_newQueryRow||_spellChg) saveQueryBufs();
     if(_newQueryRow) renderSidebar();
   }
   if(isActive(conn_id,target)){
@@ -2492,7 +3297,7 @@ function addMessage(conn_id,target,msg){
       // Update just this row's badge in place; only fall back to a full sidebar
       // render if the row doesn't exist yet (brand-new conversation). Avoids the
       // per-message full #network-list teardown that caused the channel-bar flicker.
-      saveUnread();
+      saveUnread(true);
       if(!updateUnreadBadge(conn_id,target)) renderSidebar();
       // The in-place badge path skips the full render, which is where the Messages
       // tab's total-unread pin is rebuilt — refresh just that pin for a DM so its
@@ -2557,26 +3362,39 @@ async function clearBufHistory(connId,target){
 // log. Decrypt sd8~ lines here so replayed history matches the live path.
 // Sender-agnostic: keyed purely on the channel/DM target, so self lines decrypt
 // exactly like everyone else's.
-function _resolveChanKeyName(target){
+// r4 (agy-flash F3-4): then the network's other spellings, resolved exactly like the
+// live RECEIVE path (e2e.js _e2eRecvName: the ONE E2E name equal under the network's
+// real CASEMAPPING from its 005; case only while unknown — SEC-HOOK-W1: receive-side
+// over-matching would be identity confusion) — paged history, search hits and echoes of
+// #room{ on an rfc1459 network used to stay ciphertext when the key is held as #room[.
+// `cid` = the connection.
+function _resolveChanKeyName(target,cid){
   const ck=window.E2E&&window.E2E.channelKeys;
   if(!ck||target==null) return null;
+  target=_e2eRealTarget(target);
   if(ck[target]) return target;            // exact case (matches the live path)
   const lc=String(target).toLowerCase();   // fall back to case-insensitive
   for(const k in ck){ if(k.toLowerCase()===lc) return k; }
+  if(typeof _e2eRecvName==='function'){
+    try{ const c=_e2eRecvName(target,cid||null); if(c && c!==lc && ck[c]) return c; }catch(_){}
+  }
   return null;
 }
-async function _decryptLogLines(target,lines){
+async function _decryptLogLines(target,lines,cid){
   if(!Array.isArray(lines)||!lines.length) return lines;
   if(typeof channelDecrypt!=='function') return lines;
-  const keyName=_resolveChanKeyName(target);
+  const keyName=_resolveChanKeyName(target,cid);
   if(!keyName) return lines; // key not loaded yet — leave ciphertext for the re-decrypt pass on key arrival
   const out=new Array(lines.length);
   for(let i=0;i<lines.length;i++){
     const l=lines[i];
     if(l&&typeof l.text==='string'&&l.text.startsWith('sd8~')){
       try{
-        const pt=await channelDecrypt(keyName,l.text);
-        if(pt!==null){ out[i]=Object.assign({},l,{text:pt,encrypted:true}); continue; }
+        const pt=await channelDecrypt(keyName,l.text,l.from);
+        if(pt!==null){
+          const _a=(typeof e2eSplitAction==='function')?e2eSplitAction(pt):{action:false,text:pt};
+          out[i]=Object.assign({},l,{text:_a.text,encrypted:true},_a.action?{kind:'action'}:{}); continue;
+        }
       }catch(_){}
     }
     out[i]=l;
@@ -2586,42 +3404,133 @@ async function _decryptLogLines(target,lines){
 // Re-decrypt already-buffered sd8~ lines once a channel PSK finally loads —
 // covers the race where get_logs returns before e2e_channel_key arrives.
 async function redecryptChannelHistory(channel){
-  const keyName=_resolveChanKeyName(channel);
-  if(!keyName||typeof channelDecrypt!=='function') return;
+  if(typeof channelDecrypt!=='function'||!window.E2E||!window.E2E.channelKeys) return;
   const lc=String(channel).toLowerCase();
+  // r4 (F3-4): also the buffers of other spellings of this channel (#room{ for a key
+  // held as #room[) — each decided by _resolveChanKeyName on its own connection.
+  const fold=(typeof _e2eFoldWide==='function')?_e2eFoldWide:(typeof _e2eFoldAll==='function')?_e2eFoldAll:(x=>String(x).toLowerCase());
+  const fc=fold(channel);
   for(const k in buffers){
     const slash=k.lastIndexOf('/');                 // buffer key = `${conn_id}/${target.toLowerCase()}`
-    if(slash<0||k.slice(slash+1)!==lc) continue;
+    if(slash<0) continue;
+    const bt=k.slice(slash+1);
+    if(bt!==lc && fold(bt)!==fc) continue;
+    const keyName=_resolveChanKeyName(bt,k.slice(0,slash));
+    if(!keyName) continue;
     const buf=buffers[k];
     let changed=false;
     for(const m of buf){
       if(m&&typeof m.text==='string'&&m.text.startsWith('sd8~')){
         try{
-          const pt=await channelDecrypt(keyName,m.text);
-          if(pt!==null){ m.text=pt; m.encrypted=true; changed=true; }
+          const pt=await channelDecrypt(keyName,m.text,m.from);
+          if(pt!==null){
+            const _a=(typeof e2eSplitAction==='function')?e2eSplitAction(pt):{action:false,text:pt};
+            m.text=_a.text; m.encrypted=true; if(_a.action) m.kind='action'; changed=true;
+          }
         }catch(_){}
       }
     }
     if(changed){
       const conn_id=k.slice(0,slash);
-      if(active&&active.conn_id===conn_id&&typeof active.target==='string'&&active.target.toLowerCase()===lc) renderChat();
+      if(active&&active.conn_id===conn_id&&typeof active.target==='string'&&active.target.toLowerCase()===bt) renderChat();
     }
   }
 }
 window.redecryptChannelHistory=redecryptChannelHistory;
+// r3 (w-srv PARTIAL srv-b #26): the user "status"'s query window asks the server for its
+// own side of the shared "status" log (GetLogs/Sync `status_view:"query"`, added by the
+// server in round 2; an older server ignores the field and returns the whole log).
+// A line of the server's "query" side — exactly logs::StatusView::keeps(Query).
+function _isStatusQueryViewLine(l){
+  const k=String((l&&l.kind)||'');
+  return k==='privmsg'||k==='action'||(k==='notice'&&String((l&&l.from)||'').toLowerCase()==='status');
+}
+// A "status"-target reply (log_lines / sync_lines: the server echoes target "status"
+// for both windows) — is it the answer to the query window's request? `pend` tells
+// which of the two has a request in flight; with both, the content decides.
+function _statusReplyForQuery(conn_id,lines,pend){
+  const q=pend.has(conn_id+'/'+_STATUS_NICK_Q), s=pend.has(conn_id+'/status');
+  if(!q) return false;
+  if(!s) return true;
+  return Array.isArray(lines)&&lines.length>0&&lines.every(_isStatusQueryViewLine);
+}
+// Lines of a reply to the query window's request: a server that honoured status_view
+// sent only that side → all of it is the conversation (incl. our own lines under an
+// earlier nick); an older server sent the whole log → split it as before.
+function _statusQueryReplyLines(conn_id,lines){
+  if(!Array.isArray(lines)||lines.every(_isStatusQueryViewLine)) return {dm:lines||[],rest:[]};
+  const dm=[], rest=[];
+  for(const l of lines) (_isStatusNickLogLine(conn_id,l)?dm:rest).push(l);
+  return {dm,rest};
+}
+// The server keeps the user "status"'s DMs in the same "status" log as its own output:
+// split them out of status-window history into that user's query window, so they
+// neither pose as server lines nor disappear. Returns the server's own lines.
+function _splitStatusNickLines(conn_id,lines,sync){
+  if(!Array.isArray(lines)) return lines;
+  let dm=[], rest=[];
+  for(const l of lines) (_isStatusNickLogLine(conn_id,l)?dm:rest).push(l);
+  // r3 (agy-flash P3 MED app.js:1376): our OWN lines in the "status" log are lines that
+  // went to the IRC nick "status" — but older builds sent whatever was typed into the
+  // status window there too. Without a conversation with a real user "status" (a line
+  // from them in this batch, or that query already known here) they stay in the status
+  // window instead of opening a "status" query made only of them.
+  // r4 (agy-flash F3-7): a CLOSED "status" query is not such a conversation for this
+  // rule — the lines would go to its hidden buffer and be shown nowhere (not in the
+  // status window, and the query stays closed). Our own lines then stay in the status
+  // window too, unless this batch has a line from the real user "status" (an actual
+  // exchange: it stays with that closed conversation, like any closed query's lines).
+  const lc=_STATUS_NICK_Q.toLowerCase();
+  const closedQ=closedQueries[conn_id+'|'+lc]!=null;
+  if(dm.length && !dm.some(l=>String(l.from||'').toLowerCase()==='status')
+     && (closedQ || (!(queryBufs[conn_id]&&queryBufs[conn_id].has(lc))
+                     && !(buffers[bk(conn_id,_STATUS_NICK_Q)]||[]).length))){
+    rest=lines; dm=[];
+  }
+  if(dm.length){
+    if(closedQueries[conn_id+'|'+lc]==null){
+      if(!queryBufs[conn_id]) queryBufs[conn_id]=new Map();
+      if(!queryBufs[conn_id].has(lc)){ queryBufs[conn_id].set(lc,_STATUS_NICK_Q); try{ saveQueryBufs(); renderSidebar(); }catch(_){} }
+    }
+    Promise.resolve(sync?appendSyncLines(conn_id,_STATUS_NICK_Q,dm):prependLogs(conn_id,_STATUS_NICK_Q,dm)).catch(()=>{});
+  }
+  return rest;
+}
+// r4 (irc hand-off IRC-H2 / V3I-C2-5, round-3 residual (a)): rows this tab shows WITHOUT
+// an id, by ts|from|text(50) — a line shown live while the vault was locked (logged, and
+// so given an id, only after the unlock) or an optimistic row. An id'd CHAT line from
+// history/sync with the same key IS that row: it gets the id instead of a second row.
+// (id'd lines are never fuzzy-matched against id'd rows: two "gg" in one second stay two.)
+function _idlessRowIndex(buf){
+  const m=new Map();
+  for(const r of buf){ if(r&&!r.id){ const k=r.ts+'|'+r.from+'|'+(r.text||'').slice(0,50); const a=m.get(k); if(a) a.push(r); else m.set(k,[r]); } }
+  return m;
+}
+function _stampIdlessRow(idx,key,id){
+  const a=idx.get(key); if(!a||!a.length) return false;
+  a.shift().id=id; return true;
+}
 async function prependLogs(conn_id,target,lines){
-  lines=await _decryptLogLines(target,lines);
+  if(target==='status') lines=_splitStatusNickLines(conn_id,lines,false);
+  lines=await _decryptLogLines(target,lines,conn_id);
   const buf=getBuf(conn_id,target);
   const wasEmpty=buf.length===0;
   const _selfNick=getNick(conn_id);
   const newMsgs=lines.map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted},conn_id));
   // Track highest msg_id from log lines
   for(const m of newMsgs) trackMsgId(conn_id,target,m.id);
+  // A device that never saw this connection's live 005 (new browser, cleared data)
+  // can still learn PREFIX/CHANMODES from the logged copy in the status history.
+  if(target==='status'){ for(const m of newMsgs){ if(m.from==='*'&&_isIsupportLine(m.text)) _sniffIsupport(conn_id,m.text); } }
   // Deduplicate: use msg_id when available, fall back to ts+from+text
   const existingIds=new Set(buf.filter(m=>m.id>0).map(m=>m.id));
   const existingKeys=new Set(buf.map(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)));
+  const idless=_idlessRowIndex(buf);
   const unique=newMsgs.filter(m=>{
+    if(_isIgnoredLogLine(m)) return false;   // /ignore also hides history (log replay on reload/switch)
     if(m.id>0&&existingIds.has(m.id)) return false;
+    // r4 (IRC-H2): an id-less row already shown for this exact line takes the id.
+    if(m.id>0&&!_isStatusKind(m.kind)&&_stampIdlessRow(idless,m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50),m.id)){ existingIds.add(m.id); return false; }
     // Clock-skew reconcile: stamp a self-sent optimistic row (id 0, client ts)
     // with this id'd server copy instead of duplicating it (mobile dropped-echo
     // recovered via get_logs — get_logs lacked any skew fallback before this).
@@ -2712,7 +3621,8 @@ async function appendSyncLines(conn_id,target,lines){
   // and reload fresh, so the skipped ids are re-fetched. Mirrors addMessage's guard.
   const _histFrozen=()=>_historyView && _historyView.bk===bk(conn_id,target);
   if(_histFrozen()) return;
-  lines=await _decryptLogLines(target,lines);
+  if(target==='status') lines=_splitStatusNickLines(conn_id,lines,true);
+  lines=await _decryptLogLines(target,lines,conn_id);
   // Re-check after the await: decrypt can take seconds, and the user may have
   // jumped into a history window for this target meanwhile — the stale entry
   // check alone would then graft the live tail into the frozen window.
@@ -2721,13 +3631,17 @@ async function appendSyncLines(conn_id,target,lines){
   const _selfNick=getNick(conn_id);
   const existingIds=new Set(buf.filter(m=>m.id>0).map(m=>m.id));
   const existingKeys=new Set(buf.map(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)));
+  const idless=_idlessRowIndex(buf);
   let added=0;
   for(const l of lines){
     const id=l.id||0;
     trackMsgId(conn_id,target,id);
+    if(_isIgnoredLogLine(l)) continue;   // /ignore also hides synced tail lines
     if(id>0&&existingIds.has(id)) continue;
     // Exact fuzzy key — catches the common case where ts/from/text match.
     const fk=l.ts+'|'+l.from+'|'+(l.text||'').slice(0,50);
+    // r4 (IRC-H2): an id-less row already shown for this exact line takes the id.
+    if(id>0&&!_isStatusKind(l.kind)&&_stampIdlessRow(idless,fk,id)){ existingIds.add(id); continue; }
     // Only fuzzy-dedup UNSTAMPED lines (id===0) — EXCEPT status lines, which are
     // fuzzy-deduped even when id'd so a replayed status copy can't double an id-less
     // live copy (see _isStatusKind). An id>0 CHAT line is already deduped by id above;
@@ -2836,7 +3750,7 @@ function _renderSidebarNow(){
     const netMuted=isMuted('net:'+id)||isMuted(id+'/status');
     g.innerHTML=`<div class="net-label${sa?' active':''}" onclick="setActive('${id}','status');closeSidebar();" style="${sa?'background:var(--bg4);':''}">
       <span class="net-dot ${net.connected?'online':''}" id="dot-${id}"></span>
-      <span class="net-name">${esc(net.config.label||net.config.server)}</span>
+      <span class="net-name">${esc(net.config.label||net.config.server)}</span>${_netTlsBadge(net)}
       ${sc&&!netMuted?`<span class="chan-unread-badge${mentionUnread.get(sk)?` highlight`:''}">${sc>99?'99+':sc}</span>`:''}
       <span class="net-actions">
         <button class="net-btn net-kebab" data-net-id="${id}" title="Options">⋮</button>
@@ -2990,6 +3904,7 @@ function updateLagDisplay(){
 }
 function setActive(conn_id,target,options){
   ++_messageJumpSerial;
+  try{ _replyOnSwitch(conn_id,target); }catch(_){}   // r6: a reply quote stays with its conversation
   active={conn_id,target};
   // Uploads pseudo-channel doesn't live in IRC space — skip unread/sync/E2E
   // bookkeeping entirely. It still uses the same active/render plumbing.
@@ -3043,6 +3958,7 @@ function setActive(conn_id,target,options){
   const net=networks.find(n=>n.config.id===conn_id);
   const inpNick=document.getElementById('input-nick');if(inpNick)inpNick.textContent=net?.nick||net?.config.nick||currentUser||'—';
   updateCertBtn();
+  try{ if(typeof _restoreReloadDraft==='function') _restoreReloadDraft(conn_id,target); }catch(_){}   // r10
 }
 
 function renderChat(){
@@ -3182,9 +4098,14 @@ function loadOlderMessages(){
   if(!active)return;
   const buf=getBuf(active.conn_id,active.target);
   const oldest=buf.length>0?buf[0].ts:Math.floor(Date.now()/1000);
+  // r3 (w-srv PARTIAL srv-b #19): plus an exact cursor inside that second — the id of the
+  // oldest line shown from it — so a second holding more lines than one page is paged
+  // through instead of leaving a hole (`before_id`; an older server ignores it).
+  let bid=0;
+  for(const m of buf){ if(m&&m.ts===oldest&&m.id>0&&(!bid||m.id<bid)) bid=m.id; }
   const btn=document.querySelector('.load-more-btn');
   if(btn){btn.textContent='Loading…';btn.style.opacity='.5';}
-  wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200,before:oldest});
+  wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200,before:oldest,...(bid?{before_id:bid}:{})});
 }
 /* Cap the chat DOM at MAX rows. Buffer is bounded at 2000 (addMessage line ~3638)
    but the DOM had no cap — appendMsgRow only ever appends, never removes, so a
@@ -3573,7 +4494,9 @@ function buildCondensedRow(group){
   });
   return row;
 }
-function buildRow(msg){
+// r7 (codex-p3 app.js:5215): `conv` = the conversation the row is shown for when that is
+// NOT the active one (the split pane) — its Reply quote belongs there.
+function buildRow(msg,conv){
   const row=document.createElement('div'); row.className=`msg-row row-${msg.kind}`; row.dataset.ts=msg.ts; row.dataset.from=msg.from||''; row.dataset.msgId=msg.id||0; row._jumpText=msg.text||''; row.dataset.fp=_msgFp(msg);
   if(msg.self) row.dataset.self='1';
   if(msg.mentioned) row.dataset.mentioned='1';
@@ -3593,7 +4516,12 @@ function buildRow(msg){
   }
   const pfxHtml=userPfx?`<span class="nick-pfx${'~&@'.includes(userPfx)?' op':''}">${userPfx}</span>`:'';
   let nickHtml,bodyHtml;
-  if(isSys){nickHtml=`<span class="msg-nick" style="color:var(--text3)">—</span>`;bodyHtml=`<span class="msg-body">${renderStatusText(msg)}</span>`;}
+  // A NOTICE from a user (incl. services) shows its sender as -nick-: rendered as an
+  // anonymous "—" system line, anyone could pass a notice off as a server/services
+  // message in whatever window the victim is reading. Server notices (name has a
+  // '.') and '*' lines keep the system look.
+  if(msg.kind==='notice'&&msg.from&&msg.from!=='*'&&!String(msg.from).includes('.')){nickHtml=`<span class="msg-nick msg-notice-from" data-nick="${esc(msg.from)}" style="color:var(--notice,var(--text3));cursor:pointer">-${esc(msg.from)}-</span>`;bodyHtml=`<span class="msg-body">${renderStatusText(_ctcpReplyView(msg))}</span>`;}
+  else if(isSys){nickHtml=`<span class="msg-nick" style="color:var(--text3)">—</span>`;bodyHtml=`<span class="msg-body">${renderStatusText(msg)}</span>`;}
   else if(msg.kind==='action'){nickHtml=`<span class="msg-nick ${nc}">* ${pfxHtml}${esc(msg.from)}</span>`;bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;}
   else{
     // SECURITY: the nick is attacker-controlled (IRC prefix, no char validation)
@@ -3615,16 +4543,18 @@ function buildRow(msg){
     lock.style.cssText = 'opacity:.5;margin-left:4px;flex-shrink:0;color:var(--accent);';
     msgBody.appendChild(lock);
   }
-  if(msgBody){for(const url of extractMediaUrls(msg.text)){const el=buildMediaEl(url);if(el)msgBody.appendChild(el);}}
+  if(msgBody){for(const url of extractMediaUrls(msg.text)){const el=buildMediaEl(url,!!msg.encrypted);if(el)msgBody.appendChild(el);}}
   // Reply button on chat messages
   if(isChat&&msg.from!=='*'){
     const replyBtn=document.createElement('span');
     replyBtn.className='msg-reply-btn';
     replyBtn.title='Reply';
     replyBtn.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 17H4V12"/><path d="M4 17L15 6"/><path d="M15 6H20V11"/></svg>';
-    replyBtn.onclick=(e)=>{e.stopPropagation();setReply(msg.from,msg.text);};
+    replyBtn.onclick=(e)=>{e.stopPropagation();setReply(msg.from,msg.text,conv);};
     row.appendChild(replyBtn);
   }
+  row._msgRef=msg;
+  if(msg.sendState) _applySendState(row,msg);
   return row;
 }
 // Delegated click handler for nick list — attached once, works for all nicks.
@@ -4002,7 +4932,7 @@ function mediaPlaceholder(kind,url,buildReal){
   wrap.appendChild(btn);
   return wrap;
 }
-function buildMediaEl(url){
+function buildMediaEl(url,fromEncrypted){
   const authedUrl=appendFileToken(url);
   // Images
   if(IMG_EXTS.test(url)||url.includes('/files/')){
@@ -4135,7 +5065,22 @@ function buildMediaEl(url){
     if((loadAppearance().ytPreview||'auto')!=='click' && _mediaAutoLoad(url)) setTimeout(_ytReveal,0);
     return wrap;
   }
-  // Link preview — fetch metadata from server for non-media HTTPS links
+  // Link preview — fetch metadata from server for non-media HTTPS links.
+  // r2 (codex-p3 MED app.js:4503): a link that arrived inside an END-TO-END ENCRYPTED
+  // message is not sent to the CryptIRC server for a preview automatically (that would
+  // disclose it to the server the encryption is meant to keep out). The user can still
+  // ask for that one preview with a click.
+  if(url.startsWith('https://') && loadAppearance().linkPreviews!==false && fromEncrypted){
+    const wrap=document.createElement('div');wrap.className='msg-media';
+    const btn=document.createElement('button');btn.type='button';btn.className='msg-media-load';
+    let host=url;try{host=new URL(url).hostname;}catch(_){}
+    btn.textContent=`🔒 Load link preview — ${host}`;
+    btn.title='This link came in an end-to-end encrypted message. Loading a preview sends the link to your CryptIRC server, which fetches the page.';
+    btn.style.cssText='max-width:100%;padding:6px 10px;border:1px dashed var(--border,#555);border-radius:8px;background:var(--surface2,rgba(127,127,127,.12));color:var(--text2,inherit);font-size:12px;cursor:pointer;text-align:left;white-space:normal;word-break:break-all;';
+    btn.onclick=e=>{e.stopPropagation();const real=buildMediaEl(url,false);if(real) wrap.replaceWith(real); else wrap.remove();};
+    wrap.appendChild(btn);
+    return wrap;
+  }
   if(url.startsWith('https://') && loadAppearance().linkPreviews!==false){
     const previewId='lp-'+Math.random().toString(36).slice(2,10);
     const card=document.createElement('a');
@@ -4151,8 +5096,31 @@ function buildMediaEl(url){
         let html=`<div class="msg-link-preview-domain">${esc(d.site_name||d.domain)}</div>`;
         html+=`<div class="msg-link-preview-title">${esc(d.title)}</div>`;
         if(d.description) html+=`<div class="msg-link-preview-desc">${esc(d.description)}</div>`;
-        if(d.image&&d.image.startsWith('https://')) html+=`<img class="msg-link-preview-img" src="${esc(d.image)}" loading="lazy" onload="if(!_userScrolledAway)scrollBottom()" onerror="this.remove()">`;
         el.innerHTML=html;
+        // The og:image is a foreign-host fetch (the sender's own host — preview.rs
+        // only guarantees same-host as the page), so it obeys the External media
+        // setting like every other image: auto-load only when allowed, otherwise a
+        // click-to-load chip. Never sends a Referer.
+        if(d.image&&d.image.startsWith('https://')){
+          const _addImg=()=>{
+            const img=document.createElement('img');
+            img.className='msg-link-preview-img'; img.loading='lazy'; img.referrerPolicy='no-referrer';
+            img.onload=()=>{ if(!_userScrolledAway) scrollBottom(); };
+            img.onerror=()=>img.remove();
+            img.src=d.image;
+            el.appendChild(img);
+          };
+          if(_mediaAutoLoad(d.image)) _addImg();
+          else{
+            const chip=document.createElement('span');
+            chip.className='msg-link-preview-imgload'; chip.setAttribute('role','button');
+            chip.textContent='🖼 Load preview image';
+            chip.title='Load the preview image from '+(()=>{try{return new URL(d.image).hostname;}catch(_){return 'the linked site';}})();
+            chip.style.cssText='display:inline-block;margin-top:6px;font-size:11px;color:var(--text3);border:1px dashed var(--border);border-radius:4px;padding:2px 6px;cursor:pointer';
+            chip.addEventListener('click',e=>{ e.preventDefault(); e.stopPropagation(); chip.remove(); _addImg(); });
+            el.appendChild(chip);
+          }
+        }
         el.style.display='';
         // Card just materialized — may have added meaningful height. If the
         // user is near the bottom, re-anchor to the latest message. 500px
@@ -4219,7 +5187,9 @@ document.addEventListener('DOMContentLoaded',()=>{
       const _chanAc  = document.getElementById('chan-autocomplete');
       const _acOpen = (el) => el && el.style.display && el.style.display!=='none';
       if(_acOpen(_slashAc)||_acOpen(_nickAc)||_acOpen(_emojiAc)||_acOpen(_chanAc)) return;
-      sendTypingDone(); await handleInput(inp.value); inp.value=''; historyIdx=-1;
+      // r9 (astra-p3 app.js:5180): a send can wait (E2E re-sync after a reconnect) while the
+      // input stays editable — only the text that was sent is cleared, never a newer draft.
+      sendTypingDone(); const _sent=inp.value; if((await handleInput(_sent))!=='keep' && inp.value===_sent) inp.value=''; historyIdx=-1;
     }
     else if(e.key==='ArrowUp')   {if(historyIdx<inputHistory.length-1){historyIdx++;inp.value=inputHistory[inputHistory.length-1-historyIdx];}e.preventDefault();}
     else if(e.key==='ArrowDown') {if(historyIdx>0){historyIdx--;inp.value=inputHistory[inputHistory.length-1-historyIdx];}else{historyIdx=-1;inp.value='';}e.preventDefault();}
@@ -4309,11 +5279,21 @@ document.addEventListener('DOMContentLoaded',()=>{
 // ─── IRCv3 typing indicator sender ───────────────────────────────────────────
 let _lastTypingSent=0;
 // ─── Reply system ────────────────────────────────────────────────────────────
-let _replyTo=null; // {nick, text}
-function setReply(nick,text){
-  _replyTo={nick,text:text.slice(0,200)};
+// r6 (codex-p3 app.js:5204): a reply quote belongs to the conversation it was picked in
+// ({conn_id, target}). It used to be global and survive a conversation switch, so a
+// quote of a private / decrypted line went out with the next line typed in a public
+// channel. It is dropped on a switch and only ever sent to its own conversation.
+let _replyTo=null; // {nick, text, conn_id, target}
+function _replyKey(conn_id,target){ return String(conn_id||'')+'\n'+String(target||'').toLowerCase(); }
+function setReply(nick,text,conv){
+  // r7 (codex-p3 app.js:5215): bound to the conversation of the clicked row (the split
+  // pane passes its own) — the global `active` is only the default for the main view.
+  const c=(conv&&conv.conn_id&&conv.target)?conv:active;
+  if(!c) return;
+  _replyTo={nick,text:String(text||'').slice(0,200),conn_id:c.conn_id,target:c.target};
   const bar=document.getElementById('reply-bar');
-  document.getElementById('reply-bar-nick').textContent=nick;
+  const elsewhere=!active||_replyKey(c.conn_id,c.target)!==_replyKey(active.conn_id,active.target);
+  document.getElementById('reply-bar-nick').textContent=elsewhere?`${nick} (in ${c.target} — only sent there)`:nick;
   document.getElementById('reply-bar-text').textContent=text.slice(0,100);
   bar.classList.add('show');
   document.getElementById('msg-input').focus();
@@ -4322,29 +5302,45 @@ function cancelReply(){
   _replyTo=null;
   document.getElementById('reply-bar').classList.remove('show');
 }
-function getReplyPrefix(){
+function _replyOnSwitch(conn_id,target){
+  if(_replyTo&&_replyKey(_replyTo.conn_id,_replyTo.target)!==_replyKey(conn_id,target)) cancelReply();
+}
+// r8 (agy-flash app.js:6320): null = the reply belongs to ANOTHER conversation (picked in
+// the split pane) — the caller sends nothing (it used to drop the quote but still send
+// the reply text to the main pane's conversation). The reply stays armed.
+function getReplyPrefix(conn_id,target){
   if(!_replyTo) return '';
+  if(_replyKey(_replyTo.conn_id,_replyTo.target)!==_replyKey(conn_id,target)){
+    try{ showToast(`Not sent — this reply belongs to ${_replyTo.target}: open it to send there, or cancel the reply`); }catch(_){}
+    return null;
+  }
   const quote=_replyTo.text.slice(0,80).replace(/\n/g,' ');
   const prefix=`> <${_replyTo.nick}> ${quote}\n`;
   cancelReply();
   return prefix;
 }
 
+// r5 (agy-flash app.js:5229): typing notices go through wsend like every other frame —
+// they used to be written to the socket directly, past wsend's guards (account wipe in
+// progress, the E2E-engine failure backstop, the "status" nick alias rewrite). Sent only
+// on an authenticated socket and never while the E2E engine failed to load.
+function _sendTyping(state){
+  if(!active||!_wsReady()||!_e2eEngineOk()) return;
+  const target=active.target;
+  if(!target||target==='status') return;
+  wsend({type:'send',conn_id:active.conn_id,raw:`@+typing=${state} TAGMSG ${target}`});
+}
 function sendTypingActive(){
-  if(!active||!ws||ws.readyState!==1) return;
+  if(!active||!_wsReady()) return;
   const now=Date.now();
   if(now-_lastTypingSent<3000) return;
   _lastTypingSent=now;
-  const target=active.target;
-  if(!target||target==='status') return;
-  ws.send(JSON.stringify({type:'send',conn_id:active.conn_id,raw:`@+typing=active TAGMSG ${target}`}));
+  _sendTyping('active');
 }
 function sendTypingDone(){
-  if(!active||!ws||ws.readyState!==1) return;
+  if(!active||!_wsReady()) return;
   _lastTypingSent=0;
-  const target=active.target;
-  if(!target||target==='status') return;
-  ws.send(JSON.stringify({type:'send',conn_id:active.conn_id,raw:`@+typing=done TAGMSG ${target}`}));
+  _sendTyping('done');
 }
 
 let _sendLock=false;
@@ -4353,9 +5349,107 @@ async function doSend(){
   const inp=document.getElementById('msg-input');
   if(!inp||!inp.value.trim())return;
   _sendLock=true;
-  try{await handleInput(inp.value);inp.value='';}
+  try{ const _sent=inp.value; if((await handleInput(_sent))!=='keep' && inp.value===_sent) inp.value=''; }   // r9: see the Enter handler
   finally{setTimeout(()=>{_sendLock=false;},200);}
   inp.focus();
+}
+// r3 (web side of codex C2-11): /cycle used to send PartChannel, then a keyless
+// JoinChannel. PartChannel makes the server delete the channel's saved key, so a +k
+// channel could not be rejoined and its key was gone. Now the key the server holds is
+// read from a FRESH State first (a +k set after joining is saved server-side but never
+// pushed), then PART + JOIN go out with it; the server handles one socket's frames in
+// order, so the JOIN saves the key again. Refused (with a notice, nothing sent) when the
+// network is not connected (the JOIN would be a no-op while the PART still drops the
+// channel and its key), when the channel's saved key is still an encrypted blob (vault
+// locked; r4: a channel without a saved key cycles while locked too), or when no fresh
+// State arrives within 15 s.
+let _pendingCycles=[];
+const _CYCLE_WAIT_MS=15000;
+function _ircFold(s){ return String(s||'').replace(/[A-Z\[\]\\~]/g,c=>({'[':'{',']':'}','\\':'|','~':'^'})[c]||c.toLowerCase()).toLowerCase(); }
+function _ircFoldStrict(s){ return String(s||'').replace(/[A-Z\[\]\\]/g,c=>({'[':'{',']':'}','\\':'|'})[c]||c.toLowerCase()).toLowerCase(); }
+// r4 (agy-flash F3-5): the channel-name fold of connection `cid` for key lookups, by the
+// server's own reading of the network's CASEMAPPING (ircproto CaseMapping::from_token:
+// rfc1459 → RFC1459, strict-rfc1459 → without ~^, anything else → ascii = case only;
+// on an ascii network #a[b] and #a{b} are DIFFERENT channels). Not seen on this device
+// (no 005 here or in the loaded status history) → RFC1459, as before: the server knows
+// the mapping and on PART drops the slot its fold finds, so a narrower guess here would
+// lose a +k channel's key on /cycle.
+function _chanKeyFold(cid){
+  let cm='';
+  try{ const i=_isupport[cid]; if(i&&typeof i.casemapping==='string') cm=i.casemapping.trim().toLowerCase(); }catch(_){}
+  if(!cm||cm==='rfc1459') return _ircFold;
+  if(cm==='strict-rfc1459'||cm==='rfc1459-strict') return _ircFoldStrict;
+  return s=>String(s||'').toLowerCase();
+}
+// The key the server holds for `ch` — found the way the server finds it (irc.rs
+// existing_key_slot / channel_key_lookup_cm): the lowercased name, else an entry equal to
+// it under the connection's casemapping.
+function _serverChanKey(keys,ch,cid){
+  if(!keys||typeof keys!=='object') return null;
+  const lc=String(ch).toLowerCase();
+  if(typeof keys[lc]==='string') return keys[lc];
+  const fold=_chanKeyFold(cid), f=fold(ch);
+  for(const k of Object.keys(keys)) if(fold(k)===f && typeof keys[k]==='string') return keys[k];
+  return null;
+}
+// A still-encrypted vault value, by the server's own test (is_enc_blob): "enc:" + standard
+// base64 of at least 28 bytes. A real key that merely starts with "enc:" does not pass.
+function _isEncBlob(s){
+  if(typeof s!=='string'||!s.startsWith('enc:')) return false;
+  const b=s.slice(4);
+  if(b.length%4||!/^[A-Za-z0-9+/]*={0,2}$/.test(b)) return false;
+  return b.length/4*3-(b.match(/=*$/)[0].length)>=28;
+}
+function _cycleRequest(conn_id,ch,win){
+  if(!_wsReady()){ sysMsg(conn_id,win,`/cycle ${ch}: not connected to the server — nothing was sent`,'error'); return; }
+  const net=networks.find(n=>n.config.id===conn_id);
+  if(net&&net.connected===false){ sysMsg(conn_id,win,`/cycle ${ch}: this network is not connected — nothing was sent`,'error'); return; }
+  const lc=ch.toLowerCase();
+  if(!_pendingCycles.some(p=>p.conn_id===conn_id&&p.ch.toLowerCase()===lc)) _pendingCycles.push({conn_id,ch,win,t:Date.now()});
+  wsend({type:'get_state'});
+  setTimeout(()=>{ const n=_pendingCycles.length; _pendingCycles=_pendingCycles.filter(p=>{ if(Date.now()-p.t<_CYCLE_WAIT_MS) return true; sysMsg(p.conn_id,p.win,`/cycle ${p.ch}: no reply from the server — nothing was sent`,'error'); return false; }); },_CYCLE_WAIT_MS+50);
+}
+// Called with every State: carry out the /cycle requests waiting for one.
+function _runPendingCycles(ev){
+  if(!_pendingCycles.length) return;
+  const todo=_pendingCycles; _pendingCycles=[];
+  for(const p of todo){
+    if(Date.now()-p.t>=_CYCLE_WAIT_MS) continue;
+    const net=(ev.networks||[]).find(n=>n&&n.config&&n.config.id===p.conn_id);
+    if(!net){ sysMsg(p.conn_id,p.win,`/cycle ${p.ch}: that network is gone`,'error'); continue; }
+    if(!net.connected){ sysMsg(p.conn_id,p.win,`/cycle ${p.ch}: this network is not connected — nothing was sent`,'error'); continue; }
+    let key=_serverChanKey(net.config.channel_keys,p.ch,p.conn_id);
+    // r4 (agy-flash F3-6): refused only when the channel HAS a saved key that is still an
+    // encrypted blob (vault locked). A locked vault returns the config as stored, so a
+    // keyed channel always shows its blob here; a channel with no saved key has nothing
+    // to lose and cycles as usual.
+    if(_isEncBlob(key)){ sysMsg(p.conn_id,p.win,`/cycle ${p.ch}: unlock the vault first (the channel's saved key is still encrypted) — nothing was sent`,'error'); continue; }
+    if(!key){ try{ key=loadChanKeys()[bk(p.conn_id,p.ch)]||null; }catch(_){ key=null; } }   // a key saved on this device (/key, /join #c key)
+    wsend({type:'part_channel',conn_id:p.conn_id,channel:p.ch});
+    setTimeout(()=>{ markUserJoin(p.conn_id,p.ch); wsend({type:'join_channel',conn_id:p.conn_id,channel:p.ch,key:key||null}); },500);
+  }
+}
+// r3: typed lines that would send text to the CURRENT window (plain text and the commands
+// that post to it); their config-only sub-commands (/np set|clear, /gif key|rating) don't.
+const _STATUS_WIN_SEND_CMDS=new Set(['ME','SAY','SLAP','SHRUG','ADVERTISE','AD','GIPHY','GIF','TABLEFLIP','UNFLIP','UNFLIPTABLE','LENNY','DISAPPROVE','LOOK','RAGE','BEAR','SPARKLE','SPARKLES','FINGER','MIDDLEFINGER','DANCE','RIP','HUG','PRISM','RAINBOW','ASCII','FIGLET','UD','URBAN','NP','NOWPLAYING']);
+function _statusWinSendsText(raw){
+  if(!raw.startsWith('/')) return true;
+  const p=raw.slice(1).split(/\s+/), cmd=(p[0]||'').toUpperCase(), sub=(p[1]||'').toLowerCase();
+  if((cmd==='NP'||cmd==='NOWPLAYING')&&['set','clear','off'].includes(sub)) return false;
+  if((cmd==='GIF'||cmd==='GIPHY')&&['key','rating'].includes(sub)) return false;
+  return _STATUS_WIN_SEND_CMDS.has(cmd);
+}
+// r4 (C3-1): typed lines that send chat text (to the current window or a named target).
+function _lineSendsText(raw){
+  if(!raw.startsWith('/')) return true;
+  const p=raw.slice(1).split(/\s+/), cmd=(p[0]||'').toUpperCase();
+  if(cmd==='QUERY'||cmd==='Q') return p.length>2;
+  if(_HIST_TARGET_CMDS.has(cmd)) return true;
+  if((cmd==='QUOTE'||cmd==='RAW')) return _sendRawVerb(p.slice(1).join(' '))!=='';
+  return _statusWinSendsText(raw);
+}
+function _statusWinRefuse(conn_id){
+  sysMsg(conn_id,'status','⛔ Not sent: this is the server (status) window, not a conversation. Use /msg <nick> <text>, open a query, or join a channel (↑ recalls your line).','error');
 }
 async function handleInput(raw){
   raw=raw.trim(); if(!raw||!active)return;
@@ -4373,10 +5467,30 @@ async function handleInput(raw){
       _hist=raw.replace(/^(\S+)\s+\S[\s\S]*$/,'$1 •••');
     }
   }
+  // E2E: a line meant for an encrypted conversation stays on this device (not synced).
+  // r3: a line for a conversation with E2E state is also marked local-only for good
+  // (_histLocal), so it stays off the server after E2E is switched off again.
+  try{
+    _histE2eSeen();   // record E2E evidence BEFORE this line runs (it may be "/encrypt off")
+    if(_histTargetsOf(raw,active).some(t=>_isE2eConversation(t,active.conn_id))){ _histLocal.add(_hist); _histE2eSeen(); }
+    if(_histLineIsE2e(raw,active)) _histSyncOk.delete(_hist); else _histSyncOk.add(_hist);
+  }catch(_){ _histSyncOk.delete(_hist); _histLocal.add(_hist); }
   inputHistory.push(_hist); if(inputHistory.length>500)inputHistory.splice(0,inputHistory.length-500); saveInputHistory();
   const{conn_id,target}=active;
+  // r3 (agy-flash P3 MED app.js:1376): the status window is the server's window, not a
+  // conversation — text typed there (or /me, /say, an emote, …) used to go out as a
+  // PRIVMSG to whoever holds the IRC nick "status".
+  if(target==='status' && _statusWinSendsText(raw)){ _statusWinRefuse(conn_id); return; }
+  // r8 (agy-flash app.js:2099): the overflow window only collects lines from new nicks —
+  // nothing is sent "to" it (it used to go out as PRIVMSG *overflow*).
+  if(String(target).toLowerCase()===OVERFLOW_Q && _statusWinSendsText(raw)){ sysMsg(conn_id,target,`${OVERFLOW_Q} only collects messages from new nicks — nothing was sent. Use /query <nick> to answer one.`,'error'); return; }
+  // r4 (C3-1): the E2E engine did not load — a line that would send chat text is
+  // refused here, before any row or queue entry exists (wsend refuses the rest).
+  if(!_e2eEngineOk() && _lineSendsText(raw)){ _e2eEngineFailNotice(conn_id,target); return; }
   if(raw.startsWith('/')){
     const parts=raw.slice(1).split(' ');const cmd=parts[0].toUpperCase();const args=parts.slice(1);
+    // "/msg status …", "/query status": the USER "status" (its query), never the status window.
+    if(['MSG','PRIVMSG','QUERY','NOTICE','CTCP'].includes(cmd)&&args[0]) args[0]=args[0].split(',').map(_dmTarget).join(',');
     switch(cmd){
       // ── Navigation ──────────────────────────────────────────────────
       case 'JOIN': {
@@ -4397,10 +5511,12 @@ async function handleInput(raw){
       case 'PART': case 'LEAVE':
         wsend({type:'part_channel',conn_id,channel:args[0]||target}); break;
       case 'CYCLE': case 'REJOIN': {
-        // Part and immediately rejoin the current channel
-        const cycleKey = args[0]||target;
-        wsend({type:'part_channel',conn_id,channel:cycleKey});
-        setTimeout(()=>{markUserJoin(conn_id,cycleKey); wsend({type:'join_channel',conn_id,channel:cycleKey,key:null});},500);
+        // Part and rejoin the current (or named) channel — with its key: PartChannel makes
+        // the server forget the saved key, so it is read first (see _cycleRequest).
+        let ch=args[0]||target;
+        if(args[0]&&!/^[#&+!]/.test(ch)) ch='#'+ch;   // same '#' default as /join
+        if(!/^[#&+!]/.test(ch||'')){ sysMsg(conn_id,target,'/cycle works in a channel (or: /cycle #channel)','error'); break; }
+        _cycleRequest(conn_id,ch,target);
         break;
       }
       case 'QUERY': {
@@ -4413,15 +5529,8 @@ async function handleInput(raw){
         setActive(conn_id,qnick);
         if(args.slice(1).length) {
           const qtext = toMircChars(args.slice(1).join(' '));
-          // L2: route through E2E if session exists
-          const qwire = (window.E2E?.ready || window.E2E?.channelKeys?.[qnick]) ? await e2eEncryptOutgoing(qnick, qtext) : null;
-          if (_e2eBlockedWarn(qwire)) break;
-          if (qwire) {
-            wsend({type:'send',conn_id,raw:`PRIVMSG ${qnick} :${qwire}`});
-            addMessage(conn_id,qnick,{ts:Date.now()/1000|0,from:getNick(conn_id),text:qtext,kind:'privmsg',encrypted:true});
-          } else {
-            wsend({type:'send',conn_id,raw:`PRIVMSG ${qnick} :${qtext}`});
-          }
+          // L2: route through E2E if session exists. r7: queued + tracked like typed lines.
+          await _sendChat(conn_id,qnick,qtext);
         }
         break;
       }
@@ -4495,29 +5604,15 @@ async function handleInput(raw){
       // ── Messaging ───────────────────────────────────────────────────
       case 'ME': {
         const t=toMircChars(args.join(' '));
-        // L3: /me goes through E2E if session is active for this target
-        const meWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target]) ? await e2eEncryptOutgoing(target, `\x01ACTION ${t}\x01`) : null;
-        if (_e2eBlockedWarn(meWire)) break;
-        if (meWire) {
-          wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${meWire}`});
-        } else {
-          wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :\x01ACTION ${t}\x01`});
-        }
-        addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'action',encrypted:!!meWire});
+        // L3: /me goes through E2E if session is active for this target. r7: queued +
+        // tracked (r4 IRC-H1: plaintext = the pieces the server sends, ACTION on each).
+        await _sendChat(conn_id,target,`\x01ACTION ${t}\x01`,{kind:'action'});
         break;
       }
       case 'SAY': {
         const t=toMircChars(args.join(' '));
-        // L3: /say goes through E2E if active
-        const sayWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target]) ? await e2eEncryptOutgoing(target, t) : null;
-        if (_e2eBlockedWarn(sayWire)) break;
-        if (sayWire) {
-          wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${sayWire}`});
-          addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg',encrypted:true});
-        } else {
-          wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});
-          addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});
-        }
+        // L3: /say goes through E2E if active. r7: queued + tracked like typed lines.
+        await _sendChat(conn_id,target,t);
         break;
       }
       case 'MSG': case 'PRIVMSG': {
@@ -4530,18 +5625,23 @@ async function handleInput(raw){
           queryBufs[conn_id].set(to.toLowerCase(), to);
           saveQueryBufs();
         }
-        // L4: encrypt if E2E session exists for the destination
-        const msgWire = (window.E2E?.ready || window.E2E?.channelKeys?.[to]) ? await e2eEncryptOutgoing(to, t) : null;
-        if (_e2eBlockedWarn(msgWire)) break;
-        wsend({type:'send',conn_id,raw:`PRIVMSG ${to} :${msgWire||t}`});
-        addMessage(conn_id,to,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg',encrypted:!!msgWire});
-        setActive(conn_id,to);
+        // L4: encrypt if E2E session exists for the destination.
+        // r2 (codex-p3 HIGH app.js:4917): "/msg bob,carol text" used to be checked as ONE
+        // name ("bob,carol" has no E2E state) and went out in cleartext to both. Each
+        // recipient is now checked; if any has E2E on, every recipient gets its own line
+        // (encrypted where E2E is on), and if any of them is blocked nothing is sent.
+        const ok=await _e2eSendToTargets(conn_id,'PRIVMSG',to,t);
+        if(!ok) break;
+        const _first=_splitTargets(to)[0]||to;
+        setActive(conn_id,_first);
         break;
       }
       case 'NOTICE': {
         const to=args[0],t=toMircChars(args.slice(1).join(' '));
         if(!to||!t){sysMsg(conn_id,target,'Usage: /notice <target> <message>','error');break;}
-        wsend({type:'send',conn_id,raw:`NOTICE ${to} :${t}`}); break;
+        // r2 (codex-p3 HIGH): /notice bypassed E2E entirely. Same rules as /msg now
+        // (receivers decrypt NOTICEs too); a blocked recipient blocks the send.
+        await _e2eSendToTargets(conn_id,'NOTICE',to,t,{noEcho:true}); break;
       }
       case 'CTCP': {
         // /ctcp nick VERSION  or  /ctcp nick PING
@@ -4908,11 +6008,7 @@ async function handleInput(raw){
       }
       case 'SLAP': {
         const t=`slaps ${args[0]||'themselves'} around a bit with a large trout`;
-        const slapWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,`\x01ACTION ${t}\x01`):null;
-        if(_e2eBlockedWarn(slapWire)) break;
-        if(slapWire){wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${slapWire}`});}
-        else{wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :\x01ACTION ${t}\x01`});}
-        addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'action'}); break;
+        await _sendChat(conn_id,target,`\x01ACTION ${t}\x01`,{kind:'action'}); break;   // r7: queued + tracked
       }
       case 'MONITOR': case 'WATCH': {
         if(!args[0]){sysMsg(conn_id,target,'Usage: /monitor <nick>','error');break;}
@@ -4926,8 +6022,8 @@ async function handleInput(raw){
       }
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
-      case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 227 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 227 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';await _sendChatLine(conn_id,target,t);break; }
       case 'NP': case 'NOWPLAYING': {
         const sub=(args[0]||'').toLowerCase();
         if(sub==='set'){ const u=(args[1]||'').trim(); if(!u){ sysMsg(conn_id,target,'Usage: /np set <your-lastfm-username>','error'); break; } doSetLastfm(conn_id,target,u); break; }
@@ -4995,24 +6091,20 @@ async function handleInput(raw){
         }
         const url=await giphyFetchTop(q);
         if(!url){ sysMsg(conn_id,target,'GIF search failed — invalid key, no result, or rate-limited.','error'); break; }
-        const gifWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,url):null;
-        if(_e2eBlockedWarn(gifWire)) break;
-        if(gifWire)wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${gifWire}`});
-        else wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${url}`});
-        addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:url,kind:'privmsg',encrypted:!!gifWire});
+        await _sendChat(conn_id,target,url);   // r7: queued + tracked
         break;
       }
-      case 'TABLEFLIP': { const t='(╯°□°)╯︵ ┻━┻'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'UNFLIP': case 'UNFLIPTABLE': { const t='┬─┬ノ( º _ ºノ)'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'LENNY': { const t='( ͡° ͜ʖ ͡°)'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'DISAPPROVE': case 'LOOK': { const t='ಠ_ಠ'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'RAGE': { const t='(ノಠ益ಠ)ノ彡┻━┻'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'BEAR': { const t='ʕ•ᴥ•ʔ'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'SPARKLE': case 'SPARKLES': { const t='✧･ﾟ: *✧･ﾟ:* '+(args.length?args.join(' '):'')+'*:･ﾟ✧*:･ﾟ✧';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'FINGER': case 'MIDDLEFINGER': { const t='╭∩╮(︶︿︶)╭∩╮'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'DANCE': { const t='♪┏(・o・)┛♪┗(・o・)┓♪'+(args.length?' '+args.join(' '):'');wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'RIP': { const t='⚰️ R.I.P. '+(args.length?args.join(' '):'')+'⚰️';wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
-      case 'HUG': { const n=args[0]||'everyone';const t=`(づ｡◕‿‿◕｡)づ ${n}`;wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${t}`});addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:t,kind:'privmsg'});break; }
+      case 'TABLEFLIP': { const t='(╯°□°)╯︵ ┻━┻'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
+      case 'UNFLIP': case 'UNFLIPTABLE': { const t='┬─┬ノ( º _ ºノ)'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
+      case 'LENNY': { const t='( ͡° ͜ʖ ͡°)'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
+      case 'DISAPPROVE': case 'LOOK': { const t='ಠ_ಠ'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
+      case 'RAGE': { const t='(ノಠ益ಠ)ノ彡┻━┻'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
+      case 'BEAR': { const t='ʕ•ᴥ•ʔ'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
+      case 'SPARKLE': case 'SPARKLES': { const t='✧･ﾟ: *✧･ﾟ:* '+(args.length?args.join(' '):'')+'*:･ﾟ✧*:･ﾟ✧';await _sendChatLine(conn_id,target,t);break; }
+      case 'FINGER': case 'MIDDLEFINGER': { const t='╭∩╮(︶︿︶)╭∩╮'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
+      case 'DANCE': { const t='♪┏(・o・)┛♪┗(・o・)┓♪'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
+      case 'RIP': { const t='⚰️ R.I.P. '+(args.length?args.join(' '):'')+'⚰️';await _sendChatLine(conn_id,target,t);break; }
+      case 'HUG': { const n=args[0]||'everyone';const t=`(づ｡◕‿‿◕｡)づ ${n}`;await _sendChatLine(conn_id,target,t);break; }
       case 'COLOR': {
         const a=(args[0]||'').toLowerCase().trim();
         if(!a||a==='off'){ setMsgColorMode('off'); sysMsg(conn_id,target,'Message color turned off.','system'); break; }
@@ -5039,10 +6131,7 @@ async function handleInput(raw){
           else{colored+='\x03'+String(rainbowColors[ci%rainbowColors.length]).padStart(2,'0')+ch;ci++;}
         }
         colored+='\x0F'; // reset at end
-        const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,colored):null;
-        if(_e2eBlockedWarn(wire)) break;
-        wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||colored}`});
-        addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:colored,kind:'privmsg',encrypted:!!wire});
+        await _sendChat(conn_id,target,colored);   // r7: queued + tracked
         break;
       }
       case 'ENCRYPT': case 'E2E':
@@ -5055,10 +6144,7 @@ async function handleInput(raw){
         if(_lines.length>12){sysMsg(conn_id,target,'ASCII output too tall — try shorter text','error');break;}
         for(const rawline of _lines){
           const line=ircSafe(rawline).slice(0,400);
-          const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,line):null;
-          if(_e2eBlockedWarn(wire)) break; // blocked DM: warn once, drop the whole multi-line batch
-          wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||line}`});
-          addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:line,kind:'privmsg',encrypted:!!wire});
+          if(!(await _sendChat(conn_id,target,line))) break; // refused: warn once, drop the rest of the batch (r7: queued + tracked)
         }
         break;
       }
@@ -5075,10 +6161,7 @@ async function handleInput(raw){
             // #4: UD definitions are uncontrolled user submissions — strip CR/LF/control
             // chars from the assembled line so a definition can't inject an IRC command.
             const msg=ircSafe(`📖 ${term}: ${clean}${def.definition.length>300?'...':''} (👍${def.thumbs_up} 👎${def.thumbs_down})`);
-            const wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,msg):null;
-            if(_e2eBlockedWarn(wire)) break;
-            wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||msg}`});
-            addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:msg,kind:'privmsg',encrypted:!!wire});
+            await _sendChat(conn_id,target,msg);   // r7: queued + tracked
           } else sysMsg(conn_id,target,`No definition found for "${term}"`,'error');
         }catch(e){sysMsg(conn_id,target,`UD lookup failed — https://www.urbandictionary.com/define.php?term=${encodeURIComponent(term)}`,'error');}
         break;
@@ -5161,19 +6244,9 @@ async function handleInput(raw){
         showChannelStats(conn_id,target);
         break;
       }
-      case 'NOTE': {
-        const nick=args[0];const noteText=args.slice(1).join(' ');
-        if(!nick){sysMsg(conn_id,target,'Usage: /note <nick> [text] — set or view notes','error');break;}
-        const notes=loadUserNotes();
-        if(!noteText){
-          const existing=notes[nick.toLowerCase()];
-          sysMsg(conn_id,target,existing?`Note on ${nick}: ${existing}`:`No note on ${nick}`,'system');
-        } else {
-          notes[nick.toLowerCase()]=noteText;saveUserNotes(notes);
-          sysMsg(conn_id,target,`Note saved for ${nick}`,'system');
-        }
-        break;
-      }
+      // (A second, unreachable `case 'NOTE'` for local per-nick notes used to sit
+      // here — /note and /notes have gone to the Notes bot above since the bots
+      // release; per-nick notes stay available from the nick menu.)
       case 'DND': {
         const sub=args[0]?.toLowerCase();
         // #1 fix: each DND state change also pushes DND into notif_prefs via
@@ -5195,18 +6268,8 @@ async function handleInput(raw){
         toggleSplitView();
         break;
       }
-      case 'SEEN': {
-        const nick=args[0];if(!nick){sysMsg(conn_id,target,'Usage: /seen <nick>','error');break;}
-        const s=getSeen(nick);
-        if(s){
-          const ago=Math.round(Date.now()/1000-s.ts);
-          const agoStr=ago<60?ago+'s ago':ago<3600?Math.round(ago/60)+'m ago':ago<86400?Math.round(ago/3600)+'h ago':Math.round(ago/86400)+'d ago';
-          sysMsg(conn_id,target,`${s.nick} was last seen ${agoStr} in ${s.channel}`,'system');
-        } else {
-          sysMsg(conn_id,target,`${nick} has not been seen this session.`,'system');
-        }
-        break;
-      }
+      // (A second, unreachable `case 'SEEN'` for the in-session seen table used to sit
+      // here — /seen has gone to the Seen bot above since the bots release.)
       case 'RATELIMIT': {
         const ms=parseInt(args[0]);
         if(!args[0]){sysMsg(conn_id,target,`Rate limit: ${getRateLimit()}ms between messages. Usage: /ratelimit <ms> (default 500)`,'system');break;}
@@ -5218,14 +6281,14 @@ async function handleInput(raw){
         const hours=parseInt(args[0]);
         if(!args[0]){sysMsg(conn_id,target,`Message expiry: ${getMessageExpiry()||'off'} hours. Usage: /expire <hours> (0 = off)`,'system');break;}
         if(isNaN(hours)||hours<0){sysMsg(conn_id,target,'Usage: /expire <hours> (0 = off)','error');break;}
-        setMessageExpiry(hours);sysMsg(conn_id,target,hours?`Messages will auto-expire after ${hours} hour${hours>1?'s':''}`:'Message expiry disabled','system');
+        setMessageExpiry(hours);sysMsg(conn_id,target,hours?`Messages older than ${hours} hour${hours>1?'s':''} will be hidden on this device (server history is kept — /clear deletes a chat's history)`:'Message expiry disabled','system');   // app2 #15: honest wording
         break;
       }
       case 'AUTOLOCK': {
-        const mins=parseInt(args[0]);
+        const mins=parseFloat(args[0]);   // app2 #3: '/autolock 0.5' = 30 s, not "off"
         if(!args[0]){sysMsg(conn_id,target,`Vault auto-lock: ${getVaultAutoLock()||'off'} minutes. Usage: /autolock <minutes> (0 = off)`,'system');break;}
         if(isNaN(mins)||mins<0){sysMsg(conn_id,target,'Usage: /autolock <minutes> (0 = off)','error');break;}
-        setVaultAutoLock(mins);sysMsg(conn_id,target,mins?`Vault will auto-lock after ${mins} minute${mins>1?'s':''} of inactivity`:'Vault auto-lock disabled','system');
+        setVaultAutoLock(mins);sysMsg(conn_id,target,mins?`This device will lock after ${mins} minute${mins>1?'s':''} of inactivity (IRC stays connected; other devices are not affected)`:'Auto-lock disabled on this device','system');
         break;
       }
       case 'KEEPNICK': {
@@ -5276,25 +6339,21 @@ async function handleInput(raw){
     const raw2=_styleOutgoing(toMircChars(raw));
     // Attempt E2E encryption for outgoing plaintext
     // Handle reply — send quote line first, then the actual message
-    const replyPrefix=getReplyPrefix();
+    // r7 (agy-flash app.js:6305): the reply quote and the reply itself are prepared (and
+    // encrypted) BOTH before anything is queued — a body that is refused (too long, E2E
+    // blocked, encryption failed) used to leave its quote already sent on its own.
+    const replyPrefix=getReplyPrefix(conn_id,target);
+    if(replyPrefix===null) return 'keep';   // r8: reply for another conversation → nothing sent, text kept
+    const parts=[];
     if(replyPrefix){
-      const quoteLine=replyPrefix.trim();
-      const quoteWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,quoteLine):null;
-      if(_e2eBlockedWarn(quoteWire)) return; // blocked DM: drop reply quote + the message below
-      wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${quoteWire||quoteLine}`});
-      addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:quoteLine,kind:'privmsg',encrypted:!!quoteWire});
+      const q=await _prepChatPart(conn_id,target,replyPrefix.trim(),'PRIVMSG');
+      if(!q) return;              // quote refused → the message is not sent either (as before)
+      parts.push(q);
     }
-    const e2eWire = (window.E2E?.ready || window.E2E?.channelKeys?.[target])
-      ? await e2eEncryptOutgoing(target, raw2)
-      : null;
-    if (_e2eBlockedWarn(e2eWire)) return;
-    if (e2eWire) {
-      rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${e2eWire}`});
-      addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw2,kind:'privmsg',encrypted:true});
-    } else {
-      rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${raw2}`});
-      addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:raw2,kind:'privmsg'});
-    }
+    const body=await _prepChatPart(conn_id,target,raw2,'PRIVMSG');
+    if(!body) return;             // body refused → its quote is not sent either
+    parts.push(body);
+    _queueChatParts(conn_id,target,parts,'privmsg');
   }
 }
 function insertAtCursor(inp,text){
@@ -5500,7 +6559,12 @@ function triggerUpload(){if(!active){showToast('Select a channel first');return;
 
 // ─── Encrypted Notepad ───────────────────────────────────────────────────────
 let _notepadSaveTimer=null;
+// r10: the notepad editor holds edits made after load_notepad filled it that have not gone out
+// yet (_notepadEdited), and whether that load has arrived (_notepadLoaded). The update reload
+// only ever sends a loaded and edited editor — never an untouched or still-empty one.
+let _notepadEdited=false, _notepadLoaded=false;
 function showNotepad(){
+  _notepadEdited=false; _notepadLoaded=false;
   wsend({type:'load_notepad'});
   const ov=document.createElement('div');ov.id='notepad-overlay';
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:16px;';
@@ -5520,20 +6584,26 @@ function showNotepad(){
   document.body.appendChild(ov);
   const ta=document.getElementById('notepad-area');
   ta.addEventListener('input',()=>{
+    _notepadEdited=true;
     clearTimeout(_notepadSaveTimer);
     document.getElementById('notepad-status').textContent='Saving...';
     _notepadSaveTimer=setTimeout(()=>{
-      wsend({type:'save_notepad',content:ta.value});
+      _notepadSaveTimer=null;   // r10: non-null = an autosave is still pending (see _reloadForUpdate)
+      if(wsend({type:'save_notepad',content:ta.value})!==false) _notepadEdited=false;
       document.getElementById('notepad-status').textContent='Saved ✓';
       setTimeout(()=>{const s=document.getElementById('notepad-status');if(s)s.textContent='';},2000);
     },1000);
   });
 }
 function closeNotepad(){const ov=document.getElementById('notepad-overlay');if(ov){
-  // Save before closing
+  // Save before closing. r9: a pending autosave is done now instead (its timer wrote into
+  // the removed panel — a page error when a lock closed the notepad right after typing — and
+  // an emptied notepad closed within that second was never saved).
   const ta=document.getElementById('notepad-area');
-  if(ta&&ta.value)wsend({type:'save_notepad',content:ta.value});
+  const pend=!!_notepadSaveTimer; clearTimeout(_notepadSaveTimer); _notepadSaveTimer=null;
+  if(ta&&(ta.value||pend))wsend({type:'save_notepad',content:ta.value});
   ov.remove();
+  _notepadEdited=false; _notepadLoaded=false;   // r10: nothing left to send from this editor
 }}
 function showPasteModal(){
   if(!active){showToast('Select a channel first');return;}
@@ -5718,11 +6788,13 @@ async function _autoSendUploadLink(id, rec){
   const text=isImg?shareUrl:`${r.original_name}: ${shareUrl}`;
   // Encryption failure of ANY kind (blocked sentinel OR an unexpected throw)
   // must drop the send — never downgrade a confirmed send to plaintext.
-  let wire=null,_encFail=false;
-  try{ wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,text):null; }catch(_){ _encFail=true; }
+  let wire=null,_encFail=false; const tails=[];
+  try{ wire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,text,conn_id,{defer:tails}):null; }catch(_){ _encFail=true; }
   if(_encFail||_e2eBlocked(wire)){ showToast('🔒 Encrypted session not ready — link not sent automatically. It\'s in Upload Status.'); return; }
-  rateLimitedSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||text}`});
-  addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text,kind:'privmsg',encrypted:!!wire});
+  const _am={ts:Date.now()/1000|0,from:getNick(conn_id),text,kind:'privmsg',encrypted:!!wire};
+  _queueChatSend({type:'send',conn_id,raw:`PRIVMSG ${target} :${wire||text}`},_am);
+  if(wire) for(const t of tails) _queueChatSend({type:'send',conn_id:t.cid||conn_id,raw:t.raw},_am);   // r7: tracked, right behind
+  addMessage(conn_id,target,_am);
   if(!isActive(conn_id,target)) setActive(conn_id,target);
 }
 
@@ -5743,6 +6815,10 @@ const _uploadJobs={};
 let _lastIrcActive=null;
 const UPLOAD_CHUNK_BYTES = 1024 * 1024;        // 1 MB
 const UPLOAD_RETRY_MS    = 2500;
+const UPLOAD_RETRY_MAX_MS = 60000;               // backoff cap
+const UPLOAD_MAX_SERVER_FAILS = 12;              // consecutive 5xx/408/429 (~9 min) before giving up
+const UPLOAD_MAX_NET_FAILS    = 40;              // consecutive network errors while online (~35 min)
+const UPLOAD_MAX_READ_FAILS   = 5;               // consecutive 400 "Chunk read failed" (server body-read I/O error)
 const UPLOAD_TARGET      = '__uploads';
 const UPLOAD_CONN        = '__sys';
 const UPLOAD_KEY         = UPLOAD_CONN + '/' + UPLOAD_TARGET;
@@ -5768,7 +6844,8 @@ function _idbOpen(){
     if(!self.indexedDB){ reject(new Error('IndexedDB unavailable')); return; }
     const req=self.indexedDB.open(_idbName,1);
     req.onupgradeneeded=()=>{ const db=req.result; if(!db.objectStoreNames.contains(_idbStore)) db.createObjectStore(_idbStore,{keyPath:'id'}); };
-    req.onsuccess=()=>resolve(req.result);
+    // Let a sign-out in another tab delete the database instead of being blocked by us.
+    req.onsuccess=()=>{ const db=req.result; db.onversionchange=()=>{ try{ db.close(); }catch(_){} _idbReady=null; }; resolve(db); };
     req.onerror=()=>reject(req.error);
   });
   return _idbReady;
@@ -5937,10 +7014,51 @@ async function uploadFile(file){
   }
 }
 
-// Main chunk-pump. Survives navigation between channels; the only thing
-// that stops it is `canceled` or running out of bytes. On transient errors
-// (network blip, server 503), retries forever with backoff — that's how
-// "tab closes mid-upload then reopens to seamless resume" works.
+async function _uploadStatusRec(id){
+  try{
+    const sr=await fetch(`${_uploadBase()}/upload/status/${encodeURIComponent(id)}`,{headers:_uploadAuthHeader()});
+    if(sr.ok) return await sr.json();
+  }catch(_){}
+  return null;
+}
+function _uploadRerender(){ if(isUploadsActive()) renderChat(); renderSidebar(); }
+// Stop pumping without touching the server record (another device/tab decided).
+function _uploadDropLocal(id){
+  _upcFlagClear(id); _uploadRevokePreview(id);
+  delete _uploadJobs[id]; idbDeleteFile(id);
+  _uploadRerender();
+}
+// Permanent failure: mark it failed here AND on the server (frees the partial bytes,
+// tells every other tab/device so none of them resumes it), and say why.
+async function _uploadAbort(id,msg){
+  const rec=_uploads[id];
+  if(rec){ rec.status='error'; rec.error=String(msg); }
+  try{ showToast(`Upload failed: ${(rec&&rec.original_name)||'file'} — ${msg}`); }catch(_){}
+  try{
+    await fetch(`${_uploadBase()}/upload/error/${encodeURIComponent(id)}`,{method:'POST',
+      headers:{..._uploadAuthHeader(),'Content-Type':'application/json'},body:JSON.stringify({message:String(msg).slice(0,300)})});
+  }catch(_){}
+  _upcFlagClear(id); _uploadRevokePreview(id);
+  delete _uploadJobs[id];
+  try{ await idbDeleteFile(id); }catch(_){}
+  _uploadRerender();
+}
+// Session gone (401): keep the bytes in IndexedDB and the server record as-is. With
+// no job handle, the next upload_state after signing in again resumes it.
+function _uploadPark(id){
+  delete _uploadJobs[id];
+  const now=Date.now();
+  if(now-(window._uploadParkToast||0)>5000){
+    window._uploadParkToast=now;
+    try{ showToast('Upload paused — not signed in. It resumes after you sign in again.'); }catch(_){}
+  }
+}
+
+// Main chunk-pump. Survives navigation between channels; it stops when
+// `canceled`, when it runs out of bytes, on a permanent server rejection, or
+// after bounded retries of transient errors (see the failure policy below).
+// "Tab closes mid-upload then reopens to seamless resume" works through the
+// IndexedDB copy + upload_state on the next connect.
 async function runUploadLoop(id){
   if(_uploadJobs[id]?.running) return;
   let file=_uploadJobs[id]?.file;
@@ -5963,11 +7081,19 @@ async function runUploadLoop(id){
       const sr=await fetch(`${_uploadBase()}/upload/status/${encodeURIComponent(id)}`,{headers:_uploadAuthHeader()});
       if(sr.ok){ const sd=await sr.json(); offset=sd.progress_bytes||0; }
     }catch(_){}
+    // Failure policy: a rejected chunk (4xx: quota exceeded, server storage full,
+    // file too large, upload permission revoked, …) is PERMANENT — stop and say why,
+    // instead of re-POSTing the same 1 MiB forever. Only a genuine offset mismatch
+    // (the server holds a different offset) re-syncs. 5xx / network errors retry
+    // with capped exponential backoff and give up after a bounded number of tries
+    // (offline time isn't counted). 401 = session gone: park the upload (bytes stay
+    // on this device) and resume from the server's offset after the next sign-in.
+    let fails=0, resyncs=0, readFails=0;
     while(offset < file.size){
       if(!_uploadJobs[id] || _uploadJobs[id].canceled) return;
       const end=Math.min(offset+UPLOAD_CHUNK_BYTES, file.size);
       const chunk=file.slice(offset, end);
-      let ok=false;
+      let ok=false, why='network', readRetry=false;
       try{
         const r=await fetch(`${_uploadBase()}/upload/chunk/${encodeURIComponent(id)}?offset=${offset}`, {
           method:'POST', headers:{..._uploadAuthHeader(),'Content-Type':'application/octet-stream'}, body:chunk,
@@ -5982,20 +7108,47 @@ async function runUploadLoop(id){
             j.speed = j.speed ? (j.speed*0.6 + (db*1000/dt)*0.4) : (db*1000/dt);
             j.lastTickAt=now; j.lastTickBytes=offset;
           }
-          ok=true;
-        } else if(r.status===400){
-          // Most likely an offset mismatch — re-sync from server.
-          try{
-            const sr=await fetch(`${_uploadBase()}/upload/status/${encodeURIComponent(id)}`,{headers:_uploadAuthHeader()});
-            if(sr.ok){ const sd=await sr.json(); offset=sd.progress_bytes||0; continue; }
-          }catch(_){}
+          ok=true; fails=0; resyncs=0; readFails=0;
+        } else {
+          let err='', mismatch=false; try{ err=String((await r.json())?.error||''); }catch(_){}
+          if(r.status===401){ _uploadPark(id); return; }
+          if(r.status===400){
+            // Offset mismatch (another tab/device pumped it, or a stale local offset):
+            // adopt the server's offset — but only if it actually differs.
+            const sd=await _uploadStatusRec(id);
+            if(sd && sd.status && sd.status!=='uploading'){
+              if(sd.status==='done'){ offset=file.size; break; }   // finished elsewhere → finalize (idempotent)
+              _uploadDropLocal(id); return;                         // canceled/errored elsewhere
+            }
+            const so=sd?(sd.progress_bytes||0):null;
+            if(so!=null && so!==offset && resyncs<20){ offset=so; resyncs++; continue; }
+            // Couldn't read the status / ping-ponging offsets: a real mismatch is
+            // retryable (backoff), anything else falls through as permanent.
+            mismatch=/offset mismatch/i.test(err);
+            // "Chunk read failed" = the server hit an I/O error reading THIS request's
+            // body (ChunkReadError::Io, e.g. a proxy cut the upload stream): transient,
+            // so retry it — a few times only — instead of failing the whole upload.
+            if(!mismatch && /chunk read failed/i.test(err) && ++readFails<=UPLOAD_MAX_READ_FAILS) readRetry=true;
+          }
+          if(mismatch){ why='offset mismatch'; }
+          else if(readRetry){ why='chunk read failed'; }
+          else if(r.status>=400 && r.status<500 && r.status!==408 && r.status!==425 && r.status!==429){
+            await _uploadAbort(id, err||`rejected by server (HTTP ${r.status})`);
+            return;
+          }
+          else why=`HTTP ${r.status}`;
         }
       }catch(e){ /* network blip — fall through to retry */ }
       if(!ok){
-        // Optimistically reflect our intent locally so the UI doesn't look
-        // frozen during retries; the server's next 200 will overwrite.
-        if(_uploadJobs[id]?.canceled) return;
-        await new Promise(r=>setTimeout(r, UPLOAD_RETRY_MS));
+        if(!_uploadJobs[id] || _uploadJobs[id].canceled) return;
+        const offline=(typeof navigator!=='undefined' && navigator.onLine===false);
+        if(!offline) fails++;
+        if(fails>(why==='network'?UPLOAD_MAX_NET_FAILS:UPLOAD_MAX_SERVER_FAILS)){
+          await _uploadAbort(id, why==='network'?'network error — gave up after repeated retries':`server error (${why}) — gave up after repeated retries`);
+          return;
+        }
+        const delay=offline?5000:Math.min(UPLOAD_RETRY_MS*Math.pow(2,Math.max(0,fails-1)),UPLOAD_RETRY_MAX_MS);
+        await new Promise(r=>setTimeout(r, delay*(0.85+Math.random()*0.3)));
       }
     }
     // All bytes uploaded — ask server to finalize.
@@ -6112,7 +7265,10 @@ function _onUploadState(records){
       if(!_uploads[id]) idbDeleteFile(id);
     }
   })();
-  if(records.length) setUploadsHidden(false);
+  // #12: the server re-sends upload_state on every (re)connect; only an upload that
+  // is actually in flight is a "new upload" that should undo the user's ✕ — the
+  // same rule as _onUploadUpdate. Finished records keep the entry hidden.
+  if(records.some(r=>r&&r.status==='uploading')) setUploadsHidden(false);
   if(isUploadsActive()) renderChat();
   renderSidebar();
 }
@@ -6877,19 +8033,235 @@ document.addEventListener('click',e=>{const m=document.getElementById('settings-
 
 // ─── Vault ────────────────────────────────────────────────────────────────────
 function doUnlock(){
-  const p=document.getElementById('vault-pass').value;
+  const vp=document.getElementById('vault-pass');
+  const p=vp.value;
   if(!p){document.getElementById('vault-err').textContent='Passphrase required';return;}
   document.getElementById('vault-err').textContent='';
+  // e2e: lets e2e.js derive its client-held key when the (passphrase-proven) reply arrives.
+  if(typeof e2eNotePassphrase==='function') e2eNotePassphrase(p);
+  if(_deviceLocked||_devLockFlag()) _devUnlockPending=Date.now();   // this reply may unlock the locked device
   wsend({type:'unlock_vault',passphrase:p});
+  // #2: never leave the passphrase sitting in the DOM — a later Lock re-shows this
+  // same overlay, and a pre-filled field made "Unlock" a one-click reopen for
+  // anyone at the device (and readable by any script for the life of the tab).
+  // A wrong passphrase just means typing it again, as on any login form.
+  vp.value='';
 }
-async function lockVault(){if(!(await customConfirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.','Lock')))return;flushPrefsToServer();wsend({type:'lock_vault'});for(const n of networks)wsend({type:'disconnect',id:n.config.id});document.getElementById('vault-overlay').classList.add('show');const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔒';vb.title='Lock vault';}}
+async function lockVault(){if(!(await customConfirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.','Lock')))return;_lockVaultNow();}
+// Manual Lock (account-wide, as before): the server drops the vault key for every
+// session and IRC is disconnected. Auto-lock does NOT use this — see _deviceLockNow.
+// r3 (w-web INFO): work that was already in flight when the vault was locked (E2E
+// stores, an automatic save) is refused by the server with "Vault must be unlocked …" /
+// "Vault locked". That is expected right after a lock — logged, not as a console error.
+let _vaultLockAt=0;
+function _lockRaceRefusal(m){
+  if(!/^Vault (locked$|must be unlocked to )/.test(String(m||''))) return false;
+  try{ return Date.now()-_vaultLockAt<15000 || document.getElementById('vault-overlay').classList.contains('show'); }catch(_){ return false; }
+}
+function _lockVaultNow(){
+  _vaultLockAt=Date.now();
+  // r9: before lock_vault, so an open notepad's last save still reaches the unlocked vault.
+  _closeSecretPanels();
+  flushPrefsToServer();wsend({type:'lock_vault'});for(const n of networks)wsend({type:'disconnect',id:n.config.id});
+  _showVaultLockedUi();
+}
+function _showVaultLockedUi(){
+  const vp=document.getElementById('vault-pass'); if(vp) vp.value='';
+  const ve=document.getElementById('vault-err'); if(ve) ve.textContent='';
+  const dn=document.getElementById('vault-devlock-note'); if(dn) dn.style.display='none';
+  document.getElementById('vault-overlay').classList.add('show');
+  const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔒';vb.title='Lock vault';}
+}
+// Server's VaultLocked broadcast: the vault is per-account, so a lock from another
+// session (manual or auto-lock) locks this one too — show the unlock screen instead
+// of carrying on with a vault the server can no longer decrypt.
+function _onVaultLocked(){ _vaultLockAt=Date.now(); _closeSecretPanels(); if(!document.getElementById('vault-overlay').classList.contains('show')) _showVaultLockedUi(); else { const dn=document.getElementById('vault-devlock-note'); if(dn) dn.style.display='none'; } }
+// ── Device-local lock (auto-lock, #3 follow-up) ─────────────────────────────────
+// The auto-lock setting is per device, so its lock must be too: it locks THIS browser
+// (every CryptIRC tab of it — the flag below is shared through localStorage) without
+// telling the server. No LockVault, no IRC disconnect, other devices keep working.
+// While locked: the unlock screen is up, the app UI is hidden (visibility), the chat
+// DOM is emptied, notification bodies are redacted, and this tab's in-memory secrets
+// are dropped (E2E keys/sessions, the decrypted Password Safe, the notepad, the
+// passphrase field). The flag survives a reload, so F5 is not a way around it.
+// Unlocking needs the vault passphrase, verified by the server through UnlockVault on
+// the already-unlocked vault: with the proof-gated server (agent e2e) a wrong
+// passphrase is refused ("Incorrect passphrase") and the device stays locked; an
+// unprompted VaultUnlocked (sent on every WS (re)connect) never unlocks the device.
+const _DEVLOCK_KEY='cryptirc_device_locked';
+let _deviceLocked=false, _devUnlockPending=0, _devLockMins=0;
+// Flag value: 'm<minutes>' (or 'm' when unknown) — any non-empty value means locked.
+function _devLockFlag(){ try{ return !!localStorage.getItem(_DEVLOCK_KEY); }catch(_){ return false; } }
+function _devLockFlagMins(){ try{ return parseFloat((localStorage.getItem(_DEVLOCK_KEY)||'').slice(1))||0; }catch(_){ return 0; } }
+// r4 (codex-p3 MED app.js:7857): `cryptirc-device-locked-ui` (set by _deviceLockNow once
+// the app is shown, removed by _deviceUnlock) hides EVERY other top-level element too —
+// Nick Monitor and its message viewer, the encryption panel, dialogs, toasts, the
+// lightbox and any overlay created later are siblings of #app and used to stay readable
+// (and clickable) above the unlock screen. Only the unlock screen itself, the login
+// screen and the boot splash stay visible (an expired session must still be able to
+// sign in; neither holds account data). visibility:hidden also takes them out of
+// pointer and keyboard interaction; nothing in the app sets visibility:visible.
+(function(){ try{ const st=document.createElement('style'); st.textContent='body.cryptirc-device-locked #app{visibility:hidden!important}body.cryptirc-device-locked-ui>:not(#vault-overlay):not(#auth-screen):not(#boot-splash){visibility:hidden!important}'; (document.head||document.documentElement).appendChild(st); if(_devLockFlag()) document.body&&document.body.classList.add('cryptirc-device-locked'); }catch(_){} })();
+function _wipeE2EMemory(){
+  try{
+    // r4 (verifier w3-web N6): deviceOnly — the server vault stays unlocked, so E2E writes
+    // already queued (e.g. a ratchet state save) are still sent.
+    if(typeof e2eOnVaultLocked==='function'){ e2eOnVaultLocked({deviceOnly:true}); return; }   // e2e branch: its own full wipe
+    const E=window.E2E; if(!E) return;
+    // Same state as a fresh page load; e2eInit() restores it from the server blobs
+    // when the passphrase-proven VaultUnlocked arrives.
+    E.ready=false; E.e2eEncKey=null; E.identityKeys=null; E._spkBlob=null;
+    for(const m of [E.dmSessions,E.channelKeys,E._sessionCache]) if(m) for(const k of Object.keys(m)) delete m[k];
+  }catch(_){}
+}
+// r9 (astra-p3 HIGH app.js:8043): the panels that hold decrypted secrets sit ABOVE the
+// unlock screen (Password Safe z-index 1000, notepad 500, the unlock screen 150), so EVERY
+// lock — this device's auto-lock, a manual Lock here, a lock from another session, or a
+// locked vault found on reconnect — closes and empties them (it used to be done for the
+// device lock only; after a manual Lock the Password Safe stayed open and its reveal/copy
+// buttons kept working). Closed AND emptied, not just hidden: Nick Monitor's "Last Msg"
+// viewer and card list, the encryption panel (32 key words typed into its import box), an
+// open text/passphrase prompt (cancelled — its caller sees Cancel), the notepad (saved
+// first), the Password Safe (its decrypted list is dropped; it is reloaded when opened
+// after the unlock), the profile and certificate popups and any open modal.
+function _closeSecretPanels(){
+  // r4 (C3-3)
+  try{ const mv=document.getElementById('monitor-msg-overlay'); if(mv) mv.remove(); }catch(_){}
+  try{ if(document.getElementById('monitor-overlay')?.classList.contains('show')) closeMonitorPanel(); const ml=document.getElementById('monitor-list'); if(ml) ml.innerHTML=''; }catch(_){}
+  try{ if(document.getElementById('encrypt-overlay')?.classList.contains('show')) closeEncryptPanel(); const eb=document.getElementById('encrypt-panel-body'); if(eb) eb.innerHTML=''; }catch(_){}
+  try{ if(document.getElementById('custom-prompt-overlay')?.classList.contains('open')){ const c=document.getElementById('custom-prompt-cancel'); if(c&&typeof c.onclick==='function') c.onclick(); } const ci=document.getElementById('custom-prompt-input'); if(ci) ci.value=''; }catch(_){}
+  // Panels that hold decrypted secrets
+  try{ if(document.getElementById('notepad-overlay')) closeNotepad(); }catch(_){}
+  for(const id of ['pwsafe-overlay','profile-overlay','tls-verify-popup','cert-warn-popup']){ const o=document.getElementById(id); if(o){ o.classList.remove('show'); o.style.display='none'; } }
+  try{ if(document.getElementById('modal-overlay')?.classList.contains('open')) closeModal(); }catch(_){}
+  const pb=document.getElementById('pwsafe-body'); if(pb) pb.innerHTML='';
+  // A change still waiting for its merge-then-save (one server round trip) cannot be saved
+  // into a locked vault — say so instead of dropping it silently.
+  if(_pwSafeDirty){ try{ showToast('⚠ Password Safe: your last change was NOT saved before the vault was locked — enter it again after unlocking.'); }catch(_){} }
+  _pwSafe=[]; _pwSafeBase=null; _pwSafeLoaded=false; _pwSafeDirty=false; clearTimeout(_pwSafeSyncTimer);
+}
+function _deviceLockNow(fromOtherTab,mins){
+  if(!fromOtherTab){ try{localStorage.setItem(_DEVLOCK_KEY,'m'+(mins||''));}catch(_){} }
+  if(!window._appShown) return;   // not logged in yet: applied at the next 'state'
+  const first=!_deviceLocked;
+  _deviceLocked=true; _devLockMins=mins||_devLockFlagMins()||_devLockMins;
+  document.body.classList.add('cryptirc-device-locked','cryptirc-device-locked-ui');
+  if(first){
+    _closeSecretPanels();
+    _wipeE2EMemory();
+    for(const id of ['chat-area','split-chat-area']){ const a=document.getElementById(id); if(a) a.innerHTML=''; }
+  }
+  _showVaultLockedUi();
+  const box=document.querySelector('#vault-overlay .vault-box');
+  let dn=document.getElementById('vault-devlock-note');
+  if(!dn && box){ dn=document.createElement('div'); dn.id='vault-devlock-note'; dn.style.cssText='font-size:12px;color:var(--text2);line-height:1.5;margin:0 0 12px;padding:8px 10px;border:1px solid var(--border);border-radius:6px'; const t=box.querySelector('.vault-title'); box.insertBefore(dn,t?t.nextSibling:box.firstChild); }
+  if(dn){ dn.style.display=''; dn.textContent='🔒 This device was locked'+(_devLockMins?' after '+_devLockMins+' minute'+(_devLockMins===1?'':'s')+' of inactivity':'')+'. Your IRC connections and your other devices are not affected. Enter your vault passphrase to continue.'; }
+}
+function _deviceUnlock(){
+  if(!_deviceLocked && !_devLockFlag()) return;
+  _deviceLocked=false; _devUnlockPending=0;
+  try{ localStorage.removeItem(_DEVLOCK_KEY); }catch(_){}
+  document.body.classList.remove('cryptirc-device-locked','cryptirc-device-locked-ui');
+  const dn=document.getElementById('vault-devlock-note'); if(dn) dn.style.display='none';
+  try{ renderSidebar(); renderChat(); updateTopbar(); if(typeof _splitActive!=='undefined'&&_splitActive) renderSplitChat(); }catch(_){}
+  try{ resetVaultAutoLock(); }catch(_){}
+}
+// Dispatcher wrapper (same pattern as the window.addMessage ignore wrapper): runs the
+// normal handler, then keeps a locked device locked. Only a VaultUnlocked that answers
+// this device's own unlock_vault can unlock it — with the e2e server that event carries
+// the pepper/legacy key (sent only after the passphrase was verified); with an older
+// server it must arrive within 60 s of the Unlock click.
+if(typeof handleEvent==='function'){
+  const _hev=handleEvent;
+  handleEvent=function(ev){
+    if(ev && (_deviceLocked||_devLockFlag()) && window._appShown){
+      if(ev.type==='vault_unlocked'){
+        const newServer=Object.prototype.hasOwnProperty.call(ev,'e2e_migrated');
+        const proven=newServer ? !!(ev.e2e_pepper||ev.e2e_legacy_key) : (!!_devUnlockPending && Date.now()-_devUnlockPending<60000);
+        if(!proven){ if(!_deviceLocked) _deviceLockNow(true); return; }   // unprompted (WS reconnect): ignore while locked
+        const r=_hev.apply(this,arguments); _deviceUnlock(); return r;
+      }
+      if(ev.type==='vault_error') _devUnlockPending=0;
+      // E2E engine events while this device's E2E memory is wiped: drop them. Replies to
+      // another tab's/device's e2e_load_* are broadcast to every session; handling an
+      // identity blob here with no key would make e2e.js "regenerate" the identity.
+      // e2eInit re-requests everything after the unlock.
+      if(_deviceLocked && typeof ev.type==='string' && ev.type.startsWith('e2e_')) return;
+      // Same for the decrypted Password Safe and notepad: the server broadcasts every
+      // load reply to all of the user's sessions, so another device opening them used
+      // to put the plaintext back into this locked tab's memory/DOM. Both are reloaded
+      // when their panel is opened after the unlock.
+      if(_deviceLocked && (ev.type==='password_safe'||ev.type==='notepad')) return;
+    }
+    const r=_hev.apply(this,arguments);
+    try{
+      if(ev && ev.type==='state' && ev.vault_unlocked && window._appShown && (_deviceLocked||_devLockFlag())) _deviceLockNow(true);
+    }catch(_){}
+    return r;
+  };
+}
+// Don't paint message content into the (hidden) chat while locked; _deviceUnlock()
+// re-renders from the buffers. Skipping renderChat also keeps the read horizon from
+// advancing over lines nobody could see.
+if(typeof renderChat==='function'){
+  const _rc=renderChat;
+  renderChat=function(){ if(_deviceLocked){ const a=document.getElementById('chat-area'); if(a) a.innerHTML=''; return; } return _rc.apply(this,arguments); };
+}
+if(typeof appendMsgRow==='function'){
+  const _amr=appendMsgRow;
+  appendMsgRow=function(){ if(_deviceLocked) return; return _amr.apply(this,arguments); };
+}
+// Redact notification bodies while the device is locked (the sender/channel title stays).
+if(typeof _showChatNotification==='function'){
+  const _scn=_showChatNotification;
+  _showChatNotification=function(title,body,meta){ if(_deviceLocked) body='🔒 Unlock CryptIRC to read this message'; return _scn.call(this,title,body,meta); };
+}
+// Other tabs of this browser lock together.
+window.addEventListener('storage',e=>{
+  if(e.key===_DEVLOCK_KEY && e.newValue && !_deviceLocked && window._appShown){
+    const m=_devLockFlagMins(); _deviceLockNow(true,m);
+    showToast('This device was locked'+(m?' after '+m+' minute'+(m===1?'':'s')+' of inactivity':''));
+  }
+});
+// #8: report the server's actual answer. change_passphrase replies to THIS socket
+// only, with vault_unlocked (success) or vault_error (failure; the main handler
+// writes that into the hidden unlock overlay, where nobody could see it).
+let _chpassPending=false;
 async function showChangePass(){
+  if(_chpassPending){showToast('A vault passphrase change is already in progress…');return;}
   const old=await customPrompt('Current vault passphrase:','',true);if(!old)return;
   const nw=await customPrompt('New vault passphrase:','',true);if(!nw)return;
   const confirm=await customPrompt('Confirm new vault passphrase:','',true);
   if(nw!==confirm){showToast('Passphrases do not match');return;}
+  const sock=ws;
+  if(!(sock&&sock.readyState===1)){showToast('Not connected to the server — passphrase NOT changed. Try again in a moment.');return;}
+  _chpassPending=true;
+  let timer=null;
+  const finish=(ok,why)=>{
+    if(!_chpassPending)return; _chpassPending=false; clearTimeout(timer);
+    try{sock.removeEventListener('message',onMsg);sock.removeEventListener('close',onClose);}catch(_){}
+    const ve=document.getElementById('vault-err');
+    if(ve&&!document.getElementById('vault-overlay').classList.contains('show')) ve.textContent='';
+    // r4 (srv-b C1-4 follow-up): a lock that landed right after the NEW passphrase was
+    // saved — the server says "Your vault passphrase WAS changed, but the vault was
+    // locked …" (crypto.rs LockedMeanwhile{committed:true}; this prefix is the marker).
+    // The change IS done: show the server's words as they are, and keep the E2E keyring
+    // re-wrap pending for the next unlock (with the new passphrase) — the lock wiped it.
+    const changedButLocked=!ok && /^Your vault passphrase WAS changed\b/.test(String(why||''));
+    if(ok) showToast('✓ Vault passphrase changed');
+    else if(changedButLocked){ customAlert(String(why)); try{ if(typeof e2eNotePassphraseChange==='function') e2eNotePassphraseChange(old,nw); }catch(_){} }
+    else customAlert('Vault passphrase NOT changed: '+why);
+  };
+  const onMsg=e=>{let m;try{m=JSON.parse(e.data);}catch(_){return;}
+    if(m&&m.type==='vault_unlocked') finish(true);
+    else if(m&&m.type==='vault_error') finish(false,m.message||'the server refused the change');};
+  const onClose=()=>finish(false,'the connection dropped before the server answered. Lock and unlock the vault to check which passphrase is now valid.');
+  sock.addEventListener('message',onMsg); sock.addEventListener('close',onClose);
+  timer=setTimeout(()=>finish(false,'no answer from the server after 2 minutes. Lock and unlock the vault to check which passphrase is now valid.'),120000);
+  // e2e: lets e2e.js re-wrap its client-held keyring once the server confirms.
+  if(typeof e2eNotePassphraseChange==='function') e2eNotePassphraseChange(old,nw);
   wsend({type:'change_passphrase',old,new:nw});
-  showToast('Vault passphrase changed');
+  showToast('Changing vault passphrase…');
 }
 // ─── User Profile window (account + email + security + danger zone) ──────────
 function closeProfilePanel(){ const o=document.getElementById('profile-overlay'); if(o){o.classList.remove('show');o.style.display='none';} }
@@ -6969,9 +8341,16 @@ async function renderProfilePanel(){
 async function saveProfileEmail(){
   const inp=document.getElementById('profile-email'); const msg=document.getElementById('profile-email-msg'); if(!inp) return;
   const email=inp.value.trim();
+  // The server requires the current login password for any real change of the
+  // recovery address (a session token alone must not be able to redirect resets).
+  let current_password='';
+  if(email.toLowerCase()!==String(inp.defaultValue||'').trim().toLowerCase()){
+    current_password=await customPrompt('Current login password (required to change your email):','',true);
+    if(!current_password) return;
+  }
   const btn=document.getElementById('profile-email-save'); if(btn){btn.disabled=true;btn.textContent='Saving…';}
   try{
-    const r=await fetch('/cryptirc/auth/set-email',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({email})});
+    const r=await fetch('/cryptirc/auth/set-email',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({email,current_password})});
     const d=await r.json();
     if(msg){ msg.textContent=d.message||(r.ok?'Saved.':'Failed'); msg.style.color=r.ok?'var(--join)':'var(--error)'; }
     if(r.ok){ showToast(d.message||'Email saved'); setTimeout(renderProfilePanel,700); }
@@ -6991,10 +8370,216 @@ async function doNowPlaying(conn_id,target,who){
     if(!at){ sysMsg(conn_id,target,'Nothing to show for that user.','error'); return; }
     // Strip control chars (incl CR/LF) so external track metadata can't inject IRC commands.
     const line=('🎵 '+name+' '+verb+' '+at+(d.album?' ('+d.album+')':'')).replace(/[\u0000-\u001f]/g,' ');
-    wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${line}`});
-    addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:line,kind:'privmsg'});
+    await _sendChatLine(conn_id,target,line);   // #6: E2E like any typed message
   }catch(e){ sysMsg(conn_id,target,'Network error talking to Last.fm.','error'); }
 }
+// #6: send one line of chat text the way a typed message goes out — through E2E when
+// the target has a channel key or an E2E DM session (blocked sentinel → drop + warn,
+// never a plaintext fallback), via the rate-limited queue, with a local echo that
+// carries the `encrypted` flag. Used by /np and the canned-text commands (/shrug,
+// /tableflip, /lenny, …), which used to wsend plaintext straight into encrypted
+// channels/DMs. Returns true when the line was queued.
+function _splitTargets(to){ return String(to||'').split(',').map(x=>x.trim()).filter(Boolean); }
+// r4 (irc hand-off IRC-H1, codex C1-9): the server now fits every outgoing plaintext
+// PRIVMSG/NOTICE to what its recipients receive whole (irc.rs fit_outgoing_line: split
+// into at most 4 lines, else refused "use a paste") and logs/echoes each piece. This
+// tab used to show ONE row with the whole text, so pieces 2..4 came back as extra rows
+// (the tail twice). Now the page splits FIRST, with a budget never larger than the
+// server's (it assumes a 128-byte user@host — the server uses the real one + 10, or 75
+// while unknown — and 10 bytes of nick slack), so the server never splits again, and
+// shows one row per piece; more than 4 pieces is refused here and nothing is sent. Same
+// cutting rule as the server (UTF-8 boundaries, at the last space when that keeps >60%
+// of a piece; a CTCP ACTION wrapper on every piece; other CTCP never cut).
+const _OUT_MSG_MAX=510, _OUT_MAX_PIECES=4, _OUT_UH_WORST=128, _OUT_NICK_SLACK=10, _OUT_MIN_PIECE=64;
+function _utf8len(s){ return new TextEncoder().encode(String(s==null?'':s)).length; }
+function _splitUtf8(text,max){
+  max=Math.max(4,max);
+  const enc=new TextEncoder(), dec=new TextDecoder();
+  let rest=enc.encode(String(text)); const out=[];
+  while(rest.length>max){
+    let end=max; while(end>0&&(rest[end]&0xC0)===0x80) end--;
+    let sp=-1; for(let i=end-1;i>=0;i--){ if(rest[i]===0x20){ sp=i; break; } }
+    if(sp>=0&&sp*10>end*6){ out.push(dec.decode(rest.subarray(0,sp))); rest=rest.subarray(sp+1); }
+    else { out.push(dec.decode(rest.subarray(0,end))); rest=rest.subarray(end); }
+  }
+  if(rest.length||!out.length) out.push(dec.decode(rest));
+  return out;
+}
+// The wire texts `text` goes out as to `target` (one entry when it fits), or null =
+// too long for 4 lines (the caller refuses: _plainTooLong).
+function _plainChatPieces(conn_id,verb,target,text){
+  text=String(text==null?'':text);
+  let nick=''; try{ nick=String(getNick(conn_id)||''); }catch(_){}
+  const relay=1+_utf8len(nick)+_OUT_NICK_SLACK+1+_OUT_UH_WORST+1+verb.length+1+_utf8len(target)+2;
+  const head=verb.length+1+_utf8len(target)+2;
+  const budget=Math.max(_OUT_MIN_PIECE,Math.min(_OUT_MSG_MAX-relay,_OUT_MSG_MAX-head));
+  if(_utf8len(text)<=budget) return [text];
+  let pre='', suf='', body=text;
+  if(body.startsWith('\x01ACTION ')){ pre='\x01ACTION '; body=body.slice(8); if(body.endsWith('\x01')){ suf='\x01'; body=body.slice(0,-1); } }
+  else if(body.startsWith('\x01')) return [text];          // other CTCP: the server sends it whole or refuses it
+  const pb=Math.max(_OUT_MIN_PIECE/2,budget-pre.length-suf.length);
+  const pieces=_splitUtf8(body,pb);
+  if(pieces.length>_OUT_MAX_PIECES){ _plainChatPieces.last={bytes:_utf8len(body),fit:pb*_OUT_MAX_PIECES}; return null; }
+  return pieces.map(p=>pre+p+suf);
+}
+function _plainTooLong(conn_id,target){
+  const l=_plainChatPieces.last||{};
+  const why=`Message too long (${l.bytes||'?'} bytes; at most about ${l.fit||'?'} fit in ${_OUT_MAX_PIECES} IRC lines). Nothing was sent — use a paste for long text.`;
+  try{ showToast('⚠ '+why); }catch(_){}
+  try{ if(conn_id&&target) sysMsg(conn_id,target,'⚠ '+why,'error'); }catch(_){}
+  return false;
+}
+// The server refused a send ("… Nothing was sent …" — fit_outgoing_line's refusals:
+// too long / tags too long): the newest of this tab's own rows still waiting for its
+// echo is the one it refused (frames are handled in order) — mark it "not sent".
+function _markRefusedSend(){
+  try{
+    const now=Date.now(), sm=(window._sentMsgs||[]).filter(s=>now-s.t<15000);
+    for(let i=sm.length-1;i>=0;i--){
+      const s=sm[i]; const own=getNick(s.conn); let hit=false; const marked=new Set();
+      // r8: a line to several recipients (a,b,c) has one row per recipient — the
+      // refusal (e.g. "Too many recipients for one IRC line") applies to all of them.
+      for(const t of String(s.target).split(',').filter(Boolean)){
+        const buf=getBuf(s.conn,t);
+        for(let j=buf.length-1;j>=0;j--){
+          const m=buf[j];
+          if(m&&marked.has(m)){ hit=true; break; }   // r9: this recipient's row of the same line (_rowTwins)
+          if(!m||m.id||m.sendState||m.from!==own||(m.ts||0)<now/1000-20) continue;
+          if(m.text!==s.text && !m.encrypted) continue;
+          _setMsgSendState(m,'failed'); hit=true; marked.add(m); for(const x of (_rowTwins.get(m)||[])) marked.add(x); break;
+        }
+      }
+      if(hit){ window._sentMsgs.splice(window._sentMsgs.indexOf(s),1); return true; }
+    }
+  }catch(_){}
+  return false;
+}
+// r2: send `text` to one or more comma-separated recipients with E2E applied PER
+// recipient. No recipient with E2E on → the original single line (unchanged). Any
+// recipient with E2E on → one line per recipient, each encrypted if its E2E is on; if
+// any recipient is BLOCKED, nothing at all is sent (warned). Returns true if sent.
+async function _e2eSendToTargets(conn_id,verb,to,text,opts){
+  const list=_splitTargets(to);
+  const kindOf=verb==='NOTICE'?'notice':'privmsg';
+  // r9 (astra-p3 app.js:8450): queued and tracked like typed lines (_queueChatSend): each
+  // payload is tied to its row(s) — ⏳ while offline or waiting for E2E, "not sent" when it is
+  // refused or the session ends (these rows used to look sent while the queue dropped them).
+  const send=(payloads,tgs,enc,t)=>{
+    const rows=(!(opts&&opts.noEcho)||enc)?tgs.map(()=>({ts:Date.now()/1000|0,from:getNick(conn_id),text:(t==null?text:t),kind:kindOf,...(enc?{encrypted:true}:{})})):[];
+    if(rows.length>1) _rowTwins.set(rows[0],rows.slice(1));
+    for(const p of payloads){ if(rows.length) _queueChatSend(p,rows[0]); else rateLimitedSend(p); }
+    for(let i=0;i<rows.length;i++){ if(i&&rows[0].sendState) rows[i].sendState=rows[0].sendState; addMessage(conn_id,tgs[i],rows[i]); }
+  };
+  // r3 (w-web LOW, r2/app #8 merge seam): more recipients than the server accepts (F9) —
+  // refused here, before any row exists: one row for the whole list, marked "⚠ not
+  // sent" (not one "sent-looking" row per recipient), and nothing is queued.
+  if(list.length>MAX_SEND_TARGETS){
+    try{ showToast(`⚠ Too many recipients in one message (${list.length}; max ${MAX_SEND_TARGETS}). Nothing was sent.`); }catch(_){}
+    if(!(opts&&opts.noEcho)){ addMessage(conn_id,to,{ts:Date.now()/1000|0,from:getNick(conn_id),text,kind:kindOf,sendState:'failed'}); setActive(conn_id,to); }
+    return false;
+  }
+  // r6: right after a reconnect E2E re-syncs (every target blocked meanwhile) — wait for it.
+  try{ if(typeof _e2eResyncWait==='function'&&window.E2E&&E2E._resyncPending){ if(typeof _e2eKickResync==='function') _e2eKickResync(); await _e2eResyncWait(8000); } }catch(_){}
+  const anyE2E=typeof e2eTargetState==='function' && list.some(x=>e2eTargetState(x,{conn_id}).mode!=='none');
+  if(list.length<=1 || !anyE2E){
+    let wire=null; const tails=[];
+    if(list.length<=1){
+      // r7: the continuation pieces come back (defer) and are queued right behind the first.
+      try{ wire=(window.E2E?.ready||window.E2E?.channelKeys?.[to])?await e2eEncryptOutgoing(to,text,conn_id,{verb,defer:tails}):null; }
+      catch(_){ showToast('🔒 Encryption failed — message not sent.'); return false; }
+      if(_e2eBlockedWarn(wire)) return false;
+    }
+    // r4 (IRC-H1): plaintext → the pieces the server will send (≤ 4), one row each.
+    const pcs=wire?[wire]:_plainChatPieces(conn_id,verb,to,text);
+    if(!pcs) return _plainTooLong(conn_id,list.length===1?list[0]:(active&&active.target));
+    for(const p of pcs){
+      const pl=[{type:'send',conn_id,raw:`${verb} ${to} :${p}`}];
+      if(wire) for(const t of tails) pl.push({type:'send',conn_id:t.cid||conn_id,raw:t.raw});
+      send(pl,(list.length?list:[to]),!!wire,wire?text:p);
+    }
+    return true;
+  }
+  // r5 (codex-p3 e2e.js:3371): ALL recipients are checked and encrypted before anything
+  // goes out. A refused recipient used to be found only after an earlier one's later
+  // pieces had already been scheduled — they went out although the send was refused.
+  // 1) every recipient's E2E state and plaintext size, before any encryption;
+  for(const tg of list){
+    const st=e2eTargetState(tg,{conn_id});
+    if(st&&st.mode==='blocked'&&!st.waitable){ try{ window.E2E.lastBlockReason=st.reason; }catch(_){} _e2eBlockedWarn({e2eBlocked:true}); return false; }
+    if(st&&st.mode==='none'&&!_plainChatPieces(conn_id,verb,tg,text)) return _plainTooLong(conn_id,tg);
+  }
+  // 2) encrypt each one with its later pieces held back (defer), 3) send only if all succeeded.
+  // r6 (agy-flash app.js:8445): each recipient gets its OWN tail list — they used to be
+  // matched back by target name, which e2e.js may have spelled differently (the "status"
+  // nick alias is translated before E2E sees it), so that recipient's later pieces were
+  // dropped.
+  const wires=[];
+  for(const tg of list){
+    let w=null; const tails=[];
+    try{ w=await e2eEncryptOutgoing(tg,text,conn_id,{verb,defer:tails}); }
+    catch(_){ showToast('🔒 Encryption failed — message not sent.'); return false; }
+    if(_e2eBlockedWarn(w)) return false;
+    // r4 (IRC-H1): a plaintext recipient gets the pieces the server will send.
+    const pcs=w?null:_plainChatPieces(conn_id,verb,tg,text);
+    if(!w&&!pcs) return _plainTooLong(conn_id,tg);
+    wires.push([tg,w,pcs,tails]);
+  }
+  for(const [tg,w,pcs,tails] of wires){
+    if(w){
+      send([{type:'send',conn_id,raw:`${verb} ${tg} :${w}`},...tails.map(t=>({type:'send',conn_id:t.cid||conn_id,raw:t.raw}))],[tg],true);
+      continue;
+    }
+    for(const p of pcs) send([{type:'send',conn_id,raw:`${verb} ${tg} :${p}`}],[tg],false,p);
+  }
+  return true;
+}
+// r7 (agy-flash p3 e2e.js:3603 + app.js:5533, codex/agy app.js:6305): ONE way to send a
+// chat line — typed text, a reply quote + its body, /me, /say, /query <msg>, /slap, the
+// emote / GIF / ASCII / UD commands. Every piece is prepared FIRST (encrypted with ALL its
+// continuation pieces handed back — `defer` — or the plaintext pieces the server will send)
+// and only then are all pieces of all parts queued together, in one synchronous step:
+// tracked (⏳ pending while offline, "⚠ not sent" when refused) and in order. Encrypted
+// continuation pieces used to be scheduled by e2e.js on a timer — untracked, and able to
+// fall behind the next message; the commands wrote to the socket directly (dropped while
+// reconnecting); a reply quote went out before its body was checked.
+// → a part {encrypted, payloads, rows} or null (refused; the reason was shown).
+async function _prepChatPart(conn_id,target,text,verb){
+  verb=verb||'PRIVMSG';
+  let first=null; const tails=[];
+  try{ first=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,text,conn_id,{verb,defer:tails}):null; }
+  catch(_){ showToast('🔒 Encryption failed — message not sent.'); return null; }
+  if(_e2eBlockedWarn(first)) return null;
+  if(first) return {encrypted:true,payloads:[{type:'send',conn_id,raw:`${verb} ${target} :${first}`},...tails.map(t=>({type:'send',conn_id:t.cid||conn_id,raw:t.raw}))],rows:[text]};
+  const pcs=_plainChatPieces(conn_id,verb,target,text);   // r4 (IRC-H1)
+  if(!pcs){ _plainTooLong(conn_id,target); return null; }
+  return {encrypted:false,payloads:pcs.map(p=>({type:'send',conn_id,raw:`${verb} ${target} :${p}`})),rows:pcs};
+}
+// The row text for a piece: a /me shows without its CTCP ACTION wrapper.
+function _chatRowText(t,kind){ return kind==='action'?String(t).replace(/^\x01ACTION /,'').replace(/\x01$/,''):t; }
+function _queueChatParts(conn_id,target,parts,kind){
+  kind=kind||'privmsg';
+  for(const part of parts){
+    if(part.encrypted){
+      const m={ts:Date.now()/1000|0,from:getNick(conn_id),text:_chatRowText(part.rows[0],kind),kind,encrypted:true};
+      for(const p of part.payloads) _queueChatSend(p,m);
+      addMessage(conn_id,target,m);
+    } else {
+      for(let i=0;i<part.payloads.length;i++){
+        const m={ts:Date.now()/1000|0,from:getNick(conn_id),text:_chatRowText(part.rows[i],kind),kind};
+        _queueChatSend(part.payloads[i],m);
+        addMessage(conn_id,target,m);
+      }
+    }
+  }
+}
+async function _sendChat(conn_id,target,text,o){
+  const verb=(o&&o.verb)||'PRIVMSG', kind=(o&&o.kind)||'privmsg';
+  const part=await _prepChatPart(conn_id,target,text,verb);
+  if(!part) return false;
+  _queueChatParts(conn_id,target,[part],kind);
+  return true;
+}
+async function _sendChatLine(conn_id,target,text){ return _sendChat(conn_id,target,text); }
 async function doSetLastfm(conn_id,target,user){
   try{
     const r=await fetch('/cryptirc/auth/lastfm',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+sessionToken},body:JSON.stringify({user})});
@@ -7039,26 +8624,91 @@ async function showChangeClientPassword(){
   }catch(e){showToast('Network error — try again');}
 }
 // ─── Password Safe ───────────────────────────────────────────────────────────
-let _pwSafe=[];  // [{id,name,username,password,notes}]
+let _pwSafe=[];  // [{id,name,username,password,notes,mt?}]  (mt = last-edit ms, optional)
 let _pwSafeLoaded=false;
 let _pwSafeDirty=false;
-
+// #5: per-entry merge instead of whole-list last-writer-wins. The stored format is
+// unchanged (a JSON array of entries; the optional `mt` field is ignored by older
+// clients). `_pwSafeBase` is the last server snapshot this device saw (key → content);
+// diffing local and server against it tells an add from a delete on either side, so
+// no tombstones are needed in the stored data. Every save first re-reads the server
+// copy (load_passwords → handlePasswordSafeData merges, then saves the result), and
+// the reply to a load is broadcast to all of this user's sessions, so every open
+// device converges. Residual: two devices saving within one round-trip can still
+// race (the server has no compare-and-swap).
+let _pwSafeBase=null, _pwSafeUser=null, _pwSafeSyncTimer=null;
+function _pwCanon(e){ return JSON.stringify([e.name||'',e.username||'',e.password||'',e.notes||'']); }
+// Stable per-entry key: the id (made unique per list by occurrence if duplicated),
+// or the content for a legacy entry that has no id.
+function _pwKeyed(list){
+  const m=new Map(), seen=new Map();
+  for(const e of (Array.isArray(list)?list:[])){
+    if(!e||typeof e!=='object') continue;
+    const k0=(e.id!=null&&e.id!=='')?'i:'+e.id:'c:'+_pwCanon(e);
+    const n=seen.get(k0)||0; seen.set(k0,n+1);
+    m.set(n?k0+'#'+n:k0,e);
+  }
+  return m;
+}
+function _pwSnap(list){ const m=new Map(); for(const [k,e] of _pwKeyed(list)) m.set(k,_pwCanon(e)); return m; }
+// Three-way merge. base: Map|null (null = never synced → plain union); server: array,
+// or null when the server copy is unknown (empty reply / undecryptable) → keep local.
+function _pwMerge(base,local,server){
+  if(server===null) return (local||[]).slice();
+  const L=_pwKeyed(local), S=_pwKeyed(server), out=[];
+  const inBaseAs=(k,e)=>!!base && base.has(k) && base.get(k)===_pwCanon(e);
+  for(const [k,sv] of S){
+    const lv=L.get(k);
+    if(lv){
+      if(_pwCanon(lv)===_pwCanon(sv)) out.push(lv);
+      else if(inBaseAs(k,lv)) out.push(sv);              // only the server copy changed
+      else if(inBaseAs(k,sv)) out.push(lv);              // only this device changed it
+      else out.push((+lv.mt||0)>=(+sv.mt||0)?lv:sv);    // both changed: newer edit wins
+    } else if(!inBaseAs(k,sv)) out.push(sv);             // new elsewhere, or edited there after we deleted it
+  }
+  for(const [k,lv] of L){
+    if(S.has(k)) continue;
+    if(!inBaseAs(k,lv)) out.push(lv);                    // new here, or edited here after another device deleted it
+  }
+  return out;
+}
+function _pwSafeCheckUser(){
+  // A logout + different login in the same tab must never show or merge the
+  // previous account's entries.
+  if(_pwSafeUser!==currentUser){ _pwSafe=[]; _pwSafeBase=null; _pwSafeLoaded=false; _pwSafeDirty=false; _pwSafeUser=currentUser; }
+}
 function handlePasswordSafeData(data){
-  if(!data){_pwSafeLoaded=true;return;}
-  try{const d=JSON.parse(data);if(Array.isArray(d))_pwSafe=d;}catch(e){}
+  _pwSafeCheckUser();
+  let server=null;
+  if(data){ try{const d=JSON.parse(data); if(Array.isArray(d)) server=d;}catch(e){} }
+  _pwSafe=_pwMerge(_pwSafeBase,_pwSafe,server);
+  if(server!==null) _pwSafeBase=_pwSnap(server);
   _pwSafeLoaded=true;
-  _pwSafeDirty=false;
+  if(_pwSafeDirty){
+    clearTimeout(_pwSafeSyncTimer); _pwSafeSyncTimer=null;
+    _pwSafeDirty=false;
+    wsend({type:'save_passwords',data:JSON.stringify(_pwSafe)});
+    _pwSafeBase=_pwSnap(_pwSafe);
+    // Re-read once so the (broadcast) reply refreshes this user's other open sessions.
+    wsend({type:'load_passwords'});
+  }
   // Re-render if panel is open
   const ov=document.getElementById('pwsafe-overlay');
   if(ov&&ov.classList.contains('show')) renderPasswordSafe();
 }
 function savePasswordSafe(){
   if(!sessionToken)return;
-  wsend({type:'save_passwords',data:JSON.stringify(_pwSafe)});
-  _pwSafeDirty=false;
+  _pwSafeCheckUser();
+  _pwSafeDirty=true;
+  // Merge-then-save happens when the reply to this load arrives.
+  wsend({type:'load_passwords'});
+  clearTimeout(_pwSafeSyncTimer);
+  _pwSafeSyncTimer=setTimeout(()=>{ _pwSafeSyncTimer=null; if(_pwSafeDirty) showToast('⚠ Password Safe: the server did not answer — the change is NOT saved yet. It will be saved the next time the Password Safe syncs (reopen it once you are reconnected and unlocked).'); },8000);
 }
 function showPasswordPanel(){
-  if(!_pwSafeLoaded) wsend({type:'load_passwords'});
+  _pwSafeCheckUser();
+  // Always refresh on open: another device may have changed the safe since.
+  wsend({type:'load_passwords'});
   let ov=document.getElementById('pwsafe-overlay');
   if(!ov){
     ov=document.createElement('div');ov.id='pwsafe-overlay';
@@ -7122,10 +8772,10 @@ function renderPasswordSafe(){
   if(ov&&ov.classList.contains('show')) renderPasswordPanel();
 }
 function renderPasswordSafeHTML(){
-  let html=`<div class="psafe-note"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>End-to-end encrypted with your vault key — only you can read these. Syncs across your devices.</span></div>
+  let html=`<div class="psafe-note"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Stored on the server encrypted with your vault key. The server holds that key while your vault is unlocked, so this is not end-to-end encryption. Syncs across your devices.</span></div>
   <button class="psafe-add" onclick="pwSafeAdd()">+ Add credential</button>`;
   if(!_pwSafe.length){
-    html+=`<div class="psafe-empty"><b>Your vault is empty</b>Save a password and it's encrypted on your device before it ever leaves.</div>`;
+    html+=`<div class="psafe-empty"><b>Your vault is empty</b>Saved passwords are sent to the server over your encrypted connection and written to disk encrypted with your vault key.</div>`;
     return html;
   }
   for(let i=0;i<_pwSafe.length;i++){
@@ -7148,30 +8798,42 @@ async function pwSafeAdd(){
   const username=await customPrompt('Username / email (optional):');
   const password=await customPrompt('Password:','',true);if(!password)return;
   const notes=await customPrompt('Notes (optional):');
-  _pwSafe.push({id:Date.now(),name,username:username||'',password,notes:notes||''});
+  // Numeric id as before; ms*1000 + random so two devices adding in the same ms don't collide.
+  const now=Date.now();
+  _pwSafe.push({id:now*1000+Math.floor(Math.random()*1000),name,username:username||'',password,notes:notes||'',mt:now});
   savePasswordSafe();
   renderPasswordSafe();
 }
+// Edit/Delete re-find the entry by id after the awaited prompts: a sync from another
+// device may have replaced _pwSafe meanwhile, so the index (or object) captured
+// before the prompts can point at a different entry.
+function _pwFindIdx(id){ return _pwSafe.findIndex(x=>x&&x.id===id); }
 async function pwSafeEdit(idx){
   const e=_pwSafe[idx];if(!e)return;
+  const id=e.id;
   const name=await customPrompt('Entry name:',e.name);if(name===null)return;
   const username=await customPrompt('Username / email:',e.username||'');if(username===null)return;
   const password=await customPrompt('Password:',e.password,true);if(password===null)return;
   const notes=await customPrompt('Notes:',e.notes||'');if(notes===null)return;
-  e.name=name;e.username=username;e.password=password;e.notes=notes;
+  const i=(id!=null)?_pwFindIdx(id):_pwSafe.indexOf(e);
+  const upd={...(i>=0?_pwSafe[i]:e),name,username,password,notes,mt:Date.now()};
+  if(i>=0) _pwSafe[i]=upd; else _pwSafe.push(upd);   // deleted elsewhere meanwhile: the edit wins
   savePasswordSafe();
   renderPasswordSafe();
 }
 async function pwSafeDelete(idx){
   const e=_pwSafe[idx];if(!e)return;
+  const id=e.id;
   if(!(await customConfirm(`Delete "${e.name}"?`,'Delete')))return;
-  _pwSafe.splice(idx,1);
+  const i=(id!=null)?_pwFindIdx(id):_pwSafe.indexOf(e);
+  if(i<0) return;   // already gone
+  _pwSafe.splice(i,1);
   savePasswordSafe();
   renderPasswordSafe();
 }
 
 async function clearAllLogs(){
-  if(!(await customConfirm('Clear ALL data? This will delete:\n• Chat history & logs (server + local)\n• Your notepad\n• Your paste posts\n\nThis cannot be undone.','Clear all')))return;
+  if(!(await customConfirm('Clear ALL data? This will delete:\n• Chat history & logs (server + local)\n• Your notepad\n• Your paste posts\n\nKept: your account, networks, Password Safe, uploads, settings, channel stats, AI keys and bot data.\n\nThis cannot be undone.','Clear all')))return;
   // Clear local buffers
   buffers={}; _historyView=null;
   unread.clear();
@@ -7185,6 +8847,7 @@ async function showDeleteAccount(){
   const pw=await customPrompt('To delete your account permanently, enter your password:','',true);
   if(!pw)return;
   if(!(await customConfirm('This will permanently delete your account, all connections, logs, and settings. This cannot be undone. Are you sure?','Delete')))return;
+  _deleteAcctPendingAt=Date.now();   // a "Server busy" refusal is then reported as "NOT deleted"
   wsend({type:'delete_account',password:pw});
 }
 
@@ -7208,6 +8871,7 @@ function resetNetworkForm(){
   document.getElementById('f-sasl-password').value='';
   document.getElementById('f-reconnect').value='true';
   document.getElementById('f-tls-invalid').value='false';
+  _updateTlsVerifyNote('');
   document.getElementById('f-oper-login').value='';
   document.getElementById('f-oper-pass').value='';
   document.getElementById('f-auto-identify').value='false';
@@ -7306,6 +8970,7 @@ function editNetwork(id){
   {const fq=document.getElementById('f-quit'); if(fq) fq.value=c.quit_message||'';}
   document.getElementById('f-reconnect').value=c.auto_reconnect?'true':'false';
   document.getElementById('f-tls-invalid').value=c.tls_accept_invalid_certs?'true':'false';
+  _updateTlsVerifyNote((_presetForCfg(c)||{}).tlsInvalid||'');
   document.getElementById('f-oper-login').value=c.oper_login||'';
   document.getElementById('f-oper-pass').value=c.oper_pass||'';
   document.getElementById('f-auto-identify').value=c.auto_identify?'true':'false';
@@ -7364,28 +9029,37 @@ function applyServerModeUi(){
 // Pre-filled server presets for common IRC networks. Selecting one fills
 // Label, Server, Port, and TLS; other fields (nick, SASL, etc.) are left
 // untouched so the user can customize.
-// Ports verified from each network's official docs. Several networks use
-// self-signed or non-standard certs, so Accept-Invalid-Cert defaults to true
-// for every preset — users can turn it off per-network if they want strict verification.
+// Ports verified from each network's official docs.
+// TLS certificate verification stays ON for presets (H2, audit 2026-11-01: this
+// used to switch it OFF for every preset, so an on-path attacker could read the
+// server/SASL/NickServ/OPER passwords). Each preset host was checked on 2026-11-01
+// with a bare handshake (`openssl s_client -verify_return_error -verify_hostname`).
+// The few whose certificate does NOT verify carry `tlsInvalid` (the reason); for
+// those the form turns verification off VISIBLY (warning under the TLS fields) and
+// the saved network shows the ⚠ badge in the sidebar. _TLS_VERIFIED_PRESETS lists
+// the ones whose certificate verified; undernet/quakenet/gamesurge (port 6697 did not
+// answer) and ircnet (irc.ircnet.net did not resolve) could not be checked, so they
+// default to verification ON but are never offered as "known good".
+const _TLS_VERIFIED_PRESETS=new Set(['twistednet','libera','oftc','rizon','dalnet','snoonet','geekshed','slashnet','hackint','anonops','tildechat','esper']);
 const NET_PRESETS={
   twistednet: {label:'TwistedNET',   server:'irc.twistednet.org',  port:6697, tls:true},
   libera:     {label:'Libera.Chat',  server:'irc.libera.chat',     port:6697, tls:true},
   oftc:       {label:'OFTC',         server:'irc.oftc.net',        port:6697, tls:true},
   undernet:   {label:'Undernet',     server:'irc.undernet.org',    port:6697, tls:true},
   ircnet:     {label:'IRCnet',       server:'irc.ircnet.net',      port:6697, tls:true},
-  efnet:      {label:'EFnet',        server:'irc.efnet.org',       port:9999, tls:true},
+  efnet:      {label:'EFnet',        server:'irc.efnet.org',       port:9999, tls:true, tlsInvalid:'EFnet servers use self-signed certificates'},
   quakenet:   {label:'QuakeNet',     server:'irc.quakenet.org',    port:6697, tls:true},
   rizon:      {label:'Rizon',        server:'irc.rizon.net',       port:6697, tls:true},
   dalnet:     {label:'DALnet',       server:'irc.dal.net',         port:6697, tls:true},
-  irchighway: {label:'IRCHighWay',   server:'irc.irchighway.net',  port:6697, tls:true},
+  irchighway: {label:'IRCHighWay',   server:'irc.irchighway.net',  port:6697, tls:true, tlsInvalid:'IRCHighWay uses a self-signed certificate'},
   snoonet:    {label:'Snoonet',      server:'irc.snoonet.org',     port:6697, tls:true},
   geekshed:   {label:'GeekShed',     server:'irc.geekshed.net',    port:6697, tls:true},
   gamesurge:  {label:'GameSurge',    server:'irc.gamesurge.net',   port:6697, tls:true},
   slashnet:   {label:'SlashNET',     server:'irc.slashnet.org',    port:6697, tls:true},
-  n2600:      {label:'2600net',      server:'irc.2600.net',        port:6697, tls:true},
+  n2600:      {label:'2600net',      server:'irc.2600.net',        port:6697, tls:true, tlsInvalid:'2600net presents a certificate issued for a different hostname'},
   hackint:    {label:'Hackint',      server:'irc.hackint.org',     port:6697, tls:true},
   anonops:    {label:'AnonOps',      server:'irc.anonops.com',     port:6697, tls:true},
-  chat4all:   {label:'Chat4All',     server:'irc.chat4all.org',    port:6697, tls:true},
+  chat4all:   {label:'Chat4All',     server:'irc.chat4all.org',    port:6697, tls:true, tlsInvalid:'Chat4All does not send its intermediate certificate, so the chain cannot be verified'},
   tildechat:  {label:'Tilde.chat',   server:'irc.tilde.chat',      port:6697, tls:true},
   esper:      {label:'EsperNet',     server:'irc.esper.net',       port:6697, tls:true},
 };
@@ -7396,7 +9070,159 @@ function applyNetPreset(id){
   document.getElementById('f-server').value=p.server;
   document.getElementById('f-port').value=String(p.port);
   document.getElementById('f-tls').value=p.tls?'true':'false';
-  const inv=document.getElementById('f-tls-invalid'); if(inv) inv.value='true';
+  // H2: verification ON unless this preset's server is known not to verify — and
+  // then say so in the form instead of flipping it silently.
+  const inv=document.getElementById('f-tls-invalid'); if(inv) inv.value=p.tlsInvalid?'true':'false';
+  _updateTlsVerifyNote(p.tlsInvalid||'');
+  if(p.tlsInvalid) showToast('⚠ '+p.label+': certificate verification is off — '+p.tlsInvalid);
+}
+// ── TLS certificate-verification visibility (H2) ─────────────────────────────
+// A network with tls && tls_accept_invalid_certs dials with NO certificate or
+// hostname check. Make that state visible everywhere it matters: an inline warning
+// in the network form, a ⚠ badge on the sidebar row (_netTlsBadge), and — for
+// networks that came from a preset whose server DOES verify (most of them were
+// added while every preset silently turned verification off) — a one-time,
+// non-modal offer to turn verification back on with one click. Nothing is flipped
+// automatically: a server that verified from our test box can still fail from the
+// user's host (local DNS, TLS-intercepting proxy), and a silent flip would then
+// break a working connection at the next reconnect. The offer only changes the
+// saved config (update_network does not re-dial), so the live connection stays up;
+// if the next dial fails the check, showCertWarning offers a one-click undo.
+const _TLS_DISMISS_KEY='cryptirc_tlsverify_dismissed', _TLS_FLIPPED_KEY='cryptirc_tlsverify_flipped';
+function _tlsIdSet(key){ try{ const a=JSON.parse(localStorage.getItem(key)||'[]'); return new Set(Array.isArray(a)?a.map(String):[]); }catch(_){ return new Set(); } }
+function _tlsIdSetSave(key,set){ try{ localStorage.setItem(key,JSON.stringify([...set].slice(-200))); }catch(_){} }
+// Both sets travel in the synced prefs (tlsVerify), so the undo below works on every
+// device of the account, not just the one that clicked "Turn verification on".
+function _tlsStampSync(){ try{ localStorage.setItem('cryptirc_tlsverify_ts',String(Date.now())); }catch(_){} try{ savePrefsToServer(); }catch(_){} }
+function _netTlsOff(cfg){ return !!(cfg && cfg.tls && cfg.tls_accept_invalid_certs); }
+// Preset id whose host AND port match this config (the exact endpoint that was checked).
+function _presetIdForCfg(cfg){
+  if(!cfg) return null;
+  const h=String(cfg.server||'').trim().toLowerCase().replace(/\.$/,''), port=+cfg.port||0;
+  for(const id of Object.keys(NET_PRESETS)){ const p=NET_PRESETS[id]; if(p.server===h && p.port===port) return id; }
+  return null;
+}
+function _presetForCfg(cfg){ const id=_presetIdForCfg(cfg); return id?NET_PRESETS[id]:null; }
+// Verification is off, but the server is a preset endpoint whose certificate verified.
+function _netTlsFixable(cfg){ return _netTlsOff(cfg) && _TLS_VERIFIED_PRESETS.has(_presetIdForCfg(cfg)); }
+function _updateTlsVerifyNote(reason){
+  const sel=document.getElementById('f-tls-invalid'); if(!sel) return;
+  if(reason!==undefined) sel.dataset.tlsReason=reason||'';
+  if(!sel._tlsNoteBound){
+    sel._tlsNoteBound=true;
+    sel.addEventListener('change',()=>{ sel.dataset.tlsReason=''; _updateTlsVerifyNote(); });
+    const tl=document.getElementById('f-tls'); if(tl) tl.addEventListener('change',()=>_updateTlsVerifyNote());
+  }
+  let note=document.getElementById('f-tls-verify-note');
+  if(!note){
+    const row=sel.closest('.form-row'); if(!row||!row.parentNode) return;
+    note=document.createElement('div'); note.id='f-tls-verify-note';
+    note.style.cssText='display:none;margin:0 0 12px;padding:8px 10px;border:1px solid var(--warn);border-radius:6px;color:var(--text2);font-size:11px;line-height:1.5';
+    row.parentNode.insertBefore(note,row.nextSibling);
+  }
+  const off=sel.value==='true' && document.getElementById('f-tls')?.value!=='false';
+  note.style.display=off?'':'none';
+  if(off){
+    const r=sel.dataset.tlsReason||'';
+    note.textContent='⚠ Certificate verification is OFF'+(r?' — '+r+'.':'.')+' The connection is still encrypted, but CryptIRC cannot confirm it is talking to the real server, so anyone on the network path could read your server, SASL, NickServ and oper passwords. Only use this for a server that really has a self-signed certificate (for example your own ZNC).';
+  }
+}
+// Sidebar badge (rendered inside the network row by _renderSidebarNow). No inline
+// handler: the id rides in an escaped data attribute and one capture-phase listener
+// handles the click (and keeps it from also activating the row underneath).
+function _netTlsBadge(net){
+  if(!net||!_netTlsOff(net.config)) return '';
+  return `<span class="net-tls-warn" data-tls-net="${esc(String(net.config.id))}" title="TLS certificate verification is OFF for this network — click for details" style="color:var(--warn);font-size:11px;margin-left:4px;cursor:pointer;flex-shrink:0">⚠</span>`;
+}
+function _tlsBadgeClick(id){ const n=networks.find(x=>String(x.config.id)===String(id)); if(n) _showTlsVerifyPopup([n],true); }
+document.addEventListener('click',e=>{
+  const b=e.target&&e.target.closest?e.target.closest('.net-tls-warn[data-tls-net]'):null;
+  if(!b) return;
+  e.stopPropagation(); e.preventDefault();
+  _tlsBadgeClick(b.dataset.tlsNet);
+},true);
+// Save the network with verification on/off. update_network only rewrites the saved
+// config (no re-dial), so a live connection is not touched. The client holds the
+// full decrypted config (same assumption saveNetwork's edit path relies on).
+function _setNetTlsVerify(net,verify){
+  const cfg=JSON.parse(JSON.stringify(net.config));
+  cfg.tls_accept_invalid_certs=!verify;
+  wsend({type:'update_network',network:cfg});
+  net.config.tls_accept_invalid_certs=!verify;   // optimistic; the State echo confirms
+  const flipped=_tlsIdSet(_TLS_FLIPPED_KEY);
+  if(verify) flipped.add(String(cfg.id)); else flipped.delete(String(cfg.id));
+  _tlsIdSetSave(_TLS_FLIPPED_KEY,flipped);
+  _tlsStampSync();
+}
+function _showTlsVerifyPopup(nets,fromBadge){
+  nets=(nets||[]).filter(n=>n&&_netTlsOff(n.config));
+  if(!nets.length) return;
+  const fixable=nets.filter(n=>_netTlsFixable(n.config));
+  const names=nets.map(n=>n.config.label||n.config.server).join(', ');
+  const old=document.getElementById('tls-verify-popup'); if(old) old.remove();
+  const popup=document.createElement('div'); popup.id='tls-verify-popup';
+  popup.style.cssText='position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--warn);border-radius:10px;padding:16px 20px;z-index:200;box-shadow:0 8px 30px rgba(0,0,0,.5);max-width:420px;width:90%;font-size:12px;color:var(--text);';
+  const row=document.createElement('div'); row.style.cssText='display:flex;align-items:flex-start;gap:10px';
+  const ico=document.createElement('span'); ico.style.cssText='font-size:22px;flex-shrink:0'; ico.textContent='⚠️';
+  const col=document.createElement('div'); col.style.cssText='flex:1;min-width:0';
+  const h=document.createElement('div'); h.style.cssText='font-weight:700;margin-bottom:6px;color:var(--warn)'; h.textContent='Certificate verification is off';
+  const body=document.createElement('div'); body.style.cssText='color:var(--text2);line-height:1.5;margin-bottom:10px;white-space:pre-wrap;word-break:break-word';
+  if(fixable.length===nets.length){
+    body.textContent=names+(nets.length>1?' connect':' connects')+' without checking the server\'s TLS certificate, so someone on the network path could read your passwords. Older CryptIRC versions turned this off for every network preset.\n\n'+(nets.length>1?'These servers have':'This server has')+' a valid certificate, so verification can be turned back on. Your current connection stays up; the check applies from the next reconnect, and if it ever fails CryptIRC will offer to undo it.';
+  } else {
+    const p=nets.length===1?_presetForCfg(nets[0].config):null;
+    body.textContent=names+(nets.length>1?' connect':' connects')+' without checking the server\'s TLS certificate'+(p&&p.tlsInvalid?' ('+p.tlsInvalid+')':'')+'. The connection is encrypted, but someone on the network path could read your passwords. If the server has a valid certificate, edit the network and set "Accept Invalid TLS" to No.';
+  }
+  const btns=document.createElement('div'); btns.style.cssText='display:flex;gap:8px;flex-wrap:wrap';
+  const mk=(label,primary,fn)=>{ const b=document.createElement('button'); b.textContent=label; b.style.cssText=primary?'background:var(--accent);color:#000;border:none;border-radius:6px;padding:7px 14px;cursor:pointer;font-family:var(--mono);font-weight:700;font-size:12px':'background:var(--bg4);color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:7px 14px;cursor:pointer;font-family:var(--mono);font-size:12px'; b.addEventListener('click',fn); btns.appendChild(b); return b; };
+  const dismiss=()=>{ const d=_tlsIdSet(_TLS_DISMISS_KEY); for(const n of nets) d.add(String(n.config.id)); _tlsIdSetSave(_TLS_DISMISS_KEY,d); _tlsStampSync(); popup.remove(); };
+  if(fixable.length){
+    mk(fixable.length>1?'Turn verification on for all':'Turn verification on',true,()=>{
+      for(const n of fixable) _setNetTlsVerify(n,true);
+      popup.remove(); renderSidebar();
+      showToast('🔒 Certificate verification turned on for '+fixable.map(n=>n.config.label||n.config.server).join(', ')+' (applies from the next reconnect)');
+    });
+  }
+  if(nets.length===1) mk('Edit network',!fixable.length,()=>{ popup.remove(); editNetwork(nets[0].config.id); });
+  mk(fromBadge?'Close':'Not now',false,fromBadge?()=>popup.remove():dismiss);
+  col.appendChild(h); col.appendChild(body); col.appendChild(btns);
+  row.appendChild(ico); row.appendChild(col); popup.appendChild(row);
+  document.body.appendChild(popup);
+}
+// One-time (per device, per network) offer, run from the 'state' handler.
+let _tlsPromptDone=false, _tlsPromptWaitSince=0;
+function _tlsVerifyPromptOnce(){
+  if(_tlsPromptDone || (typeof _detMode!=='undefined' && _detMode)) return;
+  if(document.getElementById('vault-overlay')?.classList.contains('show')) return; // wait for unlock
+  // The "Not now" set is synced in the prefs blob: give its load reply (sent right
+  // after the first State) a few seconds to arrive before deciding.
+  if(!_prefsSeen){
+    if(!_tlsPromptWaitSince) _tlsPromptWaitSince=Date.now();
+    if(Date.now()-_tlsPromptWaitSince<6000){ setTimeout(_tlsVerifyPromptOnce,500); return; }
+  }
+  const dismissed=_tlsIdSet(_TLS_DISMISS_KEY);
+  const nets=networks.filter(n=>_netTlsFixable(n.config) && !dismissed.has(String(n.config.id)));
+  _tlsPromptDone=true;
+  if(nets.length) _showTlsVerifyPopup(nets,false);
+}
+// #7 "Add & Connect": remember which ids existed before add_network so the State
+// that follows can identify the NEW network (the server lists networks in
+// read_dir order, so "last in the list" is often a different, possibly
+// deliberately disconnected, network).
+let _pendingAddConnect=null;
+function _onNetworksState(ev){
+  const list=(ev&&ev.networks)||networks;
+  const p=_pendingAddConnect;
+  if(p){
+    if(Date.now()-p.t>30000){ _pendingAddConnect=null; }
+    else {
+      const fresh=list.filter(n=>!p.before.has(n.config.id));
+      const norm=v=>String(v||'').trim().toLowerCase();
+      const match=fresh.find(n=>norm(n.config.server)===p.server && (+n.config.port||0)===p.port) || (fresh.length===1?fresh[0]:null);
+      if(match){ _pendingAddConnect=null; if(!match.connected) wsend({type:'connect',id:match.config.id}); }
+    }
+  }
+  if(ev&&ev.vault_unlocked){ setTimeout(_tlsVerifyPromptOnce,1500); setTimeout(()=>{ if(!_deviceLocked && !document.getElementById('vault-overlay')?.classList.contains('show')) _autolockNoticeOnce(); },2500); }
 }
 // User-initiated mode change: apply UI toggle + ZNC-friendly defaults on the
 // direct→znc transition only. Avoids clobbering values when editNetwork flips
@@ -7413,8 +9239,9 @@ function onServerModeChange(){
     if(!portEl.value||portEl.value==='6667') portEl.value='6697';
     const tlsEl=document.getElementById('f-tls');
     if(tlsEl.value==='false') tlsEl.value='true';
-    // ZNC commonly uses self-signed TLS, so default that to Yes.
+    // ZNC commonly uses self-signed TLS, so default that to Yes (shown, not silent).
     document.getElementById('f-tls-invalid').value='true';
+    _updateTlsVerifyNote('ZNC bouncers usually use a self-signed certificate');
     // ZNC handles SASL to the real network itself — disable client-side SASL.
     document.getElementById('f-sasl-method').value='none';
     onSaslMethodChange();
@@ -7490,12 +9317,24 @@ function saveNetwork(){
   if(editingNetworkId){
     wsend({type:'update_network',network:cfg}); closeModal();
   } else {
+    // #7: connect the network this add creates, identified in the State reply by
+    // its new id (see _onNetworksState) — not whatever happens to be listed last.
+    _pendingAddConnect={before:new Set(networks.map(n=>n.config.id)),server:String(cfg.server||'').trim().toLowerCase(),port:cfg.port,t:Date.now()};
     wsend({type:'add_network',network:cfg}); closeModal();
-    setTimeout(()=>{const n=networks[networks.length-1];if(n)wsend({type:'connect',id:n.config.id});},600);
   }
 }
 
 // ─── Encryption panel ─────────────────────────────────────────────────────────
+// r5 (agy-flash app.js:9205): the E2E name a window stands for, resolved like the send
+// path (e2e.js _e2eCanon: #room{ on an RFC1459 network = the key held as #room[) — so
+// the panel's STATUS matches what a send does. Display only: the panel's key actions
+// (show / copy / rotate / remove / import) resolve under the network's real case rules
+// (e2e.js _e2eKeyCmdName) and refuse or ask for another spelling.
+function _e2eUiName(target,conn_id){
+  const t=_e2eRealTarget(target);
+  try{ if(typeof _e2eCanon==='function'){ const c=_e2eCanon(t,conn_id||null); if(c) return c; } }catch(_){}
+  return String(t).toLowerCase();
+}
 function showEncryptPanel(){
   if(!active){return;}
   _bindEncryptDelegation();   // idempotent; binds the delegated button listener once
@@ -7507,7 +9346,7 @@ function showEncryptPanel(){
 
   if(isChan){
     title.textContent=`Encryption — ${target}`;
-    const hasKey=window.E2E?.channelKeys?.[target];
+    const hasKey=window.E2E?.channelKeys?.[_e2eUiName(target,conn_id)];
     if(hasKey){
       body.innerHTML=`
         <div class="encrypt-status on">
@@ -7556,8 +9395,8 @@ function showEncryptPanel(){
   } else if(target!=='status') {
     // DM
     title.textContent=`Encryption — ${target}`;
-    const hasPSK=window.E2E?.channelKeys?.[target];
-    const hasSession=window.E2E?.dmSessions?.[target];
+    const hasPSK=window.E2E?.channelKeys?.[_e2eUiName(target,conn_id)];
+    const hasSession=window.E2E?.dmSessions?.[_e2eUiName(target,conn_id)];
     if(hasPSK){
       body.innerHTML=`
         <div class="encrypt-status on">
@@ -7702,7 +9541,19 @@ async function doImportKey(){
 
 async function copyChannelKey(){
   if(!active)return;
-  const key=window.E2E?.channelKeys?.[active.target];
+  // r5 (security review): exporting a key resolves under the network's REAL case rules
+  // (e2e.js _e2eKeyCmdName), not the panel's send-path view: a look-alike that is a
+  // different channel there never gets another channel's key; another spelling of the
+  // same channel asks first.
+  const t=_e2eRealTarget(active.target);
+  let name=null;
+  if(typeof _e2eKeyCmdName==='function'){
+    const r=_e2eKeyCmdName(t,active.conn_id);
+    if(r.refuse){showToast(r.refuse.replace(/^🔐 /,''));return;}
+    if(r.ask&&!(await _e2eKeyCmdConfirm(r.ask+'\n\nCopy the E2E key held for '+r.name+'?','Copy')))return;
+    name=r.name;
+  }
+  const key=name?window.E2E?.channelKeys?.[name]:null;
   if(!key){showToast('No key set for this channel');return;}
   const raw=await crypto.subtle.exportKey('raw',key);
   const words=bytesToMnemonic(new Uint8Array(raw));
@@ -8243,6 +10094,7 @@ function loadAppearance(){
 }
 function invalidateAppearCache(){_appearCache=null;_appearCacheTs=0;}
 let _appearOversizeWarned=false;
+function _utf8Len(str){ try{ return new TextEncoder().encode(str).length; }catch(_){ return unescape(encodeURIComponent(str)).length; } }
 function saveAppearance(cfg){
   invalidateAppearCache();
   const json=JSON.stringify(cfg);
@@ -8253,8 +10105,11 @@ function saveAppearance(cfg){
   // keep the full config in localStorage (works on THIS device) but DON'T sync it,
   // and warn the user once. The custom-theme editor pre-checks at APPEAR_SYNC_BUDGET
   // (3900) so this is only a backstop for pathological configs.
-  if(json.length>4096){
-    try{console.warn('[appearance] config '+json.length+'B exceeds 4KB server cap — not syncing across devices');}catch(_){}
+  // #11: the server caps UTF-8 BYTES (settings.len() in Rust); json.length counts
+  // UTF-16 units, so non-ASCII theme names/URLs passed here and were then dropped.
+  const bytes=_utf8Len(json);
+  if(bytes>4096){
+    try{console.warn('[appearance] config '+bytes+'B exceeds 4KB server cap — not syncing across devices');}catch(_){}
     if(!_appearOversizeWarned){ _appearOversizeWarned=true; try{showToast('Settings too large to sync across devices — saved on this device only');}catch(_){} }
     return;
   }
@@ -9200,7 +11055,8 @@ fireflyMeadow(cv,ctx){
   let mx=cv.width/2,my=cv.height/2;
   const onMove=(e)=>{mx=e.clientX;my=e.clientY;};
   window.addEventListener('mousemove',onMove);
-  _animResizeFn=(()=>{const old=_animResizeFn;return function(){if(old)old();};})();
+  // (#10: no _animResizeFn wrapper here — replacing it orphaned startAnimation's
+  // registered resize listener, one leaked per start/stop; stopAnimation removes it.)
   _animTimers.push({isListener:true,cancel:()=>window.removeEventListener('mousemove',onMove)});
   (function draw(){ctx.clearRect(0,0,cv.width,cv.height);for(const f of flies){const dx=mx-f.x,dy=my-f.y,d=Math.sqrt(dx*dx+dy*dy)+0.1;const pull=Math.min(0.04,30/d);f.vx+=dx/d*pull+(Math.random()-0.5)*0.2;f.vy+=dy/d*pull+(Math.random()-0.5)*0.2;f.vx*=0.94;f.vy*=0.94;f.x+=f.vx;f.y+=f.vy;f.phase+=0.06;const a=0.3+0.7*Math.abs(Math.sin(f.phase));const g=ctx.createRadialGradient(f.x,f.y,0,f.x,f.y,10);g.addColorStop(0,`rgba(228,239,136,${a})`);g.addColorStop(1,'rgba(228,239,136,0)');ctx.beginPath();ctx.arc(f.x,f.y,10,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();ctx.beginPath();ctx.arc(f.x,f.y,2,0,Math.PI*2);ctx.fillStyle=`rgba(255,255,200,${a})`;ctx.fill();}_animId=requestAnimationFrame(draw);})();
 },
@@ -9675,7 +11531,7 @@ function _bgUpdateStatus(){
   const url=u?(u.value||'').trim():(loadAppearance().bgUrl||'');
   let local=null; try{ local=localStorage.getItem('cryptirc_bg_custom'); }catch(e){}
   if(url && !/^https:\/\//i.test(url)) s.textContent='⚠ Image URLs must start with https:// — this one is being ignored.';
-  else if(url) s.textContent='✓ Using image URL — syncs to your other devices.';
+  else if(url) s.textContent=_appearOversizeWarned?'⚠ Using image URL on this device only — your settings are over the 4 KB sync limit, so they are not synced.':'✓ Using image URL — syncs to your other devices.';
   else if(local) s.textContent='✓ Uploaded image (~'+Math.round((local.length*0.75)/1024)+' KB) — this device only.';
   else s.textContent='No image chosen yet — showing the theme’s own background.';
 }
@@ -10015,7 +11871,7 @@ function teStartFrom(name){
   _teFrom=''; // the title no longer describes what's in the editor
   _renderThemeEditor(); // re-renders color rows + resets the dropdown to "current"
 }
-function _appearByteSize(cfg){ try{return JSON.stringify(cfg).length;}catch(e){return 0;} }
+function _appearByteSize(cfg){ try{return _utf8Len(JSON.stringify(cfg));}catch(e){return 0;} }  // UTF-8 bytes (#11)
 function saveCustomTheme(){
   if(!_teState) return;
   let label=(_teState.label||'').trim();
@@ -10435,10 +12291,10 @@ document.addEventListener('click',e=>{
     {cmd:'ud',desc:'Urban Dictionary lookup',usage:'/ud <word>'},
     {cmd:'shorten',desc:'Shorten a URL',usage:'/shorten <url>'},
     {cmd:'chanstats',desc:'Channel statistics dashboard',usage:'/chanstats'},
-    {cmd:'note',desc:'Set/view notes on a nick',usage:'/note <nick> [text]'},
+    {cmd:'note',desc:'Personal notes (Notes bot)',usage:'/note <text> · /notes · /note del <n>'},
     {cmd:'dnd',desc:'Do Not Disturb mode',usage:'/dnd on|off|schedule HH:MM HH:MM'},
     {cmd:'split',desc:'Toggle split view (two channels)',usage:'/split'},
-    {cmd:'seen',desc:'When was a nick last seen?',usage:'/seen <nick>'},
+    {cmd:'seen',desc:'When was a nick last seen? (Seen bot)',usage:'/seen <nick>'},
     {cmd:'ratelimit',desc:'Set message rate limit (ms)',usage:'/ratelimit <ms>'},
     {cmd:'expire',desc:'Auto-delete old messages (hours)',usage:'/expire <hours>'},
     {cmd:'autolock',desc:'Vault auto-lock timer (minutes)',usage:'/autolock <minutes>'},
@@ -10894,13 +12750,10 @@ async function giphyFetchTop(query){
   async function pick(sel){
     if(!active)return;
     const{conn_id,target}=active;
+    if(target==='status'){ _statusWinRefuse(conn_id); return; }   // r3: not a conversation
     const url=sel.url;
     inp.value=''; close();
-    const gifWire=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,url):null;
-    if(_e2eBlockedWarn(gifWire)) return;
-    if(gifWire) wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${gifWire}`});
-    else wsend({type:'send',conn_id,raw:`PRIVMSG ${target} :${url}`});
-    addMessage(conn_id,target,{ts:Date.now()/1000|0,from:getNick(conn_id),text:url,kind:'privmsg',encrypted:!!gifWire});
+    await _sendChat(conn_id,target,url);   // r7: queued + tracked
   }
   // Close on click outside. The <600ms guard suppresses the stray synthetic click
   // iOS fires after a thumb tap (by then the picker has shifted from keyboard
@@ -11290,7 +13143,22 @@ function showCertWarning(conn_id){
   const dismissBtn=document.createElement('button');
   dismissBtn.textContent='Dismiss';dismissBtn.style.cssText='background:var(--bg4);color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:7px 14px;cursor:pointer;font-family:var(--mono);font-size:12px';
   dismissBtn.addEventListener('click',()=>popup.remove());
-  btns.appendChild(editBtn);btns.appendChild(dismissBtn);
+  btns.appendChild(editBtn);
+  // H2 undo: verification was turned on from the one-click offer and this server
+  // now fails the check — let the user restore the previous behaviour in one click.
+  if(net && _netTlsFixable({...net.config,tls_accept_invalid_certs:true}) && !net.config.tls_accept_invalid_certs && _tlsIdSet(_TLS_FLIPPED_KEY).has(String(conn_id))){
+    const undoBtn=document.createElement('button');
+    undoBtn.textContent='Turn verification off again';undoBtn.style.cssText=dismissBtn.style.cssText;
+    undoBtn.addEventListener('click',()=>{
+      _setNetTlsVerify(net,false); popup.remove();
+      { const d=_tlsIdSet(_TLS_DISMISS_KEY); d.add(String(conn_id)); _tlsIdSetSave(_TLS_DISMISS_KEY,d); _tlsStampSync(); }  // don't re-offer it
+      // Re-dial so the restored setting is used now (the failing reconnect loop holds the old one).
+      wsend({type:'disconnect',id:conn_id}); setTimeout(()=>wsend({type:'connect',id:conn_id}),1500);
+      showToast('Certificate verification turned off again for '+label+' — reconnecting');
+    });
+    btns.appendChild(undoBtn);
+  }
+  btns.appendChild(dismissBtn);
 }
 
 // ─── ZNC playback detection ──────────────────────────────────────────────────
@@ -11390,44 +13258,122 @@ function closeLightbox(){
 // ─── Message expiry ──────────────────────────────────────────────────────────
 function getMessageExpiry(){return parseInt(localStorage.getItem('cryptirc_msg_expiry')||'0');}
 function setMessageExpiry(hours){localStorage.setItem('cryptirc_msg_expiry',String(hours));savePrefsToServer();}
+// #15: this is a DISPLAY setting — it drops old lines from this device's in-memory
+// buffers (and now also from the open chat view); the server's encrypted logs are
+// not touched, so history loads / scroll-back can bring them back. The UI wording
+// (Security panel, /expire) says exactly that; deleting history is /clear (per chat) or
+// Clear all data.
 function runMessageExpiry(){
   const hours=getMessageExpiry();if(!hours)return;
   const cutoff=Date.now()/1000-(hours*3600);
+  let activeShrank=false;
+  const ak=(active&&active.target)?bk(active.conn_id,active.target):null;
   for(const k of Object.keys(buffers)){
+    const before=buffers[k].length;
     buffers[k]=buffers[k].filter(m=>m.ts>cutoff);
+    if(k===ak && buffers[k].length!==before) activeShrank=true;
   }
+  // Rows already on screen were left behind before; repaint the open chat when it lost
+  // lines (not while viewing a jumped-to history window).
+  if(activeShrank && !_historyView){ try{ renderChat(); }catch(_){} }
 }
 // Run expiry check every 5 minutes + clean up stale bp: keys
 setInterval(()=>{
   runMessageExpiry();
-  // Clean up expired block-PM cooldown keys (>6 hours old)
+  _cleanPmCooldownKeys();
+},300000);
+// Clean up expired block-PM cooldown keys. r9 (astra-p3 app.js:13241): a key is the
+// "already told / first message delivered" mark of a blocked nick and must live as long as
+// the longest cooldown in use (up to 7 days; 24 h by default) — they were deleted after 6
+// hours, so the same nick got another first message through (and another auto-notice).
+// At most BP_KEYS_MAX are kept (the oldest go first) so a flood of new nicks cannot fill
+// this browser's storage now that they live longer.
+const BP_KEYS_MAX=2000;
+function _cleanPmCooldownKeys(){
   const now=Date.now();
+  let maxH=168;
+  try{
+    maxH=Math.max(maxH,parseInt(localStorage.getItem('cryptirc_pm_cooldown')||'24')||0);
+    for(const n of Object.values(loadPmNet()||{})) maxH=Math.max(maxH,parseInt(n&&n.cooldown)||0);
+  }catch(_){}
+  const keep=[];
   for(let i=localStorage.length-1;i>=0;i--){
     const k=localStorage.key(i);
-    if(k&&k.startsWith('bp:')&&now-parseInt(localStorage.getItem(k)||'0')>6*3600*1000)localStorage.removeItem(k);
+    if(!k||!k.startsWith('bp:')) continue;
+    const t=parseInt(localStorage.getItem(k)||'0')||0;
+    if(now-t>maxH*3600*1000) localStorage.removeItem(k); else keep.push([k,t]);
   }
-},300000);
+  if(keep.length>BP_KEYS_MAX){ keep.sort((a,b)=>a[1]-b[1]); for(const [k] of keep.slice(0,keep.length-BP_KEYS_MAX)) localStorage.removeItem(k); }
+}
 
 // ─── Vault auto-lock timer ───────────────────────────────────────────────────
-let _vaultAutoLockTimer=null,_vaultLastActivity=Date.now();
-function getVaultAutoLock(){return parseInt(localStorage.getItem('cryptirc_vault_autolock')||'0');}
-function setVaultAutoLock(mins){localStorage.setItem('cryptirc_vault_autolock',String(mins));resetVaultAutoLock();}
+// #3: the timer used to call lockVault(), which first awaits a "Lock the vault?"
+// confirm — on an idle device nobody answers it, so nothing was ever locked while
+// the toast claimed it was. The setting is per device (localStorage), so the timer
+// now does a DEVICE-LOCAL lock (_deviceLockNow): this browser shows the unlock
+// screen, IRC and the user's other devices are untouched. Activity in another tab of
+// this browser counts too (a shared timestamp, written at most every
+// min(15 s, limit/4)), and that tab locks with this one.
+let _vaultAutoLockTimer=null,_vaultLastActivity=Date.now(),_vaultActShared=0;
+const _VAULT_ACT_KEY='cryptirc_vault_activity_ts';
+const _VAULT_MAX_DELAY=2147483000; // setTimeout overflows past 2^31-1 ms and would fire at once
+// Minutes; fractional values allowed (/autolock 0.5 = 30 s). Anything else = off.
+function getVaultAutoLock(){const v=parseFloat(localStorage.getItem('cryptirc_vault_autolock')||'0');return (isFinite(v)&&v>0)?v:0;}
+function setVaultAutoLock(mins){localStorage.setItem('cryptirc_vault_autolock',String(mins));try{localStorage.setItem(_AUTOLOCK_NOTICE_KEY,'1');}catch(_){}resetVaultAutoLock();}
+// One-time notice for devices that already had auto-lock set: it used to do nothing
+// (stuck on a confirm), now it really locks this device.
+const _AUTOLOCK_NOTICE_KEY='cryptirc_autolock_notice_v1';
+function _autolockNoticeOnce(){
+  const mins=getVaultAutoLock(); if(!mins) return;
+  try{ if(localStorage.getItem(_AUTOLOCK_NOTICE_KEY)) return; localStorage.setItem(_AUTOLOCK_NOTICE_KEY,'1'); }catch(_){ return; }
+  if(document.getElementById('autolock-notice')) return;
+  const p=document.createElement('div'); p.id='autolock-notice';
+  p.style.cssText='position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--accent);border-radius:10px;padding:14px 18px;z-index:200;box-shadow:0 8px 30px rgba(0,0,0,.5);max-width:420px;width:90%;font-size:12px;color:var(--text);line-height:1.5';
+  const t=document.createElement('div'); t.style.cssText='font-weight:700;margin-bottom:6px;color:var(--accent)'; t.textContent='🔒 Auto-lock is now active on this device';
+  const b=document.createElement('div'); b.style.cssText='color:var(--text2);margin-bottom:10px'; b.textContent='This device has auto-lock set to '+mins+' minute'+(mins===1?'':'s')+'. It previously never locked; now, after '+mins+' minute'+(mins===1?'':'s')+' without activity, this device shows the unlock screen and needs your vault passphrase. Your IRC connections and other devices are not affected. Change it in Settings ▸ Security & Privacy or with /autolock 0.';
+  const row=document.createElement('div'); row.style.cssText='display:flex;gap:8px;flex-wrap:wrap';
+  const ok=document.createElement('button'); ok.textContent='Got it'; ok.style.cssText='background:var(--accent);color:#000;border:none;border-radius:6px;padding:7px 14px;cursor:pointer;font-family:var(--mono);font-weight:700;font-size:12px'; ok.onclick=()=>p.remove();
+  const off=document.createElement('button'); off.textContent='Turn auto-lock off'; off.style.cssText='background:var(--bg4);color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:7px 14px;cursor:pointer;font-family:var(--mono);font-size:12px'; off.onclick=()=>{ setVaultAutoLock(0); p.remove(); showToast('Auto-lock turned off on this device'); };
+  row.appendChild(ok); row.appendChild(off); p.appendChild(t); p.appendChild(b); p.appendChild(row);
+  document.body.appendChild(p);
+}
+function _vaultIdleMs(){
+  let last=_vaultLastActivity;
+  try{const o=+localStorage.getItem(_VAULT_ACT_KEY)||0; if(o>last&&o<=Date.now()) last=o;}catch(_){}
+  return Date.now()-last;
+}
+function _vaultAutoLockFire(){
+  clearTimeout(_vaultAutoLockTimer); _vaultAutoLockTimer=null;
+  const mins=getVaultAutoLock(); if(!mins) return;
+  const limit=mins*60000, idle=_vaultIdleMs();
+  if(idle<limit){ _vaultAutoLockTimer=setTimeout(_vaultAutoLockFire,Math.min(limit-idle+250,_VAULT_MAX_DELAY)); return; } // another tab was active / long timeout
+  if(document.getElementById('vault-overlay')?.classList.contains('show')) return;           // already locked
+  if(!window._appShown) return;                                                             // not logged in
+  _deviceLockNow(false,mins);   // device-local: no LockVault, no IRC disconnect
+  showToast('This device was locked after '+mins+' minute'+(mins===1?'':'s')+' of inactivity');
+}
 function resetVaultAutoLock(){
   _vaultLastActivity=Date.now();
-  clearTimeout(_vaultAutoLockTimer);
+  clearTimeout(_vaultAutoLockTimer); _vaultAutoLockTimer=null;
   const mins=getVaultAutoLock();
   if(!mins)return;
-  _vaultAutoLockTimer=setTimeout(()=>{
-    if(typeof lockVault==='function'){lockVault();showToast('Vault auto-locked after '+mins+' minutes of inactivity');}
-  },mins*60000);
+  if(_vaultLastActivity-_vaultActShared>Math.min(15000,mins*15000)){ _vaultActShared=_vaultLastActivity; try{localStorage.setItem(_VAULT_ACT_KEY,String(_vaultLastActivity));}catch(_){} }
+  _vaultAutoLockTimer=setTimeout(_vaultAutoLockFire,Math.min(mins*60000,_VAULT_MAX_DELAY));
 }
-// Reset timer on any user interaction
+// Reset timer on any user interaction. Timers are frozen while a phone/tab is
+// suspended, so the first touch after a long sleep could otherwise just restart
+// the countdown: if we are already past the limit, lock instead.
 ['click','keydown','touchstart','mousemove'].forEach(ev=>document.addEventListener(ev,()=>{
-  if(getVaultAutoLock())resetVaultAutoLock();
+  const mins=getVaultAutoLock(); if(!mins) return;
+  if(_vaultIdleMs()>=mins*60000 && !document.getElementById('vault-overlay')?.classList.contains('show')){ _vaultAutoLockFire(); return; }
+  resetVaultAutoLock();
 },{passive:true}));
+// Start the countdown at load too (an untouched tab used to never arm the timer).
+if(getVaultAutoLock()) resetVaultAutoLock();
 
 // ─── Seen database ───────────────────────────────────────────────────────────
-const _seenDb={};
+// #16: null-prototype map — remote nicks like "__proto__" / "constructor" are keys.
+const _seenDb=Object.create(null);
 function trackSeen(nick,channel,ts){
   if(!nick||nick==='*')return;
   _seenDb[nick.toLowerCase()]={nick,channel,ts};
@@ -11437,6 +13383,9 @@ function getSeen(nick){return _seenDb[nick.toLowerCase()]||null;}
 
 // ─── Client-side rate limiter ────────────────────────────────────────────────
 let _rateQueue=[],_rateTimer=null;
+// r8: since when the queue has held a frame (drainRateQueue) — the E2E verdict bounds
+// waiting for a pending handshake / session check by it.
+const _heldSince=new WeakMap();
 function getRateLimit(){return parseInt(localStorage.getItem('cryptirc_ratelimit')||'500');}
 function setRateLimit(ms){localStorage.setItem('cryptirc_ratelimit',String(ms));savePrefsToServer();}
 function rateLimitedSend(msg){
@@ -11449,10 +13398,66 @@ function drainRateQueue(){
   // shifting so a disconnect mid-queue doesn't silently lose the message (it was
   // shown optimistically). Keep it queued and retry — it drains once the WS is
   // back. Guards against silent outgoing message loss on flaky links / restarts.
-  if(!(ws&&ws.readyState===1)){ _rateTimer=setTimeout(drainRateQueue,1000); return; }
+  // Must be AUTHENTICATED, not just open: a line sent before the auth frame makes
+  // the server drop the socket and the line with it (_wsReady, near connectWs).
+  if(!_wsReady()){ _rateTimer=setTimeout(drainRateQueue,1000); return; }
+  // r6 (codex-p3 app.js:13275): a queued line was built (encrypted or not) when it was
+  // typed. A PLAINTEXT chat line is re-checked against its target's CURRENT E2E state
+  // right before it leaves — E2E may have been turned on for it since (here, on another
+  // device, or learned only now after a reconnect): still unencrypted → sent; E2E status
+  // being (re)discovered → held (stays first in the queue, ⏳); encrypted / blocked now →
+  // NOT sent, its row is marked "not sent" with the reason.
+  const v=_queuedPlainVerdict(_rateQueue[0]);
+  // r7 (agy-flash e2e.js:3538): held lines say so — the rows (⏳ "waiting until it is known
+  // whether this conversation is encrypted") and, while the vault is locked (E2E state
+  // can't be read then; they go out after the unlock), the unlock screen.
+  if(v==='hold'){ if(!_heldSince.has(_rateQueue[0])) _heldSince.set(_rateQueue[0],Date.now()); _markRateQueuePending(true); _queueHoldNotice(true); _rateTimer=setTimeout(drainRateQueue,1000); return; }
+  _queueHoldNotice(false);
+  if(v&&v.refuse){
+    const rm=_rateQueue.shift(), m=_rateRows.get(rm);
+    if(m){ _rateRows.delete(rm); _setMsgSendState(m,'failed'); }
+    const why=v.cipher
+      ? `🔒 Not sent: a line queued for ${v.target} was encrypted with something that is no longer in use here — ${v.reason}. Send it again.`
+      : `🔒 Not sent: a line queued for ${v.target} before its end-to-end encryption was on (or while it could not be checked) would have gone out unencrypted — ${v.reason||'E2E is on for it now'}. Send it again.`;
+    try{ sysMsg(rm.conn_id,v.target,why,'error'); }catch(_){}
+    _rateTimer=setTimeout(drainRateQueue,getRateLimit()); return;
+  }
   const msg=_rateQueue.shift();
-  wsend(msg);
+  if(wsend(msg)===false && msg && _refusedFrames.has(msg)){
+    // Refused for good (too many recipients / unencrypted to an E2E peer), not an outage: never retried.
+    const m=_rateRows.get(msg); if(m){ _rateRows.delete(msg); _setMsgSendState(m,'failed'); }
+  } else _rateSent(msg);
   _rateTimer=setTimeout(drainRateQueue,getRateLimit());
+}
+
+// r6: 'send' | 'hold' | {refuse, target, reason} for a queued frame (see drainRateQueue).
+function _queuedPlainVerdict(msg){
+  if(!msg||msg.type!=='send'||typeof msg.raw!=='string') return 'send';
+  const m=/^(?:@\S+ +)?(?::\S+ +)?(PRIVMSG|NOTICE) +(\S+) +:?([\s\S]*)$/i.exec(msg.raw);
+  if(!m) return 'send';
+  const txt=m[3]||'';
+  if(!txt||/^\x01(?!ACTION )/.test(txt)) return 'send';                 // CTCP request (as _statusNickPlainBlocked)
+  if(/^\[e2ex3dh\]/.test(txt)) return 'send';                            // key-exchange header (public values)
+  // r7 (codex-p3 app.js:13324): queued CIPHERTEXT is re-checked too — held while E2E is
+  // being (re)discovered, refused if the key / peer identity it was encrypted with is no
+  // longer the one in use (rotated, removed, replaced while this device was offline).
+  if(/^(\[e2edm2\]|sd8~)/.test(txt)){
+    if(typeof e2eQueuedWireVerdict!=='function') return 'send';
+    const _hs=_heldSince.get(msg);
+    let v=null; try{ v=e2eQueuedWireVerdict(m[2],msg.conn_id,txt,_hs?Date.now()-_hs:0); }catch(_){ v={refuse:true,reason:'its encryption state could not be checked'}; }
+    if(v==='hold'||v==='send') return v;
+    return {refuse:true,target:m[2],cipher:true,reason:(v&&v.reason)||'its encryption changed'};
+  }
+  if(typeof e2eTargetState!=='function') return 'send';                 // no engine: wsend's backstop refuses
+  let hold=false;
+  for(const t of m[2].split(',')){
+    if(!t) continue;
+    let st=null; try{ st=e2eTargetState(t,{conn_id:msg.conn_id}); }catch(_){ return {refuse:true,target:t,reason:'its E2E state could not be checked'}; }
+    if(!st||st.mode==='none') continue;
+    if(st.mode==='blocked'&&st.discovery){ hold=true; continue; }
+    return {refuse:true,target:t,reason:st.mode==='blocked'?(st.reason||'blocked'):'E2E is on for it now'};
+  }
+  return hold?'hold':'send';
 }
 
 // ─── Session manager ─────────────────────────────────────────────────────────
@@ -11463,7 +13468,7 @@ async function showSessionManager(){
   document.getElementById('sessions-overlay').classList.add('show');
   _overlayOpen('sessionsPanel', closeSessionsPanel);
   try{
-    const r=await fetch(`${location.pathname}auth/sessions`,{headers:{'Authorization':`Bearer ${sessionToken}`}});
+    const r=await fetch('/cryptirc/auth/sessions',{headers:{'Authorization':`Bearer ${sessionToken}`}});
     const d=await r.json();
     if(!d.sessions||!d.sessions.length){list.innerHTML='<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">No active sessions.</div>';return;}
     list.innerHTML='';
@@ -11486,7 +13491,10 @@ async function showSessionManager(){
 }
 async function revokeSession(prefix){
   if(!(await customConfirm('Revoke this session? The device will be logged out.','Revoke')))return;
-  await fetch(`${location.pathname}auth/sessions/revoke`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${sessionToken}`},body:JSON.stringify({prefix})});
+  try{
+    const r=await fetch('/cryptirc/auth/sessions/revoke',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${sessionToken}`},body:JSON.stringify({prefix})});
+    if(!r.ok) showToast('Could not revoke that session (HTTP '+r.status+')');
+  }catch(_){ showToast('Network error — session not revoked'); }
   showSessionManager();
 }
 
@@ -11573,7 +13581,7 @@ async function showUploadsPanel(){
   document.getElementById('uploads-overlay').classList.add('show');
   _overlayOpen('uploadsPanel', closeUploadsPanel);
   try{
-    const r=await fetch(`${location.pathname}uploads`,{headers:{'Authorization':`Bearer ${sessionToken}`}});
+    const r=await fetch('/cryptirc/uploads',{headers:{'Authorization':`Bearer ${sessionToken}`}});
     const d=await r.json();
     if(!d.files||!d.files.length){list.innerHTML='<div style="color:var(--text3);font-size:12px;padding:20px;text-align:center">No uploads yet.</div>';return;}
     list.innerHTML='';
@@ -11600,12 +13608,18 @@ async function showUploadsPanel(){
 function closeUploadsPanel(){_overlayClose('uploadsPanel');document.getElementById('uploads-overlay').classList.remove('show');}
 async function deleteUpload(filename){
   if(!(await customConfirm('Delete this file?','Delete')))return;
-  await fetch(`${location.pathname}uploads/delete`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${sessionToken}`},body:JSON.stringify({filename})});
+  try{
+    const r=await fetch('/cryptirc/uploads/delete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${sessionToken}`},body:JSON.stringify({filename})});
+    if(!r.ok) showToast('Could not delete that file (HTTP '+r.status+')');
+  }catch(_){ showToast('Network error — file not deleted'); }
   showUploadsPanel();
 }
 async function clearAllUploads(){
   if(!(await customConfirm('Delete ALL your uploaded files? This cannot be undone.','Delete all')))return;
-  await fetch(`${location.pathname}uploads/clear`,{method:'POST',headers:{'Authorization':`Bearer ${sessionToken}`}});
+  try{
+    const r=await fetch('/cryptirc/uploads/clear',{method:'POST',headers:{'Authorization':`Bearer ${sessionToken}`}});
+    if(!r.ok) showToast('Could not delete your uploads (HTTP '+r.status+')');
+  }catch(_){ showToast('Network error — uploads not deleted'); }
   showUploadsPanel();
 }
 function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFixed(1)+' KB';return(b/1048576).toFixed(1)+' MB';}
@@ -11723,12 +13737,17 @@ let _chanStatsSaveTimer=null;
 
 function trackStat(conn_id,target,nick){
   if(!nick||nick==='*'||!_chanStatsEnabled)return;
-  const k=bk(conn_id,target);if(!_chanStats[k])_chanStats[k]={};
-  if(!_chanStats[k][nick])_chanStats[k][nick]=0;
-  _chanStats[k][nick]++;
+  // #16: per-channel nick maps are null-prototype objects, so a remote nick such as
+  // "constructor" or "__proto__" is an ordinary own key (was NaN / silently lost).
+  const k=bk(conn_id,target);
+  if(!Object.prototype.hasOwnProperty.call(_chanStats,k)) _chanStats[k]=Object.create(null);
+  else if(Object.getPrototypeOf(_chanStats[k])!==null) _chanStats[k]=_statsNullProto(_chanStats[k]);
+  const m=_chanStats[k];
+  m[nick]=(Object.prototype.hasOwnProperty.call(m,nick)?(+m[nick]||0):0)+1;
   _chanStatsDirty=true;
   if(!_chanStatsSaveTimer) _chanStatsSaveTimer=setTimeout(()=>{_chanStatsSaveTimer=null;saveStatsToServer();},30000);
 }
+function _statsNullProto(o){ const m=Object.create(null); if(o&&typeof o==='object') for(const n of Object.keys(o)) m[n]=o[n]; return m; }
 function saveStatsToServer(){
   if(!_chanStatsDirty||!sessionToken)return;
   const payload=JSON.stringify({enabled:_chanStatsEnabled,channels:_chanStats});
@@ -11765,8 +13784,11 @@ function handleStatsData(data){
     // local was itself last seeded from the server's value.
     let _merged=false;
     for(const ch in server){
-      const s=server[ch], l=_chanStats[ch];
-      if(!l){ _chanStats[ch]=s; continue; }
+      const s=server[ch];
+      if(!s||typeof s!=='object') continue;
+      if(!Object.prototype.hasOwnProperty.call(_chanStats,ch)){ _chanStats[ch]=_statsNullProto(s); continue; }
+      if(Object.getPrototypeOf(_chanStats[ch])!==null) _chanStats[ch]=_statsNullProto(_chanStats[ch]);  // #16
+      const l=_chanStats[ch];
       for(const nick in s){ const sv=s[nick]||0, lv=l[nick]||0; if(sv>lv){l[nick]=sv;} else if(sv<lv){_merged=true;} }
       for(const nick in s){ if(!(nick in l)) l[nick]=s[nick]; }
     }
@@ -11780,7 +13802,7 @@ function handleStatsData(data){
         if(!s){ _merged=true; break; }
         const l=_chanStats[ch];
         let found=false;
-        for(const nick in l){ if(!(nick in s)){ found=true; break; } }
+        for(const nick in l){ if(!Object.prototype.hasOwnProperty.call(s,nick)){ found=true; break; } }
         if(found){ _merged=true; break; }
       }
     }
@@ -11921,18 +13943,26 @@ function _bindStatsDelegation(){
 }
 
 // ─── Split view ──────────────────────────────────────────────────────────────
-let _splitActive=false,_splitTarget=null;
+let _splitActive=false,_splitTarget=null,_splitWatch=null,_splitSig='',_splitOptSig='',_splitLastTarget=null;
 function toggleSplitView(){
   _splitActive=!_splitActive;
   const main=document.getElementById('main');
   if(_splitActive){
     main.classList.add('split-active');
     updateSplitPanel();
+    _splitStartWatch();
     if(active)sysMsg(active.conn_id,active.target,'Split view enabled — use the dropdown in the right panel','system');
   } else {
     main.classList.remove('split-active');
+    clearInterval(_splitWatch); _splitWatch=null;
     if(active)sysMsg(active.conn_id,active.target,'Split view disabled','system');
   }
+}
+// #14(c): the conn_id is a UUID (no '/'), but channel names may contain '/'.
+function _splitParse(v){ const i=v?v.indexOf('/'):-1; return i>0?[v.slice(0,i),v.slice(i+1)]:[null,null]; }
+function _splitOptionsSig(){
+  let sig=''; for(const net of (typeof networks!=='undefined'?networks:[])) for(const ch of (net.channels||[])) sig+=net.config.id+'/'+ch.name+'\n';
+  return sig;
 }
 function updateSplitPanel(){
   const sel=document.getElementById('split-chan-select');if(!sel)return;
@@ -11944,15 +13974,45 @@ function updateSplitPanel(){
       sel.appendChild(opt);
     }
   }
+  _splitOptSig=_splitOptionsSig();
+  // #14(b): the <select> visibly shows its first option, and picking the option that
+  // is already shown fires no 'change' — so adopt what it displays as the target
+  // (also when the previous target's channel is gone).
+  if(sel.options.length && sel.value!==_splitTarget) _splitTarget=sel.value;
+  if(!sel.options.length) _splitTarget=null;
   renderSplitChat();
 }
+function _splitBufSig(){
+  const [cid,tgt]=_splitParse(_splitTarget); if(!cid||!tgt) return '';
+  const b=buffers[bk(cid,tgt)]; if(!b||!b.length) return _splitTarget+'|0';
+  const last=b[b.length-1];
+  return _splitTarget+'|'+b.length+'|'+(b[0].id||b[0].ts||'')+'|'+(last.id||'')+'|'+(last.ts||'')+'|'+(last.text||'').length;
+}
+// #14(a): the pane used to be a snapshot taken when it was opened. Buffers change
+// through several paths (live messages, history loads, ZNC playback, expiry), so a
+// cheap O(1) signature poll — only while split view is on — re-renders it when its
+// buffer (or the channel list) actually changed.
+function _splitStartWatch(){
+  clearInterval(_splitWatch);
+  _splitWatch=setInterval(()=>{
+    if(!_splitActive){ clearInterval(_splitWatch); _splitWatch=null; return; }
+    if(_splitOptionsSig()!==_splitOptSig){ updateSplitPanel(); return; }
+    if(_splitBufSig()!==_splitSig) renderSplitChat();
+  },500);
+}
 function renderSplitChat(){
-  const area=document.getElementById('split-chat-area');if(!area)return;area.innerHTML='';
+  const area=document.getElementById('split-chat-area');if(!area)return;
+  // Keep the reader's place: follow new messages only when already at the bottom.
+  const atBottom=_splitLastTarget!==_splitTarget || area.scrollHeight-area.scrollTop-area.clientHeight<40;
+  const prevTop=area.scrollTop;
+  _splitLastTarget=_splitTarget;
+  area.innerHTML='';
+  _splitSig=_splitBufSig();
   if(!_splitTarget){area.innerHTML='<div style="padding:20px;color:var(--text3);font-size:12px">Select a channel above</div>';return;}
-  const[cid,tgt]=_splitTarget.split('/');if(!cid||!tgt)return;
+  const[cid,tgt]=_splitParse(_splitTarget);if(!cid||!tgt)return;
   const buf=getBuf(cid,tgt);
-  for(const msg of buf.slice(-100)){const r=buildRow(msg);area.appendChild(r);}
-  area.scrollTop=area.scrollHeight;
+  for(const msg of buf.slice(-100)){const r=buildRow(msg,{conn_id:cid,target:tgt});area.appendChild(r);}
+  area.scrollTop=atBottom?area.scrollHeight:prevTop;
 }
 
 // ─── Smart paste ─────────────────────────────────────────────────────────────
@@ -11963,6 +14023,51 @@ let _smartPasteText='',_smartPasteType='text';
 // leading whitespace/BOM, or a script tag plus a closing document tag); Markdown
 // requires the classic >=5-line gate plus at least one strong structural marker,
 // so ordinary chat and log excerpts are not interrupted.
+// #13: the classifier runs on every multi-line paste, so every test must be linear.
+// The old table-rule regex /(^|\n)\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*(\n|$)/ had three
+// overlapping quantifiers over '-' and backtracked cubically (a 3200-dash line froze
+// the tab for ~14 s); the `(^|\n)\s*` prefixes and the markdown-link regex were
+// quadratic on whitespace-/bracket-heavy pastes. The replacements below accept
+// EXACTLY the same inputs (checked against the old regexes by a differential fuzz +
+// corpus test): since \s also matches '\n', `(^|\n)\s*X` (X starting with a non-space
+// char) is the same as `(^|\n)[^\S\n]*X` anchored at the LAST newline of the run.
+//
+// Table rule: some line start p and some q (a '\n' or the end) such that txt[p..q)
+// consists only of [\s:|-] characters and contains '---'. Checked per maximal run of
+// such characters, with the earliest line start and the latest line end in the run.
+function _pasteHasTableRule(txt){
+  const re=/[\s:|-]+/g; let m;
+  while((m=re.exec(txt))){
+    const s=m.index, run=m[0], e=s+run.length;
+    if(run.indexOf('---')<0) continue;
+    let p;
+    if(s===0) p=0; else { const nl=run.indexOf('\n'); if(nl<0) continue; p=s+nl+1; }
+    let q;
+    if(e===txt.length) q=e; else { const nl=run.lastIndexOf('\n'); if(nl<0||s+nl<p) continue; q=s+nl; }
+    if(q>p && txt.slice(p,q).indexOf('---')>=0) return true;
+  }
+  return false;
+}
+// Markdown link /\[[^\]\n]+\]\([^)\s]+\)/ without the per-'[' rescans: track the earliest
+// '[' since the last ']' or newline; at each ']' that is followed by '(' check for a
+// non-empty run of [^)\s] ending in ')'. A failed run end is remembered, so no stretch
+// of the link part is scanned twice.
+function _pasteHasMdLink(txt){
+  const n=txt.length; let open=-1, failEnd=-1;
+  for(let i=0;i<n;i++){
+    const c=txt.charCodeAt(i);
+    if(c===10){ open=-1; continue; }               // \n
+    if(c===91){ if(open<0) open=i; continue; }     // [
+    if(c!==93) continue;                           // ]
+    const j=open; open=-1;
+    if(j<0||j>i-2||txt.charCodeAt(i+1)!==40) continue;  // need '[x...](' 
+    const st=i+2; if(st<failEnd) continue;         // same [^)\s] run already failed
+    let e=st; while(e<n){ const ch=txt[e]; if(ch===')'||/\s/.test(ch)) break; e++; }
+    if(e>st && txt.charCodeAt(e)===41) return true; // ')'
+    failEnd=e;
+  }
+  return false;
+}
 function classifyPasteText(txt){
   const t=txt.replace(/^\uFEFF/,'').trimStart();
   const isHtml=/^<!doctype\s+html/i.test(t) || /^<html[\s>]/i.test(t)
@@ -11972,9 +14077,9 @@ function classifyPasteText(txt){
     const md=/(^|\n)#{1,6}\s+\S/.test(txt)                       // ATX heading
       || /(^|\n)```/.test(txt)                                   // fenced code
       || /(^|\n)>\s+\S/.test(txt)                                // blockquote
-      || /(^|\n)\s*([-*+]\s+\S|\d+\.\s+\S)/.test(txt)            // list item
-      || /\[[^\]\n]+\]\([^)\s]+\)/.test(txt)                     // markdown link
-      || (/(^|\n)\s*\|.*\|/.test(txt) && /(^|\n)\s*\|?[\s:|-]*-{3,}[\s:|-]*\|?\s*(\n|$)/.test(txt)); // table
+      || /(^|\n)[^\S\n]*([-*+]\s+\S|\d+\.\s+\S)/.test(txt)       // list item
+      || _pasteHasMdLink(txt)                                    // markdown link
+      || (/(^|\n)[^\S\n]*\|.*\|/.test(txt) && _pasteHasTableRule(txt)); // table
     return md?'markdown':'text';
   }
   return null;
@@ -12010,15 +14115,29 @@ function smartPasteYes(){
   // Create the classified paste via the API. On any failure the original content
   // is preserved in the input so nothing is lost.
   const token=sessionToken;
-  fetch(`${location.pathname}paste`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},
+  // Literal '/cryptirc/paste' (rewritten server-side to the configured base path):
+  // the old `${location.pathname}paste` POSTed to /cryptircpaste (404) whenever the
+  // app was opened at /cryptirc without a trailing slash.
+  fetch('/cryptirc/paste',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},
     body:JSON.stringify({content:text,language:type,content_type:type,expires_in:expSecs,password:null})
   }).then(async r=>{
     const d=await r.json().catch(()=>({})),inp=document.getElementById('msg-input');
-    if(!r.ok||!d.url){inp.value=text;showToast(d.error||'Paste failed — text kept in input');return;}
+    if(!r.ok||!d.url){_smartPasteFailed(text,type,d.error||d.message||('HTTP '+r.status));return;}
     inp.value=d.url;
     const kindLabel=type==='html'?'HTML app paste':type==='markdown'?'Markdown paste':'Paste';
     showToast(expSecs?`${kindLabel} created (expires in ${expLabel.toLowerCase()}) — URL in input bar`:`${kindLabel} created — URL in input bar`);
-  }).catch(()=>{document.getElementById('msg-input').value=text;});
+  }).catch(()=>{_smartPasteFailed(text,type,'network error');});
+}
+// A failed paste must not lose the multi-line text: the chat input is a single-line
+// <input>, so writing it back there stripped every newline. Re-open the dialog with
+// the original text instead — the user can retry, or pick "No" to paste it into the
+// input as before.
+function _smartPasteFailed(text,type,why){
+  _smartPasteText=text; _smartPasteType=type;
+  const dlg=document.getElementById('smart-paste-dialog');
+  if(dlg) dlg.classList.add('show');
+  else { const inp=document.getElementById('msg-input'); if(inp) inp.value=text; }
+  showToast('Paste failed ('+why+') — your text is kept, try again or choose No');
 }
 function smartPasteNo(){
   document.getElementById('smart-paste-dialog').classList.remove('show');
@@ -12132,8 +14251,18 @@ function keepnickInitAll(){
 
 // ─── Server-side preferences sync ─────────────────────────────────────────────
 let _prefsSaveTimer=null;
+// lastRead / closedQueries keys are never pruned locally and outlive the network
+// they belong to; leave keys of networks that no longer exist out of the synced
+// snapshot (only once the network list is loaded, so nothing is dropped early).
+function _dropRemovedNets(obj,sep){
+  if(!networks||!networks.length) return obj;
+  const ids=new Set(networks.map(n=>n.config.id));
+  const out={};
+  for(const k in obj){ const i=k.indexOf(sep); if(i<0||ids.has(k.slice(0,i))) out[k]=obj[k]; }
+  return out;
+}
 function gatherPreferences(){
-  return {
+  return _scrubE2eForSync({
     favorites: loadFavorites(),
     _favsTs: parseInt(localStorage.getItem('cryptirc_favs_ts')||'0'),
     muted: loadMuted(),
@@ -12148,13 +14277,18 @@ function gatherPreferences(){
     // read horizon — both synced so another device can tell a stale unread
     // re-upload from a genuinely new one instead of guessing from a boolean.
     unreadAsOf: (()=>{const o={};for(const[k,v] of unreadAsOf)o[k]=v;return o;})(),
-    lastRead: _allLastReadTs(),
+    lastRead: _dropRemovedNets(_allLastReadTs(),'/'),
     mentions: mentionsList.slice(0,100),
     _mentionsTs: parseInt(localStorage.getItem('cryptirc_mentions_ts')||'0'),
-    inputHistory: inputHistory.slice(-100),
+    // Only lines known not to belong to an E2E conversation (see _histSyncOk);
+    // _ihV:2 tells a receiving client this list was filtered that way.
+    // r3: the "no E2E conversation at all" shortcut only for an account this device has
+    // never seen use E2E, and never for a line marked local-only.
+    inputHistory: (()=>{ const all=!_histE2eSeen()&&_e2eNoConversations(); return inputHistory.filter(l=>!_histLocal.has(l)&&(all||_histSyncable(l))).map(redactSensitive).slice(-100); })(),
+    _ihV: 2,
     queries: (()=>{const o={};for(const[c,m] of Object.entries(queryBufs))o[c]=[...m.entries()];return o;})(),
     _queriesTs: parseInt(localStorage.getItem('cryptirc_queries_ts')||'0'),
-    closedQueries: {...closedQueries},
+    closedQueries: _dropRemovedNets({...closedQueries},'|'),
     _closedQueriesTs: parseInt(localStorage.getItem('cryptirc_closed_queries_ts')||'0'),
     lastActive: (()=>{try{return JSON.parse(localStorage.getItem('cryptirc_active'));}catch{return null;}})(),
     stats: {tx:_txBytes,rx:_rxBytes,tc:_txCount,rc:_rxCount},
@@ -12196,34 +14330,331 @@ function gatherPreferences(){
     // Smart-paste expiry (seconds, '0' = never) — a per-user preference, so it
     // follows the account rather than the browser profile.
     smartPasteExpire: localStorage.getItem('cryptirc_smartpaste_expire')||'',
-  };
+    // H2 one-click TLS-verification offer: which networks it turned verification on
+    // for (so ANY device can offer the undo when that server then fails the check),
+    // and which ones the user said "Not now" to.
+    tlsVerify: {flipped:[..._tlsIdSet(_TLS_FLIPPED_KEY)], dismissed:[..._tlsIdSet(_TLS_DISMISS_KEY)]},
+    _tlsVerifyTs: parseInt(localStorage.getItem('cryptirc_tlsverify_ts')||'0'),
+  });
 }
-function savePrefsToServer(){
+// E2E: decrypted text never goes into the synced blob (it is encrypted by the server,
+// not end-to-end). Entries recorded from an encrypted message (enc) — or belonging to
+// a conversation that is end-to-end encrypted, which also cleans entries saved before
+// this rule — keep their text on this device only; the synced copy carries a
+// placeholder plus a flag so receiving devices keep their own plaintext (see
+// _keepLocalE2eText). Input history is filtered in gatherPreferences.
+function _scrubE2eForSync(g){
+  const conv=_isE2eConversation;
+  if(Array.isArray(g.mentions)) g.mentions=g.mentions.map(m=>{
+    if(!m||typeof m!=='object'||m.e2eHidden) return m;
+    if(m.enc||conv(m.type==='pm'?m.from:m.target)) return {...m,text:_E2E_HIDDEN_TEXT,enc:true,e2eHidden:true,textTrunc:undefined};
+    return m;
+  });
+  if(Array.isArray(g.pmBlocked)) g.pmBlocked=g.pmBlocked.map(e=>{
+    if(!e||typeof e!=='object'||e.e2eHidden) return e;
+    if(e.enc||conv(e.from)) return {...e,text:_E2E_HIDDEN_TEXT,enc:true,e2eHidden:true};
+    return e;
+  });
+  if(g.monitor&&typeof g.monitor==='object'){
+    const o={};
+    for(const[k,v] of Object.entries(g.monitor)){
+      o[k]=(v&&typeof v==='object'&&v.lastMsg&&!v.lastMsgHidden&&(v.lastMsgEnc||conv(v.channel)))?{...v,lastMsg:_E2E_HIDDEN_TEXT,lastMsgEnc:true,lastMsgHidden:true}:v;
+    }
+    g.monitor=o;
+  }
+  return g;
+}
+// A user change (mute, favourite, ignore edit, Notices clear, read state …) is saved
+// with a trailing 2 s debounce and a 10 s max-wait, so steady traffic can't starve it.
+// Background churn — unread bumps, Notices/blocked-PM entries recorded from incoming
+// lines, nick-monitor status, traffic counters — is NOT a reason to save on its own
+// (every open device sees the same traffic): it is carried by the next user-change
+// save, or saved at most once a minute (PREFS_LOW_WAIT_MS, not extended by more
+// churn), or when the page is hidden/closed. flushPrefsToServer also skips a save
+// whose content (minus counters) the server already holds, so an idle session on a
+// quiet network sends nothing at all.
+const PREFS_DEBOUNCE_MS=2000, PREFS_MAX_WAIT_MS=10000, PREFS_LOW_WAIT_MS=60000;
+let _prefsPendingSince=0, _prefsLowSince=0;
+function savePrefsToServer(low){
+  const now=Date.now();
+  if(low===true){
+    if(_prefsPendingSince||_prefsLowSince) return;   // a save is already due; it carries this
+    _prefsLowSince=now;
+    clearTimeout(_prefsSaveTimer);
+    _prefsSaveTimer=setTimeout(flushPrefsToServer,PREFS_LOW_WAIT_MS);
+    return;
+  }
+  if(!_prefsPendingSince) _prefsPendingSince=now;
   clearTimeout(_prefsSaveTimer);
-  _prefsSaveTimer=setTimeout(flushPrefsToServer,2000);
+  const wait=Math.max(0,Math.min(PREFS_DEBOUNCE_MS,_prefsPendingSince+PREFS_MAX_WAIT_MS-now));
+  _prefsSaveTimer=setTimeout(flushPrefsToServer,wait);
+}
+// Mobile browsers often never fire beforeunload: save pending changes when hidden.
+document.addEventListener('visibilitychange',()=>{ try{ if(document.hidden&&(_prefsPendingSince||_prefsLowSince)) flushPrefsToServer(); }catch(_){} });
+// Size budget for the synced prefs blob. The server rejects a prefs string over
+// 1 MB (SavePreferences, "Preferences too large (max 1MB)") and any WebSocket
+// message over 4 MiB (WS_MAX_FRAME_BYTES). Over budget, trim only the bulky,
+// disposable parts (blocked-PM log, Notices texts, input history, old read
+// horizons, then strangers' open PMs + their unread state) — never settings — and
+// tell the user what is taking the space if it still doesn't fit.
+const PREFS_BUDGET=900*1024, PREFS_FRAME_MAX=4*1024*1024-64*1024;
+// Clip a string so its JSON-encoded form (what actually goes over the wire, where
+// a control byte costs 6 bytes) is at most maxBytes. Returns the input unchanged
+// when it already fits.
+function _clipForJson(s,maxBytes){
+  s=String(s==null?'':s);
+  if(JSON.stringify(s).length<=maxBytes) return s;
+  let out='',cost=2;
+  for(const ch of s){
+    const c=ch.codePointAt(0);
+    const w=(c<0x20)?6:(ch==='"'||ch==='\\')?2:(c<0x80?1:c<0x800?2:c<0x10000?3:4);
+    if(cost+w>maxBytes) break;
+    out+=ch; cost+=w;
+  }
+  return out;
+}
+// Keep only the `n` entries of an object map with the largest numeric values.
+function _newestEntries(obj,n){
+  const e=Object.entries(obj||{});
+  if(e.length<=n) return obj;
+  e.sort((a,b)=>(+b[1]||0)-(+a[1]||0));
+  return Object.fromEntries(e.slice(0,n));
+}
+// Returns {json, frame, trimmed} that fits the budget, or null when even the
+// fully-trimmed snapshot is too big (then nothing is sent).
+function _fitPrefsToBudget(g){
+  const measure=()=>{ const json=JSON.stringify(g); const frame=JSON.stringify({type:'save_preferences',prefs:json}); return {json,frame,ok:_utf8Len(json)<=PREFS_BUDGET&&_utf8Len(frame)<=PREFS_FRAME_MAX}; };
+  let m=measure();
+  if(m.ok) return {json:m.json,frame:m.frame,trimmed:false};
+  const clipMentions=(n,bytes)=>{ g.mentions=(g.mentions||[]).slice(0,n).map(x=>{ if(!x||typeof x.text!=='string') return x; const t=_clipForJson(x.text,bytes); return t===x.text?x:{...x,text:t,textTrunc:true}; }); };
+  const clipBlocked=(n,bytes)=>{ g.pmBlocked=(g.pmBlocked||[]).slice(-n).map(x=>x&&typeof x.text==='string'?{...x,text:_clipForJson(x.text,bytes)}:x); };
+  const stages=[
+    ()=>{ clipBlocked(100,200); clipMentions(100,400); },
+    ()=>{ g.inputHistory=(g.inputHistory||[]).slice(-25); },
+    ()=>{ g.lastRead=_newestEntries(g.lastRead,250); },
+    ()=>{ clipBlocked(25,160); },
+    ()=>{ clipMentions(50,240); },
+    ()=>{ g.closedQueries=_newestEntries(g.closedQueries,150); },
+    ()=>{ _trimStrangerPms(g,300); },
+    ()=>{ g.lastRead=_newestEntries(g.lastRead,100); g.inputHistory=[]; clipBlocked(10,120); clipMentions(25,200); },
+    ()=>{ _trimStrangerPms(g,50); },
+  ];
+  for(const st of stages){ st(); m=measure(); if(m.ok) return {json:m.json,frame:m.frame,trimmed:true}; }
+  return null;
+}
+// Drop the open-PM rows + unread/read-horizon entries of all but the `keep` most
+// recently active "stranger" DMs (not a favourite, not on the PM allow-list, not a
+// services nick, not the open window) from the SYNCED copy only. Safe: other devices
+// union-merge query rows and only ever clear unread state that is provably read, so
+// an entry missing from the blob changes nothing there; this device keeps it all.
+// A flood from hundreds of distinct nicks can then no longer stop settings sync.
+function _trimStrangerPms(g,keep){
+  const favs=new Set((g.favorites||[]).map(f=>String((f&&f.key)||'').toLowerCase()));
+  const allow=new Set((g.pmAllow||[]).map(x=>String(x).toLowerCase()));
+  let act=''; try{ if(active&&active.target) act=bk(active.conn_id,active.target); }catch(_){}
+  const isDmKey=k=>{ const i=k.indexOf('/'); if(i<0) return false; const t=k.slice(i+1); return !!t&&t!=='status'&&!/^[#&+!]/.test(t)&&!t.startsWith('__'); };
+  const recency={};   // bk → newest activity we know of
+  const note=(k,t)=>{ if(!isDmKey(k)) return; const nk=String(k).toLowerCase(); const lc=nk.slice(nk.indexOf('/')+1);
+    if(favs.has(nk)||allow.has(lc)||nk===act||_isServiceNick(lc)) return; recency[nk]=Math.max(recency[nk]||0,+t||0); };
+  for(const [cid,en] of Object.entries(g.queries||{})) if(Array.isArray(en)) for(const e of en) if(Array.isArray(e)&&typeof e[0]==='string') note(cid+'/'+e[0].toLowerCase(),0);
+  for(const mp of [g.unread,g.unreadAsOf,g.lastRead]) if(mp) for(const k of Object.keys(mp)) note(k,0);
+  for(const k of Object.keys(recency)) recency[k]=Math.max(+((g.unreadAsOf||{})[k])||0,+((g.lastRead||{})[k])||0);
+  const keys=Object.keys(recency);
+  if(keys.length<=keep) return;
+  keys.sort((a,b)=>recency[b]-recency[a]);
+  const drop=new Set(keys.slice(keep));
+  const q={};
+  for(const [cid,en] of Object.entries(g.queries||{})) q[cid]=Array.isArray(en)?en.filter(e=>!(Array.isArray(e)&&typeof e[0]==='string'&&drop.has(cid+'/'+e[0].toLowerCase()))):en;
+  g.queries=q;
+  for(const f of ['unread','unreadAsOf','lastRead']) if(g[f]){ const o={}; for(const k in g[f]) if(!drop.has(String(k).toLowerCase())) o[k]=g[f][k]; g[f]=o; }
+}
+// What is taking the space (for the "too large to sync" toast).
+function _prefsSizeHint(g){
+  const groups=[
+    ['open private chats',['queries','unread','unreadAsOf','lastRead','closedQueries']],
+    ['user notes',['userNotes']],['Notices',['mentions']],['the blocked-PM log',['pmBlocked']],
+    ['the nick monitor',['monitor']],['highlight words',['highlightWords']],['favourites',['favorites']],
+    ['mutes',['muted']],['the ignore list',['ignoreList']],['channel keys',['channelKeys']],['input history',['inputHistory']],
+  ];
+  const sz=k=>{ try{ return _utf8Len(JSON.stringify(g[k]===undefined?null:g[k])); }catch(_){ return 0; } };
+  const tot=_utf8Len(JSON.stringify(g));
+  const ranked=groups.map(([label,ks])=>[label,ks.reduce((a,k)=>a+sz(k),0)]).sort((a,b)=>b[1]-a[1]);
+  const top=ranked.filter(r=>r[1]>tot*0.15).slice(0,2);
+  const kb=n=>Math.round(n/1024)+' KB';
+  const what=top.length?' — mostly '+top.map(r=>r[0]+' ('+kb(r[1])+')').join(' and '):'';
+  const fix=top.length&&top[0][0]==='open private chats'?' Close private chats you no longer need.':top.length&&top[0][0]==='user notes'?' Shorten your user notes.':'';
+  return {tot,what,fix,kb};
+}
+let _prefsTooBigWarnedAt=0;
+function _prefsSyncWarn(msg){
+  const now=Date.now();
+  if(now-_prefsTooBigWarnedAt<60000) return;   // once a minute at most
+  _prefsTooBigWarnedAt=now;
+  try{ showToast(msg); }catch(_){}
+}
+// Server `error` events (handleEvent 'error'). Save failures and size rejections are
+// surfaced here; the rest stay console-only as before.
+let _saveErrWarnedAt=0, _saveErrWarnedMsg='', _deleteAcctPendingAt=0, _netSavePendingAt=0;
+function _onServerError(message){
+  const m=String(message||'');
+  // At most one toast per 5 s for the SAME refusal (r3: a different refusal right after
+  // another — e.g. two actions refused in a row — is no longer swallowed).
+  const toast=t=>{ const now=Date.now(); if(now-_saveErrWarnedAt<5000&&t===_saveErrWarnedMsg) return; _saveErrWarnedAt=now; _saveErrWarnedMsg=t; try{ showToast(t); }catch(_){} };
+  // E2E engine errors are not settings errors (they used to be shown as "Settings not
+  // synced: E2E …" and ate the prefs-warning throttle). A refused/failed E2E STORE is
+  // worth telling the user; the rest (bundle lookups, relay refusals) stay with e2e.js.
+  if(/^E2E\b/.test(m)){
+    if(/blob rejected|^E2E (store|publish|add) |out of date/i.test(m)) toast(m);
+    return;
+  }
+  if(/^Vault must be unlocked to (store|publish|add) E2E/i.test(m)) return;
+  // r4 (IRC-H1): the server refused a chat line (irc.rs fit_outgoing_line — stable
+  // prefixes; every one ends "Nothing was sent…"): mark its row "not sent".
+  // r8 (agy-flash app.js:8363): also the server's "Too many recipients for one IRC line (…)"
+  // refusal — its row stayed looking sent.
+  // r9 (astra-p2 irc.rs:945): and "Encrypted message too long for this target (…)" — an
+  // encrypted line that would not fit once the server adds the nick and host.
+  if(/^(Message too long|Line too long for IRC|Message tags too long|Too many recipients for one IRC line|Encrypted message too long for this target) \(/.test(m) && /Nothing was sent/.test(m)){ _markRefusedSend(); toast('⚠ '+m); return; }
+  // A refused send (too many comma-separated recipients — F9): the server sent nothing.
+  if(/^Too many recipients\b/i.test(m)){ toast('⚠ '+m); return; }
+  // Refused AI key/token save (e.g. over 32 KB), or the provider-key store failed.
+  if(/^AI key\b/i.test(m)){ toast('AI key not saved — '+m.replace(/^AI key(\/token)?:?\s*/i,'')); return; }
+  // Delete-account password check refused because the server's KDF pool is busy.
+  if(/^Server busy\b/i.test(m)){
+    const del=Date.now()-_deleteAcctPendingAt<120000; _deleteAcctPendingAt=0;
+    toast((del?'Account NOT deleted — ':'')+m); return;
+  }
+  if(/^Network limit reached\b/i.test(m)){ toast(m); return; }
+  // r3 (r2/app #8 re-sweep): further refusals that used to reach only the console.
+  // Client-certificate actions (the "Generating…" spinner used to stay up for good).
+  if(/^(Cert (generate|delete) failed|Vault must be unlocked to generate certificates|No certificate found)/i.test(m)){
+    try{ const ld=document.getElementById('cert-loading'); if(ld&&ld.style.display!=='none'){ ld.style.display='none'; const n=document.getElementById('cert-none-state'); if(n) n.style.display=''; } }catch(_){}
+    toast((/^Cert delete/i.test(m)?'Certificate NOT deleted — ':/^No certificate/i.test(m)?'':'Certificate NOT created — ')+m); return;
+  }
+  if(/^Clear failed\b/i.test(m)){ toast('History NOT deleted — '+m); return; }
+  if(/slow down\b/i.test(m)){ toast(m); return; }
+  // Non-prefs saves (notepad / stats / password safe / bot config), over-size frames
+  // and files moved aside as corrupt: show the server's own wording, at most every 5 s.
+  if(/^(Notepad|Stats|Password safe|Bot config|Message too large)\b|save failed|not saved|not processed|\.corrupt\./i.test(m) && !/^Preferences/i.test(m)){
+    toast(m);
+    return;
+  }
+  if(/^E2E\b|E2E key bundle/.test(m)) return;   // E2E errors are reported by e2e.js, never as "Settings not synced"
+  if(/pref|too large|too big|exceed/i.test(m)){ _prefsSyncWarn('Settings not synced: '+m); return; }
+  // r3: saving a network failed server-side (disk/permission error: free-form text, so
+  // matched by timing — right after this page sent add_network / update_network).
+  // r4 (verifier w3-web N9): only the save's OWN failure text — save_network returns an
+  // I/O error ("… (os error N)") or "Invalid network id"; server errors are broadcast to
+  // every session of the account, so any other unclassified one in that window (another
+  // device's refusal, a contested-id notice) is not a failed network save.
+  if(Date.now()-_netSavePendingAt<15000 && (/\(os error \d+\)\s*$/.test(m) || /^Invalid network id\b/i.test(m))){ _netSavePendingAt=0; toast('Network NOT saved — '+m); }
 }
 let _lastFlushTs=0;
+// Content signature (everything but the save token and the traffic counters) of the
+// last save the server CONFIRMED (its broadcast echo came back), and of the one in
+// flight. A flush whose content equals the confirmed one is skipped; a save the server
+// dropped (vault locked, write error) is never confirmed, so it is simply sent again.
+let _prefsSentSig=null, _prefsAckSig=null, _prefsSeen=false;
+let _prefsE2eRetryT=null, _prefsE2eRetryN=0;
+// Until e2e.js knows which conversations are encrypted, older Notices/blocked-PM/monitor
+// entries can't be scrubbed by conversation — save again once it does (bounded).
+function _armE2eRescrub(){
+  if(_prefsE2eRetryT||_prefsE2eRetryN>=8) return;
+  _prefsE2eRetryT=setTimeout(()=>{ _prefsE2eRetryT=null; _prefsE2eRetryN++; if(_e2eKnown()) savePrefsToServer(); else _armE2eRescrub(); },15000);
+}
+// Does a blob the server holds still carry E2E plaintext / key words (written before
+// this rule, or by an older app.js on another device)? Then save a clean copy now —
+// once e2e.js knows which conversations are encrypted — instead of waiting for the
+// next unrelated change. Checked for the load reply and other devices' saves (≤ 1/30 s).
+let _prefsCleanAt=0;
+function _prefsNeedsE2eClean(p){
+  const conv=_isE2eConversation;
+  if(Array.isArray(p.inputHistory)&&p.inputHistory.length&&!(p._ihV>=2)) return true;
+  if(Array.isArray(p.inputHistory)&&p.inputHistory.some(l=>typeof l==='string'&&redactSensitive(l)!==l)) return true;
+  if(Array.isArray(p.mentions)&&p.mentions.some(m=>m&&typeof m==='object'&&!m.e2eHidden&&(m.enc||conv(m.type==='pm'?m.from:m.target)))) return true;
+  if(Array.isArray(p.pmBlocked)&&p.pmBlocked.some(e=>e&&typeof e==='object'&&!e.e2eHidden&&(e.enc||conv(e.from)))) return true;
+  if(p.monitor&&typeof p.monitor==='object'&&Object.values(p.monitor).some(v=>v&&typeof v==='object'&&v.lastMsg&&!v.lastMsgHidden&&(v.lastMsgEnc||conv(v.channel)))) return true;
+  return false;
+}
+function _prefsCleanupCheck(p,tries){
+  if(!_e2eKnown()&&(tries||0)<40){ setTimeout(()=>_prefsCleanupCheck(p,(tries||0)+1),1500); return; }
+  try{ _histE2eSeen(); }catch(_){}   // r3: note E2E use as soon as it is known
+  try{ if(_prefsNeedsE2eClean(p)) savePrefsToServer(); }catch(_){}
+}
 function flushPrefsToServer(){
   clearTimeout(_prefsSaveTimer);
+  _prefsPendingSince=0; _prefsLowSince=0;
+  // r4 (C3-1): without the E2E engine the scrub below can't tell which Notices /
+  // blocked-PM / monitor entries belong to encrypted conversations — keep everything
+  // on this device (localStorage) until a reload brings the engine back.
+  if(!_e2eEngineOk()){ try{ _syncPushFiltersToServer(); }catch(_){} return; }
   try{
     // Session-unique token (not a bare Date.now() ms): the echo-suppression guard
     // in restorePreferences compares p._saveTs===_lastFlushTs, so two devices
     // flushing in the same wall-clock millisecond would otherwise collide and a
     // receiver would discard the sibling's genuine update as its own echo. (sync-audit fix)
-    _lastFlushTs=Date.now()+'-'+Math.random().toString(36).slice(2,10);
+    const saveTs=Date.now()+'-'+Math.random().toString(36).slice(2,10);
     const gathered=gatherPreferences();
-    gathered._saveTs=_lastFlushTs;
-    wsend({type:'save_preferences',prefs:JSON.stringify(gathered)});
+    if(!_e2eKnown()) _armE2eRescrub();
+    const sig=(()=>{ const {stats,...rest}=gathered; return JSON.stringify(rest); })();
+    if(sig===_prefsAckSig) return;   // the server already holds exactly this
+    gathered._saveTs=saveTs;
+    const fit=_fitPrefsToBudget(gathered);
+    if(!fit){
+      // Nothing fits even after trimming history: don't send a blob the server
+      // would refuse. Local data is untouched, so nothing is lost on this device.
+      const h=_prefsSizeHint(gathered);
+      _prefsSyncWarn('Settings are too large to sync across devices ('+h.kb(h.tot)+h.what+') — saved on this device only.'+h.fix);
+    } else {
+      _lastFlushTs=saveTs;
+      if(wsend({type:'save_preferences',prefs:fit.json})) _prefsSentSig=sig;
+    }
   }catch(e){}
+  finally{ try{ _syncPushFiltersToServer(); }catch(_){} }
 }
 // Flush preferences immediately before page unload to prevent data loss
 window.addEventListener('beforeunload',flushPrefsToServer);
+// Adopting another device's list: an entry whose synced text is the E2E placeholder
+// keeps THIS device's own plaintext copy of the same entry, if it has one.
+function _keepLocalE2eText(serverList,localList,keyOf){
+  if(!Array.isArray(serverList)) return serverList;
+  const loc=new Map();
+  for(const e of (Array.isArray(localList)?localList:[])){
+    if(!e||typeof e!=='object'||e.e2eHidden) continue;
+    const k=keyOf(e); if(!loc.has(k)) loc.set(k,[]); loc.get(k).push(e);
+  }
+  return serverList.map(e=>{
+    if(!e||typeof e!=='object'||!e.e2eHidden) return e;
+    const q=loc.get(keyOf(e)); const l=q&&q.shift();
+    if(!l) return e;
+    const o={...e,text:l.text,enc:true}; delete o.e2eHidden; if(l.textTrunc) o.textTrunc=true; return o;
+  });
+}
+// Adopting another device's input history: keep this device's local-only lines (typed
+// into E2E conversations / of unknown origin) at their place relative to the shared ones.
+function _mergeInputHistory(serverList,localList){
+  const out=serverList.filter(x=>typeof x==='string');
+  let pos=0;
+  for(const l of localList){
+    if(typeof l!=='string') continue;
+    // (r3: a local-only line that the other device's list also has — the same text typed
+    // there in the clear — is matched, not inserted again on every merge.)
+    if(_histSyncable(l) || (_histLocal.has(l) && out.indexOf(l,pos)>=0)){ const i=out.indexOf(l,pos); if(i>=0) pos=i+1; continue; }
+    out.splice(pos,0,l); pos++;
+  }
+  return out.slice(-500);
+}
 function restorePreferences(p){
   if(!p)return;
   // Skip if this is our own echo — the server broadcasts saved prefs back to
   // all sessions including the sender. Without this check, the echo overwrites
   // local state that the user may have changed since the save was debounced.
-  if(p._saveTs&&p._saveTs===_lastFlushTs)return;
+  // The echo is also the server's confirmation that it stored that content.
+  if(p._saveTs&&p._saveTs===_lastFlushTs){ _prefsAckSig=_prefsSentSig; return; }
+  // Anything else (another device's save, the load reply) means the server now holds
+  // something other than our last confirmed save: the next flush must send.
+  _prefsAckSig=null; _prefsSeen=true;
+  if(Date.now()-_prefsCleanAt>30000){ _prefsCleanAt=Date.now(); setTimeout(()=>_prefsCleanupCheck(p),0); }
   try{
     if(p.favorites){
       // Use timestamps to resolve conflict — local wins if modified more recently than last server sync
@@ -12261,7 +14692,15 @@ function restorePreferences(p){
       const localTs=parseInt(localStorage.getItem('cryptirc_monitor_ts')||'0');
       const serverTs=p._monitorTs||0;
       if(localTs<=serverTs){
-        if(p.monitor) localStorage.setItem('cryptirc_monitor',JSON.stringify(p.monitor));
+        if(p.monitor&&typeof p.monitor==='object'){
+          // Keep this device's own last-message text where the synced one is the E2E placeholder.
+          const lm=loadMonitor(), mon={...p.monitor};
+          for(const[k,v] of Object.entries(mon)){
+            const l=lm[k];
+            if(v&&v.lastMsgHidden&&l&&l.lastMsg&&!l.lastMsgHidden&&l.lastMsgEnc&&(+l.lastSeen||0)>=(+v.lastSeen||0)-60000) mon[k]={...v,lastMsg:l.lastMsg,lastMsgEnc:true,lastMsgHidden:undefined};
+          }
+          localStorage.setItem('cryptirc_monitor',JSON.stringify(mon));
+        }
         if(p.monitorNotifs) localStorage.setItem('cryptirc_monitor_notifs',p.monitorNotifs);
         if(p.monitorPush) localStorage.setItem('cryptirc_monitor_push',p.monitorPush);
         localStorage.setItem('cryptirc_monitor_ts',String(serverTs));
@@ -12339,12 +14778,19 @@ function restorePreferences(p){
       const localTs=parseInt(localStorage.getItem('cryptirc_mentions_ts')||'0');
       const serverTs=p._mentionsTs||0;
       if(localTs<=serverTs){
-        mentionsList=p.mentions;
+        mentionsList=_keepLocalE2eText(p.mentions,mentionsList,m=>[m.type,m.conn_id,String(m.target||'').toLowerCase(),String(m.from||'').toLowerCase(),m.ts,m.id||0].join('|'));
         try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));localStorage.setItem('cryptirc_mentions_ts',String(serverTs));}catch(e){}
         if(document.getElementById('mentions-panel')?.classList.contains('show')) renderMentionsList();
       }
     }
-    if(p.inputHistory) inputHistory=p.inputHistory;
+    if(Array.isArray(p.inputHistory)){
+      // A list written by a client that filters E2E lines (_ihV 2) may be re-synced
+      // from here; an older client's list is adopted for recall but stays local.
+      const sl=p.inputHistory.filter(l=>typeof l==='string').map(redactSensitive);
+      if(p._ihV>=2) for(const l of sl) _histSyncOk.add(l);
+      inputHistory=_mergeInputHistory(sl,inputHistory);
+      try{ localStorage.setItem('cryptirc_input_history',JSON.stringify(inputHistory.slice(-100))); localStorage.setItem('cryptirc_input_history_sync',JSON.stringify([..._histSyncOk].slice(-500))); }catch(_){}
+    }
     // (p.queries union-merge moved BELOW the closedQueries merge — it must see the
     // freshest closed-set so it never re-adds a conversation this device closed.)
     if(p.closedQueries){
@@ -12405,12 +14851,21 @@ function restorePreferences(p){
       // fresh device (localTs 0) still accepts and the server wins on a tie.
       const localTs=parseInt(localStorage.getItem('cryptirc_ignore_ts')||'0');
       const serverTs=p._ignoreListTs||0;
-      if(localTs<=serverTs){localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));localStorage.setItem('cryptirc_ignore_ts',String(serverTs));}
+      if(localTs<=serverTs){
+        localStorage.setItem('cryptirc_ignore',JSON.stringify(p.ignoreList));localStorage.setItem('cryptirc_ignore_ts',String(serverTs));
+        // Also update the LIVE set: it was only re-read on reload, so an ignore
+        // added/removed on another device didn't apply here, and the next local
+        // addIgnore wrote the stale set back with a fresh timestamp (undoing it).
+        ignoreList=new Set(p.ignoreList.map(x=>String(x).toLowerCase()));
+      }
     }
     if(Array.isArray(p.pmAllow)){
       const localTs=parseInt(localStorage.getItem('cryptirc_pm_allow_ts')||'0');
       const serverTs=p._pmAllowTs||0;
-      if(localTs<=serverTs){pmAllowList=new Set(p.pmAllow.map(s=>String(s).toLowerCase()));localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));}
+      // r9 (astra-p3 app.js:14799): the adopted list's timestamp is kept too (as for the other
+      // gated settings) — with the old one still stored, a delayed OLDER snapshot was accepted
+      // after a newer one and restored a removed exemption.
+      if(localTs<=serverTs){pmAllowList=new Set(p.pmAllow.map(s=>String(s).toLowerCase()));localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));localStorage.setItem('cryptirc_pm_allow_ts',String(serverTs));}
     }
     {
       // F29: timestamp-gate the global PM settings group (block/cooldown/notify/
@@ -12431,9 +14886,9 @@ function restorePreferences(p){
     if(p.pmNet&&typeof p.pmNet==='object'){
       const localTs=parseInt(localStorage.getItem('cryptirc_pm_net_ts')||'0');
       const serverTs=p._pmNetTs||0;
-      if(localTs<=serverTs) localStorage.setItem('cryptirc_pm_net',JSON.stringify(p.pmNet));
+      if(localTs<=serverTs){ localStorage.setItem('cryptirc_pm_net',JSON.stringify(p.pmNet)); localStorage.setItem('cryptirc_pm_net_ts',String(serverTs)); }   // r9: see pmAllow
     }
-    if(Array.isArray(p.pmBlocked)) localStorage.setItem('cryptirc_pm_blocked',JSON.stringify(p.pmBlocked.slice(-PM_BLOCKED_MAX)));
+    if(Array.isArray(p.pmBlocked)) localStorage.setItem('cryptirc_pm_blocked',JSON.stringify(_keepLocalE2eText(p.pmBlocked.slice(-PM_BLOCKED_MAX),loadPmBlocked(),e=>[e.conn_id,String(e.from||'').toLowerCase(),e.ts].join('|'))));
     if(p.highlightWords){
       // F29: timestamp-gate (see ignoreList above) — newest writer wins instead of
       // last-arriving snapshot, so a stale device can't resurrect deleted words.
@@ -12509,6 +14964,17 @@ function restorePreferences(p){
     // not "the user cleared it". Removing on '' would let a device that never opened
     // the smart-paste dialog wipe the choice made on the user's other device.
     if(/^\d+$/.test(String(p.smartPasteExpire??''))) localStorage.setItem('cryptirc_smartpaste_expire',String(p.smartPasteExpire));
+    if(p.tlsVerify&&typeof p.tlsVerify==='object'){
+      // H2 offer state: newest writer wins; on a tie (e.g. both still unstamped after
+      // the upgrade) take the union, so no device's existing undo marker is lost.
+      const localTs=parseInt(localStorage.getItem('cryptirc_tlsverify_ts')||'0'), serverTs=+p._tlsVerifyTs||0;
+      const ids=a=>Array.isArray(a)?a.map(String):[];
+      for(const [key,list] of [[_TLS_FLIPPED_KEY,ids(p.tlsVerify.flipped)],[_TLS_DISMISS_KEY,ids(p.tlsVerify.dismissed)]]){
+        if(serverTs>localTs) _tlsIdSetSave(key,new Set(list));
+        else if(serverTs===localTs){ const cur=_tlsIdSet(key); for(const x of list) cur.add(x); _tlsIdSetSave(key,cur); }
+      }
+      if(serverTs>localTs) try{ localStorage.setItem('cryptirc_tlsverify_ts',String(serverTs)); }catch(_){}
+    }
     // Re-apply UI state
     renderSidebar(); updateMentionsBadge(); applyFavsOnly();
     if(isMessagesActive()) renderMessagesView(); // reflect synced unread/read-state changes live
@@ -12526,6 +14992,9 @@ function restorePreferences(p){
       else{np?.classList.remove('collapsed');if(niIcon)niIcon.style.transform='';}
     }
   }catch(e){console.error('Restore prefs failed:',e);}
+  // Adopted ignore/PM-Protection settings must reach the server push engine too
+  // (no-op when unchanged since the last successful sync).
+  try{ _syncPushFiltersToServer(); }catch(_){}
 }
 
 // ─── Favorites ────────────────────────────────────────────────────────────────
@@ -12636,6 +15105,11 @@ function initSortable(){
   // Lounge-style touch handlers: force-no-select on touchstart, context menu cancel on touchmove.
   // Defensive cleanups on pointerup/mouseup/blur too — Electron doesn't fire touchend on
   // mouse-based drags, which previously could leave force-no-select stuck on <body>.
+  // #network-list is a persistent element (only its innerHTML is rebuilt) and this
+  // runs after EVERY sidebar render, so bind once — it used to add 4 more listeners
+  // per render.
+  if(netList._cryptircTouchBound) return;
+  netList._cryptircTouchBound=true;
   netList.addEventListener('touchstart',e=>{if(e.touches.length===1)document.body.classList.add('force-no-select');},{passive:true});
   netList.addEventListener('touchmove',e=>{if(_dragStartPos&&e.touches.length>0){const t=e.touches[0];if(_distPts(_dragStartPos,[t.clientX,t.clientY])>10){/* cancel context menu */}}},{passive:true});
   netList.addEventListener('touchend',e=>{if(e.touches.length===0)document.body.classList.remove('force-no-select');},{passive:true});
@@ -12857,7 +15331,7 @@ function showLinksOverlay(){
   document.getElementById('links-overlay').style.display='flex';
   window._linksData=[];
 }
-function closeLinksOverlay(){document.getElementById('links-overlay').style.display='none';window._linksData=[];}
+function closeLinksOverlay(){document.getElementById('links-overlay').style.display='none';window._linksData=null;}
 function addLinkEntry(text){
   if(!window._linksData) return;
   window._linksData.push(text);
@@ -12941,9 +15415,16 @@ function _syncMutedChannelsToServer(){
   // push settings (the notification panel's old per-network store) into the sidebar
   // mute store, so cryptirc_muted is the single source of truth from here on and an
   // unmute from EITHER place propagates correctly (no clobber, no lost mutes).
+  // r5 (codex-p3 app.js:15188): ONCE per device — it ran on every call, so unmuting a
+  // network (which deletes the local entry and calls this) put the mute straight back
+  // from the server's cached muted_networks.
   let _mig=false;
-  for(const id of (_notifPrefs.muted_networks||[])){ const k='net:'+id; if(!m[k]){ m[k]=true; _mig=true; } }
-  if(_mig) saveMuted(m);
+  let _migDone=false; try{ _migDone=localStorage.getItem('cryptirc_netmute_migrated')==='1'; }catch(_){}
+  if(!_migDone){
+    for(const id of (_notifPrefs.muted_networks||[])){ const k='net:'+id; if(!m[k]){ m[k]=true; _mig=true; } }
+    if(_mig) saveMuted(m);
+    try{ localStorage.setItem('cryptirc_netmute_migrated','1'); }catch(_){}
+  }
   const chans=[], nets=[];
   for(const k in m){ if(!m[k])continue; if(k.startsWith('net:')) nets.push(k.slice(4)); else chans.push(k); }
   const curC=(_notifPrefs.muted_channels||[]).slice().sort().join('\n');
@@ -12958,10 +15439,105 @@ function _syncMutedChannelsToServer(){
   const dndUnchanged = _notifPrefs.dnd===dnd && (_notifPrefs.dnd_start||'')===dndStart
                     && (_notifPrefs.dnd_end||'')===dndEnd && (_notifPrefs.dnd_tz_offset||0)===dndTz;
   if(!_mig && curC===nextC && curN===nextN && dndUnchanged) return;   // unchanged → skip the PUT
-  _notifPrefs.muted_channels=chans;
-  _notifPrefs.muted_networks=nets;
-  _notifPrefs.dnd=dnd; _notifPrefs.dnd_start=dndStart; _notifPrefs.dnd_end=dndEnd; _notifPrefs.dnd_tz_offset=dndTz;
-  try{ fetch('/cryptirc/push/settings',{method:'PUT',headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},body:JSON.stringify(_notifPrefs)}).catch(()=>{}); }catch(e){}
+  // Send ONLY the fields this sync owns (the server merges a partial body), so a
+  // device with a stale cached trigger/enabled no longer reverts what another
+  // device saved. _notifPrefs is updated only once the server accepted the change
+  // — on failure the next call sees a difference and retries.
+  const patch={muted_channels:chans,muted_networks:nets,dnd,dnd_start:dndStart,dnd_end:dndEnd,dnd_tz_offset:dndTz};
+  _pushSettingsPut(patch).then(ok=>{
+    if(!ok||!_notifPrefs) return;
+    _notifPrefs.muted_channels=chans;
+    _notifPrefs.muted_networks=nets;
+    _notifPrefs.dnd=dnd; _notifPrefs.dnd_start=dndStart; _notifPrefs.dnd_end=dndEnd; _notifPrefs.dnd_tz_offset=dndTz;
+  });
+}
+// PUT /push/settings with a partial body. Requests are serialised so two quick
+// changes can't land out of order, and a refusal (e.g. 413 "Too many muted
+// channels") is shown to the user instead of being swallowed by .catch(()=>{}).
+let _pushPutChain=Promise.resolve();
+let _pushPutWarnedAt=0;
+// Runs fn after every earlier push-settings request of this page has finished.
+function _pushChain(fn){
+  const p=_pushPutChain.then(fn,fn);
+  _pushPutChain=p.catch(()=>false);
+  return p;
+}
+// Is push enabled for this account right now (server's flag)? null = couldn't tell.
+// Does not touch the _notifPrefs UI cache.
+async function _fetchPushEnabled(){
+  if(!sessionToken) return null;
+  try{
+    const r=await fetch('/cryptirc/push/settings',{headers:{'Authorization':'Bearer '+sessionToken}});
+    if(!r.ok) return null;
+    const j=await r.json();
+    return !!(j&&j.enabled===true);
+  }catch(_){ return null; }
+}
+function _pushSettingsPut(patch){ return _pushChain(()=>_pushSettingsPutNow(patch)); }
+async function _pushSettingsPutNow(patch){
+  const body=JSON.stringify(patch);
+  if(!sessionToken) return false;
+  try{
+    const r=await fetch('/cryptirc/push/settings',{method:'PUT',headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},body,keepalive:_utf8Len(body)<60000});
+    if(r.ok) return true;
+    if(r.status!==401){
+      let msg=''; try{ msg=(await r.json()).message||''; }catch(_){}
+      const now=Date.now();
+      if(now-_pushPutWarnedAt>30000){ _pushPutWarnedAt=now; showToast('Push notification settings not saved'+(msg?' — '+msg:r.status===413?' — too many entries':'')); }
+    }
+    return false;
+  }catch(_){ return false; }   // offline: the next change / prefs flush retries
+}
+// ── /ignore + PM Protection → server push engine ────────────────────────────
+// Both used to exist only in the browser, so while the app was closed (exactly
+// when web push fires) an ignored user or a stranger PM Protection "silently
+// drops" still reached the lock screen. Mirror them into notif_prefs so
+// notifications.rs applies the same rules. Driven from flushPrefsToServer and
+// restorePreferences; only PUTs when the snapshot changed since the last
+// accepted sync. Works without push being set up on THIS device (the phone that
+// receives the pushes may be closed while the change is made on a desktop).
+// Privacy: notif_prefs is plaintext on the server (the push engine runs without the
+// vault), so the lists are mirrored ONLY while push is enabled for the account (the
+// server's own `enabled` flag, re-read before every change is sent). With push off
+// the mirror is cleared, and it is cleared/refilled together with the on/off switch.
+let _pushFiltersSent=null,_pushFiltersTimer=null,_pushFiltersLastReal=null;
+const _PUSH_FILTERS_EMPTY={ignore:[],pm_protect:{enabled:false,cooldown_hours:24,deliver_first:true,allow:[]},pm_protect_net:{}};
+function _gatherPushFilters(){
+  const cd=v=>{ const n=parseInt(v,10); return Number.isFinite(n)&&n>0?n:24; };
+  const net={};
+  for(const [cid,n] of Object.entries(loadPmNet()||{})){
+    if(!n||!n.override) continue;
+    net[cid]={enabled:!!n.enabled,cooldown_hours:cd(n.cooldown),deliver_first:n.deliverFirst!==false,
+      allow:Array.isArray(n.allowList)?n.allowList.map(x=>String(x).toLowerCase()):[]};
+  }
+  return {
+    ignore:[...ignoreList].map(x=>String(x).toLowerCase()).sort(),
+    pm_protect:{enabled:localStorage.getItem('cryptirc_block_pms')==='true',cooldown_hours:cd(localStorage.getItem('cryptirc_pm_cooldown')||'24'),
+      deliver_first:localStorage.getItem('cryptirc_pm_deliver_first')!=='false',allow:[...pmAllowList].map(x=>String(x).toLowerCase()).sort()},
+    pm_protect_net:net,
+  };
+}
+function _syncPushFiltersToServer(force){
+  if(!sessionToken) return;
+  clearTimeout(_pushFiltersTimer);
+  _pushFiltersTimer=setTimeout(async()=>{
+    let real; try{ real=_gatherPushFilters(); }catch(_){ return; }
+    const user=String(currentUser||'');
+    const realKey=user+'\n'+JSON.stringify(real);   // per account: a re-login as someone else must re-send
+    // Nothing changed locally since the last decision → nothing to do (no GET either).
+    if(force!==true && realKey===_pushFiltersLastReal && _pushFiltersSent!=null) return;
+    _pushChain(async()=>{
+      // Is push on for this account right now? Ask the server (another device may have
+      // switched it); unknown (offline / error) → decide later, never clear on a guess.
+      const on=await _fetchPushEnabled();
+      if(on===null) return;
+      const snap=on?real:_PUSH_FILTERS_EMPTY;
+      const key=user+'\n'+(on?'on':'off')+'\n'+JSON.stringify(snap);
+      _pushFiltersLastReal=realKey;
+      if(key===_pushFiltersSent) return;
+      if(await _pushSettingsPutNow(snap)) _pushFiltersSent=key; else _pushFiltersLastReal=null;
+    });
+  },500);
 }
 
 // ── Floating kebab dropdown (shared by net/chan/fav sidebar menus) ─────────
@@ -13109,7 +15685,15 @@ function openChanModes(connId,target){
   cmRender();
   cmQueryAll();
   // Safety: if the ircd never ends a list (e.g. +I unsupported), stop "Loading…".
-  setTimeout(()=>{ if(_cm){ _cm.collecting={b:false,e:false,I:false}; cmRenderList(); } },5000);
+  _cmArmListTimeout();
+}
+// The 5 s "stop Loading…" safety timer must only ever touch the dialog/query that
+// armed it: closing + reopening (or refreshing) within 5 s used to let a stale timer
+// mark the NEW dialog's lists finished while they were still loading.
+function _cmArmListTimeout(){
+  const me=_cm; if(!me) return;
+  const gen=me._listGen=(me._listGen||0)+1;
+  setTimeout(()=>{ if(_cm===me&&me._listGen===gen){ me.collecting={b:false,e:false,I:false}; cmRenderList(); } },5000);
 }
 function closeChanModes(){
   _cm=null; clearTimeout(_cmRefreshT);
@@ -13128,7 +15712,7 @@ function cmQueryAll(){
 function cmRefresh(){
   if(!_cm)return; clearTimeout(_cmRefreshT);
   _cmRefreshT=setTimeout(()=>{ if(!_cm)return; _cm.lists={b:[],e:[],I:[]}; _cm.collecting={b:true,e:true,I:true}; cmQueryAll();
-    setTimeout(()=>{ if(_cm){ _cm.collecting={b:false,e:false,I:false}; cmRenderList(); } },5000); },250);
+    _cmArmListTimeout(); },250);
 }
 // ── /mode <#channel> as a readable QUERY ────────────────────────────────────
 // A bare `/mode #chan` asks the server for the channel's current modes; the reply
@@ -13381,7 +15965,7 @@ window.addEventListener('resize',()=>closeFloatDd());
 })();
 
 async function removeNetwork(id,label){
-  if(!(await customConfirm(`Remove server "${label}"? This will disconnect and delete its config.`,'Remove')))return;
+  if(!(await customConfirm(`Remove server "${label}"? This will disconnect and delete its config and its saved chat history on the server.`,'Remove')))return;
   wsend({type:'remove_network',id});
   // Clean up favorites for this network
   let favs=loadFavorites().filter(f=>!f.key.startsWith(id+'/'));
@@ -13431,9 +16015,9 @@ function showNickMenu(e,nick){
   const closeAfter=()=>{closeNickMenu();if(isMobile)closeNickPanelMobile();};
   const items=[
     {label:'Whois',     action:()=>{if(active){if(!window._pendingWhois)window._pendingWhois={};window._pendingWhois[active.conn_id]=nick;wsend({type:'send',conn_id:active.conn_id,raw:`WHOIS ${nick}`});closeAfter();}}},
-    {label:'Query',     action:()=>{if(active){closeAfter();setActive(active.conn_id,nick);closeSidebar();}}},
+    {label:'Query',     action:()=>{if(active){closeAfter();setActive(active.conn_id,_dmTarget(nick));closeSidebar();}}},
     {label:'Mention',   action:()=>insertNick(nick)},
-    {label:'Slap',      action:async()=>{if(!active)return;const st=`slaps ${nick} around a bit with a large trout`;const sw=(window.E2E?.ready||window.E2E?.channelKeys?.[active.target])?await e2eEncryptOutgoing(active.target,`\x01ACTION ${st}\x01`):null;if(_e2eBlockedWarn(sw))return;if(sw)wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :${sw}`});else wsend({type:'send',conn_id:active.conn_id,raw:`PRIVMSG ${active.target} :\x01ACTION ${st}\x01`});addMessage(active.conn_id,active.target,{ts:Date.now()/1000|0,from:getNick(active.conn_id),text:st,kind:'action'});}},
+    {label:'Slap',      action:async()=>{if(!active)return;if(active.target==='status'){_statusWinRefuse(active.conn_id);return;}const st=`slaps ${nick} around a bit with a large trout`;await _sendChat(active.conn_id,active.target,`\x01ACTION ${st}\x01`,{kind:'action'});}},   // r7: queued + tracked
     {label:loadMonitor()[nick.toLowerCase()]?'Unmonitor':'Monitor', action:()=>{const k=nick.toLowerCase();if(loadMonitor()[k]){monitorRemove(nick);showToast(`Removed ${nick} from monitor`);}else{monitorAdd(nick);showToast(`Added ${nick} to monitor`);}}},
     {label:'📝 Note', action:async()=>{const notes=loadUserNotes();const existing=notes[nick.toLowerCase()]||'';const n=await customPrompt(`Note for ${nick}:`,existing);if(n!==null){if(n.trim())notes[nick.toLowerCase()]=n.trim();else delete notes[nick.toLowerCase()];saveUserNotes(notes);showToast(n.trim()?`Note saved for ${nick}`:`Note removed for ${nick}`);}}},
     {label:isIgnored(nick)?'Unignore':'Ignore nick', action:()=>{if(isIgnored(nick)){removeIgnore(nick);showToast(`Unignored ${nick}`);}else{addIgnore(nick);showToast(`Ignoring ${nick}`);}}},
@@ -13694,7 +16278,9 @@ function customConfirm(message, okLabel, cancelLabel){
     ov.appendChild(box); document.body.appendChild(ov);
     const keyH=(e)=>{
       if(e.key==='Escape'){e.preventDefault();e.stopPropagation();done(false);}
-      else if(e.key==='Enter'){e.preventDefault();e.stopPropagation();done(true);}
+      // Enter activates the FOCUSED button: with Cancel focused (Tab/Shift+Tab) it
+      // used to confirm anyway — including the admin "DELETE user" double confirm.
+      else if(e.key==='Enter'){e.preventDefault();e.stopPropagation();done(document.activeElement!==cancelBtn);}
     };
     function done(val){document.removeEventListener('keydown',keyH,true);ov.remove();resolve(val);}
     cancelBtn.onclick=()=>done(false);
@@ -13952,13 +16538,22 @@ async function saveNotifPrefs() {
   _notifPrefs.dnd_start = localStorage.getItem('cryptirc_dnd_start')||'';
   _notifPrefs.dnd_end = localStorage.getItem('cryptirc_dnd_end')||'';
   _notifPrefs.dnd_tz_offset = new Date().getTimezoneOffset();
-  try {
-    await fetch('/cryptirc/push/settings', {
-      method: 'PUT',
-      headers: {'Authorization':'Bearer '+sessionToken, 'Content-Type':'application/json'},
-      body: JSON.stringify(_notifPrefs),
-    });
-  } catch(e) {}
+  // Partial body: only what this panel edits (+ DND). Mutes and the ignore/PM
+  // filters have their own syncs, so a stale cached copy of those can no longer
+  // overwrite another device's newer settings. Failures are toasted.
+  const on=!!_notifPrefs.enabled;
+  const ok=await _pushSettingsPut({enabled:on, trigger:_notifPrefs.trigger,
+    dnd:_notifPrefs.dnd, dnd_start:_notifPrefs.dnd_start, dnd_end:_notifPrefs.dnd_end, dnd_tz_offset:_notifPrefs.dnd_tz_offset});
+  // Then fill (push on) or empty (push off) the ignore/PM-Protection mirror to match.
+  // A separate PUT, so a filter the server refuses (e.g. > 500 masks) can't block the switch.
+  if(ok){
+    let filters=_PUSH_FILTERS_EMPTY;
+    if(on){ try{ filters=_gatherPushFilters(); }catch(_){} }
+    if(await _pushSettingsPut(filters)){
+      _pushFiltersSent=String(currentUser||'')+'\n'+(on?'on':'off')+'\n'+JSON.stringify(filters);
+      try{ _pushFiltersLastReal=String(currentUser||'')+'\n'+JSON.stringify(_gatherPushFilters()); }catch(_){}
+    }
+  }
 }
 
 function renderNotifModal() {
@@ -14262,7 +16857,7 @@ async function notifDiagTest(type){
     if(!swRegistration){log('No service worker registration',false);return;}
     log('Calling swRegistration.showNotification...');
     try{
-      await swRegistration.showNotification('CryptIRC — SW Test',{body:'Service Worker notification',icon:'/cryptirc/icon-192.png',tag:'diag-sw-'+Date.now(),renotify:true,requireInteraction:true});
+      await swRegistration.showNotification('CryptIRC — SW Test',{body:'Service Worker notification',icon:'/cryptirc/icon-192.png',tag:'diag-sw-'+Date.now(),renotify:true,requireInteraction:true,data:{url:location.origin+'/cryptirc/'}});
       log('SW showNotification resolved — check if popup appeared',true);
     }catch(e){log(`SW showNotification FAILED: ${e}`,false);}
     return;
@@ -14382,11 +16977,17 @@ function getChannelNicksByTarget(conn_id, channel) {
   return ch.names.map(n => stripPfx(n));
 }
 
+// Leading status-prefix run of a NAMES entry (multi-prefix gives e.g. "~@nick"),
+// exactly the chars stripPfx removes — same rule as MDOP's #43 fix.
+function _namesPfx(n){ return n.slice(0, n.length - stripPfx(n).length); }
 function getChannelOps(conn_id, channel) {
+  const self = getNick(conn_id);
   const net = networks.find(n => n.config.id === conn_id);
   const ch  = net?.channels?.find(c=>_sameChan(c.name,channel));
   if (!ch) return [];
-  return ch.names.filter(n => n.startsWith('@')).map(n => stripPfx(n));
+  // '@' anywhere in the prefix run (the daemon requests multi-prefix, so "~@owner"
+  // and "&@admin" are ops too); never deop yourself.
+  return ch.names.filter(n => _namesPfx(n).includes('@')).map(n => stripPfx(n)).filter(n => n !== self);
 }
 
 function getChannelNonOps(conn_id, channel) {
@@ -14401,10 +17002,12 @@ function getChannelNonOps(conn_id, channel) {
 }
 
 function getChannelVoiced(conn_id, channel) {
+  const self = getNick(conn_id);
   const net = networks.find(n => n.config.id === conn_id);
   const ch  = net?.channels?.find(c=>_sameChan(c.name,channel));
   if (!ch) return [];
-  return ch.names.filter(n => n.startsWith('+')).map(n => stripPfx(n));
+  // '+' anywhere in the prefix run ("@+opvoice" is voiced too); skip yourself.
+  return ch.names.filter(n => _namesPfx(n).includes('+')).map(n => stripPfx(n)).filter(n => n !== self);
 }
 
 function getChannelNonVoiced(conn_id, channel) {
@@ -14429,7 +17032,8 @@ function _findJumpRow(ts,from,match){
   const sender=stripPfx(String(from||'')).toLowerCase();
   return rows.find(r=>Number(r.dataset.ts)===Number(ts) &&
     (!sender || stripPfx(r.dataset.from||'').toLowerCase()===sender) &&
-    (typeof match?.text!=='string' || r._jumpText===match.text));
+    (typeof match?.text!=='string' || r._jumpText===match.text ||
+     (match.textTrunc && typeof r._jumpText==='string' && r._jumpText.startsWith(match.text))));
 }
 function _refreshJumpHighlight(){
   const j=_messageJump;
@@ -14452,6 +17056,9 @@ function jumpToMessage(conn_id,target,ts,from,match){
   if(!conn_id||!target)return;
   ++_messageJumpSerial; _messageJump=null;
   if(!networks?.some(n=>n.config.id===conn_id)){
+    // Networks already loaded and this one isn't among them → it was removed. Don't
+    // re-stash forever (every later state drain re-stashed it); just say so.
+    if(networks&&networks.length){ if(_pendingNotifNav&&_pendingNotifNav.conn_id===conn_id) _pendingNotifNav=null; showToast('That network is no longer configured'); return; }
     _pendingNotifNav={conn_id,target,ts,from,match};return;
   }
   setActive(conn_id,target,{keepNotices:!!match?.notice});
@@ -14547,6 +17154,29 @@ async function _readNotifClickCache(){
   }catch(e){}
 }
 
+// A notification click is delivered twice: postMessage to an open client AND the
+// cache bridge above. When the postMessage arrives, the cache entry must go —
+// otherwise (page already visible → no visibilitychange) it lingered and the next
+// alt-tab / reload within 60 s yanked the user back to that conversation. Deletes
+// only the entry for THIS click (sw.js now tags both with `t`); an old SW without
+// `t` gets the entry deleted unconditionally. Separate listener so the existing
+// SW message handler is untouched.
+try{
+  navigator.serviceWorker?.addEventListener('message',async e=>{
+    if(e.data?.type!=='notification_click'||!('caches' in self)) return;
+    try{
+      const cache=await caches.open('cryptirc-notif-intent');
+      if(e.data.t!=null){
+        const resp=await cache.match('/__notif_click__');
+        if(!resp) return;
+        const d=await resp.json().catch(()=>null);
+        if(d&&d.t!=null&&d.t!==e.data.t) return;   // a newer click's intent — keep it
+      }
+      await cache.delete('/__notif_click__');
+    }catch(_){}
+  });
+}catch(_){}
+
 // ── PM allow list + per-network settings ─────────────────────────────────────
 let pmAllowList = new Set((()=>{try{return JSON.parse(localStorage.getItem('cryptirc_pm_allow')||'[]');}catch{return[];}})());
 function savePmAllow(){localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));localStorage.setItem('cryptirc_pm_allow_ts',String(Date.now()));savePrefsToServer();}
@@ -14561,16 +17191,31 @@ function loadPmBlocked(){try{const a=JSON.parse(localStorage.getItem('cryptirc_p
 function savePmBlocked(arr){
   if(arr.length>PM_BLOCKED_MAX) arr=arr.slice(-PM_BLOCKED_MAX);
   localStorage.setItem('cryptirc_pm_blocked',JSON.stringify(arr));
-  savePrefsToServer();
+  savePrefsToServer(true);   // recorded from incoming traffic: background save
 }
-function recordBlockedPm(conn_id, from, text, ts){
-  const arr=loadPmBlocked();
-  arr.push({
-    conn_id: String(conn_id||''),
-    from:    String(from||''),
-    text:    String(text||'').slice(0,500),
-    ts:      ts||Math.floor(Date.now()/1000),
-  });
+// The blocked log travels in the synced prefs blob, so it must stay small no
+// matter what a stranger sends: at most PM_BLOCKED_PER_SENDER entries per sender
+// (newest kept — one flooder can no longer evict everyone else or push the blob
+// past the server cap), 300 chars each, nothing older than 30 days.
+const PM_BLOCKED_PER_SENDER = 10, PM_BLOCKED_MAX_AGE = 30*86400;
+function recordBlockedPm(conn_id, from, text, ts, enc){
+  let arr=loadPmBlocked();
+  const cid=String(conn_id||''), f=String(from||''), fl=f.toLowerCase();
+  const now=Math.floor(Date.now()/1000);
+  const ent={
+    conn_id: cid,
+    from:    f,
+    text:    String(text||'').slice(0,300),
+    ts:      ts||now,
+  };
+  if(enc) ent.enc=true;   // decrypted E2E text: kept on this device, hidden in the synced copy
+  arr.push(ent);
+  arr=arr.filter(e=>e&&(!e.ts||now-e.ts<PM_BLOCKED_MAX_AGE));
+  let n=0;
+  for(let i=arr.length-1;i>=0;i--){
+    const e=arr[i];
+    if(e.conn_id===cid&&String(e.from||'').toLowerCase()===fl&&++n>PM_BLOCKED_PER_SENDER) arr.splice(i,1);
+  }
   savePmBlocked(arr);
 }
 function clearPmBlocked(){localStorage.setItem('cryptirc_pm_blocked','[]');savePrefsToServer();}
@@ -14673,7 +17318,7 @@ function showIgnorePanel(){
     <div style="padding:12px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch">
       <div style="display:flex;gap:6px;margin-bottom:12px">
         <input id="ignore-add-input" placeholder="nick, nick!*@host, *!*@*.isp.com" style="flex:1;padding:6px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:13px;outline:none">
-        <button onclick="const inp=document.getElementById('ignore-add-input');if(inp.value.trim()){addIgnore(inp.value.trim());inp.value='';this.closest('[style*=fixed]').remove();showIgnorePanel();}" style="padding:6px 12px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px">Add</button>
+        <button data-ignore-add style="padding:6px 12px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:13px">Add</button>
       </div>`;
     if(!list.length){
       html+=`<div style="color:var(--text3);text-align:center;padding:20px 0;font-size:13px">No ignored users</div>`;
@@ -14697,24 +17342,25 @@ function showIgnorePanel(){
   // Delegated remove handler (see render(): buttons carry data-ignore-rm). Bound
   // once on the stable box element; re-renders after removal to update the list.
   box.addEventListener('click',e=>{const b=e.target.closest('[data-ignore-rm]');if(b&&box.contains(b)){removeIgnore(b.dataset.ignoreRm);render();}});
+  // Add (button or Enter): delegated on the stable box, because render() replaces
+  // the input — a listener bound to the first input only worked once — and the old
+  // inline button removed the overlay without _overlayClose (stale Back entry).
+  const doAdd=()=>{
+    const inp=box.querySelector('#ignore-add-input');
+    const v=inp?inp.value.trim():'';
+    if(!v) return;
+    addIgnore(v); render();
+    const ni=box.querySelector('#ignore-add-input'); if(ni) ni.focus();
+  };
+  box.addEventListener('click',e=>{const b=e.target.closest('[data-ignore-add]');if(b&&box.contains(b))doAdd();});
+  box.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target&&e.target.id==='ignore-add-input'){e.preventDefault();doAdd();}});
   ov.appendChild(box);
   // D4: register in the overlay stack for Escape / Android Back dismissal.
   const close=()=>{ if(ov.parentNode) ov.remove(); _overlayClose('ignorePanel'); };
   ov.onclick=e=>{ if(e.target===ov || (e.target.closest && e.target.closest('[data-ov-close]'))) close(); };
   document.body.appendChild(ov);
   _overlayOpen('ignorePanel', close);
-  // Handle Enter key in add input
-  setTimeout(()=>{
-    const inp=document.getElementById('ignore-add-input');
-    if(inp){
-      inp.focus();
-      inp.addEventListener('keydown',e=>{
-        if(e.key==='Enter'&&inp.value.trim()){
-          addIgnore(inp.value.trim());inp.value='';render();
-        }
-      });
-    }
-  },100);
+  setTimeout(()=>{ const inp=box.querySelector('#ignore-add-input'); if(inp) inp.focus(); },100);
 }
 
 // Tracks which "scope" the PM Protection panel is currently showing: null = Global, or conn_id
@@ -15084,24 +17730,55 @@ function showPmProtectionPanel(){
 }
 
 function isIgnored(nick, prefix) {
-  const lnick = nick.toLowerCase();
+  const lnick = String(nick||'').toLowerCase();
   const lpfx = (prefix||'').toLowerCase();
   for (const mask of ignoreList) {
     // Exact nick match
     if (mask === lnick) return true;
-    // Wildcard mask match (nick!user@host pattern)
-    if (mask.includes('!') || mask.includes('@') || mask.includes('*')) {
+    // Wildcard mask match (nick!user@host pattern; `?` too — no nick contains it)
+    if (mask.includes('!') || mask.includes('@') || mask.includes('*') || mask.includes('?')) {
       // Match against full prefix if available
       const target = lpfx || lnick;
       if (wildcardMatch(target, mask)) return true;
+      // No `!`/`@` = a nick mask: try it on the nick too (`guest?` vs `guest1!u@h`).
+      if (lpfx && !mask.includes('!') && !mask.includes('@') && wildcardMatch(lnick, mask)) return true;
+      // Only the nick is known (log lines carry no prefix): a `nick!*@*`-style mask
+      // (all-wildcard user@host) still applies via its nick part. Host masks can't
+      // be decided from a nick. (notifications.rs is_ignored mirrors this.)
+      if (!lpfx) {
+        const bang = mask.indexOf('!');
+        if (bang > 0) { const rest = mask.slice(bang+1); if (rest && /^[*@]+$/.test(rest) && wildcardMatch(lnick, mask.slice(0,bang))) return true; }
+      }
     }
   }
   return false;
 }
+// History/sync log lines (prependLogs, appendSyncLines) — same kinds the addMessage
+// wrapper filters, matched on the nick (logs don't store the sender's host).
+function _isIgnoredLogLine(l){
+  if(!l||!l.from||l.from==='*'||!ignoreList.size) return false;
+  const k=String(l.kind||'').toLowerCase();
+  if(k!=='privmsg'&&k!=='action'&&k!=='notice') return false;
+  return isIgnored(l.from,null);
+}
+// IRC wildcard match: `*` = any run (also empty), `?` = one character, case-insensitive.
+// r4 (codex-p3 LOW app.js:17202): no RegExp any more. The old '^…$' pattern had one '.*'
+// per '*', and a valid mask such as '*!*@*a*a*a*a*a*a*a*b' backtracked exponentially on
+// a non-matching host of many 'a's — a remote user could stall the UI with one message.
+// Greedy match with one backtrack point (the last '*'): O(len(str)·len(pattern)) at
+// worst, the same algorithm as the server's notifications.rs glob_match.
 function wildcardMatch(str, pattern) {
-  // Convert IRC wildcard pattern to regex
-  const re = new RegExp('^' + pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$', 'i');
-  return re.test(str);
+  const s = Array.from(String(str == null ? '' : str).toLowerCase());
+  const p = Array.from(String(pattern == null ? '' : pattern).toLowerCase());
+  let si = 0, pi = 0, star = -1, mark = 0;
+  while (si < s.length) {
+    if (pi < p.length && (p[pi] === '?' || (p[pi] !== '*' && p[pi] === s[si]))) { si++; pi++; }
+    else if (pi < p.length && p[pi] === '*') { star = pi++; mark = si; }
+    else if (star >= 0) { pi = star + 1; si = ++mark; }
+    else return false;
+  }
+  while (pi < p.length && p[pi] === '*') pi++;
+  return pi === p.length;
 }
 
 // ─── Unread PM flash (every 20 minutes) ───────────────────────────────────────
@@ -15125,7 +17802,7 @@ const _origAddMessage = addMessage;
 window.addMessage = function(conn_id, target, msg) {
   if (msg.kind === 'privmsg' || msg.kind === 'action' || msg.kind === 'notice') {
     if (isIgnored(msg.from, msg.prefix)) return; // silently drop
-    monitorUpdate(msg.from, conn_id, target, msg.text);
+    monitorUpdate(msg.from, conn_id, target, msg.text, !!msg.encrypted);
   }
   _origAddMessage(conn_id, target, msg);
 };
@@ -15480,6 +18157,156 @@ const CRYPTIRC_VERSION='__CRYPTIRC_VERSION__';
 // If served un-replaced (still starts with '_'), the pill shows just the version.
 const CRYPTIRC_BUILD='__CRYPTIRC_BUILD__';
 function _verLabel(){ var b=CRYPTIRC_BUILD; return 'v'+CRYPTIRC_VERSION+(b && b.charAt(0)!=='_' ? ' · '+b : ''); }
+// r10: id of the frontend this page was served with (main.rs frontend_id(): a hash of the
+// embedded app.js, e2e.js, index.html, sw.js and the version), substituted at serve time.
+const CRYPTIRC_ASSETS='__CRYPTIRC_ASSETS__';
+// A tab, PWA or detached window kept open across a redeploy kept running the OLD app.js:
+// its WebSocket reconnects to the new server and nothing reloads the page. Every auth_ok
+// carries the server's frontend id; when it differs from ours a small banner offers a
+// reload. Never reloads by itself (unsent input, an unlocked vault); × hides it until the
+// next (re)connect. An older server (no id) or an unsubstituted copy shows nothing.
+function _checkFrontendId(id){
+  try{
+    if(_ubReloading) return;   // an update reload is under way: its banner stays as it is
+    const mine=CRYPTIRC_ASSETS;
+    if(!id||typeof id!=='string'||!mine||mine.charAt(0)==='_') return;
+    if(id===mine){ const b=document.getElementById('update-banner'); if(b) b.remove(); return; }
+    _showUpdateBanner();
+  }catch(_){}
+}
+function _showUpdateBanner(){
+  if(_ubReloading) return;
+  let b=document.getElementById('update-banner');
+  if(!b){
+    b=document.createElement('div'); b.id='update-banner'; b.setAttribute('role','status');
+    b.style.cssText='position:fixed;top:max(8px,env(safe-area-inset-top));left:0;right:0;margin:0 auto;width:max-content;z-index:9000;display:flex;align-items:center;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;padding:6px 6px 6px 14px;background:var(--bg2);color:var(--text);border:1px solid var(--accent);border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.35);font-size:13px;line-height:1.3';
+    document.body.appendChild(b);
+  }
+  _ubFill(b,'CryptIRC was updated —',[['Reload',()=>_reloadForUpdate(false),1]]);
+  b.style.display='flex';
+}
+// The banner's content: a text and its buttons ([label, handler, primary]), then the ×.
+function _ubFill(b,text,btns){
+  b.innerHTML='';
+  const t=document.createElement('span'); t.className='ub-text'; t.textContent=text; b.appendChild(t);
+  for(const [label,fn,primary] of btns){
+    const x=document.createElement('button'); x.type='button'; x.className=primary?'ub-reload':'ub-wait'; x.textContent=label;
+    x.style.cssText=primary?'background:var(--accent);color:#fff;border:none;border-radius:7px;padding:6px 14px;min-height:32px;font:inherit;font-weight:600;cursor:pointer;white-space:nowrap'
+      :'background:none;border:1px solid var(--border);color:var(--text);border-radius:7px;padding:6px 12px;min-height:32px;font:inherit;cursor:pointer;white-space:nowrap';
+    x.onclick=fn; b.appendChild(x);
+  }
+  const c=document.createElement('button'); c.type='button'; c.className='ub-close'; c.textContent='×';
+  c.setAttribute('aria-label','Dismiss'); c.title='Dismiss (it comes back after the next reconnect)';
+  c.style.cssText='background:none;border:none;color:var(--text3);font-size:18px;line-height:1;min-width:32px;min-height:32px;cursor:pointer';
+  c.onclick=()=>{ b.style.display='none'; }; b.appendChild(c);
+}
+// Lines still waiting in the send queue (offline, waiting for the E2E check or the unlock):
+// they live only in this page's memory. One per row (an encrypted line's pieces = one).
+function _pendingSendCount(){
+  const rows=new Set(); let n=0;
+  for(const p of _rateQueue){ const m=_rateRows.get(p); if(!m) n++; else if(!rows.has(m)){ rows.add(m); n++; } }
+  return n;
+}
+// The service worker already serves the page and the app scripts network-first (and the
+// server sends them no-store), so a plain reload gets the new files. For an older worker:
+// drop CryptIRC's app-shell caches first and let the worker update itself (bounded — a slow
+// update never holds up the reload).
+// Unsent work is never dropped silently. Lines still queued, a Password Safe change still
+// waiting for its merge-then-save, or text in the input box: Reload asks first ("Reload
+// anyway" / "Wait"). A pending notepad autosave is sent at once; a Password Safe save in
+// flight gets the same bounded wait. The input text is kept for the reload (this tab's
+// sessionStorage, taken right before navigating — the input is read-only meanwhile) and put
+// back when its conversation is open again. Queued lines and held E2E lines are never
+// written to storage.
+// An update reload is under way (the banner shows "Reloading…"): a reconnect's auth_ok
+// leaves the banner alone meanwhile (no live buttons that could not stop the reload).
+var _ubReloading=false;
+// What the reload would lose. `cross`: the typed text belongs to a reply armed for ANOTHER
+// conversation (the split pane) — not kept: restored without that reply's guard it would go
+// to the active one. `noStore`: the browser refused to store the typed text.
+function _reloadAskText(o){
+  const it=[];
+  if(o.n) it.push(`${o.n} message${o.n===1?' hasn’t':'s haven’t'} been sent yet`);
+  if(o.pw) it.push('a Password Safe change isn’t saved yet');
+  if(o.np) it.push('a notepad change couldn’t be saved (not connected)');
+  if(o.npu) it.push('the notepad has text that hasn’t been saved (its saved notes never loaded, so it is not sent)');
+  if(o.draft&&o.cross) it.push(`the reply you are typing for ${o.cross} can’t be kept`);
+  if(o.draft&&!o.cross&&o.noStore) it.push('the text you are typing can’t be kept (the browser refused to store it)');
+  if(!it.length) return 'Reload now? The text you are typing is kept.';
+  return `${it.join(' and ')} — reloading now loses ${(o.n>1||it.length>1)?'them':'it'}.${o.draft&&!o.cross&&!o.noStore?' Your typed text is kept.':''}`;
+}
+// `acc`: the losses the question just answered with "Reload anyway" named ({notepad, draftLost}).
+async function _reloadForUpdate(force,acc){
+  acc=acc||{};
+  const inp=document.getElementById('msg-input');
+  const draftOf=()=>inp&&inp.value&&inp.value.trim()?inp.value:'';
+  const pwDirty=()=>typeof _pwSafeDirty!=='undefined'&&!!_pwSafeDirty;
+  const crossReply=()=>(typeof _replyTo!=='undefined'&&_replyTo&&active&&_replyKey(_replyTo.conn_id,_replyTo.target)!==_replyKey(active.conn_id,active.target))?_replyTo.target:'';
+  const np=()=>document.getElementById('notepad-area');
+  // a notepad edit whose save did not go out (no autosave pending any more)
+  const npFailed=()=>!!np()&&_notepadLoaded&&_notepadEdited&&!_notepadSaveTimer;
+  // text typed into a notepad whose load never arrived: never sent (it could overwrite notes
+  // the user never saw) — so it is unsaved work the reload would lose
+  const npUnloaded=()=>!!np()&&_notepadEdited&&!_notepadLoaded;
+  // Each question is built fresh and "Reload anyway" accepts exactly the losses it names.
+  const ask=(extra)=>{ const bb=document.getElementById('update-banner'); if(!bb) return false;
+    const o=Object.assign({n:_pendingSendCount(),pw:pwDirty(),np:npFailed(),npu:npUnloaded(),draft:draftOf(),cross:crossReply()},extra||{});
+    const next={notepad:!!(o.np||o.npu),draftLost:!!(o.draft&&!o.cross&&o.noStore)};
+    _ubFill(bb,_reloadAskText(o),[['Reload anyway',()=>_reloadForUpdate(true,next),1],['Wait',()=>_showUpdateBanner(),0]]); return true; };
+  const n=_pendingSendCount(), pw=pwDirty();
+  if(!force&&(n||pw||npFailed()||npUnloaded()||draftOf())&&ask()) return;
+  // From here the reload runs: no button can pretend to postpone it (Wait / × disabled, and a
+  // reconnect leaves the banner alone), and nothing can be typed that the reload would lose
+  // (input and notepad read-only).
+  _ubReloading=true;
+  const b=document.getElementById('update-banner');
+  if(b) for(const x of b.querySelectorAll('button')) x.disabled=true;
+  const btn=document.querySelector('#update-banner .ub-reload'); if(btn) btn.textContent='Reloading…';
+  const setRO=(ro)=>{ if(inp) inp.readOnly=ro; const t=np(); if(t) t.readOnly=ro; };
+  setRO(true);
+  // A pending (or earlier failed) notepad save goes out now, and is retried right before
+  // navigating; whether it went out is what wsend says.
+  const flushNotepad=()=>{ try{ const ta=np(); if(!ta||!_notepadLoaded||!_notepadEdited) return true; clearTimeout(_notepadSaveTimer); _notepadSaveTimer=null; if(wsend({type:'save_notepad',content:ta.value})===false) return false; _notepadEdited=false; return true; }catch(_){ return false; } };
+  flushNotepad();
+  try{ for(const k of await caches.keys()) if(typeof k==='string'&&/^cryptirc-v/.test(k)) await caches.delete(k); }catch(_){}
+  try{
+    const r=navigator.serviceWorker&&await navigator.serviceWorker.getRegistration('/cryptirc/');
+    const pwWait=new Promise(res=>{ const t0=Date.now(); (function w(){ if(!pwDirty()||Date.now()-t0>3000) return res(); setTimeout(w,100); })(); });
+    await Promise.race([Promise.all([r?r.update().catch(()=>{}):null,pwWait]),new Promise(res=>setTimeout(res,3000))]);
+  }catch(_){}
+  // Not silently, after all: back to the question (editing allowed again).
+  const abort=(extra)=>{ _ubReloading=false; setRO(false); ask(extra); };
+  // more unsent work than when Reload was confirmed (lines queued meanwhile)
+  if(_pendingSendCount()>n||(!pw&&pwDirty())){ abort(); return; }
+  // the notepad save still did not go out (not connected)
+  if((!flushNotepad()||npUnloaded())&&!acc.notepad){ abort(); return; }
+  const draft=draftOf();
+  if(draft&&active&&!crossReply()&&!acc.draftLost){
+    try{ sessionStorage.setItem('cryptirc_reload_draft',JSON.stringify({k:bk(active.conn_id,active.target),v:draft,t:Date.now()})); }
+    catch(_){ abort({noStore:true}); return; }   // e.g. storage full: the text would be lost
+  }
+  window._updateReloading=true;   // a detached window does not say "bye" to the main window for this reload
+  // A detached window's own URL (?detached=1&conn=…&target=…) is cleaned right after it
+  // opens (the notification-click parameter cleanup), so a plain reload would turn it into
+  // a full client window: reopen it as the detached window it is.
+  if(typeof _detMode!=='undefined'&&_detMode&&_detConn&&_detTarget){ location.replace('/cryptirc/?detached=1&conn='+encodeURIComponent(_detConn)+'&target='+encodeURIComponent(_detTarget)); return; }
+  location.reload();
+}
+// The text that was in the input box when the update reload was clicked (see above). It
+// stays in this tab's sessionStorage until it is actually put back — into the input of ITS
+// conversation (never another one), when that input is empty — on startup or when the
+// conversation is opened (_restoreReloadDraft). Older than a day: dropped.
+var _reloadDraft=null;
+try{
+  const _rd=sessionStorage.getItem('cryptirc_reload_draft');
+  if(_rd){ const d=JSON.parse(_rd); if(d&&typeof d.k==='string'&&typeof d.v==='string'&&!(Date.now()-(+d.t||0)>86400000)) _reloadDraft=d; else sessionStorage.removeItem('cryptirc_reload_draft'); }
+}catch(_){ _reloadDraft=null; }
+function _restoreReloadDraft(conn_id,target){
+  if(!_reloadDraft||_reloadDraft.k!==bk(conn_id,target)) return;
+  const i=document.getElementById('msg-input'); if(!i||i.value) return;   // not empty: kept for later
+  i.value=_reloadDraft.v; _reloadDraft=null;
+  try{ sessionStorage.removeItem('cryptirc_reload_draft'); }catch(_){}
+}
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
   {version:'0.5.7', date:'October 2026', items:[
@@ -15992,7 +18819,7 @@ async function showAdminPanel(){
       const row=document.createElement('div');
       row.className='adm-u'; row.dataset.username=u.username;
       const dot=u.sessions>0?'var(--join)':'var(--text3)';
-      const badges=(u.admin?'<span class="adm-bdg adm">admin</span>':'')+(u.verified?'':'<span class="adm-bdg unv">unverified</span>');
+      const badges=(u.admin?'<span class="adm-bdg adm">admin</span>':'')+(u.disabled?'<span class="adm-bdg unv">disabled</span>':(u.verified?'':'<span class="adm-bdg unv">unverified</span>'));
       row.innerHTML=`<span class="dot" style="background:${dot}"></span><span class="nm">${esc(u.username)}${badges}</span><span class="ses">${u.sessions>0?(u.sessions+' online'):'offline'}</span><span class="chev">›</span>`;
       roster.appendChild(row);
     }
@@ -16040,6 +18867,7 @@ function showUserDetail(uname){
         case 'setemail': adminSetUserEmail(un); break;
         case 'upload': adminToggleUpload(un, btn.dataset.val==='true'); break;
         case 'disable': adminDisableUser(un); break;
+        case 'enable': adminEnableUser(un); break;
         case 'delete': adminDeleteUser(un); break;
       }
     });
@@ -16064,17 +18892,17 @@ function renderUserDetail(u){
     </div>
     <dl class="adm-grid">
       <dt>Role</dt><dd>${u.admin?'Admin 👑':'Member'}</dd>
-      <dt>Status</dt><dd style="color:${u.verified?'var(--accent)':'var(--warn)'}">${u.verified?'Verified':'Unverified'}</dd>
+      <dt>Status</dt><dd style="color:${u.disabled?'var(--error)':(u.verified?'var(--accent)':'var(--warn)')}">${u.disabled?'Disabled (login blocked by an admin)':(u.verified?'Verified':'Unverified')}</dd>
       <dt>Email</dt><dd>${u.email?esc(u.email):'<span style="color:var(--text3)">none on file</span>'}</dd>
       <dt>Signed up</dt><dd>${fmt(u.created_at)}</dd>
       <dt>Last login</dt><dd>${u.last_login?fmt(u.last_login):'<span style="color:var(--text3)">never</span>'}</dd>
       <dt>Uploads</dt><dd>${uploads}</dd>
     </dl>
     <div class="adm-acts">
-      ${u.verified?'':'<button class="ok" data-act="approve">✓ Approve account</button>'}
+      ${u.disabled?'<button class="ok" data-act="enable">✓ Enable login</button>':(u.verified?'':'<button class="ok" data-act="approve">✓ Approve account</button>')}
       <button data-act="setemail">✉ ${u.email?'Edit email':'Set email'}</button>
       ${u.admin?'':`<button data-act="upload" data-val="${!u.can_upload}">📎 ${u.can_upload?'Revoke uploads':'Allow uploads'}</button>`}
-      ${u.admin?'':'<button class="warn" data-act="disable">⊘ Disable login</button>'}
+      ${(u.admin||u.disabled)?'':'<button class="warn" data-act="disable">⊘ Disable login</button>'}
       ${u.admin?'':'<button class="bad" data-act="delete">🗑 Delete account</button>'}
     </div>`;
 }
@@ -16101,11 +18929,15 @@ const _BOT_CMDS={weather:'/w',ud:'/ud',wiki:'/wiki',define:'/define or /dict',cr
 // "netid␟#chan" (one channel), "netid" (all channels on a network), or empty = all
 // networks/channels. Reads live from the `networks` global (the user's connections).
 function _botScopeHtml(key,def){
-  const scope=(def.channels||[]);
+  const scope=(def.channels||[]).map(String);
   const isAll=scope.length===0;
-  const has=v=>scope.includes(v);
+  // Channel names are case-insensitive server-side (scope_matches), so match them so here.
+  const lc=v=>String(v).toLowerCase();
+  const scopeLc=new Set(scope.map(lc)), shown=new Set();
+  const has=v=>{ shown.add(lc(v)); return scopeLc.has(lc(v)); };
   const nets=(typeof networks!=='undefined'?networks:[]).filter(n=>n&&n.config);
-  const tree=nets.map(net=>{
+  const netLabel=id=>{ const n=nets.find(x=>String(x.config.id)===String(id)); return n?(n.config.label||n.config.server||id):null; };
+  let tree=nets.map(net=>{
     const nid=net.config.id, nlabel=net.config.label||net.config.server||nid;
     const chans=(net.channels||[]).filter(c=>c&&c.name&&/^[#&+!]/.test(c.name));
     const chRows=chans.map(c=>{
@@ -16116,7 +18948,17 @@ function _botScopeHtml(key,def){
       <label class="bot-sc-nethdr"><input type="checkbox" data-bot-scope="${key}" value="${esc(nid)}" ${has(nid)?'checked':''}> <b>${esc(nlabel)}</b> <span class="bot-sc-dim">— all channels</span></label>
       <div class="bot-sc-chans">${chRows}</div>
     </div>`;
-  }).join('')||`<div class="bot-sc-empty">Connect to a network to pick channels.</div>`;
+  }).join('');
+  // Saved scope entries with no checkbox above (a channel not joined right now, a
+  // network that is gone, or a pre-picker "#chan" entry): list them, still ticked, so
+  // a save keeps them instead of silently dropping them (and turning the scope into
+  // "every channel" once nothing else was ticked).
+  const extra=scope.filter(v=>!shown.has(lc(v)));
+  if(extra.length){
+    const label=v=>{ const i=v.indexOf('\x1f'); if(i>=0) return (netLabel(v.slice(0,i))||'removed network')+' '+v.slice(i+1); if(/^[#&+!]/.test(v)) return v+' (any network)'; return (netLabel(v)||'removed network')+' — all channels'; };
+    tree+=`<div class="bot-sc-net"><div class="bot-sc-dim" style="margin:2px 0 4px">Saved — not joined right now</div><div class="bot-sc-chans">${extra.map(v=>`<label class="bot-sc-chan"><input type="checkbox" data-bot-scope="${key}" value="${esc(v)}" checked> ${esc(label(v))}</label>`).join('')}</div></div>`;
+  }
+  if(!tree) tree=`<div class="bot-sc-empty">Connect to a network to pick channels.</div>`;
   return `
     <div class="adm-row"><span class="l">Channels</span>
       <label class="bot-sc-all"><input type="checkbox" data-bot-allchans="${key}" ${isAll?'checked':''} onchange="_botToggleAllChans('${key}',this)"> All channels</label>
@@ -16264,8 +19106,8 @@ function _readAiDef(){
   const val=k=>{const e=g(k);return e?(e.value||''):'';};
   const on=k=>{const e=g(k);return !!(e&&e.classList&&e.classList.contains('on'));};
   const list=v=>(v||'').split(',').map(s=>s.trim()).filter(Boolean);
-  const allc=document.querySelector('[data-bot-allchans="ai"]');
-  const channels=(allc&&allc.checked)?[]:[...document.querySelectorAll('[data-bot-scope="ai"]:checked')].map(cb=>cb.value);
+  const channels=_botScopeRead('ai');
+  const hist=parseInt(val('history_minutes'),10);
   return {
     enabled: on('enabled'),
     trigger: val('trigger').trim(),
@@ -16277,7 +19119,8 @@ function _readAiDef(){
     commands_enabled: on('commands_enabled'),
     commands_yolo: on('commands_yolo'),
     full_context: on('full_context'),
-    history_minutes: Math.max(0,Math.min(1440, parseInt(val('history_minutes'),10)||60)),
+    // 0 = history off (the backend skips recording/retrieval) — `||60` turned it into an hour.
+    history_minutes: Math.max(0,Math.min(1440, Number.isFinite(hist)?hist:60)),
     context: val('context'),
     access: val('access'),
     allow_nicks: list(val('allow_nicks')),
@@ -16327,8 +19170,7 @@ function _iplogCard(ip){
 }
 function _readIplog(){
   const on=document.querySelector('[data-ip="enabled"]');
-  const allc=document.querySelector('[data-bot-allchans="ip"]');
-  const channels=(allc&&allc.checked)?[]:[...document.querySelectorAll('[data-bot-scope="ip"]:checked')].map(cb=>cb.value);
+  const channels=_botScopeRead('ip');
   return { enabled:!!(on&&on.classList.contains('on')), channels };
 }
 function _readEnforce(){
@@ -16337,8 +19179,7 @@ function _readEnforce(){
   const list=k=>{const e=g(k);return ((e&&e.value)||'').split(',').map(s=>s.trim()).filter(Boolean);};
   const num=(k,d)=>{const e=g(k);const v=e?parseInt(e.value):NaN;return isNaN(v)?d:v;};
   const sel=k=>{const e=g(k);return (e&&e.value)||'';};
-  const allc=document.querySelector('[data-bot-allchans="en"]');
-  const channels=(allc&&allc.checked)?[]:[...document.querySelectorAll('[data-bot-scope="en"]:checked')].map(cb=>cb.value);
+  const channels=_botScopeRead('en');
   return { enabled:on('enabled'), autoop:list('autoop'), autovoice:list('autovoice'), channels,
     flood_enabled:on('flood_enabled'), flood_lines:num('flood_lines',5), flood_window:num('flood_window',5),
     badword_enabled:on('badword_enabled'), badwords:list('badwords'), action:sel('action')||'kick', exempt:list('exempt') };
@@ -16346,10 +19187,7 @@ function _readEnforce(){
 function _readBotDef(key){
   const g=s=>document.querySelector(`[data-bot-${s}="${key}"]`);
   const list=v=>(v||'').split(',').map(s=>s.trim()).filter(Boolean);
-  // Channel scope: "All channels" checked → [] (everywhere); else the ticked
-  // network/channel checkbox values (netid or netid␟#chan).
-  const allc=document.querySelector(`[data-bot-allchans="${key}"]`);
-  const channels=(allc&&allc.checked)?[]:[...document.querySelectorAll(`[data-bot-scope="${key}"]:checked`)].map(cb=>cb.value);
+  const channels=_botScopeRead(key);
   const on=s=>{const e=g(s);return !!(e&&e.classList&&e.classList.contains('on'));};
   const val=s=>{const e=g(s);return e?(e.value||''):'';};
   return {
@@ -16364,7 +19202,20 @@ function _readBotDef(key){
     channels,
   };
 }
+// Channel scope: "All channels" ticked → [] (the backend's "everywhere"); otherwise the
+// ticked network/channel values (netid or netid␟#chan). Nothing ticked with "All
+// channels" off must NOT be saved as [] — that is "every channel on every network" —
+// so saveBotConfig collects those cards (_botScopeEmpty) and refuses to save.
+let _botScopeEmpty=null;
+function _botScopeRead(key){
+  const allc=document.querySelector(`[data-bot-allchans="${key}"]`);
+  if(!allc||allc.checked) return [];
+  const ch=[...document.querySelectorAll(`[data-bot-scope="${key}"]:checked`)].map(cb=>cb.value);
+  if(!ch.length && _botScopeEmpty) _botScopeEmpty.push(key);
+  return ch;
+}
 function saveBotConfig(){
+  _botScopeEmpty=[];
   try{
   const cfg={
     enabled: document.getElementById('bot-master').classList.contains('on'),
@@ -16390,6 +19241,14 @@ function saveBotConfig(){
     ai:        _readAiDef(),
     enforce:   _readEnforce(),
   };
+  const empty=_botScopeEmpty||[];
+  if(empty.length){
+    const cards=empty.map(k=>document.querySelector(`[data-bot-allchans="${k}"]`)?.closest('.adm-card')).filter(Boolean);
+    const names=empty.map((k,i)=>{ const t=cards[i]?.querySelector('.adm-ct')?.textContent||k; return t.replace(/^[^\p{L}\p{N}]+/u,'').split(/\s+—\s+/)[0].trim(); });
+    try{ if(cards[0]) cards[0].scrollIntoView({block:'center',behavior:'smooth'}); }catch(_){}
+    showToast('Bots NOT saved — no channels selected for: '+names.join(', ')+'. Tick at least one channel, or “All channels”.');
+    return;
+  }
   wsend({type:'save_bot_config', config:JSON.stringify(cfg)});
   showToast('Bots saved');
   }catch(e){
@@ -16398,7 +19257,7 @@ function saveBotConfig(){
     // when nothing was sent at all.
     console.error('saveBotConfig failed:',e);
     showToast('Could not save bots — '+(e&&e.message?e.message:'unexpected error'));
-  }
+  }finally{ _botScopeEmpty=null; }
 }
 
 async function adminSaveSettings(){
@@ -16413,26 +19272,32 @@ async function adminSaveSettings(){
     if(uploadMb!==undefined) payload.max_upload_mb=uploadMb;
     if(emailReqEl) payload.email_required=emailReqEl.classList.contains('on');
     if(captchaEl) payload.captcha_enabled=captchaEl.classList.contains('on');
-    await fetch('/cryptirc/admin/settings',{
+    const r=await fetch('/cryptirc/admin/settings',{
       method:'PUT',
       headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
       body:JSON.stringify(payload)
     });
-    showToast('Admin settings saved');
-  }catch(e){}
+    // Check the status: a 4xx/5xx used to show "saved" anyway.
+    showToast(r.ok?'Admin settings saved':await _adminFailMsg(r,'Admin settings not saved'));
+  }catch(e){showToast('Admin settings not saved — network error');}
+}
+// Readable failure toast text for an admin request (tolerates non-JSON bodies).
+async function _adminFailMsg(r,what){
+  let m=''; try{ const d=await r.json(); m=d&&(d.message||d.error)||''; }catch(_){}
+  return what+' — '+(m||('HTTP '+r.status));
 }
 async function adminSaveLinkPreview(){
   const mode=document.getElementById('admin-lp-mode').value;
   const whitelist=document.getElementById('admin-lp-whitelist').value
     .split('\n').map(s=>s.trim().toLowerCase()).filter(s=>s.length>0);
   try{
-    await fetch('/cryptirc/admin/link-preview',{
+    const r=await fetch('/cryptirc/admin/link-preview',{
       method:'PUT',
       headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
       body:JSON.stringify({mode,whitelist})
     });
-    showToast('Link preview settings saved');
-  }catch(e){}
+    showToast(r.ok?'Link preview settings saved':await _adminFailMsg(r,'Link preview settings not saved'));
+  }catch(e){showToast('Link preview settings not saved — network error');}
 }
 async function adminSaveGif(){
   const provider=document.getElementById('admin-gif-provider')?.value;
@@ -16502,10 +19367,22 @@ async function adminApproveUser(username){
 async function adminDisableUser(username){
   if(!(await customConfirm(`Disable user "${username}"? They won't be able to log in.`,'Disable')))return;
   try{
-    await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}/disable`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
+    const r=await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}/disable`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
+    if(!r.ok){showToast(await _adminFailMsg(r,`Could not disable ${username}`));return;}
     showToast(`${username} disabled`);
     showAdminPanel();
-  }catch(e){}
+  }catch(e){showToast(`Could not disable ${username} — network error`);}
+}
+
+// Lift an admin Disable. The server's /approve route clears the disabled flag AND verifies
+// (auth.rs approve_user == enable_user), so no separate route is needed.
+async function adminEnableUser(username){
+  if(!(await customConfirm(`Enable "${username}"? This lifts the ban — they can sign in again with their existing password.`,'Enable')))return;
+  try{
+    const r=await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}/approve`,{method:'POST',headers:{'Authorization':'Bearer '+sessionToken}});
+    if(r.ok){showToast(`${username} enabled`);showAdminPanel();}
+    else{showToast('Failed to enable user');}
+  }catch(e){showToast('Failed to enable user');}
 }
 
 async function adminToggleUpload(username,allow){
@@ -16545,10 +19422,11 @@ async function adminDeleteUser(username){
   if(!(await customConfirm(`DELETE user "${username}"? This removes all their data permanently.`,'Delete')))return;
   if(!(await customConfirm(`Are you SURE? This cannot be undone.`,'Yes, delete')))return;
   try{
-    await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}`,{method:'DELETE',headers:{'Authorization':'Bearer '+sessionToken}});
+    const r=await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}`,{method:'DELETE',headers:{'Authorization':'Bearer '+sessionToken}});
+    if(!r.ok){showToast(await _adminFailMsg(r,`Could not delete ${username}`));if(r.status===404)showAdminPanel();return;}
     showToast(`${username} deleted`);
     showAdminPanel();
-  }catch(e){}
+  }catch(e){showToast(`Could not delete ${username} — network error`);}
 }
 
 function showHelp(conn_id, target, specific) {
@@ -16956,9 +19834,11 @@ function _releaseNoticePointer(){
 window.addEventListener('pointerup',_releaseNoticePointer);
 window.addEventListener('pointercancel',_releaseNoticePointer);
 try{mentionsList=JSON.parse(localStorage.getItem('cryptirc_mentions')||'[]');}catch(e){}
-function saveMentions(){try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));localStorage.setItem('cryptirc_mentions_ts',String(Date.now()));}catch(e){} savePrefsToServer();}
+// `low`: an entry recorded from incoming traffic (background save); a clear/dismiss
+// is a user change and saves normally.
+function saveMentions(low){try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));localStorage.setItem('cryptirc_mentions_ts',String(Date.now()));}catch(e){} savePrefsToServer(low===true);}
 function getHighlightWords(){try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}}
-function checkMention(conn_id,target,from,text,ts,record,id){
+function checkMention(conn_id,target,from,text,ts,record,id,enc){
   // B2: `record` (default true) gates the SIDE EFFECT (adding to the Mentions inbox +
   // raising the badge). Replayed ring history / ZNC playback pass record=false so an
   // already-seen mention isn't re-injected + the badge isn't falsely re-raised on every
@@ -16969,7 +19849,11 @@ function checkMention(conn_id,target,from,text,ts,record,id){
   const t=text.toLowerCase();
   const n=nick.toLowerCase();
   let mentioned=false;
-  if(n&&t.includes(n)){const re=new RegExp('\\b'+n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\b','i');if(re.test(text))mentioned=true;}
+  // Whole-word match bounded by non-letter/digit/_ on BOTH sides (lookarounds, not
+  // \b: \b needs a word char next to the boundary, so nicks that start/end with
+  // ` [ ] ^ | { } never matched). Same boundary rule as the server's
+  // text_mentions_nick, so in-app highlights and push agree.
+  if(n&&t.includes(n)){const re=new RegExp('(?<![\\p{L}\\p{N}_])'+n.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?![\\p{L}\\p{N}_])','iu');if(re.test(text))mentioned=true;}
   if(!mentioned){const words=getHighlightWords();for(const w of words){if(w&&t.includes(w.toLowerCase()))mentioned=true;}}
   // Only channel mentions enter the Notices list. PMs are recorded separately
   // via addPmNotice (one entry per sender) to avoid duplicate rows.
@@ -16978,9 +19862,11 @@ function checkMention(conn_id,target,from,text,ts,record,id){
   // badge — muting means no alert of any kind for that channel.
   if(mentioned && isChan && !_isOwnMsg(conn_id,{from}) && !_isBufMuted(conn_id,target) && record){
     const net=networks.find(x=>x.config.id===conn_id);
-    mentionsList.unshift({type:'mention',conn_id,target,from,text,ts,id:id||0,network:net?.config.label||net?.config.server||conn_id});
+    const _me={type:'mention',conn_id,target,from,text,ts,id:id||0,network:net?.config.label||net?.config.server||conn_id};
+    if(enc) _me.enc=true;   // decrypted E2E text: hidden in the synced copy (_scrubE2eForSync)
+    mentionsList.unshift(_me);
     if(mentionsList.length>100)mentionsList.length=100;
-    saveMentions(); updateMentionsBadge();
+    saveMentions(true); updateMentionsBadge();
   }
   return mentioned;
 }
@@ -16994,9 +19880,11 @@ function addPmNotice(conn_id,from,msg){
     mentionsList.splice(i,1);
   }
   const net=networks.find(x=>x.config.id===conn_id);
-  mentionsList.unshift({type:'pm',conn_id,target:from,from,text:msg.text||'',ts:msg.ts,id:msg.id||0,network:net?.config.label||net?.config.server||conn_id});
+  const _pe={type:'pm',conn_id,target:from,from,text:msg.text||'',ts:msg.ts,id:msg.id||0,network:net?.config.label||net?.config.server||conn_id};
+  if(msg.encrypted) _pe.enc=true;
+  mentionsList.unshift(_pe);
   if(mentionsList.length>100)mentionsList.length=100;
-  saveMentions(); updateMentionsBadge();
+  saveMentions(true); updateMentionsBadge();
 }
 function clearNoticesForTarget(conn_id,target){
   if(!target)return;
@@ -17054,16 +19942,64 @@ function doSearch(query){
   // matches. Track the in-flight request so a stale/late response (user typed a
   // newer query or switched channel) is discarded when it arrives.
   const sConn=active.conn_id, sTarget=active.target;
-  window._searchReq={conn_id:sConn,target:sTarget,query};
+  // The user "status"'s conversation lives in the shared "status" log (see _STATUS_NICK_Q).
+  const wire=sTarget===_STATUS_NICK_Q?'status':sTarget;
+  window._searchReq={conn_id:sConn,target:sTarget,query,wire};
+  // r3 (codex-p3 MED app.js:18996): never send the search words to the server for an
+  // end-to-end encrypted conversation — search what this device has loaded instead.
+  const why=_searchLocalOnly(sTarget,sConn);
+  if(why){ _searchLocal(sConn,sTarget,query,why); return; }
   el.innerHTML='<div class="search-empty">Searching…</div>';
   // No `limit` → server returns EVERY match across the channel/chat's full history.
-  wsend({type:'search_logs',conn_id:sConn,target:sTarget,query});
+  wsend({type:'search_logs',conn_id:sConn,target:wire,query});
 }
-async function renderSearchResults(conn_id,target,query,results){
+// Why `target` must be searched on this device only ('' = the server may search it):
+// E2E on / listed / held for it, or its E2E status not known yet (fail closed). The
+// server only holds ciphertext for its encrypted lines, so a server search could not
+// find them anyway — but it would learn the search words.
+function _searchLocalOnly(target,conn_id){
+  // r5 (codex-p3 app.js:19573): without the E2E engine nothing tells which conversations
+  // are encrypted — never send the words (it used to return '' here = server search).
+  if(!_e2eEngineOk()) return 'noengine';
+  if(target==='status') return '';   // status window = server output
+  try{
+    if(_isE2eConversation(target)) return 'e2e';
+    const st=e2eTargetState(target,conn_id?{conn_id}:null);   // r3/e2e merge: this network's case rules
+    return st&&st.mode!=='none' ? (/not known yet|still loading/i.test(st.reason||'')?'unknown':'e2e') : '';
+  }catch(_){ return 'e2e'; }
+}
+function _searchLocal(conn_id,target,query,why){
+  const q=String(query).trim().toLowerCase();
+  const hits=[];
+  if(q.length>=2) for(const m of getBuf(conn_id,target)){
+    if(!m||typeof m.text!=='string'||m.kind==='system'||m.kind==='error') continue;
+    if(/^(sd8~|\[e2edm2\]|\[e2ex3dh\])/.test(m.text)) continue;   // still ciphertext
+    if(m.text.toLowerCase().includes(q)) hits.push(m);
+  }
+  renderSearchResults(conn_id,target,query,hits.slice(-500),{local:why||'e2e'});
+}
+function _highlightQuery(text,query){
+  text=String(text==null?'':text);
+  const q=String(query||'');
+  if(!q) return esc(text);
+  const re=new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi');
+  let out='',last=0,mm;
+  while((mm=re.exec(text))){
+    if(!mm[0].length){ re.lastIndex++; continue; }
+    out+=esc(text.slice(last,mm.index))+'<mark>'+esc(mm[0])+'</mark>';
+    last=mm.index+mm[0].length;
+  }
+  return out+esc(text.slice(last));
+}
+async function renderSearchResults(conn_id,target,query,results,opts){
   const el=document.getElementById('search-results');
   if(!el)return;
-  if(!results||!results.length){el.innerHTML='<div class="search-empty">No results found</div>';return;}
-  results=await _decryptLogLines(target,results); // sd8~ search hits are ciphertext on disk — decrypt before display
+  // r3: an E2E conversation was searched on this device only (see _searchLocal) — say so.
+  const local=opts&&opts.local;
+  const note=()=>{ const n=document.createElement('div'); n.className='search-empty'; n.style.cssText='padding:6px 10px;color:var(--text3);font-size:11px;line-height:1.4';
+    n.textContent=(local==='noengine'?'🔒 The encryption engine failed to load (reload the page), so this conversation':local==='unknown'?'🔒 Encryption status of this conversation is not known yet, so it':'🔒 End-to-end encrypted conversation: it')+' was searched on this device only, in the messages loaded here. Your search was not sent to the server (it cannot read encrypted messages). Load older messages to search further back.'; return n; };
+  if(!results||!results.length){el.innerHTML=`<div class="search-empty">${local?'No results in the messages loaded on this device':'No results found'}</div>`; if(local) el.appendChild(note()); return;}
+  results=await _decryptLogLines(target,results,conn_id); // sd8~ search hits are ciphertext on disk — decrypt before display
   // Drop stale results: if the user switched channel/query during the async decrypt,
   // a slower older response must not overwrite the current view.
   { const sr=window._searchReq; if(!sr||sr.conn_id!==conn_id||sr.target!==target||sr.query!==query) return; }
@@ -17072,14 +20008,17 @@ async function renderSearchResults(conn_id,target,query,results){
   const hdr=document.createElement('div');
   hdr.className='search-empty';
   hdr.style.cssText='padding:6px 10px;color:var(--text3);font-size:11px';
-  hdr.textContent=`${results.length} result${results.length===1?'':'s'} across all history`;
+  hdr.textContent=local?`${results.length} result${results.length===1?'':'s'} in the messages loaded on this device`:`${results.length} result${results.length===1?'':'s'} across all history`;
   el.appendChild(hdr);
+  if(local) el.appendChild(note());
   // Server returns chronological (oldest→newest); show newest first.
   for(let i=results.length-1;i>=0;i--){
     const m=results[i];
     const d=document.createElement('div');d.className='search-result';
     const time=new Date(m.ts*1000).toLocaleString([],{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
-    const highlighted=esc(m.text).replace(new RegExp('('+esc(query).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark>$1</mark>');
+    // Match on the RAW text and escape each piece: matching the query inside
+    // already-escaped HTML hit entity names ("amp", "quot", ";") and broke them.
+    const highlighted=_highlightQuery(m.text,query);
     d.innerHTML=`<div class="search-result-meta">${esc(m.from)} · ${time}</div><div class="search-result-text">${highlighted}</div>`;
     d.onclick=()=>{
       closeSearchPanel();
@@ -17150,7 +20089,9 @@ function renderMentionsList(){
     d.innerHTML=`<span class="mention-meta">${meta}</span><span class="mention-text">${esc(m.text)}</span>`;
     d.onclick=()=>{
       closeMentionsPanel();
-      const match={id:m.id||0,text:m.text,notice:true};
+      // textTrunc: this entry's text was clipped to fit the synced prefs budget, so
+      // the row lookup compares by prefix instead of exact text.
+      const match={id:m.id||0,text:m.text,notice:true,textTrunc:!!m.textTrunc};
       if(!_detMode && isDetached(m.conn_id,m.target)){
         openDetachedWindow(m.conn_id,m.target, {ts:m.ts,from:m.from,match});
         return;
@@ -17261,6 +20202,13 @@ function _mircEventText(msg){
     default: return null;
   }
 }
+// A CTCP reply arrives as NOTICE "\x01VERSION gtbot 1.0\x01": show it as
+// "CTCP VERSION reply: gtbot 1.0" instead of the raw \x01 delimiters (display only).
+function _ctcpReplyView(msg){
+  const m=/^\x01([A-Za-z0-9_-]{1,32})(?:[ ]([^\x01]*))?\x01?$/.exec(String((msg&&msg.text)||''));
+  if(!m) return msg;
+  return {...msg,text:'CTCP '+m[1].toUpperCase()+' reply'+(m[2]!=null&&m[2]!==''?': '+m[2]:'')};
+}
 function renderStatusText(msg){
   let raw=msg.text||'';
   if(document.documentElement.dataset.theme==='mirc'){ const _m=_mircEventText(msg); if(_m!=null) raw=_m; }
@@ -17277,7 +20225,7 @@ function renderStatusText(msg){
       // let the delegated body-nick listener open the menu — never interpolating
       // a nick into an inline-handler JS-string (findings #3/#9/#10). The HTML
       // parser decodes the attribute back to the real nick for dataset.nick.
-      return text.replace(re,(match)=>{return `<span class="nick-mention nc${nickHash(match)}" data-nick="${match}" style="cursor:pointer;font-weight:600">${match}</span>`;});
+      return _outsideEntities(text,run=>run.replace(re,(match)=>{return `<span class="nick-mention nc${nickHash(match)}" data-nick="${match}" style="cursor:pointer;font-weight:600">${match}</span>`;}));
     });
   }
   return highlightNicks(html);
@@ -17298,8 +20246,17 @@ function highlightNicks(html){
     // SECURITY: carry the nick in an HTML-attribute-escaped data-nick and open the
     // menu via the delegated body-nick listener instead of an inline-handler
     // JS-string (findings #3/#9/#10). `match` is already HTML-escaped here.
-    return text.replace(re,(match)=>{return `<span class="nick-mention nc${nickHash(match)}" data-nick="${match}" style="cursor:pointer;font-weight:600">${match}</span>`;});
+    return _outsideEntities(text,run=>run.replace(re,(match)=>{return `<span class="nick-mention nc${nickHash(match)}" data-nick="${match}" style="cursor:pointer;font-weight:600">${match}</span>`;}));
   });
+}
+// Run `fn` over the plain-text runs of an already HTML-escaped text segment,
+// leaving character references (&amp; &lt; &gt; &quot; &#39; …) intact. The nick
+// regexes used to match INSIDE them, so a member nicked "amp"/"gt"/"lt"/"quot"
+// split every entity (`&<span>amp</span>;`) and chat showed literal "&amp;".
+// Entity boundaries count as non-word, which is right: every entity esc() /
+// parseMircColors emit stands for a punctuation character.
+function _outsideEntities(text,fn){
+  return text.replace(/(&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]*);)|([^&]+|&)/gi,(m,ent,run)=>ent?ent:fn(run));
 }
 function linkify(s){return s.replace(/(https?:\/\/[^\s<>"]+)/g,(m,url)=>{
   // `url` arrived ALREADY HTML-escaped (parseMircColors ran first), and the match
@@ -17327,7 +20284,9 @@ function loadMonitor(){try{return JSON.parse(localStorage.getItem('cryptirc_moni
 // nick message would pollute the list-intent horizon and let status churn on one
 // device reject a genuine add/remove on another (clocks skew, flushes debounce).
 // Only the user LIST-INTENT changes below (add/remove/toggle) stamp the ts.
-function saveMonitor(m){try{localStorage.setItem('cryptirc_monitor',JSON.stringify(m));}catch(e){} savePrefsToServer();}
+// `low`: status churn driven by incoming traffic (online/last-seen/last message) — a
+// background save (see savePrefsToServer), not a user change.
+function saveMonitor(m,low){try{localStorage.setItem('cryptirc_monitor',JSON.stringify(m));}catch(e){} savePrefsToServer(low===true);}
 function _stampMonitorTs(){try{localStorage.setItem('cryptirc_monitor_ts',String(Date.now()));}catch(e){}}
 function monitorAdd(nick){
   const m=loadMonitor();
@@ -17352,7 +20311,7 @@ function isNickOnline(nick){
   }
   return {online:false};
 }
-function monitorUpdate(nick,conn_id,channel,text){
+function monitorUpdate(nick,conn_id,channel,text,enc){
   const m=loadMonitor();
   const k=nick.toLowerCase();
   if(!m[k])return;
@@ -17362,8 +20321,8 @@ function monitorUpdate(nick,conn_id,channel,text){
   m[k].online=true;
   m[k].network=net?.config.label||net?.config.server||conn_id;
   m[k].channel=channel;
-  if(text) m[k].lastMsg=text;
-  saveMonitor(m);
+  if(text){ m[k].lastMsg=text; if(enc) m[k].lastMsgEnc=true; else delete m[k].lastMsgEnc; delete m[k].lastMsgHidden; }
+  saveMonitor(m,true);
   // Alert if they just came online
   if(!wasOnline) monitorAlert(nick,'online');
 }
@@ -17376,7 +20335,7 @@ function monitorOffline(nick){
   if(check.online)return;
   const wasOnline=m[k].online;
   m[k].online=false;
-  saveMonitor(m);
+  saveMonitor(m,true);
   if(wasOnline) monitorAlert(nick,'offline');
 }
 function isMonitorNotifsOn(){
@@ -17431,7 +20390,7 @@ function monitorRefreshOnline(){
     }
     if(wasOnline!==check.online){changed=true;monitorAlert(e.nick,check.online?'online':'offline');}
   }
-  if(changed) saveMonitor(m);
+  if(changed) saveMonitor(m,true);
 }
 function showMonitorPanel(){
   try{
@@ -17521,6 +20480,7 @@ function _bindMonitorDelegation(){
   });
 }
 function monitorViewMsg(nick){
+  if(_deviceLocked) return;   // r4 (C3-3): never shown on a locked device
   const m=loadMonitor();
   const e=m[nick.toLowerCase()];
   if(!e||!e.lastMsg){showToast('No messages recorded');return;}
@@ -17540,7 +20500,7 @@ function monitorViewMsg(nick){
 }
 function monitorOpenQuery(nick){
   closeMonitorPanel();
-  if(active) setActive(active.conn_id,nick);
+  if(active) setActive(active.conn_id,_dmTarget(nick));
 }
 function monitorWhois(nick){
   closeMonitorPanel();

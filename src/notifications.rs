@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use web_push::*;
 
 /// Cap stored push subscriptions per user (#83). Each subscription is an
@@ -193,6 +193,293 @@ pub struct NotifPrefs {
     pub dnd_end: String,
     #[serde(default)]
     pub dnd_tz_offset: i64,
+    /// The client's /ignore list (lower-cased `nick` or `nick!user@host` glob masks,
+    /// same semantics as app.js isIgnored). Pushes from a matching sender are
+    /// suppressed, so an ignored user can no longer reach the lock screen while the
+    /// app is closed. Missing in older prefs files / PUT bodies → empty → no filter
+    /// (today's behaviour).
+    #[serde(default)]
+    pub ignore: Vec<String>,
+    /// Global PM Protection settings mirrored from the client (block_pms, cooldown,
+    /// deliver-first, allow list). Default = disabled → no filter.
+    #[serde(default)]
+    pub pm_protect: PmProtect,
+    /// Per-network PM Protection overrides (conn_id → settings). Only networks whose
+    /// client-side override is ON are present; others fall back to `pm_protect`.
+    #[serde(default)]
+    pub pm_protect_net: std::collections::HashMap<String, PmProtect>,
+}
+
+/// PM Protection settings as the push engine needs them. Mirrors app.js
+/// getPmSettings / isPmAllowedFor: when enabled, a DM from a sender that is not on
+/// the allow list is dropped — except (deliver_first) the first one per
+/// `cooldown_hours` window, which the client also lets through.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PmProtect {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_pm_cooldown_hours")]
+    pub cooldown_hours: u32,
+    #[serde(default = "default_true")]
+    pub deliver_first: bool,
+    /// Lower-cased nicks allowed to PM regardless of protection.
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+fn default_pm_cooldown_hours() -> u32 { 24 }
+fn default_true() -> bool { true }
+impl Default for PmProtect {
+    fn default() -> Self {
+        PmProtect { enabled: false, cooldown_hours: 24, deliver_first: true, allow: vec![] }
+    }
+}
+
+/// Body of `PUT /push/settings`. Every field is optional: a field that is absent
+/// keeps its stored value, so a device that only changes its mutes no longer
+/// overwrites the trigger/enabled/ignore settings another device saved (the old
+/// handler replaced the whole file with the sender's possibly stale cached copy).
+/// An old client that sends the full object still gets exactly today's behaviour.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct NotifPrefsPatch {
+    pub enabled:        Option<bool>,
+    pub trigger:        Option<String>,
+    pub muted_networks: Option<Vec<String>>,
+    pub muted_channels: Option<Vec<String>>,
+    pub dnd:            Option<bool>,
+    pub dnd_start:      Option<String>,
+    pub dnd_end:        Option<String>,
+    pub dnd_tz_offset:  Option<i64>,
+    pub ignore:         Option<Vec<String>>,
+    pub pm_protect:     Option<PmProtect>,
+    pub pm_protect_net: Option<std::collections::HashMap<String, PmProtect>>,
+}
+
+/// Caps on what a push-settings PUT may store. The prefs file is re-read on every
+/// candidate notification, so it must stay bounded; anything over a cap is
+/// REJECTED with a clear message (the client shows it) instead of being silently
+/// truncated or silently 413'd as before.
+const MAX_MUTED_NETWORKS: usize = 256;
+const MAX_MUTED_CHANNELS: usize = 2000;
+const MAX_IGNORE_MASKS:   usize = 500;
+const MAX_ALLOW_NICKS:    usize = 500;
+const MAX_PM_NET:         usize = 64;
+const MAX_KEY_LEN:        usize = 300;
+const MAX_MASK_LEN:       usize = 256;
+const MAX_NICK_LEN:       usize = 64;
+
+/// Why a push-settings update was refused.
+#[derive(Debug)]
+pub enum PrefsUpdateError {
+    /// The request exceeded a cap (maps to 413 with this message).
+    TooLarge(String),
+    /// Persisting failed (maps to 500).
+    Io(anyhow::Error),
+    /// r4 C1-5: the caller's session was revoked while the request waited (maps to 401).
+    SessionGone,
+}
+impl std::fmt::Display for PrefsUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrefsUpdateError::TooLarge(m) => write!(f, "{}", m),
+            PrefsUpdateError::Io(e)       => write!(f, "{}", e),
+            PrefsUpdateError::SessionGone => write!(f, "{}", SUBSCRIBE_SESSION_GONE),
+        }
+    }
+}
+
+/// r4 C1-5: the session that asked was revoked (password reset / change, disable, account
+/// deletion) before its push write could commit.
+pub const SUBSCRIBE_SESSION_GONE: &str = "Not authenticated";
+
+fn check_list(name: &str, v: &[String], max_items: usize, max_len: usize) -> std::result::Result<(), PrefsUpdateError> {
+    if v.len() > max_items {
+        return Err(PrefsUpdateError::TooLarge(format!("Too many {} ({} — max {})", name, v.len(), max_items)));
+    }
+    if v.iter().any(|s| s.len() > max_len) {
+        return Err(PrefsUpdateError::TooLarge(format!("An entry in {} is too long (max {} bytes)", name, max_len)));
+    }
+    Ok(())
+}
+
+/// Normalise a mask/nick list the way the client compares it: trimmed, lower-cased,
+/// non-empty, de-duplicated (order kept).
+fn norm_list(v: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    v.into_iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+        .collect()
+}
+
+fn norm_pm_protect(mut p: PmProtect) -> std::result::Result<PmProtect, PrefsUpdateError> {
+    check_list("PM allow-list nicks", &p.allow, MAX_ALLOW_NICKS, MAX_NICK_LEN)?;
+    p.allow = norm_list(p.allow);
+    // 0 would mean "never first again" — clamp to the client's own range (1h..1y).
+    p.cooldown_hours = p.cooldown_hours.clamp(1, 24 * 365);
+    Ok(p)
+}
+
+impl NotifPrefs {
+    /// What `GET /push/settings` returns: everything except the client-owned push
+    /// filters (ignore / PM Protection). The browser keeps those in its own synced
+    /// prefs and only ever WRITES them here; leaving them out of the GET means a
+    /// stale cached 0.5.7 app.js — which PUTs back the whole object it last GOT —
+    /// can never echo an old copy over a newer one.
+    pub fn client_view(&self) -> serde_json::Value {
+        let mut v = serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(o) = v.as_object_mut() {
+            o.remove("ignore");
+            o.remove("pm_protect");
+            o.remove("pm_protect_net");
+        }
+        v
+    }
+
+    /// Apply a validated patch: present fields replace the stored value, absent
+    /// fields are kept. Validation happens before any field is touched, so a
+    /// rejected patch leaves `self` unchanged.
+    pub fn apply_patch(&mut self, p: NotifPrefsPatch) -> std::result::Result<(), PrefsUpdateError> {
+        if let Some(v) = &p.muted_networks { check_list("muted networks", v, MAX_MUTED_NETWORKS, MAX_KEY_LEN)?; }
+        if let Some(v) = &p.muted_channels { check_list("muted channels/PMs", v, MAX_MUTED_CHANNELS, MAX_KEY_LEN)?; }
+        if let Some(v) = &p.ignore         { check_list("ignore masks", v, MAX_IGNORE_MASKS, MAX_MASK_LEN)?; }
+        if let Some(t) = &p.trigger { if t.len() > 32 { return Err(PrefsUpdateError::TooLarge("Invalid trigger".into())); } }
+        for s in [&p.dnd_start, &p.dnd_end].into_iter().flatten() {
+            if s.len() > 16 { return Err(PrefsUpdateError::TooLarge("Invalid Do Not Disturb time".into())); }
+        }
+        let pm_protect = match p.pm_protect { Some(x) => Some(norm_pm_protect(x)?), None => None };
+        let pm_protect_net = match p.pm_protect_net {
+            Some(m) => {
+                if m.len() > MAX_PM_NET {
+                    return Err(PrefsUpdateError::TooLarge(format!("Too many per-network PM Protection overrides (max {})", MAX_PM_NET)));
+                }
+                let mut out = std::collections::HashMap::new();
+                for (k, v) in m {
+                    if k.len() > MAX_KEY_LEN { return Err(PrefsUpdateError::TooLarge("Invalid network id".into())); }
+                    out.insert(k, norm_pm_protect(v)?);
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        if let Some(v) = p.enabled        { self.enabled = v; }
+        if let Some(v) = p.trigger        { self.trigger = v; }
+        if let Some(v) = p.muted_networks { self.muted_networks = v; }
+        if let Some(v) = p.muted_channels { self.muted_channels = v; }
+        if let Some(v) = p.dnd            { self.dnd = v; }
+        if let Some(v) = p.dnd_start      { self.dnd_start = v; }
+        if let Some(v) = p.dnd_end        { self.dnd_end = v; }
+        if let Some(v) = p.dnd_tz_offset  { self.dnd_tz_offset = v; }
+        if let Some(v) = p.ignore         { self.ignore = norm_list(v); }
+        if let Some(v) = pm_protect       { self.pm_protect = v; }
+        if let Some(v) = pm_protect_net   { self.pm_protect_net = v; }
+        Ok(())
+    }
+}
+
+// ─── Push filters: /ignore + PM Protection (server-side mirror of app.js) ─────
+
+/// IRC glob match (`*` = any run, `?` = any one char), case already folded by the
+/// caller. Iterative with single-star backtracking: O(len(p)·len(t)) worst case,
+/// and both inputs are length-capped (masks ≤ MAX_MASK_LEN, prefixes ≤ 512).
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (None::<usize>, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1; ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi); mark = ti; pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1; mark += 1; ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' { pi += 1; }
+    pi == p.len()
+}
+
+/// Mirrors app.js isIgnored(nick, prefix): an exact (case-insensitive) nick match,
+/// or a glob mask (one containing `!`, `@`, `*` or `?`) matched against the full
+/// `nick!user@host` prefix when known, else against the bare nick. When only the
+/// nick is known, a `nick!*@*`-style mask (all-wildcard user@host) matches on its
+/// nick part.
+pub fn is_ignored(masks: &[String], nick: &str, prefix: Option<&str>) -> bool {
+    if masks.is_empty() || nick.is_empty() { return false; }
+    let lnick = nick.to_lowercase();
+    let lpfx: Option<String> = prefix.map(|p| p.to_lowercase()).filter(|p| !p.is_empty() && p.len() <= 512);
+    for mask in masks {
+        let m = mask.to_lowercase();
+        if m == lnick { return true; }
+        // Argon P1 notifications.rs:409: `?` is a wildcard too (`/ignore guest?`); no IRC
+        // nick can contain `?`, so such a mask was never an exact-nick entry.
+        if m.contains('!') || m.contains('@') || m.contains('*') || m.contains('?') {
+            let target = lpfx.as_deref().unwrap_or(&lnick);
+            if glob_match(&m, target) { return true; }
+            // A mask with no `!`/`@` is a nick mask: also try it on the nick itself, or
+            // `guest?` could never match `guest1!u@h` (`guest*` only did by accident).
+            if lpfx.is_some() && !m.contains('!') && !m.contains('@') && glob_match(&m, &lnick) { return true; }
+            if lpfx.is_none() {
+                if let Some((np, rest)) = m.split_once('!') {
+                    if !rest.is_empty() && rest.chars().all(|c| c == '*' || c == '@') && glob_match(np, &lnick) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Last time a protected DM from (user, conn, sender) was let through as the
+/// cooldown window's "first message". In-memory only: after a restart at most one
+/// extra push per sender gets through, which matches the client's own behaviour
+/// on a fresh device.
+fn pm_first_state() -> &'static DashMap<String, Instant> {
+    static STATE: OnceLock<DashMap<String, Instant>> = OnceLock::new();
+    STATE.get_or_init(DashMap::new)
+}
+const MAX_PM_FIRST_KEYS: usize = 16384;
+
+/// True when PM Protection says this DM must NOT be pushed. Same decision as the
+/// irc_message handler in app.js: settings = per-network override, else global;
+/// disabled or allow-listed → push; otherwise only the first DM per cooldown
+/// window passes (deliver_first), or none at all.
+fn pm_protect_blocks(prefs: &NotifPrefs, username: &str, conn_id: &str, from: &str, now: Instant) -> bool {
+    let s = prefs.pm_protect_net.get(conn_id).unwrap_or(&prefs.pm_protect);
+    if !s.enabled { return false; }
+    let lf = from.to_lowercase();
+    if s.allow.iter().any(|a| a.to_lowercase() == lf) { return false; }
+    if !s.deliver_first { return true; }
+    let cooldown = Duration::from_secs(u64::from(s.cooldown_hours.max(1)) * 3600);
+    let state = pm_first_state();
+    if state.len() > MAX_PM_FIRST_KEYS {
+        // Bound the map: drop entries older than the longest window the client UI
+        // offers (7 days); if a flood still overfills it, start over (worst case:
+        // one extra push per sender).
+        state.retain(|_, t| now.duration_since(*t) < Duration::from_secs(7 * 24 * 3600));
+        if state.len() > MAX_PM_FIRST_KEYS { state.clear(); }
+    }
+    let key = format!("{}\u{0}{}\u{0}{}", username, conn_id, lf);
+    match state.entry(key) {
+        dashmap::mapref::entry::Entry::Occupied(mut e) => {
+            // app.js: first = now - last > cooldown; otherwise silently dropped.
+            if now.duration_since(*e.get()) <= cooldown { true } else { e.insert(now); false }
+        }
+        dashmap::mapref::entry::Entry::Vacant(e) => { e.insert(now); false }
+    }
+}
+
+/// The new push filters, as one decision: `Some(reason)` = do not push.
+fn push_filter_reason(
+    prefs: &NotifPrefs, username: &str, conn_id: &str, from: &str,
+    prefix: Option<&str>, is_dm: bool, now: Instant,
+) -> Option<&'static str> {
+    if is_ignored(&prefs.ignore, from, prefix) { return Some("sender is on the ignore list"); }
+    if is_dm && pm_protect_blocks(prefs, username, conn_id, from, now) { return Some("PM Protection"); }
+    None
 }
 
 // ─── Notification manager ─────────────────────────────────────────────────────
@@ -226,6 +513,24 @@ impl NotificationManager {
             .clone()
     }
 
+    /// r9 (astra P4 resetpass.sh:717): the per-user lock AND the shared account lock
+    /// (auth.rs ADMIN_LOCK_FILE). resetpass.sh deletes push/<user>.json and notif_prefs/<user>.json
+    /// while it holds that lock exclusively — after it has stamped sessions_valid_after — so a
+    /// writer holding it shared either finishes before the script starts (and the script deletes
+    /// what it wrote) or starts after the script is done (and its session check, made under this
+    /// lock, sees the revocation). The in-process mutex alone could not see the script. Same
+    /// order as auth.rs lock_with_admin: the mutex is never held while waiting for the script.
+    async fn lock_user_and_account(&self, username: &str)
+        -> Result<(tokio::sync::OwnedMutexGuard<()>, crate::auth::AdminFileLock)>
+    {
+        let m = self.user_lock(username);
+        let g = Arc::clone(&m).lock_owned().await;
+        if let Some(held) = crate::auth::admin_lock_try_shared_in(&self.data_dir) { return Ok((g, held)); }
+        drop(g);
+        let held = crate::auth::admin_lock_shared_in(&self.data_dir).await?;
+        Ok((m.lock_owned().await, held))
+    }
+
     /// Persist a JSON value to `path` via temp-file + atomic rename so a crash
     /// mid-write cannot truncate the file and a concurrent reader never observes
     /// a partial file. Tightens perms after rename (push endpoints / muted lists
@@ -255,7 +560,18 @@ impl NotificationManager {
 
     // ── Subscriptions ─────────────────────────────────────────────────────────
 
-    pub async fn save_subscription(&self, username: &str, sub: PushSubscription) -> Result<()> {
+    /// `still_authorized` (r4 C1-5, codex P1 notifications.rs:543): re-checked UNDER the
+    /// per-user lock, after the endpoint's DNS resolution (which an attacker's name server can
+    /// stall). The route passes "the caller's session still validates". A password reset /
+    /// change / disable / deletion revokes the sessions and then purges the stored
+    /// subscriptions under this same lock (purge_user), so a subscribe that was admitted
+    /// before the revocation can no longer write its endpoint back afterwards. Refused with
+    /// SUBSCRIBE_SESSION_GONE (the route answers 401).
+    pub async fn save_subscription(&self, username: &str, sub: PushSubscription, still_authorized: impl FnOnce() -> bool) -> Result<()> {
+        // r5 (codex P1 notifications.rs:1246): admission BEFORE the endpoint's DNS lookup — at
+        // most SUBSCRIBE_INFLIGHT_PER_USER validations of one account at a time (and every
+        // lookup is bounded process-wide and by a deadline, see resolve_push_host).
+        let _inflight = SubscribeInFlight::acquire(username).ok_or_else(|| anyhow::anyhow!(SUBSCRIBE_BUSY))?;
         // #83: the endpoint is a client-supplied outbound URL that send_push will
         // POST to. Without validation an authenticated user could register an
         // internal target and turn the server into a blind-SSRF probe. Require
@@ -265,8 +581,8 @@ impl NotificationManager {
         // Serialize the load→mutate→write window per user so a concurrent
         // subscribe and a notify-time dead-endpoint prune cannot clobber each
         // other (last-writer-wins data loss).
-        let lock = self.user_lock(username);
-        let _guard = lock.lock().await;
+        let _locks = self.lock_user_and_account(username).await?;   // r9
+        if !still_authorized() { bail!(SUBSCRIBE_SESSION_GONE); }
 
         let mut subs = self.load_subscriptions(username).await;
         // Replace existing subscription with same endpoint
@@ -283,13 +599,27 @@ impl NotificationManager {
     }
 
     pub async fn remove_subscription(&self, username: &str, endpoint: &str) -> Result<()> {
-        let lock = self.user_lock(username);
-        let _guard = lock.lock().await;
+        // r9: a prune that read the file before resetpass.sh deleted it would write the rest back.
+        let _locks = self.lock_user_and_account(username).await?;
 
         let mut subs = self.load_subscriptions(username).await;
+        let before = subs.len();
         subs.retain(|s| s.endpoint != endpoint);
+        // r4 C1-5: nothing to remove → write nothing. A dead-endpoint prune that ran across a
+        // purge_user used to re-create an (empty) push file for a purged / deleted account.
+        if subs.len() == before { return Ok(()); }
         let path = self.subs_path(username);
         Self::write_json_atomic(&path, &subs).await // push endpoints are privacy-sensitive (#7)
+    }
+
+    /// r4 C1-5: remove the user's push subscriptions AND notification prefs, under the same
+    /// per-user lock every subscription / prefs write takes. Used on password reset, password
+    /// change, admin disable and account deletion (after their sessions were revoked).
+    pub async fn purge_user(&self, username: &str) {
+        let lock = self.user_lock(username);
+        let _guard = lock.lock().await;
+        let _ = tokio::fs::remove_file(self.subs_path(username)).await;
+        let _ = tokio::fs::remove_file(self.prefs_path(username)).await;
     }
 
     pub async fn load_subscriptions(&self, username: &str) -> Vec<PushSubscription> {
@@ -330,6 +660,7 @@ impl NotificationManager {
         }
     }
 
+    #[allow(dead_code)] // kept for API stability; the PUT route now uses update_prefs
     pub async fn save_prefs(&self, username: &str, prefs: &NotifPrefs) -> Result<()> {
         let lock = self.user_lock(username);
         let _guard = lock.lock().await;
@@ -338,9 +669,26 @@ impl NotificationManager {
         Self::write_json_atomic(&path, prefs).await // muted-channel list leaks metadata (#7)
     }
 
+    /// Merge a partial update into the stored prefs under the per-user lock
+    /// (load → apply_patch → atomic write), so concurrent PUTs from two devices
+    /// each change only the fields they sent.
+    /// `still_authorized`: re-checked under the lock, like save_subscription (r4 C1-5), so a
+    /// PUT admitted before a reset / deletion can't re-create the purged prefs file.
+    pub async fn update_prefs(&self, username: &str, patch: NotifPrefsPatch, still_authorized: impl FnOnce() -> bool) -> std::result::Result<(), PrefsUpdateError> {
+        let _locks = self.lock_user_and_account(username).await.map_err(PrefsUpdateError::Io)?;   // r9
+        if !still_authorized() { return Err(PrefsUpdateError::SessionGone); }
+        let mut prefs = self.load_prefs(username).await;
+        prefs.apply_patch(patch)?;
+        let path = self.prefs_path(username);
+        Self::write_json_atomic(&path, &prefs).await.map_err(PrefsUpdateError::Io)
+    }
+
     // ── Send notification ─────────────────────────────────────────────────────
 
     /// Called on every incoming PRIVMSG. Decides whether to push based on prefs.
+    /// Kept for callers that don't have the sender's prefix; host-based ignore
+    /// masks then match on the nick only (see `is_ignored`).
+    #[allow(dead_code)]
     pub async fn maybe_notify(
         &self,
         username:  &str,
@@ -349,6 +697,23 @@ impl NotificationManager {
         net_label: &str,
         target:    &str,
         from:      &str,
+        text:      &str,
+        ts:        i64,
+    ) {
+        self.maybe_notify_with_prefix(username, user_nick, conn_id, net_label, target, from, None, text, ts).await
+    }
+
+    /// Same as `maybe_notify`, plus the sender's full `nick!user@host` prefix so
+    /// `nick!*@host`-style ignore masks apply to push exactly as they do in the app.
+    pub async fn maybe_notify_with_prefix(
+        &self,
+        username:  &str,
+        user_nick: &str,
+        conn_id:   &str,
+        net_label: &str,
+        target:    &str,
+        from:      &str,
+        prefix:    Option<&str>,
         text:      &str,
         ts:        i64,
     ) {
@@ -392,6 +757,16 @@ impl NotificationManager {
             return;
         }
 
+        // /ignore + PM Protection (previously client-only, so an ignored user or a
+        // PM-Protection-dropped stranger still reached the lock screen while the app
+        // was closed). Evaluated last before the rate limit because the PM
+        // Protection "first message" window is stateful and must only be consumed
+        // by a DM that would otherwise really be pushed.
+        if let Some(reason) = push_filter_reason(&prefs, username, conn_id, from, prefix, is_dm, Instant::now()) {
+            debug!("Push suppressed for {}: {}", username, reason);
+            return;
+        }
+
         // #11: per-user rate limit BEFORE any subscription read / fan-out, so a
         // flood of matching messages cannot drive unbounded outbound POSTs.
         if !rate_limit_allow(username) {
@@ -418,7 +793,7 @@ impl NotificationManager {
         });
 
         let subs = self.load_subscriptions(username).await;
-        if subs.is_empty() { return; }
+        if subs.is_empty() { debug!("Push for {}: no subscriptions", username); return; }
         let payload = payload.to_string();
 
         // #11: send to all (up to MAX_SUBSCRIPTIONS_PER_USER) endpoints
@@ -528,10 +903,9 @@ impl NotificationManager {
                 Err(PushSendError::Gone)
             }
             Ok(status) => {
-                let endpoint: String = sub.endpoint.chars().take(60).collect();
                 Err(PushSendError::Other(anyhow::anyhow!(
                     "Push to {} failed: {}",
-                    endpoint,
+                    endpoint_label(&sub.endpoint),
                     status
                 )))
             }
@@ -629,17 +1003,29 @@ impl NotificationManager {
             }
         }
 
+        // web-push 0.9 builds its request with the `http` 0.2 types, while reqwest
+        // 0.12 uses `http` 1.x, so copy the (all-ASCII) VAPID/crypto/TTL headers
+        // across by name/bytes. Fail loudly rather than send a request missing one.
+        let mut push_headers = reqwest::header::HeaderMap::with_capacity(parts.headers.len());
+        for (name, value) in parts.headers.iter() {
+            let n = reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
+                .map_err(|_| anyhow::anyhow!("Push header name not convertible: {}", name))?;
+            let v = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
+                .map_err(|_| anyhow::anyhow!("Push header value not convertible for {}", name))?;
+            push_headers.append(n, v);
+        }
+
         let resp = client
             .post(sub.endpoint.as_str())
-            .headers(parts.headers)
+            .headers(push_headers)
             .body(body)
             .send()
             .await
             .map_err(|e| {
-                // char-safe truncation: byte-slicing a client-supplied endpoint at
-                // offset 60 would panic if a multibyte char straddles the boundary.
-                let endpoint: String = sub.endpoint.chars().take(60).collect();
-                anyhow::anyhow!("Push to {} failed: {:?}", endpoint, e)
+                // r9 (astra P1 notifications.rs:1013): reqwest's error carries the full
+                // request URL (its Debug output prints it), and the old 60-character prefix
+                // already reached into the token — both went to the log via fan_out.
+                anyhow::anyhow!("Push to {} failed: {:?}", endpoint_label(&sub.endpoint), e.without_url())
             })?;
 
         // Return the status; the caller (send_push) classifies success vs. the
@@ -824,6 +1210,20 @@ async fn validate_push_endpoint(endpoint: &str) -> Result<()> {
     resolve_and_validate_push_endpoint(endpoint).await.map(|_| ())
 }
 
+/// r9 (astra P1 notifications.rs:1013): a push endpoint as it may appear in a log or an
+/// error: its origin plus a short hash (to tell subscriptions apart). The rest of the URL is
+/// the subscription's token — whoever has the full URL can address that device — so it is
+/// never logged.
+fn endpoint_label(endpoint: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let hash: String = Sha256::digest(endpoint.as_bytes()).iter().take(4).map(|b| format!("{:02x}", b)).collect();
+    let origin = reqwest::Url::parse(endpoint).ok()
+        .map(|u| u.origin().ascii_serialization())
+        .filter(|o| o != "null")
+        .unwrap_or_else(|| "(invalid endpoint)".into());
+    format!("{} #{}", origin, hash)
+}
+
 /// Resolve + validate a web-push endpoint and return the public addresses to pin
 /// the outbound connection to (#83). Same checks as the registration-time guard,
 /// but additionally hands back the validated `SocketAddr`s so the SEND path can
@@ -847,9 +1247,11 @@ async fn resolve_and_validate_push_endpoint(endpoint: &str) -> Result<PinnedEndp
     }
     let host = parsed.host_str().ok_or_else(|| anyhow::anyhow!("Push endpoint has no host"))?;
 
-    // Reject obvious internal names outright.
-    let lower = host.to_ascii_lowercase();
-    if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".internal") || lower.ends_with(".local") {
+    // Reject obvious internal names outright. Argon P1 notifications.rs:1182: compare the
+    // name without its trailing root dot(s) — "localhost." / "svc.internal." are the same
+    // names in fully-qualified form and used to slip past this check.
+    let lower = host.trim_end_matches('.').to_ascii_lowercase();
+    if lower.is_empty() || lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".internal") || lower.ends_with(".local") {
         bail!("Push endpoint host is not allowed");
     }
 
@@ -874,10 +1276,7 @@ async fn resolve_and_validate_push_endpoint(endpoint: &str) -> Result<PinnedEndp
     // so this is transparent for real endpoints. (#83, mirrors
     // preview::resolve_and_validate_host.)
     let port = parsed.port_or_known_default().unwrap_or(443);
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(format!("{}:{}", host, port))
-        .await
-        .map_err(|_| anyhow::anyhow!("Push endpoint host resolution failed"))?
-        .collect();
+    let addrs = resolve_push_host(host, port, system_resolve).await?;
     if addrs.is_empty() {
         bail!("Push endpoint host is not allowed");
     }
@@ -887,6 +1286,65 @@ async fn resolve_and_validate_push_endpoint(endpoint: &str) -> Result<PinnedEndp
         }
     }
     Ok(PinnedEndpoint { host: host.to_string(), addrs, is_ip_literal: false })
+}
+
+// ── r5 (codex P1 notifications.rs:1246): bounded push-endpoint DNS ───────────────────────
+// Hostname resolution runs on the shared blocking pool (getaddrinfo), and an attacker's name
+// server can stall it for the resolver's full retry cycle. It used to run before any
+// admission and without a deadline, so one account could park hundreds of blocking threads.
+// Now: at most PUSH_DNS_MAX_CONCURRENT lookups process-wide (a lookup that times out keeps its
+// slot until the blocking call really returns, so the bound holds), each awaited for at most
+// PUSH_DNS_TIMEOUT, and at most SUBSCRIBE_INFLIGHT_PER_USER subscribe validations per account.
+const PUSH_DNS_MAX_CONCURRENT: usize = 8;
+const PUSH_DNS_TIMEOUT: Duration = if cfg!(test) { Duration::from_millis(400) } else { Duration::from_secs(5) };
+const SUBSCRIBE_INFLIGHT_PER_USER: usize = 2;
+/// Refusal while an account already has SUBSCRIBE_INFLIGHT_PER_USER validations running.
+pub const SUBSCRIBE_BUSY: &str = "Another push subscription is still being checked — try again in a moment";
+
+fn push_dns_slots() -> &'static Arc<tokio::sync::Semaphore> {
+    static S: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    S.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(PUSH_DNS_MAX_CONCURRENT)))
+}
+
+struct SubscribeInFlight(String);
+impl SubscribeInFlight {
+    fn counts() -> &'static DashMap<String, usize> {
+        static M: OnceLock<DashMap<String, usize>> = OnceLock::new();
+        M.get_or_init(DashMap::new)
+    }
+    fn acquire(user: &str) -> Option<Self> {
+        let mut c = Self::counts().entry(user.to_string()).or_insert(0);
+        if *c >= SUBSCRIBE_INFLIGHT_PER_USER { return None; }
+        *c += 1;
+        Some(SubscribeInFlight(user.to_string()))
+    }
+}
+impl Drop for SubscribeInFlight {
+    fn drop(&mut self) {
+        if let Some(mut c) = Self::counts().get_mut(&self.0) { *c = c.saturating_sub(1); }
+        Self::counts().remove_if(&self.0, |_, v| *v == 0);
+    }
+}
+
+fn system_resolve(host: &str, port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    Ok((host, port).to_socket_addrs()?.collect())
+}
+
+/// Resolve `host:port` with `resolver` on the blocking pool, bounded as described above.
+async fn resolve_push_host(host: &str, port: u16, resolver: fn(&str, u16) -> std::io::Result<Vec<std::net::SocketAddr>>)
+    -> Result<Vec<std::net::SocketAddr>>
+{
+    let permit = tokio::time::timeout(PUSH_DNS_TIMEOUT, push_dns_slots().clone().acquire_owned()).await
+        .map_err(|_| anyhow::anyhow!("Push endpoint host resolution is busy — try again in a moment"))?
+        .map_err(|_| anyhow::anyhow!("Push endpoint host resolution failed"))?;
+    let h = host.to_string();
+    let task = tokio::task::spawn_blocking(move || { let _slot = permit; resolver(&h, port) });
+    match tokio::time::timeout(PUSH_DNS_TIMEOUT, task).await {
+        Ok(Ok(Ok(addrs))) => Ok(addrs),
+        Ok(_) => bail!("Push endpoint host resolution failed"),
+        Err(_) => bail!("Push endpoint host resolution timed out"),
+    }
 }
 
 /// Convert raw 32-byte P-256 private key to PEM format for web-push crate.
@@ -907,4 +1365,396 @@ fn pem_from_raw_key(raw: &[u8]) -> Result<Vec<u8>> {
     pub_point.mul_generator(&group, &bn, &ctx)?;
     let key   = EcKey::from_private_components(&group, &bn, &pub_point)?;
     Ok(key.private_key_to_pem()?)
+}
+
+#[cfg(test)]
+mod push_filter_tests {
+    use super::*;
+
+    fn prefs() -> NotifPrefs {
+        NotifPrefs { enabled: true, trigger: "mentions_and_dms".into(), ..Default::default() }
+    }
+
+    #[test]
+    fn old_prefs_file_without_new_fields_has_no_filter() {
+        // A notif_prefs/<user>.json written by 0.5.7 (no ignore / pm_protect keys).
+        let old = r#"{"enabled":true,"trigger":"mentions_and_dms","muted_networks":[],"muted_channels":["c/#x"],"dnd":false,"dnd_start":"","dnd_end":"","dnd_tz_offset":0}"#;
+        let p: NotifPrefs = serde_json::from_str(old).unwrap();
+        assert!(p.ignore.is_empty());
+        assert_eq!(p.pm_protect, PmProtect::default());
+        assert!(p.pm_protect_net.is_empty());
+        assert_eq!(push_filter_reason(&p, "u-old", "c", "anyone", Some("anyone!x@y"), true, Instant::now()), None);
+        // and the oldest form (pre-DND) still parses
+        let older = r#"{"enabled":false,"trigger":"dms_only","muted_networks":[],"muted_channels":[]}"#;
+        assert!(serde_json::from_str::<NotifPrefs>(older).is_ok());
+    }
+
+    #[test]
+    fn ignore_matches_like_app_js() {
+        let m = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // exact nick, case-insensitive
+        assert!(is_ignored(&m(&["evil"]), "EviL", Some("EviL!u@h")));
+        assert!(is_ignored(&m(&["evil"]), "evil", None));
+        assert!(!is_ignored(&m(&["evil"]), "evil2", Some("evil2!u@h")));
+        // host mask against the full prefix
+        assert!(is_ignored(&m(&["*!*@bad.host"]), "x", Some("x!ident@BAD.host")));
+        assert!(!is_ignored(&m(&["*!*@bad.host"]), "x", Some("x!ident@good.host")));
+        assert!(is_ignored(&m(&["*!*@*.isp.com"]), "x", Some("x!i@a.b.isp.com")));
+        assert!(is_ignored(&m(&["ev?l!*@*"]), "eval", Some("eval!u@h")));
+        // nick!*@* without a prefix matches on the nick part
+        assert!(is_ignored(&m(&["evil!*@*"]), "evil", None));
+        assert!(!is_ignored(&m(&["evil!*@*"]), "good", None));
+        // a host mask cannot be decided from the nick alone
+        assert!(!is_ignored(&m(&["*!*@bad.host"]), "x", None));
+        // empty list / empty nick
+        assert!(!is_ignored(&[], "evil", None));
+        assert!(!is_ignored(&m(&["evil"]), "", None));
+    }
+
+    /// Argon P1 notifications.rs:409: a bare `?` mask is a wildcard (in-app isIgnored too).
+    #[test]
+    fn r3_question_mark_masks_are_wildcards() {
+        let m = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(is_ignored(&m(&["guest?"]), "guest1", None));
+        assert!(is_ignored(&m(&["guest?"]), "Guest7", Some("Guest7!u@h")));
+        assert!(!is_ignored(&m(&["guest?"]), "guest12", None));
+        assert!(!is_ignored(&m(&["guest?"]), "guest", None));
+    }
+
+    /// Argon P1 notifications.rs:1182: internal names in fully-qualified form (trailing dot)
+    /// are refused BEFORE any DNS lookup, like their dot-less spelling.
+    #[tokio::test]
+    async fn r3_push_endpoint_trailing_dot_internal_names_refused() {
+        for ep in ["https://localhost./p", "https://localhost../p", "https://svc.internal./p",
+                   "https://printer.local./p", "https://a.localhost./p", "https://LOCALHOST./p"] {
+            let e = validate_push_endpoint(ep).await.unwrap_err().to_string();
+            assert!(e.contains("not allowed") || e.contains("Invalid push endpoint URL"), "{ep}: {e}");
+        }
+    }
+
+    #[test]
+    fn glob_basics() {
+        assert!(glob_match("*", ""));
+        assert!(glob_match("a*b?d", "axxxbcd"));
+        assert!(!glob_match("a*b?d", "axxxbd"));
+        assert!(glob_match("**a**", "zzazz"));
+        assert!(!glob_match("abc", "abcd"));
+        // pathological input stays fast (bounded by the caps)
+        let p = "*a".repeat(128);
+        let t = "a".repeat(255) + "b";
+        assert!(!glob_match(&p, &t));
+    }
+
+    #[test]
+    fn ignore_filter_blocks_dm_and_channel_push() {
+        let mut p = prefs();
+        p.ignore = vec!["evil".into(), "*!*@spam.net".into()];
+        let now = Instant::now();
+        assert_eq!(push_filter_reason(&p, "u-ign", "c1", "evil", Some("evil!a@b"), true, now), Some("sender is on the ignore list"));
+        assert_eq!(push_filter_reason(&p, "u-ign", "c1", "evil", Some("evil!a@b"), false, now), Some("sender is on the ignore list"));
+        assert_eq!(push_filter_reason(&p, "u-ign", "c1", "bob", Some("bob!a@spam.net"), true, now), Some("sender is on the ignore list"));
+        assert_eq!(push_filter_reason(&p, "u-ign", "c1", "bob", Some("bob!a@ok.net"), true, now), None);
+    }
+
+    #[test]
+    fn pm_protection_deliver_first_then_cooldown() {
+        let mut p = prefs();
+        p.pm_protect = PmProtect { enabled: true, cooldown_hours: 24, deliver_first: true, allow: vec!["friend".into()] };
+        let t0 = Instant::now();
+        let u = "u-pm-first";
+        // first DM from a stranger passes (client delivers it too) …
+        assert_eq!(push_filter_reason(&p, u, "c1", "Stranger", None, true, t0), None);
+        // … every further DM inside the cooldown is dropped
+        for i in 1..30 {
+            assert_eq!(push_filter_reason(&p, u, "c1", "stranger", None, true, t0 + Duration::from_secs(i * 60)), Some("PM Protection"));
+        }
+        // after the window, the next one is a new "first"
+        let later = t0 + Duration::from_secs(24 * 3600 + 5);
+        assert_eq!(push_filter_reason(&p, u, "c1", "stranger", None, true, later), None);
+        assert_eq!(push_filter_reason(&p, u, "c1", "stranger", None, true, later + Duration::from_secs(1)), Some("PM Protection"));
+        // allow-listed sender always passes
+        for _ in 0..5 { assert_eq!(push_filter_reason(&p, u, "c1", "FRIEND", None, true, t0), None); }
+        // channel messages are not affected by PM Protection
+        assert_eq!(push_filter_reason(&p, u, "c1", "stranger", None, false, t0 + Duration::from_secs(5)), None);
+        // the window is per network
+        assert_eq!(push_filter_reason(&p, u, "c2", "stranger", None, true, t0 + Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn pm_protection_without_deliver_first_and_net_override() {
+        let mut p = prefs();
+        p.pm_protect = PmProtect { enabled: true, cooldown_hours: 1, deliver_first: false, allow: vec![] };
+        let t0 = Instant::now();
+        let u = "u-pm-none";
+        assert_eq!(push_filter_reason(&p, u, "c1", "x", None, true, t0), Some("PM Protection"));
+        // a network override turns protection off for that network only
+        p.pm_protect_net.insert("c9".into(), PmProtect { enabled: false, ..PmProtect::default() });
+        assert_eq!(push_filter_reason(&p, u, "c9", "x", None, true, t0), None);
+        assert_eq!(push_filter_reason(&p, u, "c1", "x", None, true, t0), Some("PM Protection"));
+        // override allow list replaces the global one (app.js isPmAllowedFor)
+        p.pm_protect.allow = vec!["pal".into()];
+        p.pm_protect_net.insert("c8".into(), PmProtect { enabled: true, cooldown_hours: 1, deliver_first: false, allow: vec!["other".into()] });
+        assert_eq!(push_filter_reason(&p, u, "c8", "pal", None, true, t0), Some("PM Protection"));
+        assert_eq!(push_filter_reason(&p, u, "c8", "other", None, true, t0), None);
+        assert_eq!(push_filter_reason(&p, u, "c1", "pal", None, true, t0), None);
+        // disabled globally → no filter
+        p.pm_protect.enabled = false;
+        assert_eq!(push_filter_reason(&p, u, "c1", "x", None, true, t0), None);
+    }
+
+    #[test]
+    fn patch_keeps_absent_fields_and_old_full_payload_still_works() {
+        let mut p = prefs();
+        p.muted_channels = vec!["c/#a".into()];
+        p.ignore = vec!["evil".into()];
+        p.trigger = "dms_only".into();
+        // a mute-only patch (new client) does not touch trigger/enabled/ignore
+        let patch: NotifPrefsPatch = serde_json::from_str(r#"{"muted_channels":["c/#b"],"muted_networks":[]}"#).unwrap();
+        p.apply_patch(patch).unwrap();
+        assert_eq!(p.muted_channels, vec!["c/#b".to_string()]);
+        assert_eq!(p.trigger, "dms_only");
+        assert!(p.enabled);
+        assert_eq!(p.ignore, vec!["evil".to_string()]);
+        // a full 0.5.7-style payload (stale cached app.js) replaces those fields as before
+        // and, lacking the new keys, keeps the stored ignore list
+        let old: NotifPrefsPatch = serde_json::from_str(r#"{"enabled":false,"trigger":"all_messages","muted_networks":["n"],"muted_channels":[],"dnd":true,"dnd_start":"22:00","dnd_end":"07:00","dnd_tz_offset":-60}"#).unwrap();
+        p.apply_patch(old).unwrap();
+        assert!(!p.enabled);
+        assert_eq!(p.trigger, "all_messages");
+        assert_eq!(p.muted_networks, vec!["n".to_string()]);
+        assert!(p.dnd);
+        assert_eq!(p.dnd_tz_offset, -60);
+        assert_eq!(p.ignore, vec!["evil".to_string()]);
+        // filters are normalised
+        let f: NotifPrefsPatch = serde_json::from_str(r#"{"ignore":[" Evil ","evil","","*!*@X"],"pm_protect":{"enabled":true,"cooldown_hours":0,"allow":["Bob"]}}"#).unwrap();
+        p.apply_patch(f).unwrap();
+        assert_eq!(p.ignore, vec!["evil".to_string(), "*!*@x".to_string()]);
+        assert!(p.pm_protect.enabled && p.pm_protect.deliver_first);
+        assert_eq!(p.pm_protect.cooldown_hours, 1);
+        assert_eq!(p.pm_protect.allow, vec!["bob".to_string()]);
+    }
+
+    #[test]
+    fn patch_over_caps_is_rejected_without_partial_apply() {
+        let mut p = prefs();
+        p.muted_channels = vec!["keep".into()];
+        let many: Vec<String> = (0..(MAX_MUTED_CHANNELS + 1)).map(|i| format!("c/#{}", i)).collect();
+        let patch = NotifPrefsPatch { muted_channels: Some(many), trigger: Some("all_messages".into()), ..Default::default() };
+        match p.apply_patch(patch) {
+            Err(PrefsUpdateError::TooLarge(m)) => assert!(m.contains("muted channels")),
+            other => panic!("expected TooLarge, got {:?}", other),
+        }
+        assert_eq!(p.muted_channels, vec!["keep".to_string()]);
+        assert_eq!(p.trigger, "mentions_and_dms");
+        let long_mask = NotifPrefsPatch { ignore: Some(vec!["x".repeat(MAX_MASK_LEN + 1)]), ..Default::default() };
+        assert!(matches!(p.apply_patch(long_mask), Err(PrefsUpdateError::TooLarge(_))));
+        // 90 mutes (the 4 KB-body failure point in the audit) is now fine
+        let ninety: Vec<String> = (0..90).map(|i| format!("{}/#chan{}", "0f8e7d6c-1111-2222-3333-444455556666", i)).collect();
+        assert!(p.apply_patch(NotifPrefsPatch { muted_channels: Some(ninety), ..Default::default() }).is_ok());
+        assert_eq!(p.muted_channels.len(), 90);
+    }
+
+    #[test]
+    fn get_view_hides_client_owned_filters() {
+        let mut p = prefs();
+        p.ignore = vec!["evil".into()];
+        p.pm_protect.enabled = true;
+        let v = p.client_view();
+        assert!(v.get("ignore").is_none() && v.get("pm_protect").is_none() && v.get("pm_protect_net").is_none());
+        assert_eq!(v["enabled"], serde_json::json!(true));
+        assert_eq!(v["trigger"], serde_json::json!("mentions_and_dms"));
+        assert!(v.get("muted_channels").is_some() && v.get("dnd_tz_offset").is_some());
+        // what a stale client PUTs back from that view keeps the stored filters
+        let back: NotifPrefsPatch = serde_json::from_value(v).unwrap();
+        p.apply_patch(back).unwrap();
+        assert_eq!(p.ignore, vec!["evil".to_string()]);
+        assert!(p.pm_protect.enabled);
+    }
+
+    #[tokio::test]
+    async fn update_prefs_merges_on_disk() {
+        let dir = std::env::temp_dir().join(format!("cryptirc-notif-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = NotificationManager::new(dir.to_str().unwrap(), VapidKeys { public_key: String::new(), private_key: String::new() });
+        // no file yet → defaults + patch
+        mgr.update_prefs("alice", serde_json::from_str(r#"{"ignore":["evil"]}"#).unwrap(), || true).await.unwrap();
+        let p = mgr.load_prefs("alice").await;
+        assert!(!p.enabled);
+        assert_eq!(p.trigger, "mentions_and_dms");
+        assert_eq!(p.ignore, vec!["evil".to_string()]);
+        // device A enables push; device B later syncs only its mutes → A's change survives
+        mgr.update_prefs("alice", serde_json::from_str(r#"{"enabled":true,"trigger":"dms_only"}"#).unwrap(), || true).await.unwrap();
+        mgr.update_prefs("alice", serde_json::from_str(r#"{"muted_channels":["c/#x"],"muted_networks":[]}"#).unwrap(), || true).await.unwrap();
+        let p = mgr.load_prefs("alice").await;
+        assert!(p.enabled);
+        assert_eq!(p.trigger, "dms_only");
+        assert_eq!(p.muted_channels, vec!["c/#x".to_string()]);
+        assert_eq!(p.ignore, vec!["evil".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod r4_push_purge_tests {
+    //! r4 C1-5 (codex P1 notifications.rs:543): a subscription admitted before a recovery
+    //! purge can't write itself back afterwards.
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn mgr() -> (NotificationManager, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("cryptirc-r4push-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (NotificationManager::new(dir.to_str().unwrap(), VapidKeys { public_key: String::new(), private_key: String::new() }), dir)
+    }
+    fn sub(ep: &str) -> PushSubscription {
+        PushSubscription { endpoint: ep.into(), keys: PushKeys { p256dh: "x".into(), auth: "y".into() }, label: None }
+    }
+
+    /// The race from the finding, with the endpoint check already done and the write waiting
+    /// for the per-user lock: the reset revokes the session and purges meanwhile — the late
+    /// write is refused and nothing is re-created. (A public IP literal: no DNS needed.)
+    #[tokio::test]
+    async fn a_subscribe_admitted_before_a_reset_cannot_outlive_its_purge() {
+        let (m, dir) = mgr();
+        let m = std::sync::Arc::new(m);
+        let path = dir.join("push").join("victim.json");
+        m.save_subscription("victim", sub("https://93.184.216.34/own"), || true).await.unwrap();
+        assert!(path.exists());
+        let revoked = std::sync::Arc::new(AtomicBool::new(false));
+        let lock = m.user_lock("victim");
+        let g = lock.lock().await;                      // something else holds the lock …
+        let (m2, r2) = (m.clone(), revoked.clone());
+        let late = tokio::spawn(async move {
+            m2.save_subscription("victim", sub("https://93.184.216.34/attacker"), move || !r2.load(Ordering::SeqCst)).await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        revoked.store(true, Ordering::SeqCst);          // … the reset revokes the sessions …
+        let m3 = m.clone();
+        let purge = tokio::spawn(async move { m3.purge_user("victim").await });
+        drop(g);
+        let late = late.await.unwrap();
+        purge.await.unwrap();
+        let left = m.load_subscriptions("victim").await;
+        println!("R4 C1-5: late subscribe = {:?}; subscriptions after the purge = {}", late.as_ref().map_err(|e| e.to_string()), left.len());
+        assert_eq!(late.unwrap_err().to_string(), SUBSCRIBE_SESSION_GONE);
+        assert!(left.is_empty() && !path.exists(), "nothing re-created");
+        // A dead-endpoint prune after the purge doesn't re-create an empty file either.
+        m.remove_subscription("victim", "https://93.184.216.34/own").await.unwrap();
+        assert!(!path.exists());
+        // Prefs: same rule.
+        let r = m.update_prefs("victim", serde_json::from_str(r#"{"enabled":true}"#).unwrap(), || false).await;
+        assert!(matches!(r, Err(PrefsUpdateError::SessionGone)));
+        assert!(!dir.join("notif_prefs").join("victim.json").exists());
+        // A live session still subscribes normally.
+        m.save_subscription("victim", sub("https://93.184.216.34/new"), || true).await.unwrap();
+        assert_eq!(m.load_subscriptions("victim").await.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod r5_push_dns_tests {
+    //! r5 (codex P1 notifications.rs:1246): bounded push-endpoint resolution.
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static RUNNING: AtomicUsize = AtomicUsize::new(0);
+    static PEAK: AtomicUsize = AtomicUsize::new(0);
+    fn stalled(_h: &str, _p: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        let n = RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
+        PEAK.fetch_max(n, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(1500));   // a name server that never answers in time
+        RUNNING.fetch_sub(1, Ordering::SeqCst);
+        Ok(vec![])
+    }
+
+    /// 40 lookups against a stalled resolver: every caller gets an answer within the deadline
+    /// (timed out / busy), and at most PUSH_DNS_MAX_CONCURRENT blocking resolutions ever run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stalled_dns_is_bounded_and_times_out() {
+        let t0 = Instant::now();
+        let hs: Vec<_> = (0..40).map(|_| tokio::spawn(resolve_push_host("slow.example", 443, stalled))).collect();
+        let mut errs = Vec::new();
+        for h in hs { errs.push(h.await.unwrap().unwrap_err().to_string()); }
+        let took = t0.elapsed();
+        println!("R5 push DNS: 40 stalled lookups answered in {:?}; peak concurrent resolutions = {}", took, PEAK.load(Ordering::SeqCst));
+        assert!(took < Duration::from_millis(1400), "{took:?}");
+        assert!(errs.iter().all(|e| e.contains("timed out") || e.contains("busy")), "{errs:?}");
+        assert!(PEAK.load(Ordering::SeqCst) <= PUSH_DNS_MAX_CONCURRENT);
+    }
+
+    /// Per-account admission before any lookup.
+    #[test]
+    fn subscribe_validations_are_capped_per_account() {
+        let u = format!("pushdns-{}", uuid::Uuid::new_v4().simple());
+        let a = SubscribeInFlight::acquire(&u).expect("1st");
+        let b = SubscribeInFlight::acquire(&u).expect("2nd");
+        assert!(SubscribeInFlight::acquire(&u).is_none(), "3rd refused");
+        assert!(SubscribeInFlight::acquire("someone-else-pushdns").is_some(), "other accounts unaffected");
+        drop(a);
+        assert!(SubscribeInFlight::acquire(&u).is_some(), "slot freed");
+        drop(b);
+    }
+}
+
+#[cfg(test)]
+mod srv_b_r9_push_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn mgr() -> (Arc<NotificationManager>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("cryptirc-r9push-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (Arc::new(NotificationManager::new(dir.to_str().unwrap(), VapidKeys { public_key: String::new(), private_key: String::new() })), dir)
+    }
+    fn sub(ep: &str) -> PushSubscription {
+        PushSubscription { endpoint: ep.into(), keys: PushKeys { p256dh: "x".into(), auth: "y".into() }, label: None }
+    }
+
+    /// r9 (astra P4 resetpass.sh:717): resetpass.sh holds the account lock exclusively while it
+    /// revokes the sessions (sessions_valid_after) and deletes push/ + notif_prefs/. A subscribe or
+    /// a settings save that arrives meanwhile must be decided AFTER the script (its session check
+    /// then sees the revocation) — it used to check and write at once, beside the script.
+    #[tokio::test]
+    async fn notification_writes_wait_for_an_admin_script_and_recheck_after_it() {
+        let (m, dir) = mgr();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (r2, d2) = (revoked.clone(), dir.clone());
+        let script = std::thread::spawn(move || {
+            use std::os::unix::io::AsRawFd;
+            let f = std::fs::OpenOptions::new().read(true).write(true).create(true).open(d2.join(crate::auth::ADMIN_LOCK_FILE)).unwrap();
+            assert_eq!(unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) }, 0);
+            held_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(400));
+            r2.store(true, Ordering::SeqCst);           // the reset revokes the sessions …
+            drop(f);                                    // … and the script exits
+        });
+        held_rx.recv().unwrap();
+        let (r3, r4) = (revoked.clone(), revoked.clone());
+        let s = m.save_subscription("victim", sub("https://93.184.216.34/attacker"), move || !r3.load(Ordering::SeqCst)).await;
+        let p = m.update_prefs("victim", NotifPrefsPatch { enabled: Some(true), ..Default::default() }, move || !r4.load(Ordering::SeqCst)).await;
+        script.join().unwrap();
+        assert!(!dir.join("push/victim.json").exists(), "a subscribe made while resetpass.sh ran was written ({:?})", s.as_ref().err());
+        assert!(!dir.join("notif_prefs/victim.json").exists(), "a settings save made while resetpass.sh ran was written");
+        assert_eq!(s.unwrap_err().to_string(), SUBSCRIBE_SESSION_GONE);
+        assert!(matches!(p, Err(PrefsUpdateError::SessionGone)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// r9 (astra P1 notifications.rs:1013): a push failure names the endpoint by origin and a
+    /// short hash only; the token (the URL's path) is never in the message.
+    #[tokio::test]
+    async fn push_errors_never_carry_the_endpoint_token() {
+        let token = "SECRETr9tokenAbCdEf0123456789";
+        let label = endpoint_label(&format!("https://fcm.googleapis.com/fcm/send/{token}"));
+        assert!(label.starts_with("https://fcm.googleapis.com #") && label.len() == "https://fcm.googleapis.com #".len() + 8, "{label}");
+        assert!(!label.contains(token) && !label.contains("/fcm/send"));
+        assert_ne!(label, endpoint_label("https://fcm.googleapis.com/fcm/send/other"));
+        assert!(endpoint_label("not a url").starts_with("(invalid endpoint) #"));
+        // what reqwest's own error says about the request: the full URL — unless stripped
+        let e = reqwest::Client::new().post(format!("http://127.0.0.1:9/fcm/send/{token}")).send().await.unwrap_err();
+        assert!(format!("{:?}", e).contains(token), "reqwest no longer puts the URL in its error: {:?}", e);
+        assert!(!format!("{:?}", e.without_url()).contains(token));
+    }
 }

@@ -167,7 +167,9 @@ function injectStyle(){
       'filter:drop-shadow(0 0 9px #4fd9bd);animation:ghRune 2.6s ease-in-out forwards}',
     '@keyframes ghRune{0%{opacity:0;transform:scale(.4) rotate(-30deg)}25%{opacity:.95;transform:scale(1) rotate(0)}55%{opacity:.55}70%{opacity:.95}100%{opacity:0;transform:scale(1.4) rotate(20deg)}}',
     /* possess-the-cursor: the ghost shrinks & shadows the pointer (movement via JS) */
-    '.cryptirc-ghost.possess{transform:scale(.62);opacity:.7}',
+    // pointer-events:none while possessing: it sits centred on the cursor for 2-4 s
+    // and would otherwise intercept every click, hover and selection there.
+    '.cryptirc-ghost.possess{transform:scale(.62);opacity:.7;pointer-events:none}',
     '@media(prefers-reduced-motion:reduce){.cryptirc-ghost *,.cryptirc-ghost,.gh-friend *,.gh-friend{animation:none!important;transition:opacity .6s ease!important}',
       // also silence the spawned FX nodes (gh-*) and hide the decorative ones
       '.gh-mist,.gh-ring,.gh-clone,.gh-drip,.gh-eyes,.gh-web,.gh-wisp,.gh-bat,.gh-frost,.gh-puddle,.gh-mirror,.gh-pumpkin,.gh-candle,.gh-chain,.gh-grave,.gh-rune{animation:none!important;opacity:0!important}}'
@@ -238,7 +240,13 @@ Ghost.prototype._on = function(target, ev, fn, opts){
   this._listeners.push({t:target, e:ev, fn:fn, opts:opts});
 };
 Ghost.prototype._after = function(ms, fn){
-  var self=this, id=setTimeout(function(){ if(!self._dead) fn(); }, ms);
+  // Drop the id once it fires: only pending timers need to be cancellable on
+  // destroy(). Keeping every id ever issued grew the array without bound
+  // (hundreds a minute — a fish 'friends pass' alone schedules ~700).
+  var self=this, id=setTimeout(function(){
+    var i=self._timers.indexOf(id); if(i>=0) self._timers.splice(i,1);
+    if(!self._dead) fn();
+  }, ms);
   this._timers.push(id); return id;
 };
 Ghost.prototype.clamp = function(){
@@ -298,9 +306,21 @@ Ghost.prototype._wire = function(){
       under.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window,
         clientX:e.clientX,clientY:e.clientY,button:e.button,detail:e.detail,
         ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey}));
+      // A synthetic click does not move focus, so clicking a text box through the
+      // pet left you typing into nothing. Focus the form control it landed on.
+      var _f=under.closest&&under.closest('input,textarea,select,[contenteditable=""],[contenteditable="true"]'); if(_f&&_f.focus){ try{ _f.focus({preventScroll:true}); }catch(_){ } }
     }
   });
-  this._on(this.el, 'contextmenu', function(e){ e.preventDefault(); return false; });
+  this._on(this.el, 'contextmenu', function(e){
+    e.preventDefault(); e.stopPropagation();
+    // Hand the right-click to the UI underneath (nick/message menus) rather than
+    // swallowing it. Same skip-every-pet resolution as the click forwarder.
+    var under=topUnderPets(e.clientX,e.clientY);
+    if(under){ under.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,view:window,
+      clientX:e.clientX,clientY:e.clientY,screenX:e.screenX,screenY:e.screenY,button:2,buttons:2,
+      ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey})); }
+    return false;
+  });
   this._on(this.el, 'dragstart', function(e){ e.preventDefault(); return false; });
 };
 Ghost.prototype._beginDrag = function(){

@@ -100,15 +100,23 @@ follows whatever scheme you already have configured.
 
 * **No reconnect.** If the WebSocket drops (server restart, network change, an
   expired session token — the server revalidates every 30s) the client reports
-  it in the status bar and stops there; you restart it. It also cannot detect a
-  half-open socket instantly: it gives up after two minutes of silence, since
-  neither end sends WebSocket pings.
+  it in the status bar and stops there; you restart it. A half-open socket is
+  caught by a keep-alive: the client sends a WebSocket ping every 30 s (the
+  server answers it automatically), and if nothing at all — not even the pong —
+  comes back for two minutes the status bar says the connection has stalled.
+  It keeps listening, so if the server does come back the warning clears by
+  itself.
 * **No E2E.** Channel-PSK and DM ciphertext (`sd8~…`) renders as ciphertext.
   Decryption is client-side by design and is not implemented here yet; use the
   web app for encrypted conversations.
-* **No mIRC colour codes.** The renderer drops zero-width control bytes, so
-  `\x03`04red` shows as `04red` — the colour byte vanishes and its digits
-  remain. Not rendered, and not quite literal either.
+* **No mIRC colour codes.** Formatting codes (bold, colour, italic,
+  underline, reverse, strikethrough, monospace, reset) are stripped, colour
+  digits included, so `\x0304red` shows as plain `red`.
+* **Nothing from the network can drive your terminal.** Every server-supplied
+  string (messages, nicks, topics, channel and network names, bot answers,
+  errors) is sanitised before it is drawn: ESC, every other C0 control, DEL,
+  the C1 range and the bidi override/isolate characters are removed, and tabs
+  and newlines become spaces. Pasted text gets the same treatment.
 * **Read-mostly for uploads/pastes** — no file upload.
 * The vault must be unlocked for IRC to connect — the client prompts for the
   passphrase as soon as the server reports it locked. Until it is open the server

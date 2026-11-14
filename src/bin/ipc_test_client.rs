@@ -52,6 +52,7 @@ async fn main() {
     out_tx.send(IpcMessage::Attach {
         version: env!("CARGO_PKG_VERSION").to_string(),
         build: option_env!("CRYPTIRC_BUILD").unwrap_or("dev").to_string(),
+        features: vec![],
     }).ok();
     println!(">> Attach {{ version: {:?}, build: {:?} }}", env!("CARGO_PKG_VERSION"), option_env!("CRYPTIRC_BUILD").unwrap_or("dev"));
 

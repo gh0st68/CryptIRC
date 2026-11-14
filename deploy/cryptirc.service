@@ -17,6 +17,9 @@ After=caddy.service
 # it too — ordering only, no Requires=, so a daemon restart/crash never
 # cascade-stops the web service or vice versa. Inert if the unit is absent.
 After=irc-core.service
+# Crash-loop guard ([Unit] is the current location; [Service] StartLimitInterval= is deprecated)
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -35,8 +38,10 @@ KillMode=mixed
 # Restart policy — always restart on crash, but not if we stop it intentionally
 Restart=on-failure
 RestartSec=5
-StartLimitInterval=60
-StartLimitBurst=5
+
+# Files/dirs the service creates default to 0600/0700 (matches the at-rest secrets
+# hardening), even if a code path forgets to chmod.
+UMask=0077
 
 # Environment
 Environment=CRYPTIRC_DATA=/var/lib/cryptirc
@@ -45,7 +50,20 @@ Environment=CRYPTIRC_BASE_PATH=/
 Environment=CRYPTIRC_PORT=9001
 Environment=CRYPTIRC_FROM_EMAIL=noreply@yourdomain.com
 Environment=CRYPTIRC_REGISTRATION=open
+# HSTS (Strict-Transport-Security, 2 years, preload): keep "on" for a domain with a real
+# (e.g. Let's Encrypt) certificate. On a bare IP / self-signed certificate set it to "off":
+# there HSTS makes browsers refuse the certificate-warning click-through and locks every
+# visitor out for ~2 years. The installers set this for you; unset means on.
+Environment=CRYPTIRC_HSTS=on
+# Secrets such as CRYPTIRC_REG_CODE belong in a root-only (chmod 600) file, not here — any
+# local user can read a unit's Environment= lines with `systemctl show` (and systemd
+# expands % in them). Registration settings in admin_settings.json override both.
+EnvironmentFile=-/etc/cryptirc/cryptirc.env
 Environment=RUST_LOG=info
+# Plain log lines: journald keeps ANSI colour codes as unreadable "blob data".
+Environment=NO_COLOR=1
+# ffmpeg + exiftool strip upload metadata; Arch installs exiftool in /usr/bin/vendor_perl.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/bin/site_perl:/usr/bin/vendor_perl:/usr/bin/core_perl
 
 # ── Security hardening ─────────────────────────────────────────────────────────
 
@@ -92,9 +110,10 @@ ProtectKernelTunables=true
 ProtectControlGroups=true
 ProtectHostname=true
 
-# Resource limits
+# Resource limits. TasksMax caps THIS unit's threads (its cgroup); not LimitNPROC, which
+# counts every task of the cryptirc UID — irc-core's too — so one service could starve the other.
 LimitNOFILE=65536
-LimitNPROC=512
+TasksMax=512
 
 [Install]
 WantedBy=multi-user.target

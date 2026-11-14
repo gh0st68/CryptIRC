@@ -13,6 +13,32 @@ use std::collections::HashMap;
 /// fields are ignored, so a newer web binary is always safe against this daemon.
 pub const IPC_PROTO_VERSION: u32 = 1;
 
+/// Feature tokens this daemon announces in `Hello.features`:
+/// - `cm_keys`: Dial-time channel keys are looked up exact-spelling first and folded with
+///   the server's CASEMAPPING (`ircproto::channel_key_lookup_cm`), so the web need not add
+///   an rfc1459-folded alias of each key (which, on an ascii-casemapping server, handed a
+///   key to a different channel).
+/// - `proc_ack` (r4): honours a web's `Attach.features` `proc_ack` — see `WEB_FEATURES`.
+/// - `send_dropped` (r4): reports a dropped web RawSend as `SendDropped` to a web that
+///   announced `send_dropped`.
+/// - `hold_ack` (r5): honours `Held` / `Released` (a processed line that is not yet durable).
+pub const DAEMON_FEATURES: &[&str] = &["cm_keys", "proc_ack", "send_dropped", "hold_ack"];
+
+/// Feature tokens a web announces in `Attach.features` (r4, additive; an older daemon
+/// ignores the field, an older web sends none and gets the old behaviour):
+/// - `proc_ack` (codex P2 ipc_server.rs:681): the web acknowledges each `RawLine` that
+///   carries a `seq` with `Processed { upto }` once it has PROCESSED it (dispatched and,
+///   where applicable, logged). The daemon then counts a ring line as delivered on that
+///   acknowledgement instead of on the socket write, so a line still in the socket buffer
+///   when the web process dies replays as backlog (and is logged) after it restarts.
+/// - `send_dropped`: the web understands `SendDropped`.
+pub const WEB_FEATURES: &[&str] = &["proc_ack", "send_dropped"];
+
+fn is_false(b: &bool) -> bool { !*b }
+fn is_zero(n: &i64) -> bool { *n == 0 }
+fn is_zero_u16(n: &u16) -> bool { *n == 0 }
+fn is_zero_u64(n: &u64) -> bool { *n == 0 }
+
 /// Every message on the wire carries this envelope. `conn_id` is the routing
 /// key (matches the web side's existing conn_id); `Attach` is the one message
 /// with no meaningful conn_id.
@@ -40,6 +66,9 @@ pub enum IpcMessage {
         version: String,
         #[serde(default)]
         build: String,
+        /// r4 (additive): `WEB_FEATURES` this web supports. Empty from an older web.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
     },
 
     /// Start owning a connection. Sent from the `Connect` handler and
@@ -79,7 +108,48 @@ pub enum IpcMessage {
     /// processed before the web process restarted. `#[serde(default)]` so an
     /// old daemon paired with a new web binary degrades to "always live"
     /// (the pre-fix behavior) instead of failing to deserialize.
-    RawLine { conn_id: String, line: String, #[serde(default)] replayed: bool },
+    ///
+    /// `backlog` (additive, codex P2 irc.rs:359): a REPLAYED line that this daemon never
+    /// managed to hand to any web client before (it arrived while no web was attached,
+    /// e.g. during a web restart or an IPC outage). The web logs such a line — it is
+    /// new to history — while still treating it as replay for the UI/bots. `recv_ts`
+    /// (additive): when the daemon read the line (unix seconds), so a replayed line
+    /// without an IRCv3 `time` tag keeps its real time instead of "now". Both default
+    /// to false/0 for an old daemon (unchanged behaviour) and are ignored by an old web.
+    ///
+    /// `seq` (additive, r4): set (> 0, increasing per IPC connection) only for a web that
+    /// announced `proc_ack`; that web answers with `Processed { upto: seq }` once the line is
+    /// processed. 0 / absent = no acknowledgement wanted (an older daemon, or an older web).
+    RawLine {
+        conn_id: String,
+        line: String,
+        #[serde(default)] replayed: bool,
+        #[serde(default, skip_serializing_if = "is_false")] backlog: bool,
+        #[serde(default, skip_serializing_if = "is_zero")] recv_ts: i64,
+        #[serde(default, skip_serializing_if = "is_zero_u64")] seq: u64,
+    },
+
+    /// r4 (web → daemon, additive; only sent to a daemon whose `RawLine`s carry `seq`):
+    /// every `RawLine` up to and including `upto` has been processed (see `WEB_FEATURES`).
+    Processed { upto: u64 },
+
+    /// r5 (web → daemon, additive; only to a daemon that announced `hold_ack`, sent BEFORE the
+    /// `Processed` that covers them): these numbered lines were processed but are NOT durable
+    /// yet (held in memory while the owner's vault is locked). The daemon keeps them
+    /// undelivered when they are acknowledged, so a web that dies first gets them again as
+    /// backlog. codex P2 ipc_client.rs:293.
+    Held { seqs: Vec<u64> },
+
+    /// r5 (web → daemon, additive): previously `Held` lines are now logged (or deliberately
+    /// discarded) — count them as delivered.
+    Released { seqs: Vec<u64> },
+
+    /// r4 (daemon → web, additive; only sent to a web that announced `send_dropped`): a
+    /// RawSend line for `conn_id` was NOT sent (`reason`: over the IRC tag limit, the
+    /// connection's send queue full / byte budget exhausted while its socket is stalled,
+    /// or no such connection). Rate-limited per connection. The web tells the user —
+    /// such a drop is only known after the web has echoed the line (codex P1 main.rs:5882).
+    SendDropped { conn_id: String, reason: String },
 
     /// Daemon-level connection lifecycle. The web side re-derives its own
     /// `ServerEvent::Connected` from seeing the 001 line in a forwarded
@@ -130,6 +200,29 @@ pub enum IpcMessage {
         /// reattach never triggers. `#[serde(default)]` = "" for old daemons.
         #[serde(default)]
         self_userhost: String,
+        /// The server's CASEMAPPING token as the daemon learned it from 005 ("rfc1459",
+        /// "strict-rfc1459" or "ascii"), so a re-Attached web folds channel names the
+        /// way the server does even when the 005 line has aged out of the ring.
+        /// Additive: "" (an old daemon) = unknown → the web keeps its rfc1459 default;
+        /// an old web ignores the field.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        casemapping: String,
+        /// The server host / port this connection really dials (the Dial's params, which
+        /// a daemon keeps for the connection's whole life, across its own reconnects). The
+        /// web takes the connection's network identity (E2E nick scoping) from this rather
+        /// than from the saved config, which the user can edit while the connection runs
+        /// (codex P2 main.rs:6834). Additive: ""/0 from an older daemon (= unknown); an
+        /// old web ignores both fields.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        dial_server: String,
+        #[serde(default, skip_serializing_if = "is_zero_u16")]
+        dial_port: u16,
+        /// r8 (codex P2 ipc_client.rs:1101): the server's CHANMODES / PREFIX as the daemon
+        /// learned them from 005 (ISUPPORT tokens, ircproto::ChanModes::isupport), so a
+        /// re-Attached web walks mode parameters correctly even when the 005 line has aged out
+        /// of the ring. Additive: None (an old daemon) = unknown; an old web ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chanmodes: Option<String>,
     },
 
     // ── Future-proofing (v1+) — kept additive so a byte-frozen daemon tolerates
@@ -137,7 +230,13 @@ pub enum IpcMessage {
     /// Version handshake. The daemon sends this right after a web `Attach` (and a
     /// web client MAY send its own on connect). Lets a newer web binary discover
     /// the frozen daemon's capabilities instead of assuming.
-    Hello { proto_version: u32 },
+    /// `features` (additive): behaviours a newer daemon has that a web may rely on —
+    /// see `DAEMON_FEATURES`. Empty from an older daemon; ignored by an older web.
+    Hello {
+        proto_version: u32,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+    },
 
     /// Reserved out-of-band control channel (web → daemon) for future knobs that
     /// must not require a daemon schema change. The frozen daemon handles the
@@ -336,7 +435,7 @@ mod tests {
     fn attach_tolerates_missing_version_fields() {
         let msg: IpcMessage = serde_json::from_str(r#"{"type":"attach"}"#).unwrap();
         match msg {
-            IpcMessage::Attach { version, build } => {
+            IpcMessage::Attach { version, build, .. } => {
                 assert_eq!(version, "");
                 assert_eq!(build, "");
             }
@@ -351,12 +450,33 @@ mod tests {
             r#"{"type":"attach","version":"0.4.3","build":"abc1234"}"#,
         ).unwrap();
         match msg {
-            IpcMessage::Attach { version, build } => {
+            IpcMessage::Attach { version, build, .. } => {
                 assert_eq!(version, "0.4.3");
                 assert_eq!(build, "abc1234");
             }
             other => panic!("unexpected variant: {:?}", other),
         }
+    }
+
+    /// r4: the additions (RawLine.seq, Attach.features, Processed, SendDropped) are
+    /// invisible to an older peer unless used: seq 0 / no features serialize exactly as
+    /// before, and the new variants are only ever sent to a peer that announced them.
+    #[test]
+    fn r4_additions_are_invisible_to_older_peers() {
+        let l = IpcMessage::RawLine { conn_id: "c".into(), line: "x".into(), replayed: false, backlog: false, recv_ts: 0, seq: 0 };
+        let j = serde_json::to_string(&l).unwrap();
+        assert!(!j.contains("seq"), "{j}");
+        let a = IpcMessage::Attach { version: "v".into(), build: "b".into(), features: vec![] };
+        assert!(!serde_json::to_string(&a).unwrap().contains("features"));
+        let m: IpcMessage = serde_json::from_str(r#"{"type":"raw_line","conn_id":"c","line":"x","replayed":true}"#).unwrap();
+        assert!(matches!(m, IpcMessage::RawLine { seq: 0, .. }));
+        let m: IpcMessage = serde_json::from_str(r#"{"type":"raw_line","conn_id":"c","line":"x","seq":7}"#).unwrap();
+        assert!(matches!(m, IpcMessage::RawLine { seq: 7, .. }));
+        let m: IpcMessage = serde_json::from_str(r#"{"type":"attach","version":"v","build":"b","features":["proc_ack"]}"#).unwrap();
+        assert!(matches!(m, IpcMessage::Attach { ref features, .. } if features == &vec!["proc_ack".to_string()]));
+        assert_eq!(serde_json::to_string(&IpcMessage::Processed { upto: 3 }).unwrap(), r#"{"type":"processed","upto":3}"#);
+        let d = serde_json::to_string(&IpcMessage::SendDropped { conn_id: "c".into(), reason: "r".into() }).unwrap();
+        assert!(d.contains(r#""type":"send_dropped""#), "{d}");
     }
 
     #[test]

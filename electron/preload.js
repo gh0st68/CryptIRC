@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 // Minimal, audited bridge. No Node primitives are exposed to page content.
-contextBridge.exposeInMainWorld('electronAPI', {
+const api = {
   isElectron: true,
 
   // Native notifications (web frontend → main)
@@ -15,11 +15,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Taskbar/dock unread badge — frontend can call window.electronAPI.setUnread(n)
   setUnread: (n) => ipcRenderer.send('set-unread', n),
+};
 
-  // Trusted local chrome (setup + connection-error pages) — these channels are
-  // only ever wired by our own local data: pages loaded with this preload.
-  setupSubmit: (url) => ipcRenderer.send('setup-url', url),
-  setupQuit: () => ipcRenderer.send('setup-quit'),
-  retryLoad: () => ipcRenderer.send('retry-load'),
-  changeServer: () => ipcRenderer.send('change-server'),
-});
+// Trusted local chrome (setup + connection-error pages). These are our own
+// data: pages; the remote server's page shares this preload (the error page is
+// loaded into the main window) but must not get them, so they are only exposed
+// when the page itself is a data: URL. The main process ALSO checks the sending
+// frame on every one of these messages — this just keeps them off the remote
+// page's bridge entirely.
+let isLocalPage = false;
+try { isLocalPage = window.location.protocol === 'data:'; } catch {}
+if (isLocalPage) {
+  api.setupSubmit = (url) => ipcRenderer.send('setup-url', url);
+  api.setupQuit = () => ipcRenderer.send('setup-quit');
+  api.retryLoad = () => ipcRenderer.send('retry-load');
+  api.changeServer = () => ipcRenderer.send('change-server');
+  api.retrustCert = () => ipcRenderer.send('retrust-cert');
+}
+
+contextBridge.exposeInMainWorld('electronAPI', api);

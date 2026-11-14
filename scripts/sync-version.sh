@@ -72,8 +72,22 @@ if [[ "$PKG_VER" != "$CANON_VER" || "$LOCK_VER" != "$CANON_VER" ]]; then
 fi
 if [[ "$README_VER" != "$CANON_VER" ]]; then
     # Preserve the badge's existing colour and any ?style= params — only the
-    # version segment is ours to rewrite.
-    sed -i -E "0,/badge\/version-[0-9A-Za-z.+-]+-([0-9A-Za-z]+)/s//badge\/version-${CANON_VER}-\1/" "$README"
+    # version segment is ours to rewrite (the first badge only). POSIX awk + a temp file,
+    # not GNU sed's `0,/re/` range and bare `-i`, so this also runs on macOS/BSD (the
+    # Electron mac builds are made on a Mac).
+    _tmp=$(mktemp "$README.XXXXXX")
+    if V="$CANON_VER" awk '
+        !done && match($0, /badge\/version-[0-9A-Za-z.+-]+-[0-9A-Za-z]+/) {
+            m = substr($0, RSTART, RLENGTH); colour = m; sub(/.*-/, "", colour)
+            $0 = substr($0, 1, RSTART - 1) "badge/version-" ENVIRON["V"] "-" colour substr($0, RSTART + RLENGTH)
+            done = 1
+        }
+        { print }' "$README" > "$_tmp"; then
+        cat "$_tmp" > "$README"      # (keeps README.md's own mode and owner)
+        rm -f "$_tmp"
+    else
+        rm -f "$_tmp"; echo "✗ Could not rewrite the README.md badge" >&2; exit 2
+    fi
     echo "  README.md badge: ${README_VER:-<unreadable>} → $CANON_VER"
     CHANGED=true
 fi

@@ -1,7 +1,13 @@
-// CryptIRC Service Worker v11
+// CryptIRC Service Worker v12
 // Handles: offline caching, push notifications, notification click actions
 
-const CACHE = 'cryptirc-v209';
+// v210: navigations are cached under ONE normalised key (no query string), so the
+// v209 cache — which held a copy of index.html per notification-click / pop-out URL,
+// incl. ?target=<nick>&from=<nick> DM metadata — is dropped on activate.
+const CACHE = 'cryptirc-v210';
+// The single cache key for the app shell. Every navigation (/cryptirc, /cryptirc/,
+// /cryptirc/?conn=…&target=…, /cryptirc/?detached=1) serves the same index.html.
+const NAV_KEY = '/cryptirc/';
 // notif-intent cache: a fallback bridge that stores a single notification-click
 // intent so the client can read it on startup if postMessage is lost. It stores
 // only minimal opaque IDs (conn_id/target/from/ts) — no auth material (audit #75).
@@ -50,24 +56,49 @@ self.addEventListener('activate', e => {
   // explicitly managed here so it is no longer an orphan that survives forever
   // outside version control (audit #75).
   const KEEP = [CACHE, NOTIF_INTENT_CACHE, PUSH_RESUB_CACHE];
+  // r4 (codex-p3 LOW sw.js:62): CacheStorage belongs to the whole ORIGIN, not to this
+  // worker's scope — another app on the same host (e.g. a PWA under /notes/) shares it.
+  // Only CryptIRC's own caches are dropped: every cache any CryptIRC version created is
+  // named 'cryptirc-…' (cryptirc-v4 … cryptirc-v210, -notif-intent, -push-resub).
   e.waitUntil(
     caches.keys()
       .then(keys => Promise.all(
-        keys.filter(k => !KEEP.includes(k)).map(k => caches.delete(k))
+        keys.filter(k => typeof k === 'string' && k.startsWith('cryptirc-') && !KEEP.includes(k)).map(k => caches.delete(k))
       ))
+      .then(() => pruneQueryEntries())
       .then(() => self.clients.claim())
   );
 });
 
-// Allow the app to clear the notif-intent bridge on logout (audit #75).
+// Drop any cached entry whose URL carries a query string (navigation copies keyed
+// on ?conn=…&target=…). Nothing current writes them; this is a belt-and-braces
+// sweep so they can never accumulate again even without a CACHE bump.
+async function pruneQueryEntries() {
+  try {
+    const c = await caches.open(CACHE);
+    const reqs = await c.keys();
+    await Promise.all(reqs.filter(r => { try { return new URL(r.url).search !== ''; } catch { return false; } })
+      .map(r => c.delete(r)));
+  } catch (err) { /* non-fatal */ }
+}
+
+// Allow the app to clear the notif-intent bridge on logout (audit #75), and sweep
+// any query-string navigation copies while at it.
 self.addEventListener('message', e => {
   if (e.data && e.data.type === 'clear_notif_intent') {
-    e.waitUntil(caches.delete(NOTIF_INTENT_CACHE));
+    e.waitUntil(Promise.all([caches.delete(NOTIF_INTENT_CACHE), pruneQueryEntries()]));
   }
 });
 
 // ─── Fetch (network-first for HTML, cache-first for static assets) ───────────
 self.addEventListener('fetch', e => {
+  // r6 (agy-flash sw.js:97): only GETs of the app's own page, scripts and cached static
+  // files are handled here. Everything else (POST/PUT/DELETE, API routes, previews, pastes,
+  // admin calls, other origins) goes straight to the network as if there were no service
+  // worker — it used to be proxied, and on a network failure it got a synthetic
+  // "503 Offline" text reply (callers expecting JSON then failed on parsing) instead of the
+  // network error they handle. Nothing dynamic was ever cached.
+  if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
   // Skip API calls entirely
   if (['/cryptirc/ws', '/cryptirc/auth', '/cryptirc/upload', '/cryptirc/files', '/cryptirc/push', '/cryptirc/pub'].some(p =>
@@ -77,11 +108,15 @@ self.addEventListener('fetch', e => {
   // On failure fall back to cache, and if nothing is cached synthesize an offline
   // Response so we never resolve to undefined / a blank document (audit #136).
   if (url.pathname === '/cryptirc/' || url.pathname === '/cryptirc') {
+    // Store/look up under NAV_KEY, never the full request URL: keying on the URL
+    // stored a ~300 KB copy per distinct query string (unbounded, and it kept DM
+    // metadata after logout), and offline a notification-click URL missed the
+    // cache and showed a bare "Offline" page instead of booting the app.
     e.respondWith(
       fetch(e.request).then(res => {
-        if (isCacheable(res)) { const c = res.clone(); caches.open(CACHE).then(cache => cache.put(e.request, c)); }
+        if (isCacheable(res)) { const c = res.clone(); caches.open(CACHE).then(cache => cache.put(NAV_KEY, c)); }
         return res;
-      }).catch(async () => (await caches.match(e.request)) || offlineResponse())
+      }).catch(async () => (await caches.match(NAV_KEY)) || (await caches.match(e.request, { ignoreSearch: true })) || offlineResponse())
     );
     return;
   }
@@ -99,6 +134,7 @@ self.addEventListener('fetch', e => {
     return;
   }
 
+  if (url.origin !== self.location.origin || !STATIC.includes(url.pathname)) return;   // r6: not ours to cache
   // Other static assets — stale-while-revalidate: serve the cached copy
   // immediately (fast, offline-capable) but always kick off a background fetch
   // to refresh the cache, so a bad/stale cache fill self-heals on the next load
@@ -197,6 +233,10 @@ self.addEventListener('notificationclick', e => {
   if (e.action === 'dismiss') return;
 
   const data    = e.notification.data || {};
+  // Only ever open our own app URL. Notifications shown without data.url (e.g. the
+  // diagnostic SW test) used to open '/cryptirc/undefined'.
+  let baseUrl = self.location.origin + '/cryptirc/';
+  try { if (data.url && new URL(data.url).origin === self.location.origin) baseUrl = data.url; } catch (err) {}
   // Build the open URL by passing conn_id and target as SEPARATE, individually
   // URL-encoded query params instead of '/'-joining them. Joining was unsafe: a
   // '/' inside conn_id or target could shift the boundary between the two fields
@@ -210,14 +250,18 @@ self.addEventListener('notificationclick', e => {
   if (data.target)  qs.push(`target=${encodeURIComponent(data.target)}`);
   if (data.ts)      qs.push(`ts=${encodeURIComponent(data.ts)}`);
   if (data.from)    qs.push(`from=${encodeURIComponent(data.from)}`);
-  const openUrl = data.url + (qs.length ? `?${qs.join('&')}` : '');
+  const openUrl = baseUrl + (qs.length ? `?${qs.join('&')}` : '');
 
+  // `t` tags this click: the page deletes the cache-bridge entry carrying the same
+  // `t` once the postMessage arrives (extra field — older pages ignore it).
+  const clickT = Date.now();
   const payload = {
     type:    'notification_click',
     conn_id: data.conn_id,
     target:  data.target,
     ts:      data.ts,
     from:    data.from,
+    t:       clickT,
   };
 
   e.waitUntil((async () => {
@@ -225,13 +269,18 @@ self.addEventListener('notificationclick', e => {
     // startup in case postMessage is lost (iOS PWA wake races, etc.)
     try {
       const cache = await caches.open(NOTIF_INTENT_CACHE);
-      const body = JSON.stringify({ ...payload, t: Date.now() });
+      const body = JSON.stringify({ ...payload, t: clickT });
       await cache.put('/__notif_click__', new Response(body, {
         headers: { 'Content-Type': 'application/json' },
       }));
     } catch (err) { /* non-fatal */ }
 
     const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    // Prefer a focused, then a visible, main window. A ?detached=1 pop-out is a
+    // single-conversation view and must not be navigated by a notification click,
+    // so it is skipped (a main window is opened instead if none exists).
+    const rank = c => (c.focused ? 0 : 2) + (c.visibilityState === 'visible' ? 0 : 1);
+    clientsList.sort((a, b) => rank(a) - rank(b));
 
     // Try to focus an existing same-origin client. Compare parsed origins rather
     // than startsWith(origin), which could match a malicious lookalike origin
@@ -239,7 +288,8 @@ self.addEventListener('notificationclick', e => {
     for (const client of clientsList) {
       let sameOrigin = false;
       try { const u = new URL(client.url); sameOrigin = u.origin === self.location.origin &&
-        (u.pathname === '/cryptirc' || u.pathname.startsWith('/cryptirc/')); } catch (err) {}
+        (u.pathname === '/cryptirc' || u.pathname.startsWith('/cryptirc/')) &&
+        u.searchParams.get('detached') !== '1'; } catch (err) {}
       if (sameOrigin) {
         try { client.postMessage(payload); } catch (err) {}
         if ('focus' in client) {

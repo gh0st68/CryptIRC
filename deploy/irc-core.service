@@ -66,7 +66,11 @@ RestartSec=5
 
 # Resource ceilings so a runaway (leaked FDs, a memory-accreting bug over years of
 # uptime) fails FAST into a clean restart instead of the OS-OOM-killer lottery that
-# could take neighbouring services with it.
+# could take neighbouring services with it. TasksMax is THIS unit's own thread/process
+# cap (its cgroup). Deliberately no LimitNPROC: RLIMIT_NPROC counts every task of the
+# whole `cryptirc` UID — the web process (same user) included — so a web thread burst,
+# or a big host's per-core tokio workers, made irc-core fail to start (203/EXEC) or hang
+# every dial (DNS runs on blocking threads it could no longer spawn).
 MemoryMax=512M
 TasksMax=256
 
@@ -79,6 +83,8 @@ UMask=0077
 # NetworkConfig secrets are decrypted by the web process, never the daemon.
 Environment=CRYPTIRC_DATA=/var/lib/cryptirc
 Environment=RUST_LOG=info
+# Plain log lines: journald keeps ANSI colour codes as unreadable "blob data".
+Environment=NO_COLOR=1
 
 # ── Security hardening (matches cryptirc.service's posture) ────────────────
 
@@ -108,7 +114,6 @@ ProtectHostname=true
 # but a transient FD spike must never trip EMFILE and cascade through accept(). Well
 # above any realistic need so the accept loop's error-swallowing is belt-and-suspenders.
 LimitNOFILE=16384
-LimitNPROC=64
 
 [Install]
 WantedBy=multi-user.target

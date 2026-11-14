@@ -76,6 +76,16 @@ const AV_STRIP_MAX_CONCURRENT: usize = 2;
 /// Wall-clock timeout for a single ffmpeg metadata-strip job.
 const AV_STRIP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Demuxers ffmpeg may use for an uploaded A/V file (`-format_whitelist`). Covers
+/// every A/V extension in `ext_needs_strip` (mp4/mov/m4v/3gp/3g2 → mov family,
+/// webm/mkv → matroska, avi, flv, wmv → asf, mp3, ogg, wav, flac) plus the few
+/// self-contained containers a mislabelled phone/screen-recorder file can really
+/// be (MPEG-TS/PS, raw AAC), so nothing that stripped before is newly rejected.
+/// Deliberately excludes the demuxers that open OTHER files/URLs (hls, concat,
+/// image2, dash, …).
+const AV_DEMUXER_WHITELIST: &str =
+    "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,flv,live_flv,asf,mp3,ogg,wav,w64,flac,mpegts,mpeg,aac";
+
 /// #26: global disk-space floor. On top of the per-user quota (which alone lets
 /// K accounts each fill PER_USER_MAX_TOTAL_BYTES of in-progress chunks and
 /// exhaust the shared data volume, failing log/DB writes server-wide), refuse
@@ -83,12 +93,12 @@ const AV_STRIP_TIMEOUT: Duration = Duration::from_secs(60);
 /// reserve. Only enforced when free space can actually be queried (see
 /// `available_disk_bytes`); a query failure fails OPEN so uploads are never
 /// blocked on a filesystem whose free space we cannot read.
-const MIN_FREE_DISK_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+pub(crate) const MIN_FREE_DISK_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 
 /// Best-effort bytes available to an unprivileged writer on the filesystem
 /// holding `path`. Returns None if the figure cannot be determined (fail open).
 #[cfg(unix)]
-fn available_disk_bytes(path: &std::path::Path) -> Option<u64> {
+pub(crate) fn available_disk_bytes(path: &std::path::Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     // SAFETY: `c_path` is a valid NUL-terminated C string and `stat` is a
@@ -101,7 +111,7 @@ fn available_disk_bytes(path: &std::path::Path) -> Option<u64> {
 }
 
 #[cfg(not(unix))]
-fn available_disk_bytes(_path: &std::path::Path) -> Option<u64> { None }
+pub(crate) fn available_disk_bytes(_path: &std::path::Path) -> Option<u64> { None }
 
 /// Global semaphore bounding concurrent ffmpeg invocations so a burst of A/V
 /// uploads cannot spawn unbounded CPU-heavy processes.
@@ -207,9 +217,38 @@ pub struct UploadResult {
     pub is_image:      bool,
 }
 
+/// r9 (astra P1 main.rs:3380): the legacy multipart /upload reserves its share of the upload
+/// budget BEFORE the body arrives, and its reads had no deadline, so a request whose body
+/// stalled (or trickled a byte now and then) held that reservation for as long as the client
+/// kept the connection open — two of them could block every other legacy upload. The body
+/// must now keep moving: no read waits longer than LEGACY_BODY_IDLE, and after
+/// LEGACY_BODY_GRACE the request must average LEGACY_BODY_MIN_RATE, else it fails and its
+/// reservation is released. (The app itself uploads through /upload/init + chunks, which
+/// have their own deadlines.)
+const LEGACY_BODY_IDLE: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(30) };
+const LEGACY_BODY_GRACE: Duration = if cfg!(test) { Duration::from_millis(600) } else { Duration::from_secs(60) };
+const LEGACY_BODY_MIN_RATE: u64 = 64 * 1024;   // bytes per second, on average
+const LEGACY_BODY_STALLED: &str = "Upload cancelled: the file arrived too slowly";
+
+/// How long the next body read may wait, given when the request started and how much of
+/// it has arrived.
+fn legacy_body_wait(started: tokio::time::Instant, received: u64) -> Duration {
+    let earned = LEGACY_BODY_GRACE + Duration::from_millis(received.saturating_mul(1000) / LEGACY_BODY_MIN_RATE);
+    earned.saturating_sub(started.elapsed()).min(LEGACY_BODY_IDLE)
+}
+
+async fn legacy_body_read<T, E: Into<anyhow::Error>>(read: impl std::future::Future<Output = std::result::Result<T, E>>,
+                                                     wait: Duration) -> Result<T> {
+    match tokio::time::timeout(wait, read).await {
+        Ok(r) => r.map_err(Into::into),
+        Err(_) => anyhow::bail!(LEGACY_BODY_STALLED),
+    }
+}
+
 pub async fn handle_upload(upload_dir: &str, mut multipart: Multipart, max_bytes: usize) -> Result<UploadResult> {
     let limit = if max_bytes > 0 { max_bytes } else { DEFAULT_MAX_UPLOAD_BYTES };
-    while let Some(mut field) = multipart.next_field().await? {
+    let (started, mut received) = (tokio::time::Instant::now(), 0u64);
+    while let Some(mut field) = legacy_body_read(multipart.next_field(), legacy_body_wait(started, received)).await? {
         let original_name = field.file_name().unwrap_or("upload").to_string();
         // Clamp original_name length
         let original_name: String = original_name.chars().take(255).collect();
@@ -220,7 +259,8 @@ pub async fn handle_upload(upload_dir: &str, mut multipart: Multipart, max_bytes
         // via `field.bytes()` and only checking the size afterward. This caps
         // peak RAM for this path at `limit` (+ one in-flight chunk).
         let mut data: Vec<u8> = Vec::new();
-        while let Some(chunk) = field.chunk().await? {
+        while let Some(chunk) = legacy_body_read(field.chunk(), legacy_body_wait(started, received)).await? {
+            received += chunk.len() as u64;
             if data.len() + chunk.len() > limit {
                 let limit_mb = limit / (1024 * 1024);
                 anyhow::bail!("File too large (max {} MB)", limit_mb);
@@ -377,8 +417,251 @@ pub struct UploadRecord {
 
 fn default_done_status() -> UploadStatus { UploadStatus::Done }
 
+// ─── Upload index location (2026-11-01 H1) ───────────────────────────────────
+//
+// The per-user upload index (every upload's UUID filename, original name and the
+// channel/nick it was sent to) used to live at `{data}/uploads/{username}.json` —
+// INSIDE the directory the unauthenticated /pub route serves, at a guessable name,
+// so `/pub/<username>.json` handed anyone the user's whole upload history. It now
+// lives in `{data}/upload_index/{username}.json` (0700 dir, 0600 files), which no
+// route serves. `migrate_upload_index` moves existing files at startup, and
+// `is_reserved_upload_name` makes the file routes refuse index-shaped names even
+// if one reappears in the served dir (e.g. written by a rolled-back old binary).
+
+/// Directory holding the per-user upload index files. Never served.
+pub fn upload_index_dir(data_dir: &str) -> PathBuf {
+    PathBuf::from(data_dir).join("upload_index")
+}
+
 fn user_uploads_path(data_dir: &str, username: &str) -> PathBuf {
+    upload_index_dir(data_dir).join(format!("{}.json", username))
+}
+
+/// Pre-2026-11-01 index location, inside the served uploads dir. Only read as a
+/// fallback when the startup migration could not move a file (see
+/// `load_user_records_for`), and removed by `clear_user_uploads`.
+fn legacy_user_uploads_path(data_dir: &str, username: &str) -> PathBuf {
     PathBuf::from(data_dir).join("uploads").join(format!("{}.json", username))
+}
+
+/// True for a canonical lowercase-or-uppercase hyphenated UUID (8-4-4-4-12 hex).
+fn is_uuid_shaped(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// The username part of an index-file name (`<username>.json`), or None when the
+/// name is not index-shaped. Server-generated upload blobs (and the admin's
+/// hand-dropped `<uuid>.<ext>` files) always have a UUID stem, which is never a
+/// valid username (36 chars > the 32-char username cap), so they are never
+/// mistaken for an index — not even an uploaded `<uuid>.json`.
+fn index_stem(name: &str) -> Option<&str> {
+    let stem = name.strip_suffix(".json")?;
+    if stem.is_empty() || stem.len() > 64 || is_uuid_shaped(stem) { return None; }
+    if !stem.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { return None; }
+    Some(stem)
+}
+
+/// Names in the uploads dir that the /pub and /files routes must never serve:
+/// per-user index files (`<username>.json`), their atomic-write temps
+/// (`<username>.json.tmp`), any other `*.tmp`, and `_`-prefixed internal entries
+/// (`_inprogress`). Everything a user or the admin actually shares is
+/// `<uuid>.<ext>`, which this never matches.
+pub fn is_reserved_upload_name(name: &str) -> bool {
+    if name.starts_with('_') || name.starts_with('.') { return true; }
+    let lower = name.to_ascii_lowercase();
+    if let Some(base) = lower.strip_suffix(".tmp") {
+        // A temp file is only ever a stale partial write; a UUID-stemmed upload
+        // can't end in .tmp unless a user uploaded "x.tmp" (allowed type), so
+        // keep those servable.
+        return base.split('.').next().map_or(true, |s| !is_uuid_shaped(s));
+    }
+    index_stem(&lower).is_some()
+}
+
+// The server is unix-only (main.rs create_dir_secure uses std::os::unix directly).
+fn set_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+
+/// Create `dir` 0700 (and re-tighten it if it pre-existed looser).
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    set_mode(dir, 0o700);
+    Ok(())
+}
+
+fn ensure_index_dir(data_dir: &str) -> std::io::Result<PathBuf> {
+    let dir = upload_index_dir(data_dir);
+    create_private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Write `bytes` to `path` crash-safely: 0600 temp file in the same dir, fsync,
+/// rename over the target. Sync — used by the startup migration.
+fn write_file_atomic_sync(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("json.tmp");
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true).create(true).truncate(true).mode(0o600)
+            .open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    set_mode(&tmp, 0o600);
+    std::fs::rename(&tmp, path)
+}
+
+/// One-time, idempotent, crash-safe move of the per-user upload index files out
+/// of the served uploads dir into `{data}/upload_index/` (2026-11-01 H1). Called
+/// once at startup, before the HTTP listener starts. Safe to run on every boot:
+///   * only `old` exists        → atomic rename (same filesystem), else copy+fsync+
+///                                rename, then delete the old file.
+///   * only `new` exists        → nothing to do (already migrated).
+///   * both exist               → a half-finished copy, or an OLD binary wrote a
+///                                fresh index after a rollback. Merge: keep every
+///                                record in `new`, add records only present in
+///                                `old` (skipping Done rows whose blob is gone, so a
+///                                deletion made after migration is not undone), keep
+///                                a backup of `old` in upload_index/legacy-backup/,
+///                                then delete `old`. Re-running after a crash at
+///                                any step converges to the same result.
+///   * stale `<user>.json.tmp`  → deleted (an interrupted old-style atomic write;
+///                                the old code never read it either).
+/// New files are 0600 in a 0700 dir. When run as root (manual invocation) the new
+/// dir/files are chowned to the data dir's owner so the service can still write.
+/// Returns (moved, merged, temps_removed).
+pub fn migrate_upload_index(data_dir: &str) -> (usize, usize, usize) {
+    let legacy_dir = PathBuf::from(data_dir).join("uploads");
+    let new_dir = match ensure_index_dir(data_dir) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("[upload] cannot create upload index dir: {} — index files stay in uploads/ (still never served)", e);
+            return (0, 0, 0);
+        }
+    };
+    let (mut moved, mut merged, mut temps) = (0usize, 0usize, 0usize);
+    if let Ok(rd) = std::fs::read_dir(&legacy_dir) {
+        for ent in rd.flatten() {
+            let name = match ent.file_name().into_string() { Ok(n) => n, Err(_) => continue };
+            // Regular files only — never follow a symlink or touch _inprogress/.
+            let is_file = std::fs::symlink_metadata(ent.path()).map(|m| m.file_type().is_file()).unwrap_or(false);
+            if !is_file { continue; }
+            if let Some(stem) = name.strip_suffix(".json.tmp") {
+                if index_stem(&format!("{}.json", stem)).is_some() {
+                    if std::fs::remove_file(ent.path()).is_ok() { temps += 1; }
+                }
+                continue;
+            }
+            if index_stem(&name).is_none() { continue; }
+            let old = ent.path();
+            let new = new_dir.join(&name);
+            if !new.exists() {
+                let ok = match std::fs::rename(&old, &new) {
+                    Ok(()) => true,
+                    // Cross-filesystem (EXDEV) or similar: copy crash-safely, then
+                    // delete the old one. A crash between the two leaves both,
+                    // identical — the merge branch below then just deletes `old`.
+                    Err(_) => match std::fs::read(&old) {
+                        Ok(bytes) => write_file_atomic_sync(&new, &bytes).is_ok() && std::fs::remove_file(&old).is_ok(),
+                        Err(_) => false,
+                    },
+                };
+                if ok { moved += 1; } else {
+                    tracing::error!("[upload] could not migrate upload index {} — left in place (never served; read as a fallback)", name);
+                }
+                continue;
+            }
+            match merge_legacy_index(&old, &new, &new_dir, &legacy_dir, &name) {
+                Ok(()) => merged += 1,
+                Err(e) => tracing::error!("[upload] could not merge legacy upload index {}: {} — left in place (never served)", name, e),
+            }
+        }
+    }
+    harden_index_dir(data_dir, &new_dir);
+    if moved + merged + temps > 0 {
+        tracing::info!("[upload] upload index migration: {} moved, {} merged, {} stale temp(s) removed", moved, merged, temps);
+    }
+    (moved, merged, temps)
+}
+
+/// Both `old` (legacy, in uploads/) and `new` exist: back `old` up (and `new`
+/// too if it is unreadable), merge old-only records into `new`, delete `old`.
+/// Every step is idempotent, so a crash anywhere just repeats it next boot.
+/// See `migrate_upload_index`.
+fn merge_legacy_index(
+    old: &std::path::Path, new: &std::path::Path, new_dir: &std::path::Path,
+    legacy_dir: &std::path::Path, name: &str,
+) -> std::io::Result<()> {
+    let old_bytes = std::fs::read(old)?;
+    let new_bytes = std::fs::read(new).unwrap_or_default();
+    let new_parsed: Option<Vec<UploadRecord>> = serde_json::from_slice(&new_bytes).ok();
+    let new_corrupt = new_parsed.is_none() && !new_bytes.is_empty();
+    let new_recs = new_parsed.unwrap_or_default();
+    let old_recs: Vec<UploadRecord> = serde_json::from_slice(&old_bytes).unwrap_or_default();
+
+    // 1. Backups first (outside the served dir), so no later step can lose data.
+    let backup_dir = new_dir.join("legacy-backup");
+    create_private_dir(&backup_dir)?;
+    let stamp = chrono::Utc::now().timestamp();
+    write_file_atomic_sync(&backup_dir.join(format!("{}.{}", name, stamp)), &old_bytes)?;
+    if new_corrupt {
+        write_file_atomic_sync(&backup_dir.join(format!("{}.{}.unreadable", name, stamp)), &new_bytes)?;
+    }
+
+    // 2. Union: everything in `new` (authoritative on id conflicts) plus rows only
+    //    in `old`. A Done row only in `old` whose blob is gone was deleted after the
+    //    migration — don't resurrect it.
+    let key = |r: &UploadRecord| if r.id.is_empty() { r.filename.clone() } else { r.id.clone() };
+    let have: std::collections::HashSet<String> = new_recs.iter().map(key).collect();
+    let mut out = new_recs.clone();
+    for r in old_recs {
+        if have.contains(&key(&r)) { continue; }
+        if r.status == UploadStatus::Done {
+            let safe: String = r.filename.chars().filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-').take(128).collect();
+            if safe.is_empty() || !legacy_dir.join(&safe).is_file() { continue; }
+        }
+        out.push(r);
+    }
+    if out.len() != new_recs.len() || new_corrupt {
+        let json = serde_json::to_vec(&out).map_err(std::io::Error::other)?;
+        write_file_atomic_sync(new, &json)?;
+    }
+
+    // 3. Only now remove the served copy.
+    std::fs::remove_file(old)
+}
+
+/// 0700 on the index dir tree, 0600 on its files; chown to the data dir's owner
+/// when running as root (so a manual root run can't leave the service unable to
+/// write). Best-effort, never follows symlinks.
+fn harden_index_dir(data_dir: &str, dir: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let owner = if unsafe { libc::geteuid() } == 0 {
+        std::fs::metadata(data_dir).ok().map(|m| (m.uid(), m.gid()))
+    } else { None };
+    fn walk(p: &std::path::Path, depth: u32, owner: Option<(u32, u32)>) {
+        if depth > 2 { return; }
+        let meta = match std::fs::symlink_metadata(p) { Ok(m) => m, Err(_) => return };
+        if meta.file_type().is_symlink() { return; }
+        if let Some((u, g)) = owner { let _ = std::os::unix::fs::chown(p, Some(u), Some(g)); }
+        if meta.is_dir() {
+            set_mode(p, 0o700);
+            if let Ok(rd) = std::fs::read_dir(p) { for e in rd.flatten() { walk(&e.path(), depth + 1, owner); } }
+        } else if meta.is_file() {
+            set_mode(p, 0o600);
+        }
+    }
+    walk(dir, 0, owner);
 }
 
 pub async fn record_upload(data_dir: &str, username: &str, result: &UploadResult) -> Result<()> {
@@ -387,10 +670,7 @@ pub async fn record_upload(data_dir: &str, username: &str, result: &UploadResult
     let _guard = lock.lock().await;
 
     let path = user_uploads_path(data_dir, username);
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let mut records = load_user_records(&path).await;
+    let mut records = load_user_records_for(data_dir, username).await;
     // #16: reject if this completed upload would push the user over quota.
     check_quota(&records, None, result.size)?;
     let now = chrono::Utc::now().timestamp();
@@ -410,7 +690,10 @@ pub async fn record_upload(data_dir: &str, username: &str, result: &UploadResult
         source_conn_id: String::new(),
         source_target: String::new(),
     });
-    write_records_atomic(&path, &records).await;
+    // codex P1 upload.rs:821: a failed index write is an error (the route then removes the
+    // just-stored file and reports the failure) instead of a success nothing remembers.
+    write_records_atomic(&path, &records).await
+        .map_err(|e| anyhow::anyhow!("Could not save the upload list: {}", e))?;
     Ok(())
 }
 
@@ -440,6 +723,14 @@ fn checked_id(id: &str) -> Result<String> {
         anyhow::bail!("Invalid upload id (illegal characters)");
     }
     Ok(safe)
+}
+
+/// A filename-shaped record id as written by record_upload / the pre-chunked era
+/// ("<name>.<ext>": the stored filename's own charset, one or more dots, no path parts).
+/// Only used to MATCH an existing record id exactly (remove_record) — never to build a path.
+fn is_legacy_file_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.contains('.') && !id.starts_with('.') && !id.contains("..")
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
 fn safe_user(username: &str) -> String {
@@ -531,7 +822,7 @@ pub async fn sweep_stale_inprogress(data_dir: &str, ttl: Duration) -> usize {
 /// callers behind the per-user records lock (see [`user_record_lock`]) and
 /// persisted via [`write_records_atomic`].
 async fn load_records(data_dir: &str, username: &str) -> Vec<UploadRecord> {
-    let mut records = load_user_records(&user_uploads_path(data_dir, username)).await;
+    let mut records = load_user_records_for(data_dir, username).await;
     // Migration: pre-chunked records have empty id. Backfill from filename
     // so every row has a unique stable key for in-memory maps and remove().
     for r in &mut records {
@@ -539,33 +830,76 @@ async fn load_records(data_dir: &str, username: &str) -> Vec<UploadRecord> {
             r.id = if r.filename.is_empty() { Uuid::new_v4().to_string() } else { r.filename.clone() };
         }
         if r.progress_bytes == 0 && r.status == UploadStatus::Done { r.progress_bytes = r.size; }
+        // Argon P1 upload.rs:1299: records finalized by older builds carry the auth-gated
+        // "<base>/files/<file>" link; hand out the public "<base>/pub/<file>" one (same
+        // file, same bytes — exactly what the client already rewrote it to when sharing).
+        if !r.filename.is_empty() {
+            let old_tail = format!("/files/{}", r.filename);
+            if let Some(base) = r.url.strip_suffix(old_tail.as_str()) {
+                r.url = format!("{}/pub/{}", base, r.filename);
+            }
+        }
         if r.started_at == 0  { r.started_at  = r.uploaded_at; }
         if r.completed_at == 0 && r.status == UploadStatus::Done { r.completed_at = r.uploaded_at; }
     }
     records
 }
 
-async fn save_records(data_dir: &str, username: &str, records: &[UploadRecord]) {
+async fn save_records(data_dir: &str, username: &str, records: &[UploadRecord]) -> Result<()> {
     let path = user_uploads_path(data_dir, username);
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    write_records_atomic(&path, records).await;
+    write_records_atomic(&path, records).await
+        .map_err(|e| {
+            tracing::warn!("uploads: could not save the upload list of {}: {}", username, e);
+            anyhow::anyhow!("Could not save the upload list (server storage problem) — try again later")
+        })
 }
 
 /// Persist the records list via temp-file + atomic rename (#21) so a crash
 /// mid-write cannot truncate the list and a concurrent reader never observes a
-/// partial file.
-async fn write_records_atomic(path: &PathBuf, records: &[UploadRecord]) {
-    let json = serde_json::to_string(records).unwrap_or_default();
-    let tmp = path.with_extension("json.tmp");
-    if tokio::fs::write(&tmp, &json).await.is_ok() {
-        if tokio::fs::rename(&tmp, path).await.is_err() {
-            // Rename can fail across some filesystems; fall back to direct write.
-            let _ = tokio::fs::write(path, &json).await;
-            let _ = tokio::fs::remove_file(&tmp).await;
+/// partial file. codex P1 upload.rs:821: fallible — callers must not treat an
+/// unsaved list as committed.
+async fn write_records_atomic(path: &PathBuf, records: &[UploadRecord]) -> std::io::Result<()> {
+    let json = serde_json::to_string(records)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write_index_bytes(path, json.as_bytes()).await
+}
+
+/// Atomically replace an index file (temp + fsync + rename) with 0600 perms, creating the
+/// 0700 index dir if needed. H1: the index lives outside the served uploads dir.
+/// codex P1 upload.rs:821: every step's error is returned (it used to be discarded, so a
+/// full disk made finalize report Done and delete the staged upload while the index still
+/// described it as unfinished).
+async fn write_index_bytes(path: &PathBuf, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    if let Some(parent) = path.parent() {
+        if tokio::fs::metadata(parent).await.is_err() {
+            let p = parent.to_path_buf();
+            tokio::task::spawn_blocking(move || create_private_dir(&p)).await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))??;
         }
     }
+    let tmp = path.with_extension("json.tmp");
+    let wrote = async {
+        let mut f = tokio::fs::OpenOptions::new()
+            .write(true).create(true).truncate(true).mode(0o600)
+            .open(&tmp).await?;
+        f.write_all(bytes).await?;
+        f.flush().await?;
+        f.sync_all().await?;
+        std::io::Result::Ok(())
+    }.await;
+    if let Err(e) = wrote {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    if tokio::fs::rename(&tmp, path).await.is_err() {
+        // Rename can fail across some filesystems; fall back to direct write.
+        let direct = tokio::fs::write(path, bytes).await;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        direct?;
+    }
+    set_mode(path, 0o600);
+    Ok(())
 }
 
 /// Aggregate stored bytes + counts for a user. Used to enforce the per-user
@@ -664,7 +998,7 @@ where
             r
         }
     };
-    save_records(data_dir, username, &records).await;
+    save_records(data_dir, username, &records).await?;
     Ok(record)
 }
 
@@ -733,6 +1067,13 @@ pub async fn init_chunked_upload(
     let id_for_check = id.clone();
     let rec = upsert_record_validated(data_dir, username, &id, blank,
         |records| {
+            // Codex P1 (upload.rs:1027): a COMPLETED upload's id must not be re-initialised.
+            // The revive below would blank its filename/url while the stored file stays on
+            // disk, so the file drops out of quota accounting, clear and account deletion
+            // (repeat → unbounded public files). Clients always mint a fresh id per upload.
+            if records.iter().any(|r| r.id == id_for_check && r.status == UploadStatus::Done) {
+                anyhow::bail!("Upload id already used by a completed upload");
+            }
             // #38: cap simultaneously in-progress chunked uploads. A revive of an
             // already-Uploading record with this id does not add a new one.
             let already_uploading = records.iter()
@@ -772,6 +1113,20 @@ pub async fn init_chunked_upload(
     // For a genuine resume the dir already exists (create_dir_all is idempotent).
     tokio::fs::create_dir_all(&dir).await?;
     Ok(rec)
+}
+
+/// Cheap O(1) pre-check for the chunk route (rust-http #10): does `id` name an
+/// upload of this user that is still being assembled? (init creates the per-id
+/// temp dir; finalize/cancel/error/sweep remove it.) A miss means append_chunk
+/// would refuse the chunk anyway, so the route can answer before it reads the
+/// body or takes a shared slot. Not authoritative — append_chunk re-validates
+/// everything under the per-user lock.
+pub async fn chunk_target_exists(data_dir: &str, username: &str, id: &str) -> bool {
+    let Ok(id) = checked_id(id) else { return false };
+    match inprogress_dir(data_dir, username, &id) {
+        Some(dir) => tokio::fs::metadata(&dir).await.map(|m| m.is_dir()).unwrap_or(false),
+        None => false,
+    }
 }
 
 /// Append a chunk at the given absolute offset. Validates that offset matches
@@ -859,12 +1214,57 @@ pub async fn append_chunk(
             anyhow::bail!("Upload not initialized");
         }
     };
-    save_records(data_dir, username, &records).await;
+    // codex P1 upload.rs:821: if the progress can't be recorded, take the chunk back off
+    // the staged file so file and record agree and the client's retry of this same chunk
+    // (same offset) is accepted.
+    if let Err(e) = save_records(data_dir, username, &records).await {
+        if let Ok(f) = tokio::fs::OpenOptions::new().write(true).open(&data_path).await {
+            let _ = f.set_len(current as u64).await;
+        }
+        return Err(e);
+    }
     Ok(rec)
+}
+
+/// r4 F1-1 (agy P1 upload.rs:1286): a finalize failure caused by server storage — the
+/// stored file or the upload index could not be written — not by the upload itself. The
+/// assembled bytes are kept in the staging dir and the record stays `Uploading`, so the
+/// client's finalize retry (app.js retries a failed finalize) can still succeed;
+/// route_upload_finalize answers 503 for it instead of marking the upload failed.
+#[derive(Debug)]
+pub struct FinalizeRetryable(pub String);
+impl std::fmt::Display for FinalizeRetryable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
+}
+impl std::error::Error for FinalizeRetryable {}
+
+fn finalize_retryable(what: &str, e: impl std::fmt::Display) -> anyhow::Error {
+    tracing::warn!("[upload] finalize: {}: {} — upload kept for a retry", what, e);
+    anyhow::Error::new(FinalizeRetryable(
+        "Could not store the upload (server storage problem) — retrying may work".to_string()))
+}
+
+/// r4 F1-1: undo the store of `final_path` after a failed commit while keeping the upload
+/// retryable. A file that was MOVED out of the staging dir (formats that are not rewritten)
+/// goes back to `data_path`; otherwise (a stripped copy, or the copy fallback) the staged
+/// original is still there and only the stored copy is removed. No orphan is left behind
+/// in the public dir either way.
+async fn unstore_final(final_path: &std::path::Path, data_path: &std::path::Path) {
+    if tokio::fs::metadata(data_path).await.is_err() {
+        if tokio::fs::rename(final_path, data_path).await.is_ok() { return; }
+        if tokio::fs::copy(final_path, data_path).await.is_ok() {
+            let _ = tokio::fs::remove_file(final_path).await;
+            return;
+        }
+        tracing::warn!("[upload] finalize: could not return a stored file to its staging dir; the upload has to be sent again");
+    }
+    let _ = tokio::fs::remove_file(final_path).await;
 }
 
 /// Finalize: validate the assembled temp file, strip metadata, move into
 /// the public upload dir, mark record as Done. Returns the final record.
+/// A storage failure (stored file / index write) returns a [`FinalizeRetryable`] error
+/// with the staged bytes intact (r4 F1-1); every other error is final.
 pub async fn finalize_chunked_upload(
     data_dir: &str, upload_dir: &str, username: &str, id: &str,
 ) -> Result<UploadRecord> {
@@ -928,7 +1328,7 @@ pub async fn finalize_chunked_upload(
     check_quota(&records, Some(&id), on_disk_len)?;
 
     let filename = format!("{}.{}", Uuid::new_v4(), ext);
-    std::fs::create_dir_all(upload_dir)?;
+    std::fs::create_dir_all(upload_dir).map_err(|e| finalize_retryable("creating the upload dir", e))?;
     let final_path = PathBuf::from(upload_dir).join(&filename);
 
     // Helper: move (rename, falling back to copy) the assembled temp file into
@@ -950,7 +1350,12 @@ pub async fn finalize_chunked_upload(
     //   - Everything else: move the temp file into place (#39).
     let size_final = if !ext_needs_strip(&ext) {
         // #39: formats with no metadata to strip — move the temp file into place.
-        move_into_place(&data_path, &final_path).await?;
+        // r4 F1-1: on failure the staged file is still in place (a failed rename moves
+        // nothing; the copy fallback leaves the source) — drop any partial copy, retryable.
+        if let Err(e) = move_into_place(&data_path, &final_path).await {
+            unstore_final(&final_path, &data_path).await;
+            return Err(finalize_retryable("storing the file", e));
+        }
         on_disk_len
     } else {
         match ext.as_str() {
@@ -972,7 +1377,12 @@ pub async fn finalize_chunked_upload(
                 } else {
                     strip_jpeg_metadata(&raw)?
                 };
-                tokio::fs::write(&final_path, &stripped).await?;
+                // r4 F1-1: a failed write (e.g. disk full) leaves the staged original; drop
+                // the partial copy and keep the upload retryable.
+                if let Err(e) = tokio::fs::write(&final_path, &stripped).await {
+                    let _ = tokio::fs::remove_file(&final_path).await;
+                    return Err(finalize_retryable("storing the file", e));
+                }
                 stripped.len()
             }
             // #99: GIF/WEBP/AVIF/HEIC/HEIF/TIFF — path-based exiftool strip,
@@ -993,10 +1403,14 @@ pub async fn finalize_chunked_upload(
     };
 
     let content_type = safe_content_type(&ext).to_string();
-    // trim_end_matches('/') so a root install (CRYPTIRC_BASE_PATH="/") yields
-    // "/files/…" not "//files/…" — see the note at the legacy-upload site above.
+    // Argon P1 upload.rs:1299: the PUBLIC /pub/ URL, exactly like handle_upload — the
+    // /files/ route is auth-gated, so a chunked upload's recorded link 401'd for anyone
+    // without the uploader's session (TUI, a recipient opening the link). Older records
+    // that still say /files/ are rewritten when loaded (see load_records); both routes
+    // keep serving the same file. trim_end_matches('/') so a root install
+    // (CRYPTIRC_BASE_PATH="/") yields "/pub/…" not "//pub/…".
     let url = format!(
-        "{}/files/{}",
+        "{}/pub/{}",
         std::env::var("CRYPTIRC_BASE_PATH").unwrap_or_else(|_| "/cryptirc".into()).trim_end_matches('/'),
         filename
     );
@@ -1010,7 +1424,7 @@ pub async fn finalize_chunked_upload(
     // the temp dir and marks the record Error — so nothing is orphaned. (The client
     // must start a new upload to retry; this is not an in-place resumable retry.)
     if let Err(e) = check_quota(&records, Some(&id), size_final) {
-        let _ = tokio::fs::remove_file(&final_path).await;
+        unstore_final(&final_path, &data_path).await;
         return Err(e);
     }
 
@@ -1036,7 +1450,17 @@ pub async fn finalize_chunked_upload(
             anyhow::bail!("Unknown upload id");
         }
     };
-    save_records(data_dir, username, &records).await;
+    // codex P1 upload.rs:821: only a durably saved Done record commits the upload. If the
+    // index can't be written, the just-stored public file must not stay (nothing would
+    // reference it: an orphan outside quota, listing and cleanup). r4 F1-1 (agy P1
+    // upload.rs:1286): for formats that are moved rather than rewritten, that file WAS the
+    // staged upload — deleting it destroyed the only copy, so the client's retry found "No
+    // data uploaded". unstore_final moves it back into the staging dir instead, and the
+    // error is retryable (the record stays Uploading; the route does not fail the upload).
+    if let Err(e) = save_records(data_dir, username, &records).await {
+        unstore_final(&final_path, &data_path).await;
+        return Err(finalize_retryable("saving the upload list", e));
+    }
 
     // #5/#34: the Done record is now durably written — reclaim the temp dir. The
     // temp `data` file was the only copy of the assembled upload until this
@@ -1138,12 +1562,19 @@ pub async fn remove_record(
 ) -> bool {
     // #96: reject ids that aren't byte-identical after sanitization rather than
     // collapsing distinct client ids onto one path/record key.
-    let id = match checked_id(id) {
-        Ok(i) => i,
+    // Codex P1 (upload.rs:1426): except a legacy record id — direct/legacy uploads use
+    // their stored filename ("<uuid>.<ext>") as id, and the dot failed checked_id, so
+    // My Uploads could list such a file but its Remove did nothing. Such an id only ever
+    // matches a record exactly; it has no in-progress dir.
+    let (id, legacy) = match checked_id(id) {
+        Ok(i) => (i, false),
+        Err(_) if is_legacy_file_id(id) => (id.to_string(), true),
         Err(_) => return false,
     };
-    if let Some(dir) = inprogress_dir(data_dir, username, &id) {
-        let _ = tokio::fs::remove_dir_all(&dir).await;
+    if !legacy {
+        if let Some(dir) = inprogress_dir(data_dir, username, &id) {
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+        }
     }
     // #21: serialize the records read-modify-write behind the per-user lock.
     let lock = user_record_lock(username);
@@ -1160,7 +1591,9 @@ pub async fn remove_record(
         } else { true }
     });
     if records.len() != before {
-        save_records(data_dir, username, &records).await;
+        // codex P1 upload.rs:821: keep file and record together — if the shortened list
+        // can't be saved, leave both in place and report "not removed".
+        if save_records(data_dir, username, &records).await.is_err() { return false; }
         if let Some(name) = to_unlink {
             // Reuse the same sanitize as delete_user_upload.
             let safe: String = name.chars().filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-').take(128).collect();
@@ -1191,11 +1624,15 @@ pub async fn delete_user_upload(data_dir: &str, upload_dir: &str, username: &str
     let lock = user_record_lock(username);
     let _guard = lock.lock().await;
     let path = user_uploads_path(data_dir, username);
-    let mut records = load_user_records(&path).await;
+    let mut records = load_user_records_for(data_dir, username).await;
     if records.iter().any(|r| r.filename == safe) {
-        let _ = tokio::fs::remove_file(PathBuf::from(upload_dir).join(&safe)).await;
         records.retain(|r| r.filename != safe);
-        write_records_atomic(&path, &records).await;
+        // codex P1 upload.rs:821: save first, then unlink — an unsaved removal must not
+        // leave a record pointing at a deleted file.
+        match write_records_atomic(&path, &records).await {
+            Ok(()) => { let _ = tokio::fs::remove_file(PathBuf::from(upload_dir).join(&safe)).await; }
+            Err(e) => tracing::warn!("uploads: could not save the upload list of {}: {} — file kept", username, e),
+        }
     }
 }
 
@@ -1204,23 +1641,56 @@ pub async fn clear_user_uploads(data_dir: &str, upload_dir: &str, username: &str
     let lock = user_record_lock(username);
     let _guard = lock.lock().await;
     let path = user_uploads_path(data_dir, username);
-    let records = load_user_records(&path).await;
+    let records = load_user_records_for(data_dir, username).await;
     for r in &records {
         // Sanitize before joining, consistent with delete_user_upload (filenames are
         // server-generated UUIDs today, so this is defense-in-depth, not a behavior change).
         let safe: String = r.filename.chars().filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-').take(128).collect();
         let _ = tokio::fs::remove_file(PathBuf::from(upload_dir).join(&safe)).await;
     }
-    let tmp = path.with_extension("json.tmp");
-    if tokio::fs::write(&tmp, "[]").await.is_ok() && tokio::fs::rename(&tmp, &path).await.is_err() {
-        let _ = tokio::fs::write(&path, "[]").await;
-        let _ = tokio::fs::remove_file(&tmp).await;
+    // If the empty list can't be written, remove the index instead (a missing index reads
+    // as empty) so no record survives pointing at the files just deleted.
+    if write_index_bytes(&path, b"[]").await.is_err() {
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+    // Codex P1 (upload.rs:1499): the staged chunks of every in-flight upload go too. Their
+    // records were just wiped, so the bytes would otherwise sit outside quota accounting
+    // until the 24 h sweeper (stage ~2 GiB, clear, repeat). Done under the records lock,
+    // which append_chunk also holds, so no chunk lands in a dir mid-delete; a later chunk
+    // for a cleared id is refused ("Upload not initialized").
+    if let Some(dir) = user_inprogress_dir(data_dir, username) {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+    // H1: also drop any copy still in the served dir (a migration that could not
+    // move it, or one written by a rolled-back old binary) and this user's merge
+    // backups, so clearing / account deletion leaves no index residue anywhere.
+    let _ = tokio::fs::remove_file(legacy_user_uploads_path(data_dir, username)).await;
+    let _ = tokio::fs::remove_file(legacy_user_uploads_path(data_dir, username).with_extension("json.tmp")).await;
+    let backup_dir = upload_index_dir(data_dir).join("legacy-backup");
+    if let Ok(mut rd) = tokio::fs::read_dir(&backup_dir).await {
+        let prefix = format!("{}.json.", username);
+        while let Ok(Some(e)) = rd.next_entry().await {
+            if e.file_name().to_str().map_or(false, |n| n.starts_with(&prefix)) {
+                let _ = tokio::fs::remove_file(e.path()).await;
+            }
+        }
     }
 }
 
-async fn load_user_records(path: &PathBuf) -> Vec<UploadRecord> {
-    match tokio::fs::read_to_string(path).await {
+/// Read a user's records from the index dir; if that file does not exist yet but
+/// a legacy copy is still in the served uploads dir (the startup migration could
+/// not move it), read that instead so My Uploads / quota / delete keep working.
+/// The next write lands in the new location; the next startup migration merges
+/// and removes the legacy copy.
+async fn load_user_records_for(data_dir: &str, username: &str) -> Vec<UploadRecord> {
+    match tokio::fs::read_to_string(user_uploads_path(data_dir, username)).await {
         Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match tokio::fs::read_to_string(legacy_user_uploads_path(data_dir, username)).await {
+                Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+                Err(_) => vec![],
+            }
+        }
         Err(_) => vec![],
     }
 }
@@ -1235,12 +1705,14 @@ pub fn is_image(filename: &str) -> bool {
     )
 }
 
-/// Media types that are safe to serve from the unauthenticated /pub route so a
-/// copied share link actually loads for anyone (link previews, inline video/audio
-/// players). Kept in lockstep with the client's _PUBLIC_MEDIA_EXTS in app.js and
-/// with the extensions safe_content_type knows. Everything NOT listed here
-/// (documents, archives, text, unknown) stays behind the authenticated /files
-/// route — a leaked UUID for those must not be anonymously fetchable.
+/// Media types the /pub route serves INLINE (rendered/played in the browser:
+/// images, video, audio — link previews and inline players need that). Kept in
+/// lockstep with the client's _PUBLIC_MEDIA_EXTS in app.js and with the extensions
+/// safe_content_type knows. This does NOT decide WHETHER /pub serves a file: since
+/// v0.4.0 (343fc82) every upload is public-by-link (its unguessable UUID is the
+/// capability), so documents/archives/text/unknown types are served too, just as
+/// `Content-Disposition: attachment` (PDF is also inline; see serve_file_public).
+/// Only the reserved internal names (`is_reserved_upload_name`) are never served.
 pub fn is_public_media(filename: &str) -> bool {
     if is_image(filename) { return true; }
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -1347,6 +1819,13 @@ async fn strip_av_metadata_path(
         "-nostdin",
         "-y",                   // overwrite output
         "-threads", "1",        // bound CPU per job
+        // Defense in depth against crafted "media" that is really a playlist /
+        // concat script (HLS, ffconcat, …) pointing at local files or URLs: the
+        // input may only be opened via the plain file protocol, and only by a
+        // real container demuxer for the formats we accept (no hls/concat/
+        // image2/dash/…). Every ext_needs_strip A/V type maps to one of these.
+        "-protocol_whitelist", "file",
+        "-format_whitelist", AV_DEMUXER_WHITELIST,
         "-i", in_str,
         "-map_metadata", "-1",  // strip all metadata
         "-c", "copy",           // copy streams without re-encoding
@@ -1429,7 +1908,7 @@ async fn strip_image_metadata_exiftool_path(
     // file and pads it by ~2KB. Qualifying the group makes exiftool decline
     // instead, so those formats come out exactly as they did before — no loss,
     // since nothing renders orientation from a GIF anyway.
-    let mut cmd = Command::new("exiftool");
+    let mut cmd = Command::new(exiftool_program());
     cmd.args(["-all=", "-tagsfromfile", "@", "-EXIF:Orientation", "-overwrite_original", out_str])
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
@@ -1460,6 +1939,27 @@ async fn strip_image_metadata_exiftool_path(
             anyhow::bail!("Metadata stripping produced no output");
         }
     }
+}
+
+/// The exiftool to run: `exiftool` from PATH when it is there, else Arch's
+/// perl-image-exiftool location (/usr/bin/vendor_perl, which is not on a systemd
+/// service's default PATH), else plain `exiftool` (fails closed as before).
+/// Resolved once.
+fn exiftool_program() -> &'static std::ffi::OsStr {
+    static P: OnceLock<std::ffi::OsString> = OnceLock::new();
+    P.get_or_init(|| {
+        use std::os::unix::fs::PermissionsExt;
+        let is_exec = |p: &std::path::Path| std::fs::metadata(p)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false);
+        let on_path = std::env::var_os("PATH").map_or(false, |path| {
+            std::env::split_paths(&path).any(|d| is_exec(&d.join("exiftool")))
+        });
+        if !on_path {
+            let arch = std::path::Path::new("/usr/bin/vendor_perl/exiftool");
+            if is_exec(arch) { return arch.as_os_str().to_os_string(); }
+        }
+        std::ffi::OsString::from("exiftool")
+    }).as_os_str()
 }
 
 /// In-RAM wrapper around `strip_image_metadata_exiftool_path` for the legacy
@@ -1787,6 +2287,10 @@ fn strip_png_metadata(data: &[u8]) -> Result<Vec<u8>> {
     // PNG structure: 8-byte signature, then chunks: [4-byte length][4-byte type][data][4-byte CRC]
     // Critical chunks to keep: IHDR, PLTE, IDAT, IEND
     // Safe ancillary to keep: tRNS, gAMA, cHRM, sRGB, iCCP, sBIT, pHYs
+    // APNG animation (r4 C1-10): acTL (animation control), fcTL (frame control: sequence
+    //   number, size, offset, delay, dispose/blend), fdAT (frame data). They carry no
+    //   metadata; dropping them turned every animated PNG into its static first frame.
+    //   Kept in their original order, so the sequence numbers stay valid.
     // Strip everything else: tEXt, iTXt, zTXt, eXIf, dSIG, tIME, etc.
     const PNG_SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
@@ -1797,6 +2301,7 @@ fn strip_png_metadata(data: &[u8]) -> Result<Vec<u8>> {
     let keep_chunks: &[&[u8]] = &[
         b"IHDR", b"PLTE", b"IDAT", b"IEND",
         b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"sBIT", b"pHYs",
+        b"acTL", b"fcTL", b"fdAT",
     ];
 
     let mut out = Vec::with_capacity(data.len());
@@ -2099,6 +2604,46 @@ mod png_orientation_tests {
         assert_eq!(out, v);
     }
 
+    /// r4 C1-10: an animated PNG keeps its animation chunks (acTL / fcTL / fdAT, in order)
+    /// while text metadata is still stripped; with an eXIf orientation the kept chunk
+    /// lands right after IHDR, before acTL and the first IDAT (both stay valid).
+    #[test]
+    fn r4_apng_animation_chunks_survive_the_strip() {
+        let fctl = |seq: u32| { let mut d = seq.to_be_bytes().to_vec(); d.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 10, 0, 0]); d };
+        let idat = [0x78, 0x9C, 0x63, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01];
+        let mut fdat = 2u32.to_be_bytes().to_vec(); fdat.extend_from_slice(&idat);
+        let build = |with_exif: bool| {
+            let mut v = SIG.to_vec();
+            v.extend_from_slice(&chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
+            if with_exif { v.extend_from_slice(&chunk(b"eXIf", &orientation_app1_segment(6)[10..])); }
+            v.extend_from_slice(&chunk(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]));
+            v.extend_from_slice(&chunk(b"tEXt", b"Comment\0SECRET-APNG"));
+            v.extend_from_slice(&chunk(b"fcTL", &fctl(0)));
+            v.extend_from_slice(&chunk(b"IDAT", &idat));
+            v.extend_from_slice(&chunk(b"fcTL", &fctl(1)));
+            v.extend_from_slice(&chunk(b"fdAT", &fdat));
+            v.extend_from_slice(&chunk(b"IEND", &[]));
+            v
+        };
+        let types = |png: &[u8]| {
+            let mut t = Vec::new();
+            let mut i = 8;
+            while i + 12 <= png.len() {
+                let len = u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]) as usize;
+                t.push(String::from_utf8_lossy(&png[i + 4..i + 8]).to_string());
+                i += 12 + len;
+            }
+            t
+        };
+        let out = strip_png_metadata(&build(false)).expect("strip");
+        println!("R4 APNG strip: chunks kept = {:?}", types(&out));
+        assert_eq!(types(&out), ["IHDR", "acTL", "fcTL", "IDAT", "fcTL", "fdAT", "IEND"]);
+        assert!(!out.windows(6).any(|w| w == b"SECRET"), "text metadata still stripped");
+        let out = strip_png_metadata(&build(true)).expect("strip");
+        assert_eq!(types(&out), ["IHDR", "eXIf", "acTL", "fcTL", "IDAT", "fcTL", "fdAT", "IEND"]);
+        assert_eq!(png_exif_orientation(&out), Some(6));
+    }
+
     #[test]
     fn malformed_png_never_panics() {
         let cases: Vec<Vec<u8>> = vec![
@@ -2120,5 +2665,382 @@ mod png_orientation_tests {
             let _ = png_exif_orientation(&c);
             let _ = strip_png_metadata(&c);
         }
+    }
+}
+
+#[cfg(test)]
+mod index_location_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn tmp_data() -> String {
+        let d = std::env::temp_dir().join(format!("cryptirc-upidx-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(d.join("uploads")).unwrap();
+        d.to_str().unwrap().to_string()
+    }
+    fn rec(id: &str, filename: &str, status: UploadStatus) -> UploadRecord {
+        UploadRecord {
+            id: id.into(), filename: filename.into(), original_name: "o.txt".into(), size: 1,
+            content_type: "text/plain".into(), url: String::new(), uploaded_at: 1, status,
+            progress_bytes: 1, started_at: 1, completed_at: 1, error: String::new(),
+            source_conn_id: String::new(), source_target: "#secret".into(),
+        }
+    }
+    fn mode(p: &std::path::Path) -> u32 { std::fs::metadata(p).unwrap().permissions().mode() & 0o777 }
+
+    #[test]
+    fn reserved_names() {
+        for n in ["alice.json", "Alice.JSON", "a.json", "bob_1-x.json", "alice.json.tmp", "x.tmp", "_inprogress", ".hidden"] {
+            assert!(is_reserved_upload_name(n), "{} must be reserved", n);
+        }
+        for n in ["93d1a2b4-1c2d-4e5f-8a9b-0c1d2e3f4a5b.pdf", "93d1a2b4-1c2d-4e5f-8a9b-0c1d2e3f4a5b.json",
+                  "93D1A2B4-1C2D-4E5F-8A9B-0C1D2E3F4A5B.png", "93d1a2b4-1c2d-4e5f-8a9b-0c1d2e3f4a5b.tmp",
+                  "93d1a2b4-1c2d-4e5f-8a9b-0c1d2e3f4a5b.mp4", "report.pdf", "notes.txt"] {
+            assert!(!is_reserved_upload_name(n), "{} must stay servable", n);
+        }
+    }
+
+    #[test]
+    fn migration_moves_merges_and_is_idempotent() {
+        let data = tmp_data();
+        let up = PathBuf::from(&data).join("uploads");
+        let blob = "93d1a2b4-1c2d-4e5f-8a9b-0c1d2e3f4a5b.pdf";
+        let gone = "00000000-1c2d-4e5f-8a9b-0c1d2e3f4a5b.pdf";
+        let user_json = "11111111-1c2d-4e5f-8a9b-0c1d2e3f4a5b.json"; // an uploaded .json blob
+        std::fs::write(up.join(blob), b"pdf").unwrap();
+        std::fs::write(up.join(user_json), b"{}").unwrap();
+        // alice: only legacy → moved.
+        let alice = vec![rec(blob, blob, UploadStatus::Done)];
+        std::fs::write(up.join("alice.json"), serde_json::to_vec(&alice).unwrap()).unwrap();
+        set_mode(&up.join("alice.json"), 0o644);
+        // bob: both exist (rolled-back old binary wrote a new legacy file) → merged.
+        let idx = upload_index_dir(&data);
+        std::fs::create_dir_all(&idx).unwrap();
+        std::fs::write(idx.join("bob.json"), serde_json::to_vec(&vec![rec("n1", blob, UploadStatus::Done)]).unwrap()).unwrap();
+        std::fs::write(up.join("bob.json"), serde_json::to_vec(&vec![
+            rec("n1", blob, UploadStatus::Done),          // dup id → new wins
+            rec("o1", blob, UploadStatus::Done),          // old-only, blob present → kept
+            rec("o2", gone, UploadStatus::Done),          // old-only, blob deleted → not resurrected
+            rec("o3", "", UploadStatus::Error),           // old-only non-Done → kept
+        ]).unwrap()).unwrap();
+        // stale temp from the old atomic writer
+        std::fs::write(up.join("carol.json.tmp"), b"[partial").unwrap();
+
+        let (moved, merged, temps) = migrate_upload_index(&data);
+        assert_eq!((moved, merged, temps), (1, 1, 1));
+        assert!(!up.join("alice.json").exists() && !up.join("bob.json").exists() && !up.join("carol.json.tmp").exists());
+        assert!(up.join(blob).exists() && up.join(user_json).exists(), "blobs (incl. <uuid>.json) untouched");
+        let a: Vec<UploadRecord> = serde_json::from_slice(&std::fs::read(idx.join("alice.json")).unwrap()).unwrap();
+        assert_eq!(a.len(), 1);
+        let b: Vec<UploadRecord> = serde_json::from_slice(&std::fs::read(idx.join("bob.json")).unwrap()).unwrap();
+        let ids: Vec<&str> = b.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["n1", "o1", "o3"]);
+        assert_eq!(mode(&idx), 0o700);
+        assert_eq!(mode(&idx.join("alice.json")), 0o600);
+        assert_eq!(mode(&idx.join("bob.json")), 0o600);
+        // Backup of bob's legacy file exists, outside the served dir.
+        let backups: Vec<_> = std::fs::read_dir(idx.join("legacy-backup")).unwrap().flatten().collect();
+        assert_eq!(backups.len(), 1);
+        // Second run: nothing to do, nothing changes.
+        assert_eq!(migrate_upload_index(&data), (0, 0, 0));
+        let b2: Vec<UploadRecord> = serde_json::from_slice(&std::fs::read(idx.join("bob.json")).unwrap()).unwrap();
+        assert_eq!(b2.len(), 3);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[tokio::test]
+    async fn runtime_paths_use_index_dir_with_legacy_fallback() {
+        let data = tmp_data();
+        let up = PathBuf::from(&data).join("uploads");
+        let blob = "93d1a2b4-1c2d-4e5f-8a9b-0c1d2e3f4a5b.png";
+        std::fs::write(up.join(blob), b"png").unwrap();
+        // A legacy file the migration could not move is still readable …
+        std::fs::write(up.join("dave.json"), serde_json::to_vec(&vec![rec(blob, blob, UploadStatus::Done)]).unwrap()).unwrap();
+        assert_eq!(list_user_uploads(&data, "dave").await.len(), 1);
+        // … and clearing removes both the blob and every copy of the index.
+        clear_user_uploads(&data, up.to_str().unwrap(), "dave").await;
+        assert!(!up.join(blob).exists() && !up.join("dave.json").exists());
+        assert_eq!(std::fs::read(upload_index_dir(&data).join("dave.json")).unwrap(), b"[]");
+        // New writes land in the index dir (0600), never in the served dir.
+        let r = UploadResult { url: "/pub/x".into(), filename: blob.into(), original_name: "a.png".into(),
+                               size: 3, content_type: "image/png".into(), is_image: true };
+        record_upload(&data, "erin", &r).await.unwrap();
+        assert!(!up.join("erin.json").exists());
+        let p = upload_index_dir(&data).join("erin.json");
+        assert_eq!(mode(&p), 0o600);
+        assert_eq!(list_user_uploads(&data, "erin").await.len(), 1);
+        delete_user_upload(&data, up.to_str().unwrap(), "erin", blob).await;
+        assert_eq!(list_user_uploads(&data, "erin").await.len(), 0);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+#[cfg(test)]
+mod r2_srv_a_upload_tests {
+    //! Round-2 (srv-a): completed ids can't be re-initialised (quota bypass), clear also
+    //! drops staged chunks, and Remove works for legacy filename-shaped record ids.
+    use super::*;
+
+    fn tmp_data() -> (String, String) {
+        let d = std::env::temp_dir().join(format!("cryptirc-r2up-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(d.join("uploads")).unwrap();
+        let data = d.to_str().unwrap().to_string();
+        (data.clone(), format!("{}/uploads", data))
+    }
+    fn stored_files(up: &str) -> usize {
+        std::fs::read_dir(up).unwrap().flatten().filter(|e| e.path().is_file()).count()
+    }
+
+    #[tokio::test]
+    async fn completed_upload_id_cannot_be_reinitialised() {
+        let (data, up) = tmp_data();
+        let id = "11111111-2222-4333-8444-555555555555";
+        init_chunked_upload(&data, "mallory", id, "a.txt", 5, "", "").await.unwrap();
+        append_chunk(&data, "mallory", id, 0, b"hello").await.unwrap();
+        let done = finalize_chunked_upload(&data, &up, "mallory", id).await.unwrap();
+        assert_eq!(done.status, UploadStatus::Done);
+        // Re-init the same (completed) id: refused, record + file untouched.
+        let again = init_chunked_upload(&data, "mallory", id, "b.txt", 5, "", "").await;
+        let rec = get_record(&data, "mallory", id).await.unwrap();
+        println!("R2 reinit-done: result={:?} status={:?} filename_kept={}", again.as_ref().map(|r| r.status.clone()).map_err(|e| e.to_string()),
+            rec.status, rec.filename == done.filename);
+        assert!(again.is_err());
+        assert_eq!(rec.status, UploadStatus::Done);
+        assert_eq!(rec.filename, done.filename);
+        assert_eq!(stored_files(&up), 1);
+        // A canceled id may still be retried (unchanged behaviour).
+        let id2 = "21111111-2222-4333-8444-555555555555";
+        init_chunked_upload(&data, "mallory", id2, "c.txt", 3, "", "").await.unwrap();
+        cancel_chunked_upload(&data, "mallory", id2).await.unwrap();
+        assert!(init_chunked_upload(&data, "mallory", id2, "c.txt", 3, "", "").await.is_ok());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// codex P1 upload.rs:821: when the index can't be written, finalize is NOT a commit —
+    /// it errors, removes the just-stored public file (no orphan) and the record never says
+    /// Done; a failed chunk save is taken back off the staged file so a retry fits.
+    /// (The index write is made to fail by occupying its temp path with a directory.)
+    #[tokio::test]
+    async fn r3_index_write_failure_is_not_a_commit() {
+        let (data, up) = tmp_data();
+        let id = "41111111-2222-4333-8444-555555555555";
+        init_chunked_upload(&data, "full", id, "a.txt", 10, "", "").await.unwrap();
+        append_chunk(&data, "full", id, 0, b"hello").await.unwrap();
+        let blocker = user_uploads_path(&data, "full").with_extension("json.tmp");
+        std::fs::create_dir_all(&blocker).unwrap();
+        // A chunk whose progress can't be saved is rolled back off the staged file.
+        let staged = inprogress_dir(&data, "full", id).unwrap().join("data");
+        assert!(append_chunk(&data, "full", id, 5, b"world").await.is_err());
+        assert_eq!(std::fs::metadata(&staged).unwrap().len(), 5, "chunk taken back");
+        std::fs::remove_dir(&blocker).unwrap();
+        append_chunk(&data, "full", id, 5, b"world").await.unwrap(); // the retry fits
+        std::fs::create_dir_all(&blocker).unwrap();
+        let r = finalize_chunked_upload(&data, &up, "full", id).await;
+        let rec = get_record(&data, "full", id).await.unwrap();
+        println!("R3 index-fail finalize: result={:?} record={:?} stored_files={}", r.as_ref().map(|r| r.status.clone()).map_err(|e| e.to_string()), rec.status, stored_files(&up));
+        assert!(r.is_err(), "no Done without a saved index");
+        assert_eq!(rec.status, UploadStatus::Uploading);
+        assert_eq!(stored_files(&up), 0, "no orphan public file");
+        // Legacy direct upload: record_upload reports the failure (the route deletes the file).
+        let res = UploadResult { url: "/cryptirc/pub/x.txt".into(), filename: "x.txt".into(), original_name: "x.txt".into(), size: 1, content_type: "text/plain".into(), is_image: false };
+        assert!(record_upload(&data, "full", &res).await.is_err());
+        // Removing a record whose shortened list can't be saved keeps both record and file.
+        std::fs::remove_dir(&blocker).unwrap();
+        let id2 = "51111111-2222-4333-8444-555555555555";
+        init_chunked_upload(&data, "full", id2, "b.txt", 2, "", "").await.unwrap();
+        append_chunk(&data, "full", id2, 0, b"ok").await.unwrap();
+        let done = finalize_chunked_upload(&data, &up, "full", id2).await.unwrap();
+        std::fs::create_dir_all(&blocker).unwrap();
+        assert!(!remove_record(&data, &up, "full", id2).await);
+        assert!(std::path::Path::new(&up).join(&done.filename).exists());
+        assert!(get_record(&data, "full", id2).await.is_some());
+        std::fs::remove_dir(&blocker).unwrap();
+        assert!(remove_record(&data, &up, "full", id2).await);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// r4 F1-1 (agy P1 upload.rs:1286): an index-write failure at finalize keeps the upload
+    /// retryable — for a moved (not rewritten) format the stored file goes back to the
+    /// staging dir, for a stripped one the staged original stays; the error is
+    /// FinalizeRetryable, the record stays Uploading, no public orphan is left, and the
+    /// retry after the disk recovers commits the original bytes.
+    #[tokio::test]
+    async fn r4_failed_index_commit_keeps_the_upload_retryable() {
+        let (data, up) = tmp_data();
+        let blocker = user_uploads_path(&data, "retry").with_extension("json.tmp");
+        // A moved format (.txt) and a stripped one (.png).
+        let png = {
+            let mut v = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+            let mut chunk = |t: &[u8; 4], d: &[u8]| {
+                let mut c = (d.len() as u32).to_be_bytes().to_vec();
+                c.extend_from_slice(t); c.extend_from_slice(d);
+                let crc = png_crc32(&c[4..]);
+                c.extend_from_slice(&crc.to_be_bytes());
+                v.extend_from_slice(&c);
+            };
+            chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
+            chunk(b"tEXt", b"Comment\0secret");
+            chunk(b"IDAT", &[0x78, 0x9C, 0x63, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01]);
+            chunk(b"IEND", &[]);
+            v
+        };
+        for (id, name, body) in [
+            ("71111111-2222-4333-8444-555555555555", "a.txt", b"helloworld".to_vec()),
+            ("81111111-2222-4333-8444-555555555555", "p.png", png.clone()),
+        ] {
+            init_chunked_upload(&data, "retry", id, name, body.len(), "", "").await.unwrap();
+            append_chunk(&data, "retry", id, 0, &body).await.unwrap();
+            let staged = inprogress_dir(&data, "retry", id).unwrap().join("data");
+            std::fs::create_dir_all(&blocker).unwrap();
+            let r = finalize_chunked_upload(&data, &up, "retry", id).await;
+            let err = r.as_ref().err().map(|e| e.to_string()).unwrap_or_default();
+            let retryable = r.as_ref().err().map_or(false, |e| e.downcast_ref::<FinalizeRetryable>().is_some());
+            let staged_now = std::fs::read(&staged).ok();
+            println!("R4 F1-1 {}: err={:?} retryable={} staged_bytes_left={:?} public_files={}", name, err, retryable,
+                staged_now.as_ref().map(|b| b.len()), stored_files(&up));
+            assert!(retryable, "{name}: storage failure is retryable");
+            assert_eq!(staged_now.as_deref(), Some(&body[..]), "{name}: staged bytes intact");
+            assert_eq!(get_record(&data, "retry", id).await.unwrap().status, UploadStatus::Uploading);
+            assert_eq!(stored_files(&up), 0, "{name}: no orphan public file");
+            // Disk recovers: the client's retry commits.
+            std::fs::remove_dir(&blocker).unwrap();
+            let done = finalize_chunked_upload(&data, &up, "retry", id).await.expect("retry commits");
+            assert_eq!(done.status, UploadStatus::Done);
+            let stored = std::fs::read(std::path::Path::new(&up).join(&done.filename)).unwrap();
+            if name.ends_with(".txt") { assert_eq!(stored, body); } else { assert!(!stored.windows(6).any(|w| w == b"secret")); }
+            assert!(!staged.exists(), "staging reclaimed after the commit");
+            let n = stored_files(&up);
+            std::fs::remove_file(std::path::Path::new(&up).join(&done.filename)).unwrap();
+            assert_eq!(n, 1);
+        }
+        // A permanent failure (corrupt image) is NOT marked retryable.
+        let id = "91111111-2222-4333-8444-555555555555";
+        init_chunked_upload(&data, "retry", id, "bad.png", 4, "", "").await.unwrap();
+        append_chunk(&data, "retry", id, 0, b"nope").await.unwrap();
+        let e = finalize_chunked_upload(&data, &up, "retry", id).await.unwrap_err();
+        assert!(e.downcast_ref::<FinalizeRetryable>().is_none(), "{e}");
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Argon P1 upload.rs:1299: chunked uploads record the public /pub/ link like the direct
+    /// upload path; records an older build stored with /files/ are handed out as /pub/.
+    #[tokio::test]
+    async fn r3_chunked_upload_records_public_link() {
+        let (data, up) = tmp_data();
+        let id = "61111111-2222-4333-8444-555555555555";
+        init_chunked_upload(&data, "pubber", id, "c.txt", 2, "", "").await.unwrap();
+        append_chunk(&data, "pubber", id, 0, b"hi").await.unwrap();
+        let done = finalize_chunked_upload(&data, &up, "pubber", id).await.unwrap();
+        assert!(done.url.ends_with(&format!("/pub/{}", done.filename)), "{}", done.url);
+        assert!(!done.url.contains("/files/"));
+        // An index written by 0d3570d (or older) with /files/ links.
+        let old = format!(r#"[{{"id":"legacy.txt","filename":"aa.txt","original_name":"a.txt","size":1,"content_type":"text/plain","url":"/cryptirc/files/aa.txt","uploaded_at":1,"status":"done","progress_bytes":1,"started_at":1,"completed_at":1,"error":"","source_conn_id":"","source_target":""}},
+            {{"id":"root","filename":"bb.png","original_name":"b.png","size":1,"content_type":"image/png","url":"/files/bb.png","uploaded_at":1,"status":"done","progress_bytes":1,"started_at":1,"completed_at":1,"error":"","source_conn_id":"","source_target":""}}]"#);
+        std::fs::create_dir_all(upload_index_dir(&data)).unwrap();
+        std::fs::write(user_uploads_path(&data, "olduser"), old).unwrap();
+        let recs = list_all_records(&data, "olduser").await;
+        let urls: Vec<&str> = recs.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls, vec!["/cryptirc/pub/aa.txt", "/pub/bb.png"]);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[tokio::test]
+    async fn clear_drops_staged_chunks() {
+        let (data, up) = tmp_data();
+        let id = "31111111-2222-4333-8444-555555555555";
+        init_chunked_upload(&data, "stager", id, "big.bin", 10, "", "").await.unwrap();
+        append_chunk(&data, "stager", id, 0, b"12345").await.unwrap();
+        let staged = user_inprogress_dir(&data, "stager").unwrap();
+        assert!(staged.join(id).join("data").exists());
+        clear_user_uploads(&data, &up, "stager").await;
+        println!("R2 clear: staged dir left after clear = {}", staged.exists());
+        assert!(!staged.exists());
+        // A late chunk for the cleared id is refused, not re-staged.
+        assert!(append_chunk(&data, "stager", id, 5, b"67890").await.is_err());
+        assert!(!staged.join(id).join("data").exists());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[tokio::test]
+    async fn remove_record_accepts_legacy_filename_ids() {
+        let (data, up) = tmp_data();
+        let blob = "93d1a2b4-1c2d-4e5f-8a9b-0c1d2e3f4a5b.png";
+        std::fs::write(format!("{}/{}", up, blob), b"png").unwrap();
+        let r = UploadResult { url: format!("/pub/{}", blob), filename: blob.into(), original_name: "a.png".into(),
+                               size: 3, content_type: "image/png".into(), is_image: true };
+        record_upload(&data, "legacy", &r).await.unwrap();
+        assert_eq!(list_user_uploads(&data, "legacy").await[0].id, blob);
+        // Path-ish ids are still refused outright.
+        for bad in ["../x.png", "a/b.png", ".hidden.png", "x..png", "", "a b.png"] {
+            assert!(!remove_record(&data, &up, "legacy", bad).await, "{:?}", bad);
+        }
+        let removed = remove_record(&data, &up, "legacy", blob).await;
+        println!("R2 remove legacy id: removed={} file_left={}", removed, std::path::Path::new(&format!("{}/{}", up, blob)).exists());
+        assert!(removed);
+        assert!(list_user_uploads(&data, "legacy").await.is_empty());
+        assert!(!std::path::Path::new(&format!("{}/{}", up, blob)).exists());
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+#[cfg(test)]
+mod srv_b_r9_upload_tests {
+    use super::*;
+    use axum::extract::FromRequest;
+    use futures_util::StreamExt;
+
+    const HEAD: &str = "--XB\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\n";
+
+    async fn multipart<S>(body: S) -> Multipart
+    where S: futures_util::Stream<Item = std::result::Result<axum::body::Bytes, std::io::Error>> + Send + 'static {
+        let req = axum::http::Request::builder().method("POST").uri("/upload")
+            .header("content-type", "multipart/form-data; boundary=XB")
+            .body(axum::body::Body::from_stream(body)).unwrap();
+        Multipart::from_request(req, &()).await.unwrap()
+    }
+    fn tmpdir() -> String {
+        let d = std::env::temp_dir().join(format!("cryptirc-upload-r9-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.to_string_lossy().into_owned()
+    }
+    fn head() -> std::result::Result<axum::body::Bytes, std::io::Error> { Ok(axum::body::Bytes::from_static(HEAD.as_bytes())) }
+
+    /// r9 (astra P1 main.rs:3380): a legacy upload whose body stops arriving used to wait
+    /// forever, holding its reservation of the upload budget; it now fails.
+    #[tokio::test]
+    async fn a_stalled_legacy_upload_body_gives_up() {
+        let d = tmpdir();
+        let body = futures_util::stream::iter(vec![head()]).chain(futures_util::stream::pending());
+        let r = tokio::time::timeout(Duration::from_secs(5), handle_upload(&d, multipart(body).await, 1 << 20)).await;
+        assert!(r.is_ok(), "the upload is still waiting for its body after 5 s (holding its upload budget)");
+        assert!(r.unwrap().is_err());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A body that trickles a byte now and then (never idle for long) is cut off too.
+    #[tokio::test]
+    async fn a_trickling_legacy_upload_body_gives_up() {
+        let d = tmpdir();
+        let drip = futures_util::stream::unfold((), |_| async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Some((Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"x")), ()))
+        });
+        let body = futures_util::stream::iter(vec![head()]).chain(drip);
+        let r = tokio::time::timeout(Duration::from_secs(5), handle_upload(&d, multipart(body).await, 1 << 20)).await;
+        assert!(r.is_ok(), "a trickling upload body is still being waited for after 5 s");
+        assert!(r.unwrap().is_err());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A body that arrives normally is stored as before.
+    #[tokio::test]
+    async fn a_normal_legacy_upload_still_works() {
+        let d = tmpdir();
+        let all = format!("{}hello\r\n--XB--\r\n", HEAD);
+        let body = futures_util::stream::iter(vec![Ok::<_, std::io::Error>(axum::body::Bytes::from(all))]);
+        let r = handle_upload(&d, multipart(body).await, 1 << 20).await.unwrap();
+        assert_eq!(r.size, 5);
+        assert!(std::path::Path::new(&d).join(&r.filename).exists());
+        let _ = std::fs::remove_dir_all(d);
     }
 }

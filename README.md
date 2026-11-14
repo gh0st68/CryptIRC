@@ -7,7 +7,7 @@
 <p align="center"><strong>IRC that stays connected.</strong><br>Self-hosted. Encrypted history. All your devices.</p>
 
 <p align="center">
-  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.7-00b894?style=flat-square" alt="Version 0.5.7"></a>
+  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.8-00b894?style=flat-square" alt="Version 0.5.8"></a>
   <img src="https://img.shields.io/badge/server-Linux-5a7085?style=flat-square" alt="Linux server">
   <img src="https://img.shields.io/badge/client-desktop%20%C2%B7%20mobile%20%C2%B7%20terminal-5a7085?style=flat-square" alt="Desktop, mobile, and terminal clients">
 </p>
@@ -206,7 +206,7 @@ The server also includes **19 bots** for weather, lookups, quotes, seen records,
 - **Max upload size** — admin-set per-file upload cap (1–500 MB)
 - **Link preview controls** — pick a mode (Off / Whitelist approved-domains-only / All HTTPS links, with private IPs blocked) plus the domain whitelist
 - **Registration modes** — open, invite-code, or closed (persists across reboots)
-- **User management** — disable, delete, promote to admin, toggle upload permission
+- **User management** — add, approve, disable, delete, set email, toggle upload permission (admin rights are granted on the server with `sudo bash makeadmin.sh <user>`)
 - **All admin settings persist** to disk with mutex protection (survives server restarts)
 
 </details>
@@ -499,7 +499,12 @@ Routine web-server updates restart `cryptirc` while `irc-core` keeps running. Up
 | `CRYPTIRC_REGISTRATION` | `open` | Registration mode: `open`, `closed` |
 | `CRYPTIRC_REG_CODE` | (none) | Invite code required for registration |
 | `CRYPTIRC_IPC_SOCK` | `$CRYPTIRC_DATA/irc-core.sock` | Unix socket path between the web server and the `irc-core` daemon |
+| `CRYPTIRC_TRUSTED_PROXIES` | (none) | Extra reverse proxies / CDN ranges (IPs or CIDRs) whose forwarding headers are believed; loopback is always trusted |
+| `CRYPTIRC_REAL_IP_HEADER` | `auto` | Header a trusted proxy's client address comes from: `auto`, `x-forwarded-for`, `x-real-ip` or `off` |
+| `CRYPTIRC_AI_ALLOW_PRIVATE` | (off) | Allow the AI bot's custom endpoint to reach private/loopback addresses (e.g. a local Ollama). Off by default; enable only when every account is trusted |
 | `RUST_LOG` | `info` | Log level |
+
+`CRYPTIRC_REGISTRATION` and `CRYPTIRC_REG_CODE` are fallbacks for while `admin_settings.json` doesn't hold that setting (it does once it is saved in Settings → Admin). How the client address is chosen for rate limits behind a proxy or CDN is explained in [INSTALL.md](INSTALL.md#client-ip-addresses-behind-a-proxy).
 
 For registration, HTTPS, service configuration, and backups, see [INSTALL.md](INSTALL.md) and the [deployment guide](deploy/README.md).
 

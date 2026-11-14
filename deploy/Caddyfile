@@ -1,5 +1,7 @@
 # CryptIRC Caddyfile
 # Place at /etc/caddy/Caddyfile
+# Written for CryptIRC at the site root (CRYPTIRC_BASE_PATH=/, as the installers and
+# INSTALL.md set it). The @static / @sw paths below assume that.
 #
 # Caddy automatically:
 #   - Obtains and renews Let's Encrypt TLS certificates
@@ -13,6 +15,9 @@
     # Global options
     email admin@yourdomain.com          # Let's Encrypt notifications
     admin off                           # Disable Caddy admin API (not needed)
+    # NOTE: with the admin API off, `systemctl reload caddy` FAILS (reload talks to that
+    # API) — apply edits with `sudo systemctl restart caddy`. The installers instead use
+    # `admin "unix//run/caddy/admin.socket"` (needs /run/caddy to exist) so reload works.
 
     # Uncomment to use Let's Encrypt staging while testing
     # (avoids hitting rate limits during setup)
@@ -21,18 +26,19 @@
 
 cryptirc.yourdomain.com {
     # Reverse proxy everything to the CryptIRC Rust server
-    # Caddy handles TLS; CryptIRC speaks plain HTTP internally
-    reverse_proxy localhost:9001 {
+    # Caddy handles TLS; CryptIRC speaks plain HTTP internally. 127.0.0.1, not localhost:
+    # the server listens on IPv4 loopback only, and localhost may resolve to ::1 first.
+    # (No active health check: with a single upstream it can only turn a probe that
+    # misses — e.g. under another base path — into a 502 for every request. If CryptIRC
+    # is down, Caddy answers 502 anyway.)
+    reverse_proxy 127.0.0.1:9001 {
         # WebSocket upgrade support (transparent — Caddy handles it)
         header_up Host {host}
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
+        # {client_ip}: the client's address (Caddy 2.7+; {remote_host} on older Caddy). Behind a CDN,
+        # list its ranges in the global `servers { trusted_proxies static … }` (see INSTALL.md).
+        header_up X-Real-IP {client_ip}
+        header_up X-Forwarded-For {client_ip}
         header_up X-Forwarded-Proto {scheme}
-
-        # Health check — if CryptIRC is down, Caddy returns 502
-        health_uri /manifest.json
-        health_interval 30s
-        health_timeout 5s
     }
 
     # Compression (text, JSON, HTML)
@@ -74,6 +80,15 @@ cryptirc.yourdomain.com {
         output file /var/log/caddy/cryptirc.log {
             roll_size 10mb
             roll_keep 5
+        }
+        # Keep one-time secrets out of the log: email-verify / password-reset tokens and
+        # paste passwords travel in the query string (and the Referer would repeat them).
+        format filter {
+            request>uri query {
+                replace token REDACTED
+                replace password REDACTED
+            }
+            request>headers>Referer delete
         }
     }
 }

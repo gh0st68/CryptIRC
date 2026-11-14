@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#000004">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -2512,7 +2512,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div class="auth-badge-row">
       <span class="auth-badge">AES-256-GCM</span>
       <span class="auth-badge">Argon2id</span>
-      <span class="auth-badge">Zero plaintext</span>
+      <span class="auth-badge">E2E DMs</span>
     </div>
   </div>
 </div>
@@ -2521,13 +2521,13 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 <div id="vault-overlay">
   <div class="vault-box">
     <div class="vault-title">🔐 Unlock Vault</div>
-    <div class="vault-sub">Enter your passphrase to decrypt log storage.<br>The key never leaves your session memory.</div>
+    <div class="vault-sub">Enter your vault passphrase to unlock your encrypted logs and settings.<br>The passphrase is sent to the server, which derives the vault key from it and holds that key in memory only while the vault is unlocked. Your end-to-end encryption keys are unwrapped in this browser: the server stores them only in encrypted form, but because the passphrase passes through it, a compromised server could capture it.</div>
     <div class="auth-field"><label class="auth-label">Passphrase</label>
       <input class="auth-input" type="password" id="vault-pass" placeholder="Enter passphrase…" autocomplete="current-password"></div>
     <div class="auth-err" id="vault-err"></div>
     <button class="auth-btn" onclick="doUnlock()">Unlock</button>
     <div style="font-size:10px;color:var(--text3);text-align:center;margin-top:10px;line-height:1.6;">
-      AES-256-GCM · Argon2id KDF · Server never sees plaintext
+      AES-256-GCM · Argon2id KDF · Logs encrypted at rest · Non-E2E messages pass through the server in plaintext
     </div>
   </div>
 </div>
@@ -3986,7 +3986,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div class="appear-section">
         <div class="appear-section-title">Vault</div>
         <div class="appear-row">
-          <div><span class="appear-label">Auto-lock timer</span><div style="font-size:10px;color:var(--text3)">Lock vault after inactivity</div></div>
+          <div><span class="appear-label">Auto-lock timer</span><div style="font-size:10px;color:var(--text3)">Lock this device after inactivity (IRC stays connected)</div></div>
           <select id="sec-vault-autolock" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="setVaultAutoLock(+this.value)">
             <option value="0">Off</option><option value="5">5 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hour</option><option value="120">2 hours</option>
           </select>
@@ -3996,7 +3996,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div class="appear-section">
         <div class="appear-section-title">Messages</div>
         <div class="appear-row">
-          <div><span class="appear-label">Message expiry</span><div style="font-size:10px;color:var(--text3)">Auto-delete old messages from buffer</div></div>
+          <div><span class="appear-label">Message expiry</span><div style="font-size:10px;color:var(--text3)">Hide older messages on this device (server history is kept)</div></div>
           <select id="sec-msg-expiry" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="setMessageExpiry(+this.value)">
             <option value="0">Off</option><option value="1">1 hour</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">24 hours</option><option value="72">3 days</option><option value="168">7 days</option>
           </select>

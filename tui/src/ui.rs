@@ -10,6 +10,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 use unicode_width::UnicodeWidthStr;
 use crate::app::{App, LineKind};
+use crate::sanitize::clean;
 use crate::theme::Theme;
 
 /// Colour a nick deterministically from the active theme's palette — same nick,
@@ -69,7 +70,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_topic(f: &mut Frame, area: Rect, app: &App) {
     let (label, topic) = match app.cur() {
-        Some(b) => (b.label.clone(), b.topic.clone()),
+        // Both are server-controlled (channel name, topic) — see sanitize.rs.
+        Some(b) => (clean(&b.label).into_owned(), clean(&b.topic).into_owned()),
         None => (String::from("cryptirc"), String::new()),
     };
     let th = &app.theme;
@@ -112,7 +114,7 @@ fn draw_buflist(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::styled(if online { "● " } else { "○ " },
                     Style::default().fg(if online { th.online } else { th.dim })),
                 Span::styled(format!("{:>2} ", num), Style::default().fg(th.dim)),
-                Span::styled(b.label.clone(), name_style),
+                Span::styled(clean(&b.label).into_owned(), name_style),
             ])));
         } else {
             let (marker, mut style) = match b.activity {
@@ -124,7 +126,7 @@ fn draw_buflist(f: &mut Frame, area: Rect, app: &mut App) {
             items.push(ListItem::new(Line::from(vec![
                 // Indented under its network header, mirroring the web sidebar.
                 Span::styled(format!("{}  {:>2} ", marker, num), style),
-                Span::styled(b.label.clone(), style),
+                Span::styled(clean(&b.label).into_owned(), style),
             ])));
         }
         row += 1;
@@ -140,22 +142,24 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App) {
     let width = area.width.saturating_sub(1) as usize;
     let cur = app.current;
     let Some(buf) = app.buffers.get(cur) else {
-        f.render_widget(Paragraph::new("no buffers — /join #channel")
+        f.render_widget(Paragraph::new("no networks yet — add one in the web app (/quit to exit)")
             .style(Style::default().fg(app.theme.fg).bg(app.theme.bg)), area);
         return;
     };
     // Total rendered rows for THIS width. Computed first so the scroll clamp is
     // against reality; without it the oldest part of a wrapped buffer was
     // unreachable because the clamps used the message count instead.
+    // Measured on the SANITISED text, which is what is actually drawn.
     let mut total_rows = 0usize;
     for l in buf.lines.iter() {
+        let from = clean(&l.from);
         let head = hhmm(l.ts).width() + 1 + match l.kind {
-            LineKind::Msg | LineKind::Own => l.from.width() + 2,
-            LineKind::Action => l.from.width() + 3,
-            LineKind::Notice => l.from.width() + 2,
+            LineKind::Msg | LineKind::Own => from.width() + 2,
+            LineKind::Action => from.width() + 3,
+            LineKind::Notice => from.width() + 2,
             LineKind::Status | LineKind::Error => 4,
         } + 1;
-        total_rows += wrap(&l.text, width.saturating_sub(head).max(8)).len();
+        total_rows += wrap(&clean(&l.text), width.saturating_sub(head).max(8)).len();
     }
     // Build from the newest backwards until the viewport is full, honouring the
     // scroll offset. Wrapping is done here (not by Paragraph) because we need an
@@ -168,17 +172,20 @@ fn draw_chat(f: &mut Frame, area: Rect, app: &mut App) {
     let mut taken = 0usize;
     for l in buf.lines.iter().rev() {
         let ts = hhmm(l.ts);
+        // Sender and text are remote-controlled: never let a control byte reach
+        // the terminal (sanitize.rs). The nick colour still hashes the raw nick.
+        let from = clean(&l.from);
         let (prefix, body_style) = match l.kind {
-            LineKind::Msg    => (Span::styled(format!("<{}>", l.from), Style::default().fg(nick_color(&th, &l.from))), Style::default().fg(th.fg)),
-            LineKind::Own    => (Span::styled(format!("<{}>", l.from), Style::default().fg(th.own).add_modifier(Modifier::BOLD)), Style::default().fg(th.own)),
-            LineKind::Action => (Span::styled(format!(" * {}", l.from), Style::default().fg(th.action)), Style::default().fg(th.action)),
-            LineKind::Notice => (Span::styled(format!("-{}-", l.from), Style::default().fg(th.notice)), Style::default().fg(th.notice)),
+            LineKind::Msg    => (Span::styled(format!("<{}>", from), Style::default().fg(nick_color(&th, &l.from))), Style::default().fg(th.fg)),
+            LineKind::Own    => (Span::styled(format!("<{}>", from), Style::default().fg(th.own).add_modifier(Modifier::BOLD)), Style::default().fg(th.own)),
+            LineKind::Action => (Span::styled(format!(" * {}", from), Style::default().fg(th.action)), Style::default().fg(th.action)),
+            LineKind::Notice => (Span::styled(format!("-{}-", from), Style::default().fg(th.notice)), Style::default().fg(th.notice)),
             LineKind::Status => (Span::styled(" -!-".to_string(), Style::default().fg(th.dim)), Style::default().fg(th.dim)),
             LineKind::Error  => (Span::styled(" !! ".to_string(), Style::default().fg(th.error).add_modifier(Modifier::BOLD)), Style::default().fg(th.error)),
         };
         let head_w = ts.width() + 1 + prefix.content.width() + 1;
         let avail = width.saturating_sub(head_w).max(8);
-        let wrapped = wrap(&l.text, avail);
+        let wrapped = wrap(&clean(&l.text), avail);
         // Emit in reverse so continuation rows sit UNDER their first row once the
         // whole list is flipped back at the end.
         for (n, seg) in wrapped.iter().enumerate().rev() {
@@ -245,7 +252,7 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
 fn draw_nicklist(f: &mut Frame, area: Rect, app: &App) {
     let th = &app.theme;
     let Some(b) = app.cur() else { return };
-    let mut names = b.names.clone();
+    let mut names: Vec<String> = b.names.iter().map(|n| clean(n).into_owned()).collect();
     // Ops first, then voiced, then the rest — each alphabetical, as clients do.
     fn rank(n: &str) -> u8 {
         match n.chars().next() {
@@ -280,11 +287,11 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     let (conn, nick, target, lag) = match app.cur() {
         Some(b) => (
             *app.connected.get(&b.conn_id).unwrap_or(&false),
-            app.our_nick(&b.conn_id).to_string(),
-            b.label.clone(),
+            clean(app.our_nick(&b.conn_id)).into_owned(),
+            clean(&b.label).into_owned(),
             app.lag.get(&b.conn_id).copied().flatten(),
         ),
-        None => (false, app.username.clone(), String::new(), None),
+        None => (false, clean(&app.username).into_owned(), String::new(), None),
     };
     let sb = Style::default().fg(th.status_fg).bg(th.status_bg);
     let mut spans = vec![
@@ -314,7 +321,8 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     }
     if !app.status.is_empty() {
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(app.status.clone(), Style::default().fg(th.status_fg).bg(th.status_bg).add_modifier(Modifier::BOLD)));
+        // Often carries server text (errors, bot answers, close reasons).
+        spans.push(Span::styled(clean(&app.status).into_owned(), Style::default().fg(th.status_fg).bg(th.status_bg).add_modifier(Modifier::BOLD)));
     }
     f.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(th.status_bg)),
@@ -325,7 +333,7 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let th = &app.theme;
     if let Some(p) = &app.prompt {
-        let shown = if p.masked { "*".repeat(p.value.chars().count()) } else { p.value.clone() };
+        let shown = if p.masked { "*".repeat(p.value.chars().count()) } else { clean(&p.value).into_owned() };
         f.render_widget(Paragraph::new(Line::from(vec![
             Span::styled(format!("{} ", p.label), Style::default().fg(th.nicks[2]).add_modifier(Modifier::BOLD)),
             Span::styled(shown.clone(), Style::default().fg(th.fg)),
@@ -334,7 +342,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         f.set_cursor(x.min(area.x + area.width.saturating_sub(1)), area.y);
         return;
     }
-    let nick = app.cur().map(|b| app.our_nick(&b.conn_id).to_string()).unwrap_or_else(|| app.username.clone());
+    let nick = clean(&app.cur().map(|b| app.our_nick(&b.conn_id).to_string()).unwrap_or_else(|| app.username.clone())).into_owned();
     let prompt = format!("[{}] ", nick);
     // Horizontal scroll: keep the caret on screen for input longer than the
     // terminal is wide, instead of truncating and freezing the cursor at the
@@ -355,7 +363,9 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let tail = &app.input[off.min(app.input.len())..];
     f.render_widget(Paragraph::new(Line::from(vec![
         Span::styled(prompt.clone(), Style::default().fg(th.online)),
-        Span::styled(tail.to_string(), Style::default().fg(th.fg)),
+        // Input is kept control-free on the way in (paste, tab completion), so
+        // this is a backstop that never changes the caret arithmetic above.
+        Span::styled(clean(tail).into_owned(), Style::default().fg(th.fg)),
     ])).style(Style::default().bg(th.bg)), area);
     // Caret measured in DISPLAY columns, not bytes.
     let x = area.x + (prompt.width() + before.width().saturating_sub(before_w - shown_w.min(before_w))) as u16;

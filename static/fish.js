@@ -194,7 +194,13 @@ Fish.prototype._on = function(target, ev, fn, opts){
   this._listeners.push({t:target, e:ev, fn:fn, opts:opts});
 };
 Fish.prototype._after = function(ms, fn){
-  var self=this, id=setTimeout(function(){ if(!self._dead) fn(); }, ms);
+  // Drop the id once it fires: only pending timers need to be cancellable on
+  // destroy(). Keeping every id ever issued grew the array without bound
+  // (hundreds a minute — a fish 'friends pass' alone schedules ~700).
+  var self=this, id=setTimeout(function(){
+    var i=self._timers.indexOf(id); if(i>=0) self._timers.splice(i,1);
+    if(!self._dead) fn();
+  }, ms);
   this._timers.push(id); return id;
 };
 Fish.prototype.clamp = function(){

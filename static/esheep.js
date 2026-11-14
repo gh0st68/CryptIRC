@@ -1864,9 +1864,21 @@ ESheep.prototype._wire=function(){
       under.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window,
         clientX:e.clientX,clientY:e.clientY,button:e.button,detail:e.detail,
         ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey}));
+      // A synthetic click does not move focus, so clicking a text box through the
+      // pet left you typing into nothing. Focus the form control it landed on.
+      var _f=under.closest&&under.closest('input,textarea,select,[contenteditable=""],[contenteditable="true"]'); if(_f&&_f.focus){ try{ _f.focus({preventScroll:true}); }catch(_){ } }
     }
   });
-  this._on(this.DOMdiv,'contextmenu',function(e){ e.preventDefault(); return false; });
+  this._on(this.DOMdiv, 'contextmenu', function(e){
+    e.preventDefault(); e.stopPropagation();
+    // Hand the right-click to the UI underneath (nick/message menus) rather than
+    // swallowing it. Same skip-every-pet resolution as the click forwarder.
+    var under=_esTopUnderPets(e.clientX,e.clientY);
+    if(under){ under.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,view:window,
+      clientX:e.clientX,clientY:e.clientY,screenX:e.screenX,screenY:e.screenY,button:2,buttons:2,
+      ctrlKey:e.ctrlKey,shiftKey:e.shiftKey,altKey:e.altKey,metaKey:e.metaKey})); }
+    return false;
+  });
   this._on(window,'resize',function(){
     if(!self.DOMdiv) return;
     self.screenW=_esClampDim(window.innerWidth||document.documentElement.clientWidth||document.body.clientWidth);

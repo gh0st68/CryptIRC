@@ -16,6 +16,7 @@ use rand::rngs::OsRng;
 use subtle::ConstantTimeEq;
 use std::path::{Path, PathBuf};
 use dashmap::DashMap;
+use zeroize::Zeroize;
 
 const NONCE_LEN: usize = 12;
 const KEY_LEN:   usize = 32;
@@ -73,7 +74,37 @@ pub struct CryptoManager {
     /// for the same user could interleave their read-master → derive → write_master_bundle
     /// → rename sequences and commit the wrong wrapped-master bundle.
     vault_locks: DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+    /// r4 C1-4: per-user count of vault locks (LockVault, account purge). An unlock or
+    /// passphrase change snapshots it when it is REQUESTED and installs the master key only
+    /// if no lock happened since: lock() never took vault_lock, so a lock that landed while
+    /// an unlock / change_passphrase was deriving (seconds of Argon2) was silently undone
+    /// when that operation inserted the key afterwards. The check-and-insert (unlock /
+    /// change) and the bump-and-remove (lock) run under this one std mutex, so they are
+    /// atomic with respect to each other. No await is ever held under it.
+    lock_epochs: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
+
+/// r4 C1-4: the vault was locked (LockVault from another tab/device, or account deletion)
+/// after this unlock / passphrase change was requested, so the master key was NOT
+/// installed: the lock stands. `committed` = the new passphrase had already been written
+/// (change_passphrase only): it is the valid one now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LockedMeanwhile {
+    pub committed: bool,
+}
+
+impl std::fmt::Display for LockedMeanwhile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.committed {
+            f.write_str("Your vault passphrase WAS changed, but the vault was locked while the change was finishing, \
+so it stays locked: unlock it with the NEW passphrase.")
+        } else {
+            f.write_str("The vault was locked (from another tab or device) while this was in progress, so it stays locked \
+and nothing was changed. Try again.")
+        }
+    }
+}
+impl std::error::Error for LockedMeanwhile {}
 
 impl CryptoManager {
     pub fn new(data_dir: &str) -> Result<Self> {
@@ -81,7 +112,55 @@ impl CryptoManager {
             data_dir: data_dir.to_string(),
             keys: DashMap::new(),
             vault_locks: DashMap::new(),
+            lock_epochs: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
+    }
+
+    fn epochs(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, u64>> {
+        self.lock_epochs.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// r4 C1-4: the user's current lock epoch. Take it when an unlock / passphrase change
+    /// is REQUESTED (before queueing for the KDF) and pass it to unlock_since /
+    /// change_passphrase_since.
+    pub fn lock_epoch(&self, username: &str) -> u64 {
+        self.epochs().get(username).copied().unwrap_or(0)
+    }
+
+    /// r4 C1-4: Err(LockedMeanwhile) if the vault was locked after `since` was taken.
+    fn ensure_not_locked_since(&self, username: &str, since: u64, committed: bool) -> Result<()> {
+        if self.lock_epoch(username) != since {
+            return Err(anyhow::Error::new(LockedMeanwhile { committed }));
+        }
+        Ok(())
+    }
+
+    /// r4 C1-4: install the master key unless the vault was locked after `since` was taken
+    /// — atomically with respect to lock().
+    fn install_key_since(&self, username: &str, master: [u8; KEY_LEN], since: u64, committed: bool) -> Result<()> {
+        let mut master = master;
+        let ep = self.epochs();
+        if ep.get(username).copied().unwrap_or(0) != since {
+            drop(ep);
+            master.zeroize();
+            return Err(anyhow::Error::new(LockedMeanwhile { committed }));
+        }
+        self.keys.insert(username.to_string(), master);
+        drop(ep);
+        master.zeroize();
+        Ok(())
+    }
+
+    /// r4 C1-4: bump the lock epoch and wipe the key, atomically w.r.t. install_key_since.
+    fn lock_now(&self, username: &str) {
+        let mut ep = self.epochs();
+        let e = ep.entry(username.to_string()).or_insert(0);
+        *e = e.wrapping_add(1);
+        if let Some(mut entry) = self.keys.get_mut(username) {
+            for b in entry.value_mut().iter_mut() { *b = 0; }
+        }
+        self.keys.remove(username);
+        drop(ep);
     }
 
     fn vault_lock(&self, username: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
@@ -113,12 +192,22 @@ impl CryptoManager {
     // ─── Vault operations ─────────────────────────────────────────────────────
 
     pub async fn unlock(&self, username: &str, passphrase: &str) -> Result<()> {
+        let since = self.lock_epoch(username);
+        self.unlock_since(username, passphrase, since).await
+    }
+
+    /// unlock(), refusing (Err(LockedMeanwhile), nothing installed) when the vault was
+    /// locked after `since` (= lock_epoch() taken when the unlock was requested) — r4 C1-4.
+    pub async fn unlock_since(&self, username: &str, passphrase: &str, since: u64) -> Result<()> {
         // Serialize with change_passphrase (and concurrent unlocks) for this user, so the
         // legacy-migration write_master_bundle below can't interleave with a concurrent
         // passphrase change and commit a stale wrapped-master bundle. Bind the Arc to a
         // local first so it outlives the guard (E0716).
         let _vault_lock = self.vault_lock(username);
         let _vault_guard = _vault_lock.lock().await;
+        // r4 C1-4: a lock (or account purge) that landed while this waited: stop before
+        // touching the disk (a purged account's vault must not be re-created below).
+        self.ensure_not_locked_since(username, since, false)?;
         // ── Master-key vault (audit #8) ──────────────────────────────────────
         // Once vault.mkey exists it is the single authoritative, crash-atomic
         // record: it embeds the salt under which it was wrapped, so unlocking
@@ -128,8 +217,8 @@ impl CryptoManager {
             Ok(bundle) => {
                 let master = unwrap_master_bundle(&bundle, passphrase)
                     .map_err(|_| anyhow::anyhow!("Incorrect passphrase"))?;
-                self.keys.insert(username.to_string(), master);
-                return Ok(());
+                // r4 C1-4: not if the vault was locked meanwhile.
+                return self.install_key_since(username, master, since, false);
             }
             // Only a genuinely-missing mkey (NotFound) means "legacy vault". Any
             // other read error (transient I/O, EPERM) must ABORT: falling through
@@ -193,8 +282,9 @@ impl CryptoManager {
             let _ = write_secret(self.canary_path(username), new_canary.as_bytes()).await;
         }
 
-        self.keys.insert(username.to_string(), master);
-        Ok(())
+        // r4 C1-4: not if the vault was locked meanwhile (the migrated bundle re-wraps the
+        // same master under the same passphrase, so writing it was harmless either way).
+        self.install_key_since(username, master, since, false)
     }
 
     /// Atomically write the wrapped-master bundle (salt + master wrapped by the
@@ -234,10 +324,9 @@ impl CryptoManager {
     }
 
     pub async fn lock(&self, username: &str) {
-        if let Some(mut entry) = self.keys.get_mut(username) {
-            for b in entry.value_mut().iter_mut() { *b = 0; }
-        }
-        self.keys.remove(username);
+        // r4 C1-4: also bumps the lock epoch, so an unlock / passphrase change requested
+        // before this lock can no longer re-install the key when it finishes.
+        self.lock_now(username);
     }
 
     /// Atomically tear down a user's vault on account deletion: zeroize+drop the
@@ -248,12 +337,13 @@ impl CryptoManager {
     /// write_master_bundle AFTER the teardown, resurrecting the deleted account's master
     /// key and vault — a cross-owner E2E key disclosure to a re-registered same-name user.
     pub async fn purge_vault(&self, username: &str) {
+        // r4 C1-4: bump the epoch BEFORE waiting for vault_lock, so an unlock /
+        // change_passphrase that is still queued (or deriving) refuses instead of
+        // installing the key or re-creating the vault after the teardown below.
+        self.lock_now(username);
         let _vault_lock = self.vault_lock(username);
         let _vault_guard = _vault_lock.lock().await;
-        if let Some(mut entry) = self.keys.get_mut(username) {
-            for b in entry.value_mut().iter_mut() { *b = 0; }
-        }
-        self.keys.remove(username);
+        self.lock_now(username);
         let _ = tokio::fs::remove_dir_all(self.vault_dir(username)).await;
     }
 
@@ -262,11 +352,22 @@ impl CryptoManager {
     }
 
     pub async fn change_passphrase(&self, username: &str, old: &str, new: &str) -> Result<()> {
+        let since = self.lock_epoch(username);
+        self.change_passphrase_since(username, old, new, since).await
+    }
+
+    /// change_passphrase(), honouring a vault lock that happened after `since` (= lock_epoch()
+    /// taken when the change was requested) — r4 C1-4: before the new bundle is written the
+    /// change is abandoned (Err(LockedMeanwhile{committed:false}), nothing changed); after it,
+    /// the new passphrase stands but the master key is not re-installed
+    /// (Err(LockedMeanwhile{committed:true})) — the vault stays locked.
+    pub async fn change_passphrase_since(&self, username: &str, old: &str, new: &str, since: u64) -> Result<()> {
         // Serialize with unlock (and concurrent passphrase changes) for this user — both
         // write vault.mkey; interleaving could commit a bundle wrapped under the wrong KDF.
         // Bind the Arc to a local first so it outlives the guard (E0716).
         let _vault_lock = self.vault_lock(username);
         let _vault_guard = _vault_lock.lock().await;
+        self.ensure_not_locked_since(username, since, false)?;
         // Authorization is the OLD-passphrase proof below (it must unwrap the
         // master bundle / verify the canary), so this works whether or not the
         // vault is already unlocked — preserving the existing UI flow while the
@@ -319,6 +420,8 @@ impl CryptoManager {
         // Explicit OS CSPRNG for nonce/salt material (audit #21).
         OsRng.fill_bytes(&mut new_salt);
         let new_kdf = derive_key(new, &new_salt)?;
+        // r4 C1-4: a lock during the two derivations above abandons the change cleanly.
+        self.ensure_not_locked_since(username, since, false)?;
         self.write_master_bundle(username, &new_salt, &new_kdf, &master).await?;
 
         // Keep the legacy vault.salt/vault.canary mirrors in sync (best-effort;
@@ -331,9 +434,9 @@ impl CryptoManager {
             let _ = write_secret(self.canary_path(username), new_canary.as_bytes()).await;
         }
 
-        // In-memory master key is unchanged; keep it so the session stays usable.
-        self.keys.insert(username.to_string(), master);
-        Ok(())
+        // In-memory master key is unchanged; keep it so the session stays usable — unless
+        // the vault was locked after this change was requested (r4 C1-4): the lock stands.
+        self.install_key_since(username, master, since, true)
     }
 
     pub async fn encrypt(&self, username: &str, plaintext: &[u8]) -> Result<String> {
@@ -360,10 +463,26 @@ impl CryptoManager {
         decrypt_with_key_aad(entry.value(), encoded, aad)
     }
 
+    /// LEGACY E2E blob-wrapping key (pre-2026-11-01). The server can derive it, so it
+    /// only exists to let the browser read + re-wrap blobs written by older app
+    /// versions (C1 migration). New blobs are wrapped under a client-held key.
     pub async fn derive_e2e_enc_key(&self, username: &str) -> Result<[u8; KEY_LEN]> {
         let entry = self.keys.get(username)
             .ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
         derive_subkey(entry.value(), b"cryptirc-e2e-enc-v1")
+    }
+
+    /// C1: per-user "pepper" mixed (client-side, with HKDF) into the key the browser
+    /// derives from the vault passphrase to wrap its E2E master key. Alone it unwraps
+    /// nothing — the browser also needs PBKDF2(passphrase) — but it ties the client
+    /// keyring to the Argon2-protected vault master, so a stolen data dir can't be
+    /// brute-forced through the cheaper browser KDF. Stable across passphrase changes
+    /// (the master key never changes). Sent only to a socket that just proved the
+    /// passphrase (unlock / re-verify / change-passphrase).
+    pub async fn derive_e2e_kek_pepper(&self, username: &str) -> Result<[u8; KEY_LEN]> {
+        let entry = self.keys.get(username)
+            .ok_or_else(|| anyhow::anyhow!("Vault locked"))?;
+        derive_subkey(entry.value(), b"cryptirc-e2e-kek-pepper-v2")
     }
 
     async fn get_or_create_salt(&self, username: &str) -> Result<[u8; SALT_LEN]> {
@@ -491,15 +610,36 @@ fn unwrap_master_bundle(bundle: &str, passphrase: &str) -> Result<[u8; KEY_LEN]>
 
     // Use the params stored in the bundle (audit #106); fall back to the
     // historical defaults for older v:1 bundles that omitted them.
-    let m = val.get("m").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(ARGON2_M);
-    let t = val.get("t").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(ARGON2_T);
-    let p = val.get("p").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(ARGON2_P);
+    // r3 (agy-P1 LOW crypto.rs:510): bounded. Every UnlockVault / ChangePassphrase runs
+    // this KDF, so a vault.mkey restored from a bad backup or edited on disk with an
+    // extreme cost (m up to 4 GiB, t/p in the billions) pinned a blocking thread and
+    // allocated gigabytes on every unlock attempt. The app has only ever written
+    // m=65536, t=3, p=1; the bounds leave room for raising the cost later (m ≤ 256 MiB,
+    // t ≤ 10, p ≤ 4) and refuse anything beyond — before any memory is allocated.
+    let m = val.get("m").and_then(|v| v.as_u64()).unwrap_or(ARGON2_M as u64);
+    let t = val.get("t").and_then(|v| v.as_u64()).unwrap_or(ARGON2_T as u64);
+    let p = val.get("p").and_then(|v| v.as_u64()).unwrap_or(ARGON2_P as u64);
+    let (m, t, p) = check_kdf_params(m, t, p)?;
     let kdf_key = derive_key_params(passphrase, &salt, m, t, p)?;
     let raw = decrypt_with_key(&kdf_key, wrapped)?;
     if raw.len() != KEY_LEN { bail!("Corrupt master key bundle"); }
     let mut master = [0u8; KEY_LEN];
     master.copy_from_slice(&raw);
     Ok(master)
+}
+
+/// Upper bounds for the Argon2 parameters read back from a vault.mkey bundle.
+const ARGON2_M_MAX: u64 = 262_144; // 256 MiB (KiB units) — 4x the current default
+const ARGON2_T_MAX: u64 = 10;
+const ARGON2_P_MAX: u64 = 4;
+
+/// Validate stored Argon2 parameters (see unwrap_master_bundle).
+fn check_kdf_params(m: u64, t: u64, p: u64) -> Result<(u32, u32, u32)> {
+    if !(1..=ARGON2_P_MAX).contains(&p) || !(1..=ARGON2_T_MAX).contains(&t)
+        || m < 8 * p || m > ARGON2_M_MAX {
+        bail!("Corrupt master key bundle (Argon2 parameters out of range)");
+    }
+    Ok((m as u32, t as u32, p as u32))
 }
 
 fn derive_key(passphrase: &str, salt: &[u8]) -> Result<[u8; KEY_LEN]> {
@@ -532,4 +672,168 @@ pub fn derive_subkey(master: &[u8; KEY_LEN], info: &[u8]) -> Result<[u8; KEY_LEN
 /// homograph/NFC path collisions impossible on case-insensitive filesystems.
 fn sanitize_username(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect()
+}
+
+#[cfg(test)]
+mod kdf_param_tests {
+    use super::*;
+
+    #[test]
+    fn stored_argon2_params_are_bounded() {
+        // every value the app has ever written
+        assert_eq!(check_kdf_params(65536, 3, 1).unwrap(), (65536, 3, 1));
+        // headroom for a future cost increase
+        assert!(check_kdf_params(262_144, 10, 4).is_ok());
+        // extreme / nonsensical values are refused (no allocation happens)
+        assert!(check_kdf_params(u32::MAX as u64, 3, 1).is_err());
+        assert!(check_kdf_params((1u64 << 32) + 65536, 3, 1).is_err()); // was truncated to 65536 by `as u32`
+        assert!(check_kdf_params(65536, 1_000_000, 1).is_err());
+        assert!(check_kdf_params(65536, 3, 1000).is_err());
+        assert!(check_kdf_params(65536, 0, 1).is_err());
+        assert!(check_kdf_params(4, 3, 1).is_err());
+    }
+
+    #[tokio::test]
+    async fn tampered_vault_mkey_cost_is_refused_quickly() {
+        let d = std::env::temp_dir().join(format!("cryptirc-kdf-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        let dir = d.to_string_lossy().into_owned();
+        let cm = CryptoManager::new(&dir).unwrap();
+        cm.unlock("alice", "correct horse").await.unwrap();
+        cm.lock("alice").await;
+        let p = cm.mkey_path("alice");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!((v["m"].as_u64(), v["t"].as_u64(), v["p"].as_u64()), (Some(65536), Some(3), Some(1)));
+        let good = v.clone();
+        v["m"] = serde_json::json!(4_194_304u64); // 4 GiB
+        std::fs::write(&p, v.to_string()).unwrap();
+        let t0 = std::time::Instant::now();
+        assert!(cm.unlock("alice", "correct horse").await.is_err());
+        assert!(t0.elapsed() < std::time::Duration::from_secs(2));
+        // the untouched bundle still unlocks
+        std::fs::write(&p, good.to_string()).unwrap();
+        cm.unlock("alice", "correct horse").await.unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod r4_lock_race_tests {
+    //! r4 C1-4: a vault lock requested after an unlock / passphrase change was requested
+    //! wins — the operation finishing afterwards must not re-install the key.
+    use super::*;
+    use std::sync::Arc;
+
+    fn mgr(tag: &str) -> (Arc<CryptoManager>, std::path::PathBuf) {
+        let d = std::env::temp_dir().join(format!("cryptirc-r4lock-{}-{}", tag, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        (Arc::new(CryptoManager::new(&d.to_string_lossy()).unwrap()), d)
+    }
+
+    /// The unlock is queued behind the vault lock (as behind another unlock / a KDF slot)
+    /// when the Lock arrives. Only existing APIs are used, so the same test shows the
+    /// 3b92eaf behaviour (key re-installed after the lock → unlocked).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lock_while_an_unlock_is_queued_wins() {
+        let (cm, d) = mgr("q");
+        cm.unlock("alice", "correct horse").await.unwrap();   // create the vault
+        cm.lock("alice").await;
+        let vl = cm.vault_lock("alice");
+        let held = vl.lock().await;
+        let c = cm.clone();
+        let t = tokio::spawn(async move { c.unlock("alice", "correct horse").await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;   // unlock requested + waiting
+        cm.lock("alice").await;                                             // the user locks
+        drop(held);
+        let r = t.await.unwrap();
+        assert!(!cm.is_unlocked("alice").await, "the lock must stand");
+        let e = r.expect_err("the unlock reports the lock");
+        assert_eq!(e.downcast_ref::<LockedMeanwhile>(), Some(&LockedMeanwhile { committed: false }));
+        // An unlock requested after the lock works normally.
+        cm.unlock("alice", "correct horse").await.unwrap();
+        assert!(cm.is_unlocked("alice").await);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Lock landing while the unlock derives (epoch taken at request time, like the WS
+    /// handler does): refused whatever the timing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lock_during_the_derivation_wins() {
+        let (cm, d) = mgr("derive");
+        cm.unlock("alice", "correct horse").await.unwrap();
+        cm.lock("alice").await;
+        let since = cm.lock_epoch("alice");
+        let c = cm.clone();
+        let t = tokio::spawn(async move { c.unlock_since("alice", "correct horse", since).await });
+        // Right away: before (first check) or during (install check) the 64 MiB Argon2 run.
+        cm.lock("alice").await;
+        let r = t.await.unwrap();
+        assert!(r.is_err() && !cm.is_unlocked("alice").await);
+        // A wrong passphrase is still "Incorrect passphrase", not LockedMeanwhile.
+        let e = cm.unlock("alice", "wrong").await.unwrap_err();
+        assert!(e.downcast_ref::<LockedMeanwhile>().is_none());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// change_passphrase queued when the Lock arrives: abandoned cleanly — nothing written,
+    /// the OLD passphrase still unlocks, the vault stays locked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lock_while_a_passphrase_change_is_queued_wins() {
+        let (cm, d) = mgr("chg");
+        cm.unlock("alice", "correct horse").await.unwrap();
+        let vl = cm.vault_lock("alice");
+        let held = vl.lock().await;
+        let c = cm.clone();
+        let t = tokio::spawn(async move { c.change_passphrase("alice", "correct horse", "battery staple").await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cm.lock("alice").await;
+        drop(held);
+        let r = t.await.unwrap();
+        assert!(!cm.is_unlocked("alice").await, "the lock must stand");
+        assert_eq!(r.unwrap_err().downcast_ref::<LockedMeanwhile>(), Some(&LockedMeanwhile { committed: false }));
+        assert!(cm.unlock("alice", "battery staple").await.is_err(), "nothing was changed");
+        cm.unlock("alice", "correct horse").await.unwrap();
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// A lock that lands after the new bundle was written: the new passphrase stands, the
+    /// key is NOT re-installed, and the error says so (committed).
+    #[tokio::test]
+    async fn lock_after_the_commit_keeps_the_new_passphrase_and_the_lock() {
+        let (cm, d) = mgr("commit");
+        cm.unlock("alice", "correct horse").await.unwrap();
+        let since = cm.lock_epoch("alice");
+        // Simulate the lock landing between write_master_bundle and the key install.
+        let mut master = *cm.keys.get("alice").unwrap();
+        cm.lock("alice").await;
+        let e = cm.install_key_since("alice", master, since, true).unwrap_err();
+        master.zeroize();
+        assert_eq!(e.downcast_ref::<LockedMeanwhile>(), Some(&LockedMeanwhile { committed: true }));
+        assert!(e.to_string().contains("NEW passphrase"));
+        assert!(!cm.is_unlocked("alice").await);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// Account purge bumps the epoch: an unlock queued behind it can neither re-install
+    /// the key nor re-create the deleted vault (3b92eaf: the legacy branch re-created
+    /// vault.salt/canary under the deleted account's name and unlocked it).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn purge_beats_a_queued_unlock() {
+        let (cm, d) = mgr("purge");
+        cm.unlock("alice", "correct horse").await.unwrap();
+        let vl = cm.vault_lock("alice");
+        let held = vl.lock().await;
+        let c2 = cm.clone();
+        let p = tokio::spawn(async move { c2.purge_vault("alice").await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;   // purge queued first
+        let c = cm.clone();
+        let t = tokio::spawn(async move { c.unlock("alice", "correct horse").await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;   // then the unlock
+        drop(held);
+        p.await.unwrap();
+        let _ = t.await.unwrap();
+        assert!(!cm.is_unlocked("alice").await);
+        assert!(!cm.vault_dir("alice").exists(), "the purged vault stays gone");
+        let _ = std::fs::remove_dir_all(d);
+    }
 }

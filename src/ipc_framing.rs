@@ -100,7 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn round_trip_single_frame() {
-        let msg = IpcMessage::RawLine { conn_id: "net1".into(), line: ":server PRIVMSG #chan :hi".into(), replayed: false };
+        let msg = IpcMessage::RawLine { conn_id: "net1".into(), line: ":server PRIVMSG #chan :hi".into(), replayed: false, backlog: false, recv_ts: 0, seq: 0 };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).await.unwrap();
 
@@ -118,7 +118,7 @@ mod tests {
     #[tokio::test]
     async fn round_trip_multiple_frames_in_sequence() {
         let msgs = vec![
-            IpcMessage::Attach { version: "0.4.3".into(), build: "abc1234".into() },
+            IpcMessage::Attach { version: "0.4.3".into(), build: "abc1234".into(), features: vec![] },
             IpcMessage::ConnStatus { conn_id: "n".into(), state: ConnLifecycle::Connecting },
             IpcMessage::Drop { conn_id: "n".into(), reason: "bye".into() },
         ];
@@ -147,7 +147,7 @@ mod tests {
 
     #[tokio::test]
     async fn truncated_frame_is_an_error_not_a_clean_eof() {
-        let msg = IpcMessage::RawLine { conn_id: "n".into(), line: "x".into(), replayed: false };
+        let msg = IpcMessage::RawLine { conn_id: "n".into(), line: "x".into(), replayed: false, backlog: false, recv_ts: 0, seq: 0 };
         let mut buf = Vec::new();
         write_frame(&mut buf, &msg).await.unwrap();
         buf.truncate(buf.len() - 1); // chop the last body byte

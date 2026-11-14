@@ -184,7 +184,9 @@ Alien.prototype._bounds = function(){
   this.screenH = window.innerHeight || document.documentElement.clientHeight || 600;
 };
 Alien.prototype._on = function(t,e,fn,o){ t.addEventListener(e,fn,o); this._listeners.push({t:t,e:e,fn:fn,o:o}); };
-Alien.prototype._after = function(ms,fn){ var self=this,id=setTimeout(function(){ if(!self._dead) fn(); },ms); this._timers.push(id); return id; };
+// Drop the id once it fires (only pending timers need cancelling on destroy) —
+// keeping every id ever issued grew the array without bound.
+Alien.prototype._after = function(ms,fn){ var self=this,id=setTimeout(function(){ var i=self._timers.indexOf(id); if(i>=0) self._timers.splice(i,1); if(!self._dead) fn(); },ms); this._timers.push(id); return id; };
 Alien.prototype.clamp = function(){
   this.x = Math.max(0, Math.min(this.x, this.screenW - this.W));
   this.y = Math.max(0, Math.min(this.y, this.screenH - this.H));

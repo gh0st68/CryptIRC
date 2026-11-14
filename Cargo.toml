@@ -1,10 +1,10 @@
 [package]
 name = "cryptirc"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "=1.38.0", features = ["full"] }
+tokio = { version = "=1.38.2", features = ["full"] }
 axum = { version = "=0.7.5", features = ["ws", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -32,8 +32,11 @@ libc = "0.2"
 tokio-openssl = "0.6"
 web-push = { version = "0.9", default-features = false, features = ["hyper-client"] }
 hkdf = "0.12"
+# r4 (V3W-N2): NFKC for the E2E outdated-tab guard's widest name fold. Already in the
+# dependency tree (idna → idna_adapter, same version, compiled_data): no new code.
+icu_normalizer = { version = "2.1", default-features = false, features = ["compiled_data"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 socket2 = { version = "0.5", features = ["all"] }
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 ammonia = "4.2.3"

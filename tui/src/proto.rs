@@ -33,7 +33,25 @@ pub enum ClientMessage {
     Send { conn_id: String, raw: String },
     JoinChannel { conn_id: String, channel: String, key: Option<String> },
     PartChannel { conn_id: String, channel: String },
-    GetLogs { conn_id: String, target: String, limit: Option<usize>, before: Option<i64> },
+    /// `before_id` and `status_view` are optional, additive fields (server
+    /// 0.5.8+). They are left out of the frame entirely when unset, so an older
+    /// server sees exactly the frame it always got; a server without them ignores
+    /// the unknown fields (its ClientMessage has no deny_unknown_fields).
+    ///  - `before_id`: id of the oldest line we show (its ts is `before`), an exact
+    ///    paging cursor inside that second.
+    ///  - `status_view`: "query" for a DM with a user whose nick folds to
+    ///    `status` — the server then returns only that conversation from the
+    ///    shared "status" log, not its own output (MOTD, numerics, AWAY lines).
+    GetLogs {
+        conn_id: String, target: String, limit: Option<usize>, before: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")] before_id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")] status_view: Option<String>,
+    },
+    /// Ask for a fresh `State` snapshot. /cycle uses it to read the channel key
+    /// the server holds NOW (a +k set after we joined is saved server-side but
+    /// not pushed to clients) before parting, because the server forgets a
+    /// parted channel's key.
+    GetState {},
     /// Re-dial a network. Field is `id`, not `conn_id` — the server is asymmetric
     /// here (see ../src/main.rs ClientMessage::Connect/Disconnect).
     Connect { id: String },
@@ -60,6 +78,11 @@ pub struct NetworkConfig {
     pub id: String,
     #[serde(default)]
     pub label: String,
+    /// Saved channel keys, keyed by the lowercased channel name (sometimes another
+    /// spelling of it under the server's CASEMAPPING, see `saved_channel_key`). Decrypted while the vault is
+    /// open; `enc:`-wrapped blobs while it is locked. Only /cycle reads it.
+    #[serde(default)]
+    pub channel_keys: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,6 +105,10 @@ pub struct NetworkState {
     pub channels: Vec<ChannelState>,
     #[serde(default)]
     pub lag_ms: Option<u64>,
+    /// The server's CASEMAPPING token ("rfc1459" / "strict-rfc1459" / "ascii"), sent by
+    /// servers since round 4 of the 0.5.8 fixes; absent = unknown (see saved_channel_key).
+    #[serde(default)]
+    pub casemapping: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -131,7 +158,19 @@ pub enum ServerEvent {
         #[serde(default)] kind: String,
         #[serde(default)] msg_id: u64,
     },
+    /// The pre-extended-join shape. Current servers no longer send it; it is
+    /// kept so the client still works against one that does.
     IrcJoin { conn_id: String, nick: String, channel: String, #[serde(default)] ts: i64 },
+    /// What current servers send for EVERY join, extended-join cap or not
+    /// (../src/irc.rs "JOIN"). Without this variant every live join fell into
+    /// `Unknown`, so joiners never reached scrollback or the nick list.
+    /// `account`/`realname` are empty when the network has no extended-join.
+    IrcJoinEx {
+        conn_id: String, nick: String, channel: String,
+        #[serde(default)] #[allow(dead_code)] account: String,
+        #[serde(default)] #[allow(dead_code)] realname: String,
+        #[serde(default)] ts: i64,
+    },
     IrcPart { conn_id: String, nick: String, channel: String, #[serde(default)] reason: String, #[serde(default)] ts: i64 },
     IrcQuit { conn_id: String, nick: String, #[serde(default)] reason: String, #[serde(default)] ts: i64 },
     IrcNick { conn_id: String, #[serde(default)] old: String, #[serde(default)] new: String, #[serde(default)] ts: i64 },

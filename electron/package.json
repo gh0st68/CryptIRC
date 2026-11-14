@@ -1,6 +1,6 @@
 {
   "name": "cryptirc",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "description": "CryptIRC — Encrypted IRC Client",
   "main": "main.js",
   "author": "gh0st",
@@ -21,6 +21,12 @@
     "productName": "CryptIRC",
     "directories": {
       "output": "dist"
+    },
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "grantFileProtocolExtraPrivileges": false
     },
     "publish": [
       {
@@ -57,7 +63,7 @@
     }
   },
   "devDependencies": {
-    "electron": "^44.8.0",
+    "electron": "^44.10.1",
     "electron-builder": "^26.17.0"
   }
 }

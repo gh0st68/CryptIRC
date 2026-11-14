@@ -116,8 +116,14 @@ impl PreviewService {
         let mut resp = None;
         for hop in 0..=MAX_REDIRECTS {
             // (1) Parse + scheme check on THIS hop's URL.
-            let parsed = reqwest::Url::parse(&current)
+            let mut parsed = reqwest::Url::parse(&current)
                 .map_err(|_| anyhow::anyhow!("Invalid URL"))?;
+            // Argon P1 preview.rs:133: canonicalise a fully-qualified host ("github.com.")
+            // to its dot-less form for EVERYTHING below — whitelist match, internal-name
+            // checks, the pinned resolve, TLS name, Host header and the reported domain —
+            // so the two spellings of one name can't be treated differently.
+            canonicalize_url_host(&mut parsed)?;
+            current = parsed.to_string();
             if parsed.scheme() != "https" {
                 anyhow::bail!("Only HTTPS URLs supported");
             }
@@ -232,7 +238,7 @@ impl PreviewService {
             match reqwest::Url::parse(img) {
                 Ok(u) => u
                     .host_str()
-                    .map(|h| h.to_lowercase() == final_domain)
+                    .map(|h| h.trim_end_matches('.').to_lowercase() == final_domain)
                     .unwrap_or(false),
                 Err(_) => false,
             }
@@ -256,6 +262,16 @@ impl PreviewService {
 /// for `host`, so DNS is not re-resolved at connect time (defeats DNS-rebinding /
 /// TOCTOU). #18: Policy::none() disables automatic redirect following; the caller
 /// follows + re-validates each hop itself.
+/// Rewrite a URL whose host ends in '.' (root-label form) to the dot-less host. IP literals
+/// come back from the parser already normalised; an all-dots host is refused.
+pub(crate) fn canonicalize_url_host(u: &mut reqwest::Url) -> Result<()> {
+    let Some(h) = u.host_str().map(str::to_string) else { return Ok(()) };
+    let trimmed = h.trim_end_matches('.');
+    if trimmed.len() == h.len() { return Ok(()); }
+    if trimmed.is_empty() { anyhow::bail!("No host in URL"); }
+    u.set_host(Some(trimmed)).map_err(|_| anyhow::anyhow!("Invalid URL"))
+}
+
 fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(TIMEOUT)
@@ -308,9 +324,11 @@ pub(crate) async fn read_capped_body(mut resp: reqwest::Response, max: usize) ->
 /// resolution yields zero addresses or when ANY address is private/internal.
 /// (#17: validate all A/AAAA records and pin the exact set we validated.)
 async fn resolve_and_validate_host(host: &str, port: Option<u16>) -> Result<Vec<SocketAddr>> {
-    // #119: strip a trailing '.' (fully-qualified form, e.g. "localhost.") and also
-    // reject ".localhost" so the name-prefilter matches the IP-check backstop below.
-    let host = host.strip_suffix('.').unwrap_or(host);
+    // #119: strip the trailing '.'(s) (fully-qualified form, e.g. "localhost." — Argon P1:
+    // all of them, "localhost.." too) and also reject ".localhost" so the name-prefilter
+    // matches the IP-check backstop below.
+    let host = host.trim_end_matches('.');
+    if host.is_empty() { anyhow::bail!("No host in URL"); }
     // Reject obvious internal names before resolving.
     if host == "localhost"
         || host.ends_with(".localhost")
@@ -350,13 +368,16 @@ fn extract_meta(html: &str, name: &str) -> Option<String> {
             format!(r#"{}='{}'"#, attr, name),
         ];
         for pat in &patterns {
-            if let Some(idx) = html.to_lowercase().find(&pat.to_lowercase()) {
-                // #86: idx came from a lowercased copy; to_lowercase() can change byte
-                // length for some Unicode, so idx may not be a char boundary in the
-                // original. Use get() and bail to None instead of panicking on slice.
+            // agy P1 (LOW): search an ASCII-lowercased copy. to_lowercase() is Unicode-aware
+            // and changes byte length for some characters (ẞ→ß, K→k, İ→i̇), so an offset
+            // found in that copy pointed at the wrong place (or a non-boundary) in `html`
+            // whenever such a character came first. ASCII lowercasing is byte-for-byte, so
+            // offsets line up, and the patterns ("property=", "og:title", …) are ASCII.
+            if let Some(idx) = html.to_ascii_lowercase().find(&pat.to_ascii_lowercase()) {
+                // #86: still slice with get() (defensive; offsets are boundaries now).
                 let Some(after) = html.get(idx..) else { continue };
                 // Find content="..."
-                if let Some(ci) = after.to_lowercase().find("content=") {
+                if let Some(ci) = after.to_ascii_lowercase().find("content=") {
                     let Some(rest) = after.get(ci + 8..) else { continue };
                     let quote = if rest.starts_with('"') { '"' } else if rest.starts_with('\'') { '\'' } else { continue };
                     let inner = &rest[1..];
@@ -375,11 +396,10 @@ fn extract_meta(html: &str, name: &str) -> Option<String> {
 fn extract_tag(html: &str, tag: &str) -> Option<String> {
     let open = format!("<{}", tag);
     let close = format!("</{}>", tag);
-    let lower = html.to_lowercase();
+    // ASCII-only lowercasing keeps byte offsets identical to `html` (see extract_meta).
+    let lower = html.to_ascii_lowercase();
     let start = lower.find(&open)?;
-    // #86: indices come from the lowercased copy and may not be char boundaries in
-    // the original (to_lowercase() can change byte length). Slice with get() and
-    // bail to None instead of panicking.
+    // #86: slice with get() and bail to None instead of panicking (defensive).
     let after_open = html.get(start..)?;
     let gt = after_open.find('>')?;
     let content_start = start + gt + 1;
@@ -536,6 +556,18 @@ pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
                     );
                     is_private_ip(IpAddr::V4(v4))
                 })
+                // Local-use NAT64 prefix (64:ff9b:1::/48, RFC 8215). Operators carve their
+                // own translator prefixes out of it with varying embedding layouts, so the
+                // IPv4 can't be decoded reliably — and nothing public lives there. Block it.
+                || (seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2] == 0x0001)
+                // IPv4-translated (::ffff:0:a.b.c.d, RFC 2765 SIIT): decode & check.
+                || (seg[0..4] == [0,0,0,0] && seg[4] == 0xffff && seg[5] == 0 && {
+                    let v4 = std::net::Ipv4Addr::new(
+                        (seg[6] >> 8) as u8, seg[6] as u8,
+                        (seg[7] >> 8) as u8, seg[7] as u8,
+                    );
+                    is_private_ip(IpAddr::V4(v4))
+                })
                 // Deprecated IPv4-compatible IPv6 (::a.b.c.d): seg[0..6]==0, embedded v4 in
                 // seg[6..8]. Decode & check (loopback ::1 is already handled above).
                 || (seg[0..6] == [0,0,0,0,0,0] && (seg[6] != 0 || seg[7] != 0) && {
@@ -557,6 +589,84 @@ pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
                 || (seg[0] == 0x2001 && seg[1] == 0x0db8)
                 // Unspecified
                 || seg == [0; 8]
+        }
+    }
+}
+
+#[cfg(test)]
+mod ssrf_tests {
+    use super::is_private_ip;
+    use std::net::IpAddr;
+
+    fn blocked(s: &str) -> bool { is_private_ip(s.parse::<IpAddr>().unwrap()) }
+
+    #[test]
+    fn nat64_prefixes() {
+        // RFC 6052 well-known prefix: decoded, private targets blocked …
+        assert!(blocked("64:ff9b::7f00:1"));
+        assert!(blocked("64:ff9b::a9fe:a9fe"));
+        assert!(blocked("64:ff9b::a00:1"));
+        // … public targets still allowed (NAT64 hosts reach the internet this way).
+        assert!(!blocked("64:ff9b::808:808"));
+        // RFC 8215 local-use prefix: blocked wholesale (was reachable before).
+        assert!(blocked("64:ff9b:1::7f00:1"));
+        assert!(blocked("64:ff9b:1:abcd::1"));
+        assert!(blocked("64:ff9b:1:ffff:ffff:ffff:ffff:ffff"));
+        // RFC 2765 IPv4-translated form.
+        assert!(blocked("::ffff:0:7f00:1"));
+        assert!(!blocked("::ffff:0:808:808"));
+    }
+
+    #[test]
+    fn unicode_before_tags_does_not_shift_offsets() {
+        // Each of these lowercases to a different byte length under to_lowercase().
+        for pre in ["GROẞE", "\u{212A}elvin", "İstanbul İ İ İ", "ẞẞẞẞẞẞẞẞẞẞ", "İİİİİİİİİİİİİİİİİİİİİİİİİİİİİİ"] {
+            let html = format!("<html><head><meta name=\"author\" content=\"{}\">\
+                <meta property=\"og:title\" content=\"Real Title\"><title>Tab Title</title>\
+                <meta name=\"description\" content=\"Desc ✓\"></head></html>", pre);
+            assert_eq!(super::extract_meta(&html, "og:title").as_deref(), Some("Real Title"), "{}", pre);
+            assert_eq!(super::extract_tag(&html, "title").as_deref(), Some("Tab Title"), "{}", pre);
+            assert_eq!(super::extract_meta(&html, "description").as_deref(), Some("Desc ✓"), "{}", pre);
+        }
+        // Mixed-case markup still matches.
+        let html = "<TITLE>Hi</TITLE><META PROPERTY='OG:TITLE' CONTENT='Up'>";
+        assert_eq!(super::extract_tag(html, "title").as_deref(), Some("Hi"));
+        assert_eq!(super::extract_meta(html, "og:title").as_deref(), Some("Up"));
+    }
+
+    #[test]
+    fn existing_ranges_unchanged() {
+        for a in ["127.0.0.1", "10.1.2.3", "169.254.169.254", "100.96.133.84", "::1",
+                  "::ffff:127.0.0.1", "2002:7f00:1::", "fd7a:115c:a1e0::1", "fe80::1", "::"] {
+            assert!(blocked(a), "{} should be blocked", a);
+        }
+        for a in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111", "2001:4860:4860::8888"] {
+            assert!(!blocked(a), "{} should be allowed", a);
+        }
+    }
+}
+
+#[cfg(test)]
+mod r3_trailing_dot_tests {
+    use super::*;
+
+    /// Argon P1 preview.rs:133/313: "host." is canonicalised to "host" (so the whitelist,
+    /// pin, TLS name and reported domain all see one spelling); IP literals are untouched.
+    #[test]
+    fn fully_qualified_hosts_are_canonicalised() {
+        let canon = |u: &str| { let mut x = reqwest::Url::parse(u).unwrap(); canonicalize_url_host(&mut x).map(|_| x.to_string()) };
+        assert_eq!(canon("https://github.com./a/b?c=1").unwrap(), "https://github.com/a/b?c=1");
+        assert_eq!(canon("https://GitHub.COM../x").unwrap(), "https://github.com/x");
+        assert_eq!(canon("https://github.com/x").unwrap(), "https://github.com/x");
+        assert_eq!(canon("https://1.2.3.4./x").unwrap(), "https://1.2.3.4/x");
+    }
+
+    /// The internal-name prefilter strips every trailing dot, before any DNS lookup.
+    #[tokio::test]
+    async fn internal_names_with_trailing_dots_are_refused() {
+        for h in ["localhost.", "localhost..", "svc.internal.", "svc.internal..", "printer.local.."] {
+            let e = resolve_and_validate_host(h, Some(443)).await.unwrap_err().to_string();
+            assert!(e.contains("Private/internal"), "{h}: {e}");
         }
     }
 }

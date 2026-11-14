@@ -44,9 +44,23 @@ pub struct Buffer {
     /// Set once we have asked the server for history, so switching buffers
     /// repeatedly does not re-request it every time.
     pub history_asked: bool,
+    /// An older page (GetLogs with `before`) is in flight. Kept apart from
+    /// `history_asked`: sharing that flag made every wire event during a page
+    /// fetch re-send the initial fetch, whose newest lines were then PREPENDED
+    /// above the ones already on screen.
+    pub page_pending: bool,
+    /// The last page brought nothing new: the start of the history is reached,
+    /// so stop asking on every key press at the top.
+    pub history_end: bool,
 }
 
 impl Buffer {
+    #[cfg(test)]
+    pub fn test_new(conn_id: &str, target: &str) -> Buffer {
+        Buffer { conn_id: conn_id.into(), target: target.into(), label: target.into(), topic: String::new(), names: Vec::new(),
+                 lines: Vec::new(), scroll: 0, total_rows: 0, activity: 0, history_asked: false, page_pending: false, history_end: false }
+    }
+
     pub fn is_channel(&self) -> bool {
         self.target.starts_with(['#', '&', '+', '!'])
     }
@@ -103,7 +117,32 @@ pub struct App {
     /// Tab-cycle state: (word start, original partial, candidate index, text written).
     pub complete_state: Option<(usize, String, usize, String)>,
     pub should_quit: bool,
+    /// /cycle requests waiting for a State snapshot (see run_pending_cycles).
+    pub pending_cycles: Vec<PendingCycle>,
+    /// r5: this TUI submitted the vault passphrase and awaits the server's answer.
+    pub unlock_submitted: bool,
+    /// Each network's CASEMAPPING, once known (the server's State says it, or a 005 line
+    /// seen live). Absent = unknown. See `saved_channel_key`.
+    pub casemap: HashMap<String, CaseMap>,
+    /// Channels we asked to join whose JOIN the server has not confirmed yet: a State
+    /// taken before the confirmation does not list them, and must not close their window.
+    pub pending_joins: Vec<PendingJoin>,
+    /// Frames produced while handling a server event (handle_event has no
+    /// sender); the run loop sends them right after the event batch.
+    pub outbox: Vec<crate::proto::ClientMessage>,
+    /// r6: each network's channels in the latest State (wide fold) — windows for them are
+    /// not counted against MAX_AUTO_BUFFERS_PER_NET.
+    pub joined: HashMap<String, std::collections::HashSet<String>>,
+    /// r6: networks whose *overflow* window has been announced.
+    pub overflow_noticed: std::collections::HashSet<String>,
 }
+
+/// r6 (codex P2 tui/src/app.rs:239): at most this many windows per network are opened by
+/// INCOMING lines (private messages, or channels we are not in). Past it a new conversation
+/// goes to the network's one OVERFLOW_BUF window, prefixed with its target — as the server
+/// logs it. Opening a window yourself (/msg, /query, /join) is never refused.
+pub const MAX_AUTO_BUFFERS_PER_NET: usize = 200;
+pub const OVERFLOW_BUF: &str = "*overflow*";
 
 pub struct Prompt {
     pub label: String,
@@ -113,7 +152,61 @@ pub struct Prompt {
 }
 
 #[derive(PartialEq)]
-pub enum PromptKind { Vault }
+pub enum PromptKind {
+    Vault,
+    /// r5 (codex P2 tui/src/main.rs:706 HIGH): the vault was unlocked by another session
+    /// while this passphrase prompt was up and before it was submitted. The prompt stays
+    /// (masked) so that a passphrase pasted / typed right now still lands HERE and not in
+    /// the chat line; Enter or Esc closes it and whatever was typed is discarded.
+    VaultUnlockedElsewhere,
+}
+
+/// A /cycle waiting for the fresh State that tells us the channel's saved key.
+pub struct PendingCycle {
+    pub conn_id: String,
+    pub channel: String,
+    pub asked: std::time::Instant,
+}
+
+/// A /join waiting for the server's confirmation (see `App::pending_joins`).
+pub struct PendingJoin {
+    pub conn_id: String,
+    pub channel: String,
+    pub asked: std::time::Instant,
+}
+
+/// How long a /join's window survives State snapshots that do not list it yet.
+pub const JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A server's ISUPPORT CASEMAPPING, the same three rules the server uses
+/// (../src/ircproto.rs CaseMapping): which channel names are the same channel.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CaseMap { Rfc1459, StrictRfc1459, Ascii }
+
+impl CaseMap {
+    /// A CASEMAPPING token (unknown tokens fold letters only, like the server).
+    pub fn from_token(v: &str) -> Self {
+        match v.to_ascii_lowercase().as_str() {
+            "rfc1459" => CaseMap::Rfc1459,
+            "strict-rfc1459" | "rfc1459-strict" => CaseMap::StrictRfc1459,
+            _ => CaseMap::Ascii,
+        }
+    }
+    pub fn fold(self, s: &str) -> String {
+        s.chars().map(|c| match (self, c) {
+            (_, 'A'..='Z') => c.to_ascii_lowercase(),
+            (CaseMap::Rfc1459 | CaseMap::StrictRfc1459, '[') => '{',
+            (CaseMap::Rfc1459 | CaseMap::StrictRfc1459, ']') => '}',
+            (CaseMap::Rfc1459 | CaseMap::StrictRfc1459, '\\') => '|',
+            (CaseMap::Rfc1459, '~') => '^',
+            _ => c,
+        }).collect()
+    }
+}
+
+/// The widest fold any server uses (Unicode lowercase + RFC1459 specials): two names
+/// that differ under it are different channels on every server; equal ones may be one.
+pub fn wide_fold(s: &str) -> String { CaseMap::Rfc1459.fold(&s.to_lowercase()) }
 
 impl App {
     pub fn new(username: String) -> Self {
@@ -138,6 +231,13 @@ impl App {
             theme: crate::theme::default_theme(),
             complete_state: None,
             should_quit: false,
+            pending_cycles: Vec::new(),
+            unlock_submitted: false,
+            casemap: HashMap::new(),
+            pending_joins: Vec::new(),
+            outbox: Vec::new(),
+            joined: HashMap::new(),
+            overflow_noticed: std::collections::HashSet::new(),
         }
     }
 
@@ -167,9 +267,38 @@ impl App {
             total_rows: 0,
             activity: 0,
             history_asked: false,
+            page_pending: false,
+            history_end: false,
         });
         self.rebuild_order();
         self.buffers.len() - 1
+    }
+
+    /// r6: the window an INCOMING line for `target` goes to — buf_index, except that a NEW
+    /// window for a private message or a channel we are not in (nor joining) counts against
+    /// MAX_AUTO_BUFFERS_PER_NET; past it the line goes to the network's OVERFLOW_BUF window
+    /// (returns true: the caller prefixes the line with its target).
+    pub fn event_buf(&mut self, conn_id: &str, target: &str, label_hint: Option<&str>) -> (usize, bool) {
+        if let Some(i) = self.find_buf(conn_id, target) { return (i, false); }
+        let chosen_channel = |app: &App, t: &str| t.starts_with(['#', '&', '+', '!'])
+            && (app.join_pending(conn_id, t) || app.joined.get(conn_id).is_some_and(|j| j.contains(&wide_fold(t))));
+        if target.is_empty() || chosen_channel(self, target) {
+            return (self.buf_index(conn_id, target, label_hint), false);
+        }
+        let auto = self.buffers.iter()
+            .filter(|b| b.conn_id == conn_id && !b.target.is_empty() && !chosen_channel(self, &b.target))
+            .count();
+        if auto < MAX_AUTO_BUFFERS_PER_NET { return (self.buf_index(conn_id, target, label_hint), false); }
+        let i = self.buf_index(conn_id, OVERFLOW_BUF, Some(OVERFLOW_BUF));
+        if self.overflow_noticed.insert(conn_id.to_string()) {
+            let text = format!("too many new conversations on this network ({} windows) — new ones are shown here, \
+                prefixed with their nick or channel; /msg <nick> opens a window for one", MAX_AUTO_BUFFERS_PER_NET);
+            self.status = format!("⚠ {}", text);
+            if let Some(b) = self.buffers.get_mut(i) {
+                b.push(Line { ts: chrono::Utc::now().timestamp(), from: String::new(), text, kind: LineKind::Status, id: 0 });
+            }
+        }
+        (i, true)
     }
 
     pub fn cur(&self) -> Option<&Buffer> { self.buffers.get(self.current) }
@@ -243,6 +372,32 @@ impl App {
         self.rebuild_order();
     }
 
+    /// The server confirmed our JOIN of `channel` (agy P2 tui/src/main.rs:708): it is no
+    /// longer pending. If its window was opened under another spelling of the same name
+    /// (`/join #chan[1]` answered with `JOIN #chan{1}` on an RFC1459 network) and none has
+    /// the server's spelling yet, that window takes the server's spelling — instead of a
+    /// second window opening next to an empty one.
+    pub fn confirm_join(&mut self, conn_id: &str, channel: &str) {
+        let wf = wide_fold(channel);
+        let typed: Vec<String> = self.pending_joins.iter()
+            .filter(|p| p.conn_id == conn_id && wide_fold(&p.channel) == wf)
+            .map(|p| p.channel.clone()).collect();
+        self.pending_joins.retain(|p| !(p.conn_id == conn_id && wide_fold(&p.channel) == wf));
+        if self.find_buf(conn_id, channel).is_some() { return; }
+        if let Some(i) = typed.iter().find_map(|t| self.find_buf(conn_id, t)) {
+            self.buffers[i].target = channel.to_string();
+            self.buffers[i].label = channel.to_string();
+            self.rebuild_order();
+        }
+    }
+
+    /// Is a /join of `channel` (any spelling of the same name) still awaiting its
+    /// confirmation, within JOIN_GRACE?
+    pub fn join_pending(&self, conn_id: &str, channel: &str) -> bool {
+        let wf = wide_fold(channel);
+        self.pending_joins.iter().any(|p| p.conn_id == conn_id && p.asked.elapsed() <= JOIN_GRACE && wide_fold(&p.channel) == wf)
+    }
+
     /// Index of a buffer if it already exists — unlike `buf_index`, never creates one.
     pub fn find_buf(&self, conn_id: &str, target: &str) -> Option<usize> {
         self.buffers.iter().position(|b| b.conn_id == conn_id && b.target.eq_ignore_ascii_case(target))
@@ -262,30 +417,34 @@ impl App {
     /// its channels then its DMs, both alphabetical. This is the single source of
     /// truth for the numbers shown, Alt+N, `/buffer N` and the activity list.
     pub fn rebuild_order(&mut self) {
+        // r6 (codex P2 tui/src/app.rs:395): one pass to group, a sort per group, and a
+        // placed-flag for the leftovers — it used to rescan every buffer per network and
+        // run `order.contains` per buffer (quadratic in the number of windows).
+        struct Group { status: Option<usize>, chans: Vec<usize>, dms: Vec<usize> }
         let mut nets: Vec<String> = Vec::new();
-        for b in self.buffers.iter() {
-            if !nets.iter().any(|n| n == &b.conn_id) { nets.push(b.conn_id.clone()); }
+        let mut groups: HashMap<String, Group> = HashMap::new();
+        for (i, b) in self.buffers.iter().enumerate() {
+            let g = groups.entry(b.conn_id.clone()).or_insert_with(|| {
+                nets.push(b.conn_id.clone());
+                Group { status: None, chans: Vec::new(), dms: Vec::new() }
+            });
+            if b.target.is_empty() {
+                if g.status.is_none() { g.status = Some(i); }
+            } else if b.is_channel() { g.chans.push(i) } else { g.dms.push(i) }
         }
         let mut order = Vec::with_capacity(self.buffers.len());
+        let mut placed = vec![false; self.buffers.len()];
         for cid in nets {
-            if let Some(i) = self.buffers.iter().position(|b| b.conn_id == cid && b.target.is_empty()) {
-                order.push(i);
-            }
-            let mut chans: Vec<usize> = Vec::new();
-            let mut dms: Vec<usize> = Vec::new();
-            for (i, b) in self.buffers.iter().enumerate() {
-                if b.conn_id != cid || b.target.is_empty() { continue; }
-                if b.is_channel() { chans.push(i) } else { dms.push(i) }
-            }
-            chans.sort_by_key(|i| self.buffers[*i].label.to_lowercase());
-            dms.sort_by_key(|i| self.buffers[*i].label.to_lowercase());
-            order.extend(chans);
-            order.extend(dms);
+            let Some(mut g) = groups.remove(&cid) else { continue };
+            if let Some(i) = g.status { order.push(i); placed[i] = true; }
+            g.chans.sort_by_cached_key(|i| self.buffers[*i].label.to_lowercase());
+            g.dms.sort_by_cached_key(|i| self.buffers[*i].label.to_lowercase());
+            for i in g.chans.into_iter().chain(g.dms) { order.push(i); placed[i] = true; }
         }
-        // Anything orphaned (no status buffer for its conn) still has to be
+        // Anything left (a second network buffer for the same conn) still has to be
         // reachable, or it would vanish from every index.
-        for i in 0..self.buffers.len() {
-            if !order.contains(&i) { order.push(i); }
+        for (i, done) in placed.iter().enumerate() {
+            if !done { order.push(i); }
         }
         self.display_order = order;
     }
@@ -296,15 +455,17 @@ impl App {
         if let Some(&idx) = self.display_order.get(n1 - 1) { self.switch_to(idx); }
     }
 
-    pub fn next_buffer(&mut self) {
+    /// r6 (agy P2 tui/src/app.rs:409): next / previous in the DISPLAY order (the list on
+    /// screen), not in storage order, which jumped between unrelated networks and windows.
+    pub fn next_buffer(&mut self) { self.step_buffer(1); }
+    pub fn prev_buffer(&mut self) { self.step_buffer(-1); }
+    fn step_buffer(&mut self, dir: isize) {
         if self.buffers.is_empty() { return; }
-        let n = (self.current + 1) % self.buffers.len();
-        self.switch_to(n);
-    }
-    pub fn prev_buffer(&mut self) {
-        if self.buffers.is_empty() { return; }
-        let n = if self.current == 0 { self.buffers.len() - 1 } else { self.current - 1 };
-        self.switch_to(n);
+        if self.display_order.len() != self.buffers.len() { self.rebuild_order(); }
+        let n = self.display_order.len() as isize;
+        let pos = self.display_order.iter().position(|&i| i == self.current).map_or(0, |p| p as isize);
+        let next = self.display_order[(pos + dir).rem_euclid(n) as usize];
+        self.switch_to(next);
     }
 
     // ── Input editing. All indices are byte offsets kept on char boundaries so
@@ -392,8 +553,10 @@ impl App {
         };
         if partial.is_empty() { return; }
         let lower = partial.to_lowercase();
+        // Names come from the server and the chosen one is written into the
+        // input line (which is drawn to the terminal), so sanitise it first.
         let cands: Vec<String> = b.names.iter()
-            .map(|n| n.trim_start_matches(['~', '&', '@', '%', '+']).to_string())
+            .map(|n| crate::sanitize::clean(n.trim_start_matches(['~', '&', '@', '%', '+'])).into_owned())
             .filter(|n| n.to_lowercase().starts_with(&lower))
             .collect();
         if cands.is_empty() { self.complete_state = None; return; }

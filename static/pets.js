@@ -483,7 +483,11 @@ function puff(p, ch, n) {
         d.style.opacity = '0.85';
         setTimeout(function () { d.style.opacity = '0'; }, dur * 0.45);
       });
-      p.later(function () {
+      // A plain timer, NOT p.later(): destroy() cancels a pet's later() timers,
+      // which left the particle node on screen and _particles never decremented —
+      // after ~10 disables the global cap was used up and puffs stopped for the
+      // whole session. The particle is independent of the pet; let it finish.
+      setTimeout(function () {
         if (d.parentNode) d.parentNode.removeChild(d);
         _particles = Math.max(0, _particles - 1);
       }, dur + 260);
