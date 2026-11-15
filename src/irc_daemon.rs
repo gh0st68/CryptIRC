@@ -498,6 +498,105 @@ fn cap_list_has(list: &str, cap: &str) -> bool {
     list.split_whitespace().any(|t| t.trim_start_matches('-').split('=').next() == Some(cap))
 }
 
+// Leave room for the existing 52 KiB channel list in a 64 KiB IPC frame.
+const REG_CAPS_JSON_BUDGET: usize = 6 * 1024;
+// Enabled names need no values; keep the added snapshot within the IPC frame budget.
+const REG_ENABLED_CAPS_JSON_BUDGET: usize = 1024;
+const REG_ISUPPORT_JSON_BUDGET: usize = 2 * 1024;
+const REG_CAPS_MAX: usize = 256;
+
+fn registration_key(token: &str) -> &str {
+    token.trim_start_matches('-').split('=').next().unwrap_or(token)
+}
+
+/// Keep original spelling/values, but only one current value per token. Never truncate a
+/// value into a different meaning. Overflow makes the entire classification restrictive.
+fn store_registration_token(tokens: &mut Vec<String>, token: &str, budget: usize, count: usize) -> bool {
+    let mut next = tokens.clone();
+    next.retain(|t| !registration_key(t).eq_ignore_ascii_case(registration_key(token)));
+    next.push(token.to_string());
+    if next.len() > count || serde_json::to_vec(&next).map_or(true, |v| v.len() > budget) { return false; }
+    *tokens = next;
+    true
+}
+
+/// Allocate before CAP so pre-001 facts and the registered session share an epoch.
+/// A random process seed avoids reusing a counter sequence after daemon restart;
+/// the atomic counter guarantees distinct epochs for every socket in this process.
+fn next_session_epoch() -> u64 {
+    use std::sync::{OnceLock, atomic::{AtomicU64, Ordering}};
+    static NEXT: OnceLock<AtomicU64> = OnceLock::new();
+    let next = NEXT.get_or_init(|| AtomicU64::new(rand::thread_rng().gen()));
+    loop {
+        let epoch = next.fetch_add(1, Ordering::Relaxed);
+        if epoch != 0 { return epoch; }
+    }
+}
+
+/// Called ONLY at the server socket read boundary, before forwarding a line. RawSend and
+/// Attach replay never enter here. A fresh run_loop creates fresh facts on every dial.
+fn note_registration_input(facts: &mut crate::ipc::RegistrationFacts, p: &crate::ircproto::IrcLine, registered: bool) {
+    match p.command.as_str() {
+        "CAP" => {
+            let sub = p.params.get(1).map(String::as_str).unwrap_or("");
+            let multiline = p.params.get(2).map(String::as_str) == Some("*");
+            let caps = if multiline { p.params.get(3) } else { p.params.last() }.map(String::as_str).unwrap_or("");
+            if matches!(sub, "LS" | "NEW") {
+                facts.behind_bouncer |= crate::ircproto::classify_avatar_registration(p.prefix.as_deref(), caps, &[], false).behind_bouncer;
+            }
+            if (sub == "LS" && !registered && !facts.cap_ls_done) || sub == "NEW" {
+                facts.cap_ls_done |= sub == "LS" && !multiline;
+                for cap in caps.split_whitespace() {
+                    if !store_registration_token(&mut facts.caps, cap, REG_CAPS_JSON_BUDGET, REG_CAPS_MAX) { facts.truncated = true; }
+                }
+            } else if sub == "DEL" {
+                facts.caps.retain(|c| !caps.split_whitespace().any(|t| registration_key(t).eq_ignore_ascii_case(registration_key(c))));
+                facts.enabled_caps.retain(|c| !caps.split_whitespace().any(|t| registration_key(t).eq_ignore_ascii_case(c)));
+                // The sticky bouncer evidence survives DEL, just as it does in the web.
+            } else if sub == "ACK" {
+                // This boundary also sees ACKs for the web's mid-session CAP REQs.
+                for cap in caps.split_whitespace() {
+                    let name = registration_key(cap);
+                    if cap.starts_with('-') {
+                        facts.enabled_caps.retain(|c| !c.eq_ignore_ascii_case(name));
+                    } else if !store_registration_token(&mut facts.enabled_caps, name, REG_ENABLED_CAPS_JSON_BUDGET, REG_CAPS_MAX) {
+                        facts.truncated = true;
+                    }
+                }
+            }
+        }
+        "001" | "004" => {
+            facts.behind_bouncer |= crate::ircproto::classify_avatar_registration(p.prefix.as_deref(), "", &[], false).behind_bouncer;
+            if let Some(name) = &p.prefix {
+                if serde_json::to_vec(name).map_or(false, |v| v.len() <= 512) {
+                    facts.server_name = Some(name.clone());
+                } else { facts.truncated = true; }
+            }
+        }
+        "005" => {
+            facts.behind_bouncer |= crate::ircproto::classify_avatar_registration(None, "", &p.params, false).behind_bouncer;
+            let mut saw_casemapping = false;
+            for token in &p.params {
+                let key = token.split('=').next().unwrap_or(token);
+                // CaseMapping::from_isupport takes the first mapping on each 005.
+                if key.eq_ignore_ascii_case("CASEMAPPING") && token.contains('=') {
+                    if saw_casemapping { continue; }
+                    saw_casemapping = true;
+                }
+                // Match what the web actually consumes: bare CLIENTTAGDENY/CASEMAPPING
+                // and -CASEMAPPING are ignored there and must not erase an earlier value.
+                let used = key.eq_ignore_ascii_case("BOUNCER_NETID") || token.eq_ignore_ascii_case("-BOUNCER_NETID")
+                    || token.eq_ignore_ascii_case("-CLIENTTAGDENY")
+                    || (token.contains('=') && (key.eq_ignore_ascii_case("CLIENTTAGDENY") || key.eq_ignore_ascii_case("CASEMAPPING")));
+                if used {
+                    if !store_registration_token(&mut facts.isupport, token, REG_ISUPPORT_JSON_BUDGET, 3) { facts.truncated = true; }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The daemon's own narrow per-connection state — nick + which channels we
 /// believe we're in (case-folded names only) + the real socket writer. No
 /// topics/names/keys/message log; that display-layer state stays web-side.
@@ -527,6 +626,7 @@ struct DaemonConn {
     /// `NICK` spoof guard (#30) without waiting for a self-JOIN that a reattach
     /// never produces.
     self_userhost: String,
+    registration: crate::ipc::RegistrationFacts,
 }
 
 impl DaemonConn {
@@ -924,6 +1024,7 @@ where
         message_tags: false,
         echo_message_enabled: false,
         self_userhost: String::new(),
+        registration: crate::ipc::RegistrationFacts { session_epoch: next_session_epoch(), ..Default::default() },
     }));
 
     // codex P2 main.rs:6834 / agy P2: the endpoint this connection really dials, so a
@@ -943,6 +1044,7 @@ where
             echo_message_enabled: c.echo_message_enabled,
             self_userhost: c.self_userhost.clone(),
             casemapping: c.casemapping.token().to_string(),
+            registration: Some(c.registration.clone()),
             dial_server: dial_server.clone(),
             chanmodes: c.chanmodes.isupport(),
             dial_port,
@@ -1172,6 +1274,12 @@ where
                 }
 
                 let p = parse_irc(&line);
+                if matches!(p.command.as_str(), "CAP" | "001" | "004" | "005") {
+                    let mut c = conn.lock().await;
+                    let before = c.registration.clone();
+                    note_registration_input(&mut c.registration, &p, registered);
+                    if c.registration != before { sync(&c, registered, true, None); }
+                }
 
                 match p.command.as_str() {
                     "PING" => {
@@ -1850,6 +1958,210 @@ where
 mod tests {
     use super::*;
 
+    fn worst_registration_facts() -> crate::ipc::RegistrationFacts {
+        let mut facts = crate::ipc::RegistrationFacts::default();
+        facts.session_epoch = u64::MAX;
+        // Fill all byte budgets with JSON-escaping tokens, then prove overflow closes.
+        for (key, budget, list) in [("cap", REG_CAPS_JSON_BUDGET, &mut facts.caps),
+                                    ("enabled", REG_ENABLED_CAPS_JSON_BUDGET, &mut facts.enabled_caps),
+                                    ("CLIENTTAGDENY", REG_ISUPPORT_JSON_BUDGET, &mut facts.isupport)] {
+            let token = format!("{}={}", key, "\\".repeat((budget - key.len() - 5) / 2));
+            assert!(store_registration_token(list, &token, budget, REG_CAPS_MAX));
+        }
+        facts.server_name = Some("\\".repeat(255));
+        facts.cap_ls_done = true;
+        facts
+    }
+
+    #[test]
+    fn registration_fragments_changes_and_bounds() {
+        let mut f = crate::ipc::RegistrationFacts::default();
+        note_registration_input(&mut f, &parse_irc(":irc CAP me LS * :sasl=PLAIN,EXTERNAL multi-prefix"), false);
+        assert!(!f.cap_ls_done);
+        note_registration_input(&mut f, &parse_irc(":irc CAP me LS :server-time"), false);
+        assert!(f.cap_ls_done);
+        assert_eq!(f.caps, ["sasl=PLAIN,EXTERNAL", "multi-prefix", "server-time"]);
+        note_registration_input(&mut f, &parse_irc(":irc 005 me CASEMAPPING=ascii CLIENTTAGDENY=* :supported"), true);
+        note_registration_input(&mut f, &parse_irc(":irc 005 me NETWORK=test BOUNCER_NETID=42 :supported"), true);
+        assert!(f.behind_bouncer);
+        assert_eq!(f.isupport, ["CASEMAPPING=ascii", "CLIENTTAGDENY=*", "BOUNCER_NETID=42"]);
+        note_registration_input(&mut f, &parse_irc(":irc CAP me NEW :soju.im/bouncer-networks=value"), true);
+        note_registration_input(&mut f, &parse_irc(":irc CAP me DEL :soju.im/bouncer-networks sasl"), true);
+        note_registration_input(&mut f, &parse_irc(":irc 005 me -BOUNCER_NETID -CLIENTTAGDENY :supported"), true);
+        assert_eq!(f.caps, ["multi-prefix", "server-time"]);
+        assert!(f.behind_bouncer, "withdrawals never erase evidence");
+        assert!(f.isupport.contains(&"-CLIENTTAGDENY".into()));
+        note_registration_input(&mut f, &parse_irc(":irc 005 me CLIENTTAGDENY=* CASEMAPPING=ascii CASEMAPPING=rfc1459 :supported"), true);
+        note_registration_input(&mut f, &parse_irc(":irc 005 me CLIENTTAGDENY CASEMAPPING -CASEMAPPING -CLIENTTAGDENY=ignored :supported"), true);
+        assert!(f.isupport.contains(&"CLIENTTAGDENY=*".into()));
+        assert!(f.isupport.contains(&"CASEMAPPING=ascii".into()));
+        let mut cap_only = crate::ipc::RegistrationFacts::default();
+        note_registration_input(&mut cap_only, &parse_irc(":irc CAP me LS :soju.im/bouncer-networks"), false);
+        note_registration_input(&mut cap_only, &parse_irc(":irc CAP me DEL :soju.im/bouncer-networks"), true);
+        assert!(cap_only.caps.is_empty() && cap_only.behind_bouncer);
+        let mut prefix_only = crate::ipc::RegistrationFacts::default();
+        note_registration_input(&mut prefix_only, &parse_irc(":irc.znc.in 004 me irc version modes modes"), true);
+        assert!(prefix_only.behind_bouncer && !prefix_only.cap_ls_done);
+
+        let mut bounded = worst_registration_facts();
+        note_registration_input(&mut bounded, &parse_irc(":irc CAP me NEW :soju.im/overflow"), true);
+        assert!(bounded.truncated && bounded.behind_bouncer);
+        assert!(serde_json::to_vec(&bounded).unwrap().len() < 10 * 1024);
+        let mut count = crate::ipc::RegistrationFacts::default();
+        for i in 0..=REG_CAPS_MAX { note_registration_input(&mut count, &parse_irc(&format!(":irc CAP me NEW :c{i}")), true); }
+        assert_eq!(count.caps.len(), REG_CAPS_MAX);
+        assert!(count.truncated);
+    }
+
+    #[test]
+    fn enabled_caps_follow_initial_and_mid_session_ack_and_withdrawals() {
+        let mut f = crate::ipc::RegistrationFacts::default();
+        note_registration_input(&mut f, &parse_irc(":irc CAP me LS :message-tags draft/metadata-2"), false);
+        assert!(f.enabled_caps.is_empty(), "LS does not enable anything");
+        note_registration_input(&mut f, &parse_irc(":irc CAP me ACK :message-tags"), false);
+        note_registration_input(&mut f, &parse_irc(":irc CAP me ACK :draft/metadata-2=value"), true);
+        assert_eq!(f.enabled_caps, ["message-tags", "draft/metadata-2"]);
+        note_registration_input(&mut f, &parse_irc(":irc CAP me ACK :draft/metadata-2"), true);
+        assert_eq!(f.enabled_caps.len(), 2, "duplicate ACKs do not grow facts");
+        note_registration_input(&mut f, &parse_irc(":irc CAP me ACK :-draft/metadata-2"), true);
+        assert_eq!(f.enabled_caps, ["message-tags"]);
+        assert!(f.caps.contains(&"draft/metadata-2".into()), "negative ACK only disables");
+        note_registration_input(&mut f, &parse_irc(":irc CAP me NAK :draft/metadata-2"), true);
+        assert_eq!(f.enabled_caps, ["message-tags"]);
+        note_registration_input(&mut f, &parse_irc(":irc CAP me ACK :draft/metadata-2"), true);
+        note_registration_input(&mut f, &parse_irc(":irc CAP me DEL :draft/metadata-2"), true);
+        assert_eq!(f.enabled_caps, ["message-tags"]);
+        assert!(!f.caps.contains(&"draft/metadata-2".into()));
+        note_registration_input(&mut f, &parse_irc(":irc CAP me NEW :draft/metadata-2"), true);
+        assert_eq!(f.enabled_caps, ["message-tags"], "NEW does not re-enable");
+
+        let mut bounded = worst_registration_facts();
+        note_registration_input(&mut bounded, &parse_irc(":irc CAP me ACK :draft/metadata-2"), true);
+        assert!(bounded.truncated);
+        assert!(!bounded.enabled_caps.contains(&"draft/metadata-2".into()));
+        assert!(serde_json::to_vec(&bounded.enabled_caps).unwrap().len() <= REG_ENABLED_CAPS_JSON_BUDGET);
+    }
+
+    /// Exercise the actual server-reader/RawSend boundary with an in-memory socket.
+    /// Each invocation is a new run_loop, exactly the reset boundary used by reconnect.
+    async fn registration_session(lines: &str) -> Vec<IpcMessage> {
+        use tokio::io::AsyncBufReadExt;
+        let params: DialParams = serde_json::from_value(serde_json::json!({
+            "server":"irc.test", "port":6667, "tls":false, "tls_accept_invalid_certs":false,
+            "nick":"me", "username":"me", "realname":"me", "password":null, "sasl_plain":null,
+            "sasl_external":false, "client_identity":null, "oper_login":null, "oper_pass":null,
+            "nickserv_pass":null, "auto_identify":false, "auto_join":[], "channel_keys":{},
+            "perform_commands":[], "disabled_caps":[], "label":"test", "auto_reconnect":true
+        })).unwrap();
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let (tx, mut rx) = mpsc::channel(8);
+        let messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = messages.clone();
+        let emit = move |m| sink.lock().unwrap().push(m);
+        let mut stopped = false;
+        let mut registered = false;
+        let mut channels = HashMap::new();
+        let mut keys = HashMap::new();
+        let mut parted = HashMap::new();
+        let mut cm = CaseMapping::default();
+        let version = Arc::new(WebVersionCell::default());
+        let run = run_loop("c", &params, &emit, client, &mut rx, &mut stopped, &mut registered,
+            &mut channels, &mut keys, &mut parted, &mut cm, &version);
+        let driver = async {
+            let (read, mut write) = tokio::io::split(server);
+            let mut read = BufReader::new(read);
+            let mut line = String::new();
+            // An outbound line that looks exactly like registration is NOT evidence.
+            let fake = ":irc.znc.in CAP me LS :soju.im/bouncer-networks";
+            let q = QueuedLine::charge(fake.into(), Arc::new(std::sync::atomic::AtomicUsize::new(0))).unwrap();
+            tx.send(DaemonCmd::RawSend(q)).await.ok().unwrap();
+            loop {
+                line.clear();
+                assert!(read.read_line(&mut line).await.unwrap() > 0);
+                if line.trim_end() == fake { break; }
+            }
+            write.write_all(lines.as_bytes()).await.unwrap();
+            // Keep reading until the daemon has handled all input, then cycle the socket.
+            write.write_all(b"PING :finished\r\n").await.unwrap();
+            loop {
+                line.clear();
+                assert!(read.read_line(&mut line).await.unwrap() > 0);
+                if line.trim_end() == "PONG :finished" { break; }
+            }
+            tx.send(DaemonCmd::Reconnect).await.ok().unwrap();
+            // Drain QUIT so the reconnect write cannot fail because the peer disappeared.
+            loop {
+                line.clear();
+                if read.read_line(&mut line).await.unwrap() == 0 { break; }
+            }
+        };
+        timeout(Duration::from_secs(5), async { let (result, ()) = tokio::join!(run, driver); result.unwrap(); }).await.unwrap();
+        assert!(!stopped && registered);
+        let result = messages.lock().unwrap().clone();
+        result
+    }
+
+    #[tokio::test]
+    async fn oversized_clienttagdeny_marks_sessionsync_incomplete() {
+        let oversized = format!("CLIENTTAGDENY=cryptirc.com/avatar,{}", "other/tag,".repeat(300));
+        assert!(oversized.len() > REG_ISUPPORT_JSON_BUDGET);
+        for earlier in ["", ":irc 005 me CLIENTTAGDENY=other/tag :supported\r\n"] {
+            let lines = format!(":irc 001 me :hi\r\n{earlier}:irc 005 me {oversized} :supported\r\n");
+            let messages = registration_session(&lines).await;
+            let facts = messages.iter().rev().find_map(|m| match m {
+                IpcMessage::SessionSync { registration: Some(f), .. } => Some(f), _ => None,
+            }).unwrap();
+            assert!(facts.truncated);
+            let expected: Vec<String> = if earlier.is_empty() { vec![] } else { vec!["CLIENTTAGDENY=other/tag".into()] };
+            assert_eq!(facts.isupport, expected, "overflow leaves missing or stale facts");
+            assert!(messages.iter().any(|m| matches!(m, IpcMessage::RawLine { line, .. } if line.contains(&oversized))),
+                "the web still receives the full live denial");
+        }
+    }
+
+    #[tokio::test]
+    async fn live_registration_and_reconnect_ignore_outbound_evidence() {
+        let lines = ":irc CAP me LS * :sasl=PLAIN multi-prefix\r\n:irc CAP me LS :server-time draft/metadata-2\r\n:irc CAP me ACK :server-time\r\n:irc 001 me :hi\r\n:irc CAP me ACK :draft/metadata-2\r\n:irc 004 me irc version modes modes\r\n:irc 005 me CLIENTTAGDENY=* CASEMAPPING=ascii :supported\r\n:irc 005 me BOUNCER_NETID=42 :supported\r\n:irc CAP me NEW :soju.im/bouncer-networks=value\r\n:irc CAP me DEL :soju.im/bouncer-networks\r\n";
+        let messages = registration_session(lines).await;
+        let snapshots: Vec<_> = messages.iter().filter_map(|m| match m {
+            IpcMessage::SessionSync { registration: Some(f), .. } => Some(f), _ => None,
+        }).collect();
+        assert!(!snapshots[0].cap_ls_done && !snapshots[0].behind_bouncer);
+        assert!(snapshots[0].enabled_caps.is_empty());
+        let last = snapshots.last().unwrap();
+        let epoch = last.session_epoch;
+        assert_ne!(epoch, 0);
+        assert!(snapshots.iter().all(|f| f.session_epoch == epoch), "CAP, 001 and later facts share an epoch");
+        assert!(last.cap_ls_done && last.behind_bouncer);
+        assert_eq!(last.server_name.as_deref(), Some("irc"));
+        assert!(last.caps.contains(&"sasl=PLAIN".into()));
+        assert_eq!(last.enabled_caps, ["server-time", "draft/metadata-2"]);
+        assert!(!last.caps.iter().any(|c| c.starts_with("soju.im/")));
+        // Nothing was hidden: all original server lines were forwarded verbatim.
+        let forwarded: Vec<_> = messages.iter().filter_map(|m| match m { IpcMessage::RawLine { line, .. } => Some(line.as_str()), _ => None }).collect();
+        assert_eq!(forwarded, lines.lines().collect::<Vec<_>>());
+        let mut epochs = HashSet::from([epoch]);
+        for reply in [":irc 001 me :hi\r\n", ":irc 421 me CAP :unknown\r\n:irc 001 me :hi\r\n"] {
+            let messages = registration_session(reply).await;
+            let f = messages.iter().rev().find_map(|m| match m { IpcMessage::SessionSync { registration: Some(f), .. } => Some(f), _ => None }).unwrap();
+            assert_ne!(f.session_epoch, 0);
+            assert!(epochs.insert(f.session_epoch), "re-registering the same conn_id gets a new epoch");
+            assert!(!f.cap_ls_done && !f.behind_bouncer);
+            assert!(f.caps.is_empty() && f.enabled_caps.is_empty() && f.isupport.is_empty(), "new dial resets all facts");
+        }
+    }
+
+    #[tokio::test]
+    async fn live_metadata_del_updates_sessionsync() {
+        let messages = registration_session(":irc CAP me LS :draft/metadata-2\r\n:irc 001 me :hi\r\n:irc CAP me ACK :draft/metadata-2\r\n:irc CAP me DEL :draft/metadata-2\r\n").await;
+        let snapshots: Vec<_> = messages.iter().filter_map(|m| match m {
+            IpcMessage::SessionSync { registration: Some(f), .. } => Some(f), _ => None,
+        }).collect();
+        assert!(snapshots.iter().any(|f| f.enabled_caps == ["draft/metadata-2"]));
+        let last = snapshots.last().unwrap();
+        assert!(last.enabled_caps.is_empty() && last.caps.is_empty());
+    }
+
     #[test]
     fn trackable_channel_filter() {
         assert!(is_trackable_channel("#chan"));
@@ -1937,6 +2249,7 @@ mod tests {
             echo_message_enabled: true,
             self_userhost: clean_userhost(&format!("user@{}", "h".repeat(MAX_USERHOST_LEN - 5))).unwrap(),
             casemapping: CaseMapping::StrictRfc1459.token().to_string(),
+            registration: Some(worst_registration_facts()),
             dial_server: clean_dial_server(&"s".repeat(255)),
             // r8: the largest CHANMODES/PREFIX ChanModes::learn accepts.
             chanmodes: Some(format!("CHANMODES={a},{a},{a},{a} PREFIX=({p})", a = "a".repeat(64), p = "o".repeat(16))),

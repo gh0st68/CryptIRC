@@ -3303,8 +3303,10 @@ pub(crate) mod tests {
             assert!(elapsed < budget + Duration::from_millis(1250), "{label}: {elapsed:?}");
             assert!(parsed.partial || !parsed.entries.is_empty(), "{label}");
         }
+        // The audit's 180k page takes ~20x the quadratic work of 40k, which can finish
+        // within the budget on a fast idle CPU; use it to exercise deadline cancellation.
         let (parsed, timed_out) = parse_thread_content_within(
-            &serde_json::to_vec(&serde_json::json!({"code":200,"id":"123","content":[unique_attribute_flood(40_000)]})).unwrap(),
+            &serde_json::to_vec(&serde_json::json!({"code":200,"id":"123","content":[unique_attribute_flood(180_000)]})).unwrap(),
             "123",
             now(),
             budget,

@@ -73,13 +73,6 @@ const UPLOAD_BODIES_MAX: usize = 4;
 const UPLOAD_IDLE: Duration = Duration::from_secs(15);
 const UPLOAD_TOTAL: Duration = Duration::from_secs(60);
 const PRIVATE_NO_STORE: &str = "private, no-store";
-/// Capability names (or prefixes) only bouncers advertise: soju (soju.im/*, bouncer-networks),
-/// pounce (causal.agency/*) and ZNC's core-only znc.in/batch / znc.in/server-time-iso. NOT
-/// znc.in/playback or znc.in/self-message: Ergo — a real ircd — advertises those two.
-const BOUNCER_CAP_PREFIXES: &[&str] = &["soju.im/", "causal.agency/"];
-const BOUNCER_CAPS: &[&str] = &["draft/bouncer-networks", "draft/bouncer-networks-notify", "znc.in/batch", "znc.in/server-time-iso"];
-/// ZNC answers CAP itself, from this server name.
-const ZNC_SERVER_NAME: &str = "irc.znc.in";
 /// user@host observations kept per connection.
 const SEEN_HOSTS_MAX: usize = 4096;
 /// Per-connection classifications that survive a web restart (see `SessionRecord`).
@@ -294,38 +287,59 @@ fn image_file_version(name: &str) -> Option<&str> {
     (valid_version(v) && (size == "128" || size == "48")).then_some(v)
 }
 
-/// Is this CAP line (its source and capability list) a bouncer's?
-pub fn cap_line_names_a_bouncer(source: Option<&str>, caps: &str) -> bool {
-    source.map_or(false, |s| s.eq_ignore_ascii_case(ZNC_SERVER_NAME)) || caps_name_a_bouncer(caps)
-}
+#[cfg(test)]
+use cryptirc::ircproto::{cap_line_names_a_bouncer, caps_name_a_bouncer, isupport_names_a_bouncer};
+use cryptirc::ircproto::classify_avatar_registration;
 
-/// Does this CAP LS / NEW capability list name a bouncer?
-pub fn caps_name_a_bouncer(caps: &str) -> bool {
-    caps.split_whitespace().any(|cap| {
-        let name = cap.split('=').next().unwrap_or(cap).to_ascii_lowercase();
-        BOUNCER_CAP_PREFIXES.iter().any(|p| name.starts_with(p)) || BOUNCER_CAPS.contains(&name.as_str())
-    })
-}
-
-/// Does this ISUPPORT (005) line name a bouncer (BOUNCER_NETID)?
-pub fn isupport_names_a_bouncer(params: &[String]) -> bool {
-    params.iter().any(|t| t.split('=').next().map_or(false, |k| k.eq_ignore_ascii_case("BOUNCER_NETID")))
-}
-
-/// Classify a connection from its own CAP LS / NEW lines (irc.rs): `behind_bouncer` once any
-/// of them is a bouncer's, `cap_ls_done` at the final line of a LIVE CAP LS listing. A
-/// replayed line can only make it more restrictive (mark a bouncer): earlier fragments of a
-/// multiline listing may have been evicted from the replay ring, so a replayed final
-/// fragment proves nothing (codex re-check M avatar.rs:383). After a web restart
-/// "negotiated" comes only from the continuity-checked record or a live negotiation. Both
-/// flags are per live connection (reset when it reconnects — ipc_client), so one account's
-/// connection can never change how another's is classified.
-pub fn note_cap_line(c: &mut IrcConnection, source: Option<&str>, sub: &str, multiline: bool, caps: &str, replayed: bool) {
-    if cap_line_names_a_bouncer(source, caps) {
-        c.behind_bouncer = true;
+/// Merge retained registration within an epoch; a replacement uses the lifecycle
+/// reset first. Returns true when callers must discard the old session's caches.
+pub fn apply_registration_facts(c: &mut IrcConnection, facts: &cryptirc::ipc::RegistrationFacts) -> bool {
+    let replaced = c.adopt_registration_epoch(facts.session_epoch);
+    let caps = facts.caps.join(" ");
+    let classification = classify_avatar_registration(facts.server_name.as_deref(), &caps, &facts.isupport, facts.cap_ls_done);
+    c.daemon_registration = true;
+    c.cap_ls_done |= classification.cap_ls_done;
+    c.behind_bouncer |= classification.behind_bouncer || facts.behind_bouncer || facts.truncated;
+    // An incomplete snapshot cannot prove support or enablement; it also cannot
+    // negate a live LS/NEW/ACK. DEL remains the live handler's responsibility.
+    c.avx.meta2_on |= !facts.truncated && facts.enabled_caps.iter().any(|cap| cap.eq_ignore_ascii_case(remote::META_CAP));
+    c.avx.meta2_offered |= !facts.truncated && remote::cap_list_has(&caps, remote::META_CAP)
+        && !c.cfg.disabled_caps.iter().any(|d| d == remote::META_CAP);
+    // Overflow is sticky for this session. Complete snapshots can fill a missing
+    // policy or deny our tag, but cannot replace a live denial with an exemption.
+    c.avx.client_tag_deny_incomplete |= facts.truncated;
+    if !facts.truncated {
+        let params: Vec<String> = std::iter::once(c.nick.clone()).chain(facts.isupport.iter().cloned()).collect();
+        let deny = remote::clienttagdeny_from_isupport(&params).flatten();
+        if c.avx.client_tag_deny.is_none() || (remote::client_tag_allowed(c.avx.client_tag_deny.as_deref()) && !remote::client_tag_allowed(deny.as_deref())) {
+            c.avx.client_tag_deny = deny;
+        }
     }
-    if sub == "LS" && !multiline && !replayed {
-        c.cap_ls_done = true;
+    replaced
+}
+
+/// Original 005 rules, including replay: bouncer evidence sticks; tag policy updates.
+pub fn note_isupport_line(c: &mut IrcConnection, params: &[String]) -> bool {
+    let classification = classify_avatar_registration(None, "", params, false);
+    c.behind_bouncer |= classification.behind_bouncer;
+    if let Some(d) = remote::clienttagdeny_from_isupport(params) { c.avx.client_tag_deny = d; }
+    classification.behind_bouncer
+}
+
+/// Classify live CAP LS / NEW and retain bouncer evidence even from replay. A replayed
+/// final LS cannot prove completion: earlier fragments may have left the replay ring.
+/// Daemon facts supplement this evidence and never change these live/replay rules.
+pub fn note_cap_line(c: &mut IrcConnection, source: Option<&str>, sub: &str, multiline: bool, caps: &str, replayed: bool) {
+    let classification = classify_avatar_registration(source, caps, &[], sub == "LS" && !multiline && !replayed);
+    c.behind_bouncer |= classification.behind_bouncer;
+    c.cap_ls_done |= classification.cap_ls_done;
+}
+
+/// SessionSync can itself be the first surviving evidence of an offer after restart
+/// or coalescing. Share the live request guard so either arrival sends exactly once.
+pub async fn request_registration_metadata(c: &mut IrcConnection) {
+    if c.connected && c.registered && !c.cfg.disabled_caps.iter().any(|d| d == remote::META_CAP) {
+        remote::request_meta2(c).await;
     }
 }
 
@@ -385,8 +399,33 @@ pub fn remote_after_attach(c: &mut IrcConnection, ev: Option<ReplayEvidence>) ->
     if replay_proves_session(ev) {
         return false;
     }
+    let meta = (c.avx.meta2_on, c.avx.meta2_offered, c.avx.meta2_requested, c.avx.meta2_initialized);
     c.avx.drop_unproven();
+    // Announce bindings still need continuity. Retain merged registration and both
+    // once-per-session guards: live input may already have requested/initialized metadata
+    // while Attach was draining, even when registration has left the replay ring.
+    // Epoch replacement already ran reset_irc_session before merging the new facts,
+    // so these flags can only belong to the current session (or a legacy daemon).
+    if c.daemon_registration {
+        (c.avx.meta2_on, c.avx.meta2_offered, c.avx.meta2_requested, c.avx.meta2_initialized) = meta;
+    }
     true
+}
+
+/// Retained offers use the same dedupe as SessionSync/live CAP. Old daemons keep
+/// the original saved-hint recheck after unproven attach cleanup.
+async fn recheck_meta_after_attach(c: &mut IrcConnection, had_meta: bool, dropped: bool) {
+    if c.daemon_registration {
+        request_registration_metadata(c).await;
+    } else {
+        let disabled = c.cfg.disabled_caps.iter().any(|d| d == remote::META_CAP);
+        let live = c.connected && c.registered;
+        if remote::meta_recheck(had_meta, dropped, live, disabled) {
+            c.avx.meta2_offered = true;
+            c.avx.meta2_requested = true;
+            let _ = c.send_raw(&format!("CAP REQ :{}\r\n", remote::META_CAP)).await;
+        }
+    }
 }
 
 /// May `record` be restored for a connection after a web restart? Some(behind_bouncer) only
@@ -408,6 +447,16 @@ pub fn restorable(record: Option<&SessionRecord>, owner: Option<&str>, endpoint:
     Some(record.bouncer)
 }
 
+/// The old saved-record path kept the server's subscription and sent only SET. Keep
+/// that behavior only with evidence that this session already ran initialization;
+/// enabled_caps alone proves ACK, not that the web ever sent SUB.
+fn restore_meta2_subscription(c: &mut IrcConnection, record: Option<&SessionRecord>, owner: Option<&str>, ev: Option<ReplayEvidence>) {
+    let endpoint = c.dial_endpoint.as_ref().map(|(h, p)| (h.as_str(), *p));
+    if c.avx.meta2_on && record.map_or(false, |r| r.meta2) && restorable(record, owner, endpoint, ev).is_some() {
+        c.avx.meta2_initialized = true;
+    }
+}
+
 /// At AttachComplete: give each connection the irc-core session still has its recorded
 /// classification back, when `restorable` allows; otherwise drop the record (fail closed).
 pub async fn restore_after_attach(state: &crate::AppState, seen: &HashSet<String>) {
@@ -424,44 +473,27 @@ pub async fn restore_after_attach(state: &crate::AppState, seen: &HashSet<String
         // irc-core session; the IRC connection may have restarted while no link was up (its
         // lifecycle events are not replayed) and a nick changed hands.
         let had_meta = c.avx.meta2_on || c.avx.meta2_offered || record.as_ref().map_or(false, |r| r.meta2);
-        if remote_after_attach(&mut c, ev) {
+        let dropped = remote_after_attach(&mut c, ev);
+        if dropped {
             state.avatar_remote.forget_conn(conn_id);
-            // …but never leave draft/metadata-2 off for good: ask again (ACK → SUB / SET /
-            // SYNC, so publication and opt-out deletion keep working; NAK → not offered).
-            let disabled = c.cfg.disabled_caps.iter().any(|d| d == remote::META_CAP);
-            let live = c.connected && c.registered;
-            if remote::meta_recheck(had_meta, true, live, disabled) {
-                c.avx.meta2_offered = true;
-                c.avx.meta2_requested = true;
-                let _ = c.send_raw(&format!("CAP REQ :{}\r\n", remote::META_CAP)).await;
-            }
         }
-        if c.cap_ls_done {
-            // Metadata-2 kept across this Attach: sync our value too (a change made while the
-            // link was down could not be sent then).
-            if c.avx.meta2_on {
-                if let Some(o) = owner.clone() {
-                    sync_meta.push((o, conn.clone()));
-                }
-            }
-            continue; // this process saw it negotiate (backlog) — already classified
-        }
-        let endpoint = c.dial_endpoint.clone();
-        let decision = restorable(record.as_ref(), owner.as_deref(), endpoint.as_ref().map(|(h, p)| (h.as_str(), *p)), ev);
-        if apply_restore(&mut c, decision) {
-            c.avx.meta2_on = record.as_ref().map_or(false, |r| r.meta2);
-            // Metadata-2 is active again: sync our value (it may have changed while no web
-            // was attached — a withdrawal must reach IRC).
-            if c.avx.meta2_on {
-                if let Some(o) = owner.clone() {
-                    sync_meta.push((o, conn.clone()));
-                }
-            }
-        } else {
-            drop(c);
-            if record.is_some() {
+        // An enabled cap initializes below unless continuity proves a prior subscription.
+        recheck_meta_after_attach(&mut c, had_meta, dropped).await;
+        if !c.cap_ls_done && !c.daemon_registration {
+            let endpoint = c.dial_endpoint.clone();
+            let decision = restorable(record.as_ref(), owner.as_deref(), endpoint.as_ref().map(|(h, p)| (h.as_str(), *p)), ev);
+            if apply_restore(&mut c, decision) {
+                // Keep any live ACK parked before AttachComplete as well as the saved hint.
+                c.avx.meta2_on |= record.as_ref().map_or(false, |r| r.meta2);
+            } else if record.is_some() {
                 state.avatars.forget_session(conn_id);
             }
+        }
+        restore_meta2_subscription(&mut c, record.as_ref(), owner.as_deref(), ev);
+        // Sync once after attach: full initialization if SUB is unproven, otherwise just
+        // SET/delete (our sharing may have changed while the web link was down).
+        if c.avx.meta2_on {
+            if let Some(o) = owner { sync_meta.push((o, conn.clone())); }
         }
     }
     replay_evidence().clear();
@@ -473,6 +505,7 @@ pub async fn restore_after_attach(state: &crate::AppState, seen: &HashSet<String
 /// Apply a `restorable` decision to a live connection. A saved bouncer mark is kept, and so
 /// is one replay added (`behind_bouncer` is only ever OR-ed here). False: not restored.
 pub fn apply_restore(c: &mut IrcConnection, decision: Option<bool>) -> bool {
+    if c.daemon_registration { return false; }
     match decision {
         Some(bouncer) if c.registered && c.connected => {
             c.cap_ls_done = true;
@@ -564,6 +597,15 @@ impl AvatarStore {
             self.persist_sessions();
         }
     }
+    /// Refresh merged classification without erasing saved restrictions or metadata negotiation.
+    /// Keep the legacy live-registration writer's behaviour unchanged for old daemons.
+    pub fn refresh_session(&self, conn_id: &str, owner: &str, endpoint: (&str, u16), bouncer: bool, conn_owners: &DashMap<String, String>) {
+        let old = self.session(conn_id).filter(|r| r.owner == owner && r.host == canonical_host(endpoint.0) && r.port == endpoint.1);
+        let bouncer = bouncer || old.as_ref().map_or(false, |r| r.bouncer);
+        if old.as_ref().map_or(false, |r| r.bouncer == bouncer) { return; }
+        self.record_session(conn_id, owner, endpoint, bouncer, conn_owners);
+        if old.map_or(false, |r| r.meta2) { self.ensure_session_meta2(conn_id, owner, endpoint, conn_owners); }
+    }
     /// A later bouncer sign on `conn_id` (CAP NEW, ISUPPORT BOUNCER_NETID).
     pub fn mark_session_bouncer(&self, conn_id: &str) {
         let changed = match self.sessions.get_mut(conn_id) {
@@ -583,7 +625,7 @@ impl AvatarStore {
     /// `bouncer: true` — unknown counts as a bouncer — until a live CAP LS records the truth.
     pub fn ensure_session_meta2(&self, conn_id: &str, owner: &str, endpoint: (&str, u16), conn_owners: &DashMap<String, String>) {
         if self.sessions.contains_key(conn_id) {
-            self.mark_session_meta2(conn_id);
+            self.set_session_meta2(conn_id, true);
             return;
         }
         if conn_owners.get(conn_id).map_or(true, |o| o.value().as_str() != owner) {
@@ -596,11 +638,12 @@ impl AvatarStore {
         self.sessions.insert(conn_id.to_string(), SessionRecord { owner: owner.to_string(), host, port: endpoint.1, bouncer: true, meta2: true });
         self.persist_sessions();
     }
-    /// The session on `conn_id` negotiated draft/metadata-2 (remote avatars).
-    pub fn mark_session_meta2(&self, conn_id: &str) {
+    /// Remember initialization, or invalidate it on withdrawal so attach cannot restore
+    /// an obsolete subscription from this session's saved record.
+    pub fn set_session_meta2(&self, conn_id: &str, initialized: bool) {
         let changed = match self.sessions.get_mut(conn_id) {
-            Some(mut r) if !r.meta2 => {
-                r.meta2 = true;
+            Some(mut r) if r.meta2 != initialized => {
+                r.meta2 = initialized;
                 true
             }
             _ => false,

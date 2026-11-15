@@ -4905,7 +4905,7 @@ mod r8_srv_a_bot_tests {
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
             casemapping: cryptirc::ircproto::CaseMapping::default(), server_casemapping: None, dial_endpoint: None,
             statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(),
-            chanmodes: cryptirc::ircproto::ChanModes::default(), whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, replay_view: None, avx: Default::default(), cfg: crate::NetworkConfig::default(),
+            chanmodes: cryptirc::ircproto::ChanModes::default(), whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, daemon_registration: false, registration_epoch: 0, live_registration_link: None, replay_view: None, avx: Default::default(), cfg: crate::NetworkConfig::default(),
         }))
     }
 

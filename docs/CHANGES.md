@@ -1,5 +1,15 @@
 # CryptIRC changelog
 
+## v0.5.11 (November 2026)
+
+Fixes
+- Avatars now work right after a web-only update or restart. irc_core remembers what the IRC server announced when the connection registered (capabilities, bouncer signs, CLIENTTAGDENY) and hands it to the web on every attach, so connections no longer stay "unclassified" (no cross-server avatars, CTCP AVATAR unanswered) until they reconnect.
+- A server's CLIENTTAGDENY list that is too long to store is now treated as denying all client tags, instead of possibly dropping the avatar denial.
+- X preview test: the deadline test no longer fails on fast idle machines.
+
+Upgrade notes
+- Restart irc-core once after upgrading from 0.5.10 or older (this reconnects IRC once). After that, web-only updates keep avatars working.
+
 ## v0.5.10 (November 2026)
 
 New

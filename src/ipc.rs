@@ -39,6 +39,30 @@ fn is_zero(n: &i64) -> bool { *n == 0 }
 fn is_zero_u16(n: &u16) -> bool { *n == 0 }
 fn is_zero_u64(n: &u64) -> bool { *n == 0 }
 
+/// Registration facts learned only from the daemon's live server reader. Missing from
+/// SessionSync means an old daemon; a present, unanswered LS means genuinely unknown.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrationFacts {
+    /// Identifies this IRC socket's session, including across daemon restarts.
+    /// Zero means an older daemon that cannot prove session replacement.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub session_epoch: u64,
+    /// Initial LS (values intact), subsequently updated by live NEW/DEL.
+    pub caps: Vec<String>,
+    /// Currently enabled names, from live ACK / DEL (including post-registration ACKs).
+    #[serde(default)]
+    pub enabled_caps: Vec<String>,
+    /// Only a final fragment of the initial LS sets this (never 421 or 001).
+    pub cap_ls_done: bool,
+    pub server_name: Option<String>,
+    /// Latest raw BOUNCER_NETID, CLIENTTAGDENY and CASEMAPPING tokens only.
+    pub isupport: Vec<String>,
+    /// Sticky evidence, including CAP prefixes and capabilities later withdrawn.
+    pub behind_bouncer: bool,
+    /// Storage limits were exceeded: fail closed even if the final LS arrived.
+    pub truncated: bool,
+}
+
 /// Every message on the wire carries this envelope. `conn_id` is the routing
 /// key (matches the web side's existing conn_id); `Attach` is the one message
 /// with no meaningful conn_id.
@@ -207,6 +231,9 @@ pub enum IpcMessage {
         /// an old web ignores the field.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         casemapping: String,
+        /// Authoritative live registration state; presence is the feature negotiation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registration: Option<RegistrationFacts>,
         /// The server host / port this connection really dials (the Dial's params, which
         /// a daemon keeps for the connection's whole life, across its own reconnects). The
         /// web takes the connection's network identity (E2E nick scoping) from this rather
@@ -381,6 +408,40 @@ impl std::fmt::Debug for DialParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sessionsync_registration_compatibility() {
+        let old = serde_json::json!({"type":"session_sync", "conn_id":"c", "nick":"me",
+            "channels":[], "registered":true, "connected":true, "lag_ms":null});
+        let msg: IpcMessage = serde_json::from_value(old.clone()).unwrap();
+        assert!(matches!(&msg, IpcMessage::SessionSync { registration: None, .. }));
+        let encoded = serde_json::to_value(&msg).unwrap();
+        assert!(encoded.get("registration").is_none());
+        assert!(matches!(serde_json::from_value::<IpcMessage>(encoded).unwrap(), IpcMessage::SessionSync { registration: None, .. }));
+
+        let facts = RegistrationFacts { session_epoch: u64::MAX, caps: vec!["sasl=PLAIN,EXTERNAL".into()], enabled_caps: vec!["draft/metadata-2".into()], cap_ls_done: true,
+            server_name: Some("irc.test".into()), isupport: vec!["CLIENTTAGDENY=*".into()], ..Default::default() };
+        let mut previous_facts = serde_json::to_value(&facts).unwrap();
+        previous_facts.as_object_mut().unwrap().remove("enabled_caps");
+        previous_facts.as_object_mut().unwrap().remove("session_epoch");
+        let previous_facts: RegistrationFacts = serde_json::from_value(previous_facts).unwrap();
+        assert!(previous_facts.enabled_caps.is_empty());
+        assert_eq!(previous_facts.session_epoch, 0);
+        assert!(serde_json::to_value(previous_facts).unwrap().get("session_epoch").is_none());
+        let mut new = old;
+        new["registration"] = serde_json::to_value(&facts).unwrap();
+        let msg: IpcMessage = serde_json::from_value(new).unwrap();
+        let encoded = serde_json::to_value(msg).unwrap();
+        let decoded: IpcMessage = serde_json::from_value(encoded.clone()).unwrap();
+        assert!(matches!(decoded, IpcMessage::SessionSync { registration: Some(ref f), .. } if f == &facts));
+        // Frozen old reader shape: unknown fields, including registration, are ignored.
+        #[derive(Deserialize, Serialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum OldMessage { SessionSync { conn_id: String, nick: String, channels: Vec<String>, registered: bool, connected: bool, lag_ms: Option<u64> } }
+        let old_reader: OldMessage = serde_json::from_value(encoded).unwrap();
+        let back: IpcMessage = serde_json::from_value(serde_json::to_value(old_reader).unwrap()).unwrap();
+        assert!(matches!(back, IpcMessage::SessionSync { registration: None, .. }));
+    }
 
     fn sample_params() -> DialParams {
         DialParams {

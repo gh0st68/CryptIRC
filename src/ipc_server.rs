@@ -333,6 +333,7 @@ struct ConnCache {
     self_userhost: String,
     /// Last CASEMAPPING token a SessionSync carried ("" = never told).
     casemapping: String,
+    registration: Option<crate::ipc::RegistrationFacts>,
     /// r5: the reason of the connection's terminal Disconnected (replayed after its
     /// retained history, see Daemon::ended).
     last_disconnect: String,
@@ -380,6 +381,7 @@ impl ConnCache {
             echo_message_enabled: self.echo_message_enabled,
             self_userhost: self.self_userhost.clone(),
             casemapping: self.casemapping.clone(),
+            registration: self.registration.clone(),
             dial_server: self.dial_server.clone(),
             dial_port: self.dial_port,
             chanmodes: self.chanmodes.clone(),
@@ -431,9 +433,11 @@ impl Drop for ConnCache {
 fn frame_weight(msg: &IpcMessage) -> usize {
     match msg {
         IpcMessage::RawLine { conn_id, line, .. } => line.len() + conn_id.len() + 64,
-        IpcMessage::SessionSync { conn_id, nick, channels, self_userhost, casemapping, dial_server, .. } =>
+        IpcMessage::SessionSync { conn_id, nick, channels, self_userhost, casemapping, dial_server, registration, .. } =>
             256 + conn_id.len() + nick.len() + self_userhost.len() + casemapping.len() + dial_server.len()
-                + channels.iter().map(|c| c.len() + 32).sum::<usize>(),
+                + channels.iter().map(|c| c.len() + 32).sum::<usize>()
+                + registration.as_ref().map_or(0, |f| 128 + f.server_name.as_ref().map_or(0, String::len)
+                    + f.caps.iter().chain(&f.enabled_caps).chain(&f.isupport).map(|t| t.len() + 32).sum::<usize>()),
         IpcMessage::ConnStatus { conn_id, state } => 128 + conn_id.len() + match state {
             ConnLifecycle::Disconnected { reason } | ConnLifecycle::Reconnecting { reason, .. } => reason.len(),
             ConnLifecycle::Connecting => 0,
@@ -1350,7 +1354,8 @@ async fn update_cache_and_forward(cache: &Arc<Mutex<ConnCache>>, daemon: &Arc<Da
             let ts = if *recv_ts > 0 { *recv_ts } else { chrono::Utc::now().timestamp() };
             ack = Some(c.push_line_at(line.clone(), ts));
         }
-        IpcMessage::SessionSync { nick, channels, registered, connected, lag_ms, message_tags, echo_message_enabled, self_userhost, casemapping, dial_server, dial_port, chanmodes, .. } => {
+        IpcMessage::SessionSync { nick, channels, registered, connected, lag_ms, message_tags, echo_message_enabled, self_userhost, casemapping, dial_server, dial_port, chanmodes, registration, .. } => {
+            c.registration = registration.clone();
             c.nick = nick.clone();
             c.channels = channels.clone();
             c.registered = *registered;
@@ -1364,14 +1369,16 @@ async fn update_cache_and_forward(cache: &Arc<Mutex<ConnCache>>, daemon: &Arc<Da
             if chanmodes.is_some() { c.chanmodes = chanmodes.clone(); }
         }
         IpcMessage::ConnStatus { state, .. } => match state {
-            ConnLifecycle::Connecting => { c.connected = false; }
+            ConnLifecycle::Connecting => { c.connected = false; c.registration = None; }
             ConnLifecycle::Reconnecting { .. } => {
                 c.connected = false;
                 c.registered = false;
+                c.registration = None;
             }
             ConnLifecycle::Disconnected { reason } => {
                 c.connected = false;
                 c.registered = false;
+                c.registration = None;
                 c.last_disconnect = reason.clone();
             }
         },
@@ -1558,13 +1565,32 @@ mod tests {
         assert_eq!(backlog, vec![("x".into(), true), ("y".into(), false), ("z".into(), true)]);
     }
 
+    #[test]
+    fn attach_replays_facts_without_relearning_old_lines() {
+        let mut cache = ConnCache::default();
+        let facts = crate::ipc::RegistrationFacts { session_epoch: 123, cap_ls_done: true,
+            enabled_caps: vec!["draft/metadata-2".into()],
+            isupport: vec!["CLIENTTAGDENY=*".into(), "CASEMAPPING=ascii".into()], ..Default::default() };
+        cache.registration = Some(facts.clone());
+        // A retained line from an older session is display history, never registration.
+        cache.push_line(":irc.znc.in CAP me LS :soju.im/bouncer-networks".into());
+        cache.push_line(":irc 005 me -CLIENTTAGDENY :supported".into());
+        cache.push_line(":irc CAP me DEL :draft/metadata-2".into());
+        for _ in 0..2 {
+            let frames = cache.replay_frames("c");
+            assert!(matches!(&frames[0].msg, IpcMessage::SessionSync { registration: Some(f), .. } if f == &facts));
+            assert!(frames[1..].iter().all(|frame| matches!(&frame.msg, IpcMessage::RawLine { replayed: true, .. })));
+            assert_eq!(cache.registration.as_ref(), Some(&facts));
+        }
+    }
+
     fn snap(conn_id: &str, nick: &str, nchan: usize) -> IpcMessage {
         IpcMessage::SessionSync {
             conn_id: conn_id.into(), nick: nick.into(),
             channels: (0..nchan).map(|i| format!("#{:0>99}", i)).collect(),
             registered: true, connected: true, lag_ms: None, message_tags: false, echo_message_enabled: false,
             self_userhost: String::new(), casemapping: String::new(), dial_server: String::new(), dial_port: 0,
-            chanmodes: None,
+            chanmodes: None, registration: None,
         }
     }
 

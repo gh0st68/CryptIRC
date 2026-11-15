@@ -852,3 +852,36 @@ mod tests {
         assert!(body.len() < crate::ipc_framing::MAX_FRAME_LEN as usize, "{} bytes", body.len());
     }
 }
+
+/// Shared avatar classification for live web registration and daemon snapshots. Evidence
+/// is OR-ed by callers for the session's lifetime; DEL/withdrawals never undo a bouncer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvatarClassification {
+    pub cap_ls_done: bool,
+    pub behind_bouncer: bool,
+}
+
+pub fn classify_avatar_registration(source: Option<&str>, caps: &str, isupport: &[String], cap_ls_done: bool) -> AvatarClassification {
+    AvatarClassification {
+        cap_ls_done,
+        behind_bouncer: cap_line_names_a_bouncer(source, caps) || isupport_names_a_bouncer(isupport),
+    }
+}
+
+pub fn cap_line_names_a_bouncer(source: Option<&str>, caps: &str) -> bool {
+    source.map_or(false, |s| s.eq_ignore_ascii_case("irc.znc.in")) || caps_name_a_bouncer(caps)
+}
+
+pub fn caps_name_a_bouncer(caps: &str) -> bool {
+    // Ergo advertises znc.in/playback and znc.in/self-message: those are NOT evidence.
+    const PREFIXES: &[&str] = &["soju.im/", "causal.agency/"];
+    const CAPS: &[&str] = &["draft/bouncer-networks", "draft/bouncer-networks-notify", "znc.in/batch", "znc.in/server-time-iso"];
+    caps.split_whitespace().any(|cap| {
+        let name = cap.split('=').next().unwrap_or(cap).to_ascii_lowercase();
+        PREFIXES.iter().any(|p| name.starts_with(p)) || CAPS.contains(&name.as_str())
+    })
+}
+
+pub fn isupport_names_a_bouncer(params: &[String]) -> bool {
+    params.iter().any(|t| t.split('=').next().map_or(false, |k| k.eq_ignore_ascii_case("BOUNCER_NETID")))
+}

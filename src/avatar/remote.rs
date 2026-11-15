@@ -210,7 +210,9 @@ pub fn clienttagdeny_from_isupport(params: &[String]) -> Option<Option<String>> 
             out = Some(None);
         } else if let Some((k, v)) = t.split_once('=') {
             if k.eq_ignore_ascii_case("CLIENTTAGDENY") {
-                out = Some(Some(v.chars().take(1024).collect()));
+                // A truncated prefix can lose a denial or leave only an exemption.
+                // Fail closed whenever the full value exceeds our storage bound.
+                out = Some(Some(if v.chars().nth(1024).is_some() { "*".into() } else { v.to_string() }));
             }
         }
     }
@@ -344,8 +346,13 @@ pub struct ConnState {
     pub meta2_offered: bool,
     pub meta2_requested: bool,
     pub meta2_on: bool,
+    /// SUB / SET / SYNC has been issued for this IRC session, independently of ACK
+    /// versus SessionSync ordering. Reset with the session (and on live CAP DEL).
+    pub meta2_initialized: bool,
     /// ISUPPORT CLIENTTAGDENY (None: not announced).
     pub client_tag_deny: Option<String>,
+    /// Incomplete daemon facts deny all tags, even if a later live 005 allows them.
+    pub client_tag_deny_incomplete: bool,
 }
 
 impl ConnState {
@@ -355,14 +362,16 @@ impl ConnState {
     /// After an Attach whose replay does not prove the same irc-core session (the IRC
     /// connection may have restarted meanwhile, its lifecycle events unseen): forget every
     /// announce, open batch and negotiated metadata state. CLIENTTAGDENY stays (the replay's
-    /// own 005 lines set it, in order).
+    /// own 005 lines set it, in order), including a daemon snapshot's overflow denial.
     pub fn drop_unproven(&mut self) {
         let deny = self.client_tag_deny.take();
+        let incomplete = self.client_tag_deny_incomplete;
         *self = ConnState::default();
         self.client_tag_deny = deny;
+        self.client_tag_deny_incomplete = incomplete;
     }
     pub fn tags_allowed(&self) -> bool {
-        client_tag_allowed(self.client_tag_deny.as_deref())
+        !self.client_tag_deny_incomplete && client_tag_allowed(self.client_tag_deny.as_deref())
     }
     pub fn binding(&self, nick: &str) -> Option<&Binding> {
         self.bindings.get(&lower(nick))
@@ -1416,22 +1425,71 @@ async fn held_here(state: &crate::AppState, host: &str, nick: &str) -> bool {
     false
 }
 
-/// The connection negotiated draft/metadata-2 (live ACK): subscribe to the key and publish
-/// (or clear) our own value.
-pub async fn on_meta2_ack(state: &crate::AppState, owner: &str, conn: &Arc<Mutex<IrcConnection>>) {
+/// Original live LS/NEW offer rules. LS waits for 001; a registered NEW asks now.
+pub async fn note_meta2_offer(c: &mut IrcConnection, sub: &str, caps: &str, replayed: bool) {
+    if !replayed && cap_list_has(caps, META_CAP) && !c.cfg.disabled_caps.iter().any(|d| d == META_CAP) {
+        c.avx.meta2_offered = true;
+        if sub == "NEW" && c.registered { request_meta2(c).await; }
+    }
+}
+
+/// Shared by the original live triggers and snapshot recovery, under the connection lock.
+pub async fn request_meta2(c: &mut IrcConnection) {
+    if c.avx.meta2_offered && !c.avx.meta2_on && !c.avx.meta2_requested {
+        c.avx.meta2_requested = true;
+        let _ = c.send_raw(&format!("CAP REQ :{}\r\n", META_CAP)).await;
+    }
+}
+
+/// Original ACK/DEL rules: only live ACK enables; even replayed DEL disables.
+/// Daemon facts never gate these transitions. Live DEL also re-arms initialization.
+pub fn note_meta2_cap(c: &mut IrcConnection, sub: &str, caps: &str, replayed: bool) -> bool {
+    if !cap_list_has(caps, META_CAP) { return false; }
+    match sub {
+        "ACK" if !replayed => {
+            c.avx.meta2_on = true;
+            true
+        }
+        "DEL" => {
+            c.avx.meta2_on = false;
+            if !replayed { c.avx.meta2_initialized = false; }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Both live ACK and enabled SessionSync use this gate. Record initialization only after
+/// issuing its commands, so the saved-record attach path can keep the subscription.
+pub async fn ensure_meta2_initialized(state: &crate::AppState, owner: &str, conn: &Arc<Mutex<IrcConnection>>) -> bool {
+    {
+        let c = conn.lock().await;
+        if !c.avx.meta2_on || c.avx.meta2_initialized { return false; }
+    }
     let url = announce_url(state, owner).await;
     let mut c = conn.lock().await;
-    c.avx.meta2_on = true;
+    if !initialize_meta2(&mut c, url.as_deref()).await { return false; }
+    let endpoint = c.dial_endpoint.clone().unwrap_or_else(|| (c.cfg.server.clone(), c.cfg.port));
+    state.avatars.ensure_session_meta2(&c.conn_id, owner, (&endpoint.0, endpoint.1), &state.conn_owners);
+    true
+}
+
+/// Hold the connection lock through the guard and sends: concurrent triggers cannot
+/// duplicate initialization. An enabled cap alone does not prove we subscribed to it.
+pub(super) async fn initialize_meta2(c: &mut IrcConnection, url: Option<&str>) -> bool {
+    if !c.avx.meta2_on || c.avx.meta2_initialized || !c.connected || !c.registered { return false; }
+    c.avx.meta2_initialized = true;
     let _ = c.send_raw(&format!("METADATA * SUB {}\r\n", META_KEY)).await;
     // Idempotent sync of the current state (codex astra re-check 2): our URL if sharing, an
     // explicit deletion otherwise — a withdrawal that could not reach IRC is applied now.
-    let _ = c.send_raw(&meta_sync_line(url.as_deref())).await;
+    let _ = c.send_raw(&meta_sync_line(url)).await;
     // Channels joined before the subscription: ask for their members' values now (a JOIN
     // after it is synced by the server by itself).
     let chans: Vec<String> = c.channels.values().map(|ch| ch.name.clone()).filter(|n| !n.is_empty() && !n.contains([' ', '\r', '\n', ','])).take(REANNOUNCE_MAX_CHANNELS).collect();
     for ch in chans {
         let _ = c.send_raw(&format!("METADATA {} SYNC\r\n", ch)).await;
     }
+    true
 }
 
 /// The line that makes the server's `avatar` value for us match `url` (None: delete it).
@@ -1442,14 +1500,23 @@ pub fn meta_sync_line(url: Option<&str>) -> String {
     }
 }
 
-/// Metadata-2 became active again without an ACK (state restored after a web restart): sync
-/// our value the same way (`meta_sync_line`).
+/// Attach recovery: initialize if needed, otherwise keep the subscription and sync just
+/// our value, as the continuity-checked saved-record path always did.
 pub async fn meta_sync(state: &crate::AppState, owner: &str, conn: &Arc<Mutex<IrcConnection>>) {
     let url = announce_url(state, owner).await;
     let mut c = conn.lock().await;
-    if c.avx.meta2_on && c.connected && c.registered {
-        let _ = c.send_raw(&meta_sync_line(url.as_deref())).await;
+    if sync_meta_after_attach(&mut c, url.as_deref()).await {
+        let endpoint = c.dial_endpoint.clone().unwrap_or_else(|| (c.cfg.server.clone(), c.cfg.port));
+        state.avatars.ensure_session_meta2(&c.conn_id, owner, (&endpoint.0, endpoint.1), &state.conn_owners);
     }
+}
+
+pub(super) async fn sync_meta_after_attach(c: &mut IrcConnection, url: Option<&str>) -> bool {
+    if initialize_meta2(c, url).await { return true; }
+    if c.avx.meta2_on && c.connected && c.registered {
+        let _ = c.send_raw(&meta_sync_line(url)).await;
+    }
+    false
 }
 
 /// `owner`'s sharing changed: publish or clear the metadata value on each of their live

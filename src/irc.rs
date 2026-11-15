@@ -157,6 +157,13 @@ pub struct IrcConnection {
     /// CAP or ISUPPORT lines was a bouncer's (avatar::note_cap_line). Reset on reconnect.
     pub cap_ls_done: bool,
     pub behind_bouncer: bool,
+    /// Retained daemon facts are available for attach recovery (never gate live input).
+    pub daemon_registration: bool,
+    /// Last daemon IRC session whose facts we adopted; zero for older daemons.
+    pub registration_epoch: u64,
+    /// Live 001 may precede a coalesced snapshot. Adopt its next epoch without
+    /// clearing live evidence, but only on this IPC link (never across an outage).
+    pub live_registration_link: Option<u64>,
     /// During an Attach replay only: the (nick, user@host) we had when each replayed line
     /// arrived, as 069f376 tracked it in `nick` — set from the snapshot, moved by replayed
     /// self NICK / JOIN / CHGHOST lines under the same ident rule, cleared at AttachComplete.
@@ -185,6 +192,39 @@ pub struct IrcConnection {
 const USER_JOINS_MAX: usize = 1024;
 
 impl IrcConnection {
+    /// Shared reset for lifecycle reconnects and replacements discovered on Attach.
+    pub(crate) fn reset_irc_session(&mut self) {
+        self.connected = false;
+        self.registered = false;
+        self.who_pending.clear();
+        self.whois_seen.clear();
+        self.seen_userhosts.clear();
+        self.cap_ls_done = false;
+        self.behind_bouncer = false;
+        self.daemon_registration = false;
+        self.registration_epoch = 0;
+        self.live_registration_link = None;
+        self.avx.reset();
+        self.resync_gen = self.resync_gen.wrapping_add(1);
+        self.resync_busy = false;
+    }
+
+    pub(crate) fn note_live_registration(&mut self) {
+        self.live_registration_link = Some(crate::ipc_client::current_link());
+    }
+
+    /// True when retained state belonged to a different IRC session. A live 001
+    /// already establishes the new session even if its snapshot was coalesced.
+    pub(crate) fn adopt_registration_epoch(&mut self, epoch: u64) -> bool {
+        if epoch == 0 { return false; }
+        let replaced = self.registration_epoch != 0 && self.registration_epoch != epoch
+            && self.live_registration_link != Some(crate::ipc_client::current_link());
+        if replaced { self.reset_irc_session(); }
+        self.registration_epoch = epoch;
+        self.live_registration_link = None;
+        replaced
+    }
+
     /// A registered, connected test connection dialing `server:port` as `nick`.
     #[cfg(test)]
     pub(crate) fn for_test(conn_id: &str, nick: &str, server: &str, port: u16) -> IrcConnection {
@@ -197,7 +237,7 @@ impl IrcConnection {
             casemapping: CaseMapping::default(), server_casemapping: None,
             dial_endpoint: Some((server.to_string(), port)),
             statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(), chanmodes: ChanModes::default(),
-            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 1, cap_ls_done: true, behind_bouncer: false, replay_view: None, avx: Default::default(), cfg: NetworkConfig::default(),
+            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 1, cap_ls_done: true, behind_bouncer: false, daemon_registration: false, registration_epoch: 0, live_registration_link: None, replay_view: None, avx: Default::default(), cfg: NetworkConfig::default(),
         }
     }
 
@@ -1228,8 +1268,7 @@ pub async fn dispatch_line(
             }
             if let Some(s) = statusmsg_from_isupport(&p.params) { c.statusmsg = Some(s); }
             c.chanmodes.learn(&p.params);
-            if crate::avatar::isupport_names_a_bouncer(&p.params) { c.behind_bouncer = true; isupport_bouncer = true; }
-            if let Some(d) = crate::avatar::remote::clienttagdeny_from_isupport(&p.params) { c.avx.client_tag_deny = d; }
+            isupport_bouncer = crate::avatar::note_isupport_line(&mut c, &p.params);
         }
         // Avatars: the user@host this line shows for a nick (see avatar::discover rule 5).
         crate::avatar::observe_line(&mut c, p.prefix.as_deref(), &p.command, &p.params);
@@ -1335,25 +1374,15 @@ pub async fn dispatch_line(
                     // when the network config disables it). Requested once registered (001),
                     // or now for a CAP NEW after registration — never during irc-core's own
                     // CAP negotiation.
-                    let meta = crate::avatar::remote::META_CAP;
-                    if !replayed && crate::avatar::remote::cap_list_has(&caps, meta) && !c.cfg.disabled_caps.iter().any(|d| d == meta) {
-                        c.avx.meta2_offered = true;
-                        if sub == "NEW" && c.registered && !c.avx.meta2_on && !c.avx.meta2_requested {
-                            c.avx.meta2_requested = true;
-                            let _ = c.send_raw(&format!("CAP REQ :{}\r\n", meta)).await;
-                        }
-                    }
+                    crate::avatar::remote::note_meta2_offer(&mut c, sub, &caps, replayed).await;
                 }
                 "ACK" => {
                     // L43: Set capability flags on ACK, not on REQ
                     if caps.contains("echo-message") { conn.lock().await.echo_message_enabled = true; }
                     if caps.contains("message-tags") { conn.lock().await.message_tags = true; }
-                    if !replayed && crate::avatar::remote::cap_list_has(&caps, crate::avatar::remote::META_CAP) {
-                        crate::avatar::remote::on_meta2_ack(state, username, conn).await;
-                        // The session record says metadata-2 is on — recreated if a reattach
-                        // dropped it, so the next restart re-establishes it too.
-                        let endpoint = { let c = conn.lock().await; c.dial_endpoint.clone().unwrap_or_else(|| (c.cfg.server.clone(), c.cfg.port)) };
-                        state.avatars.ensure_session_meta2(conn_id, username, (&endpoint.0, endpoint.1), &state.conn_owners);
+                    let meta_ack = { let mut c = conn.lock().await; crate::avatar::remote::note_meta2_cap(&mut c, sub, &caps, replayed) };
+                    if meta_ack {
+                        crate::avatar::remote::ensure_meta2_initialized(state, username, conn).await;
                     }
                 }
                 "NAK" => {
@@ -1364,7 +1393,11 @@ pub async fn dispatch_line(
                 }
                 "DEL" => {
                     if caps.contains("echo-message") { conn.lock().await.echo_message_enabled = false; }
-                    if crate::avatar::remote::cap_list_has(&caps, crate::avatar::remote::META_CAP) { conn.lock().await.avx.meta2_on = false; }
+                    let mut c = conn.lock().await;
+                    crate::avatar::remote::note_meta2_cap(&mut c, sub, &caps, replayed);
+                    if !replayed && crate::avatar::remote::cap_list_has(&caps, crate::avatar::remote::META_CAP) {
+                        state.avatars.set_session_meta2(conn_id, false);
+                    }
                 }
                 _ => {}
             }
@@ -1385,28 +1418,16 @@ pub async fn dispatch_line(
         }
 
         // ── Welcome ──────────────────────────────────────────
-        // #29/live-tested fix: 001 is deliberately a no-op here (just
-        // swallowed, never falls through to the generic numeric display).
-        // The daemon's own "001" handling ALWAYS calls its sync() (emitting
-        // SessionSync with the adopted nick + registered:true) BEFORE it
-        // forwards this raw line — so by the time dispatch_line would see
-        // 001, the IPC client's SessionSync handler has already adopted the
-        // nick and (on the false→true edge) emitted ServerEvent::Connected.
-        // Duplicating that here raced the SessionSync's registered flag
-        // (which arrives first) against this arm's own idempotency guard —
-        // caught live in a real end-to-end test: the guard read "already
-        // registered" before the real 001 line ever arrived, so Connected
-        // silently never fired even though the connection worked perfectly.
-        // SessionSync is now the single authoritative source for nick/
-        // registered/connected/Connected-emission; see ipc_client.rs.
+        // #29: SessionSync alone adopts nick/registered/connected and emits Connected.
+        // The daemon emits it before 001, but coalescing can delay its delivery until
+        // after live registration lines. Remember that boundary for epoch adoption
+        // without racing the snapshot's connection-status transition.
         "001" => {
             // Remote avatars: ask for draft/metadata-2 now that registration is over.
             if !replayed {
                 let mut c = conn.lock().await;
-                if c.avx.meta2_offered && !c.avx.meta2_on && !c.avx.meta2_requested {
-                    c.avx.meta2_requested = true;
-                    let _ = c.send_raw(&format!("CAP REQ :{}\r\n", crate::avatar::remote::META_CAP)).await;
-                }
+                c.note_live_registration();
+                crate::avatar::remote::request_meta2(&mut c).await;
             }
         }
 
@@ -2835,7 +2856,7 @@ mod tests {
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
             casemapping: CaseMapping::default(), server_casemapping: None, dial_endpoint: None,
             statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(), chanmodes: ChanModes::default(),
-            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, replay_view: None, avx: Default::default(), cfg: NetworkConfig::default(),
+            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, daemon_registration: false, registration_epoch: 0, live_registration_link: None, replay_view: None, avx: Default::default(), cfg: NetworkConfig::default(),
         }
     }
 

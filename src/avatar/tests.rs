@@ -1496,3 +1496,655 @@ async fn the_metadata_ack_recreates_the_session_record() {
     f.store.ensure_session_meta2(&b, "alice", ("irc.test", 6667), &f.conn_owners);
     assert!(f.store.session(&b).is_none(), "only for a saved network of that owner");
 }
+
+#[test]
+fn daemon_facts_match_live_avatar_classification() {
+    use cryptirc::ipc::RegistrationFacts;
+    for (source, caps, tokens, answered, bouncer) in [
+        ("irc.test", "sasl=PLAIN znc.in/playback znc.in/self-message", "CLIENTTAGDENY=* CASEMAPPING=ascii", true, false),
+        ("irc.test", "znc.in/batch=value", "", true, true),
+        ("irc.test", "soju.im/bouncer-networks=value", "", true, true),
+        ("irc.znc.in", "multi-prefix", "", true, true),
+        ("irc.test", "server-time", "BOUNCER_NETID=42", true, true),
+        ("irc.test", "", "CLIENTTAGDENY=*", false, false),
+    ] {
+        let isupport: Vec<String> = tokens.split_whitespace().map(str::to_string).collect();
+        let mut live = IrcConnection::for_test("live", "me", "irc.test", 6667);
+        live.cap_ls_done = false;
+        if answered { note_cap_line(&mut live, Some(source), "LS", false, caps, false); }
+        let params: Vec<String> = std::iter::once("me".to_string()).chain(isupport.iter().cloned()).collect();
+        note_isupport_line(&mut live, &params);
+        let facts = RegistrationFacts { caps: caps.split_whitespace().map(str::to_string).collect(),
+            cap_ls_done: answered, server_name: Some(source.into()), isupport, ..Default::default() };
+        let mut restored = IrcConnection::for_test("restored", "me", "irc.test", 6667);
+        restored.cap_ls_done = false;
+        apply_registration_facts(&mut restored, &facts);
+        assert_eq!((restored.cap_ls_done, restored.behind_bouncer), (live.cap_ls_done, live.behind_bouncer));
+        assert_eq!(restored.avx.client_tag_deny, live.avx.client_tag_deny);
+        assert_eq!(remote::restricted(&restored), !answered || bouncer);
+    }
+}
+
+#[test]
+fn registration_merges_live_saved_and_replayed_evidence_without_clearing_it() {
+    use cryptirc::ipc::RegistrationFacts;
+    let facts = RegistrationFacts { caps: vec!["server-time".into()], cap_ls_done: true,
+        isupport: vec!["CLIENTTAGDENY=*".into(), "CASEMAPPING=ascii".into()], ..Default::default() };
+    for saved_bouncer in [false, true] {
+        let mut c = IrcConnection::for_test("c", "me", "irc.test", 6667);
+        c.cap_ls_done = false;
+        if saved_bouncer { assert!(apply_restore(&mut c, Some(true))); }
+        crate::ipc_client::apply_session_registration(&mut c, Some(&facts), "");
+        assert!(c.cap_ls_done);
+        assert_eq!(c.behind_bouncer, saved_bouncer);
+        assert_eq!(c.casemapping, cryptirc::ircproto::CaseMapping::Ascii);
+        assert!(!c.avx.tags_allowed());
+        // Original replay rules still apply: 005 updates the policy, CAP adds bouncer
+        // evidence, and a replayed final LS cannot prove negotiation by itself.
+        note_isupport_line(&mut c, &["me".into(), "-CLIENTTAGDENY".into(), "BOUNCER_NETID=old".into()]);
+        assert!(c.behind_bouncer && c.avx.tags_allowed());
+        note_cap_line(&mut c, Some("irc.znc.in"), "LS", false, "znc.in/batch", true);
+        apply_registration_facts(&mut c, &facts);
+        assert!(c.behind_bouncer && !c.avx.tags_allowed());
+        apply_registration_facts(&mut c, &RegistrationFacts::default());
+        assert!(c.cap_ls_done && c.behind_bouncer && !c.avx.tags_allowed());
+        assert!(!apply_restore(&mut c, Some(false)), "saved records cannot loosen facts");
+    }
+    for via_cap in [false, true] {
+        let mut c = IrcConnection::for_test("c", "me", "irc.test", 6667);
+        c.cap_ls_done = false;
+        apply_registration_facts(&mut c, &RegistrationFacts::default());
+        note_cap_line(&mut c, Some("irc.test"), "LS", false, "server-time", true);
+        assert!(!c.cap_ls_done);
+        note_cap_line(&mut c, Some("irc.test"), "LS", false, "server-time", false);
+        assert!(c.cap_ls_done, "live LS works even with unanswered daemon facts");
+        if via_cap {
+            note_cap_line(&mut c, Some("irc.znc.in"), "NEW", false, "znc.in/batch", false);
+        } else {
+            note_isupport_line(&mut c, &["me".into(), "BOUNCER_NETID=new".into(), "CLIENTTAGDENY=*".into()]);
+        }
+        apply_registration_facts(&mut c, &RegistrationFacts::default());
+        assert!(c.cap_ls_done && c.behind_bouncer, "lagging snapshots cannot erase live evidence");
+    }
+}
+
+#[test]
+fn sessionsync_casemapping_corrects_live_005_with_or_without_epochs() {
+    use cryptirc::{ipc::RegistrationFacts, ircproto::CaseMapping};
+    let mut c = IrcConnection::for_test("c", "me", "irc.test", 6667);
+    for epoch in [0, 11, 11, 12] {
+        let facts = RegistrationFacts { session_epoch: epoch,
+            isupport: vec!["CASEMAPPING=rfc1459".into()], ..Default::default() };
+        // The live 005 handler updates both mapping views. SessionSync must still
+        // correct them, even in the same epoch and with a stale facts token.
+        c.note_server_casemapping(CaseMapping::StrictRfc1459);
+        c.set_casemapping(CaseMapping::StrictRfc1459);
+        crate::ipc_client::apply_session_registration(&mut c, Some(&facts), "ascii");
+        assert_eq!(c.server_casemapping, Some(CaseMapping::Ascii));
+        assert_eq!(c.casemapping, CaseMapping::Ascii);
+    }
+    for name in ["#[room]", "#{room}"] {
+        c.channels.insert(name.into(), crate::irc::ChannelState {
+            name: name.into(), topic: String::new(), names: vec![], key: None,
+        });
+    }
+    let stale = RegistrationFacts { session_epoch: 12, isupport: vec!["CASEMAPPING=rfc1459".into()], ..Default::default() };
+    crate::ipc_client::apply_session_registration(&mut c, Some(&stale), "ascii");
+    assert_eq!(c.channels.len(), 2, "a stale facts mapping must never temporarily merge distinct channels");
+    crate::ipc_client::apply_session_registration(&mut c, None, "rfc1459");
+    assert_eq!(c.casemapping, CaseMapping::Rfc1459);
+}
+
+#[test]
+fn truncated_registration_keeps_avatar_tags_denied_across_sync_and_restart() {
+    use cryptirc::ipc::RegistrationFacts;
+    let deny = format!("cryptirc.com/avatar,{}", "other/tag,".repeat(300));
+    let params = vec!["me".into(), format!("CLIENTTAGDENY={deny}")];
+    // Overflow can leave either no token or an older token that allows our tag.
+    for isupport in [vec![], vec!["CLIENTTAGDENY=other/tag".into()]] {
+        let facts = RegistrationFacts { cap_ls_done: true, truncated: true, isupport, ..Default::default() };
+        let mut live = IrcConnection::for_test("live", "me", "irc.test", 6667);
+        note_isupport_line(&mut live, &params);
+        let before = live.avx.client_tag_deny.clone();
+        assert!(!live.avx.tags_allowed());
+        apply_registration_facts(&mut live, &facts); // SessionSync after live input
+        assert_eq!(live.avx.client_tag_deny, before);
+        assert!(!live.avx.tags_allowed());
+
+        // A restarted web has no live denial and may have no registration in replay.
+        let mut restarted = IrcConnection::for_test("restart", "me", "irc.test", 6667);
+        apply_registration_facts(&mut restarted, &facts);
+        assert!(!restarted.avx.tags_allowed());
+        for c in [&mut live, &mut restarted] {
+            note_isupport_line(c, &["me".into(), "-CLIENTTAGDENY".into()]);
+            c.avx.drop_unproven(); // attach cleanup must retain the overflow denial
+            assert!(!c.avx.tags_allowed());
+            // The daemon also sends snapshots BEFORE forwarding their live 005.
+            note_isupport_line(c, &params);
+            note_isupport_line(c, &["me".into(), "CLIENTTAGDENY=*,-cryptirc.com/avatar".into()]);
+            assert!(!c.avx.tags_allowed(), "live exemptions cannot undo overflow");
+            apply_registration_facts(c, &facts);
+            assert!(!c.avx.tags_allowed());
+            c.avx.reset(); // a new IRC session must not inherit the overflow
+            assert!(c.avx.tags_allowed());
+        }
+    }
+}
+
+#[test]
+fn oversized_clienttagdeny_fails_closed_in_live_and_complete_registration() {
+    use cryptirc::ipc::RegistrationFacts;
+    for (deny, allowed) in [
+        ("x".repeat(1024), true), // Exactly at the bound: keep the complete value.
+        ("x".repeat(1025), false), // Every overlong value must deny all.
+        (format!("{}cryptirc.com/avatar", "other/tag,".repeat(102)), false), // Cut inside the denial.
+        (format!("{}cryptirc.com/avatar", "other/tag,".repeat(103)), false), // Denial after the cut.
+        (format!("*,-cryptirc.com/avatar,{}cryptirc.com/avatar", "other/tag,".repeat(103)), false),
+    ] {
+        let token = format!("CLIENTTAGDENY={deny}");
+        let mut live = IrcConnection::for_test("live", "me", "irc.test", 6667);
+        note_isupport_line(&mut live, &["me".into(), token.clone()]);
+        assert_eq!(live.avx.tags_allowed(), allowed);
+        assert_eq!(live.avx.client_tag_deny.as_deref(), Some(if allowed { deny.as_str() } else { "*" }));
+
+        // Complete daemon facts use the same bound, independently of snapshot overflow.
+        let facts = RegistrationFacts { cap_ls_done: true, isupport: vec![token], ..Default::default() };
+        let mut restored = IrcConnection::for_test("restored", "me", "irc.test", 6667);
+        apply_registration_facts(&mut restored, &facts);
+        assert_eq!(restored.avx.client_tag_deny, live.avx.client_tag_deny);
+        assert_eq!(restored.avx.tags_allowed(), allowed);
+    }
+}
+
+#[test]
+fn complete_registration_fills_tag_policy_but_never_loosens_live_denial_or_overflow() {
+    use cryptirc::ipc::RegistrationFacts;
+    for (token, deny, allowed) in [
+        (Some("CLIENTTAGDENY=cryptirc.com/avatar,other/tag"), Some("cryptirc.com/avatar,other/tag"), false),
+        (Some("CLIENTTAGDENY=*,-cryptirc.com/avatar"), Some("*,-cryptirc.com/avatar"), true),
+        (None, None, true),
+    ] {
+        let mut c = IrcConnection::for_test("c", "me", "irc.test", 6667);
+        let facts = RegistrationFacts { cap_ls_done: true,
+            isupport: token.into_iter().map(str::to_string).collect(), ..Default::default() };
+        apply_registration_facts(&mut c, &facts);
+        assert_eq!(c.avx.client_tag_deny.as_deref(), deny);
+        assert_eq!(c.avx.tags_allowed(), allowed);
+        note_isupport_line(&mut c, &["me".into(), "CLIENTTAGDENY=*".into()]);
+        apply_registration_facts(&mut c, &facts);
+        assert_eq!(c.avx.client_tag_deny.as_deref(), Some("*"));
+        assert!(!c.avx.tags_allowed());
+        // An explicit live withdrawal is still handled as in v0.5.10.
+        note_isupport_line(&mut c, &["me".into(), "-CLIENTTAGDENY".into()]);
+        assert!(c.avx.tags_allowed());
+        apply_registration_facts(&mut c, &RegistrationFacts { truncated: true, ..Default::default() });
+        apply_registration_facts(&mut c, &facts);
+        assert!(!c.avx.tags_allowed(), "complete facts cannot clear session overflow");
+    }
+    let mut c = IrcConnection::for_test("c", "me", "irc.test", 6667);
+    note_isupport_line(&mut c, &["me".into(), "CLIENTTAGDENY=*,-cryptirc.com/avatar".into()]);
+    apply_registration_facts(&mut c, &RegistrationFacts { isupport: vec!["CLIENTTAGDENY=cryptirc.com/avatar".into()], ..Default::default() });
+    assert!(!c.avx.tags_allowed(), "facts may add a restriction to a live exemption");
+}
+
+#[test]
+fn daemon_classification_refreshes_session_record_and_preserves_metadata() {
+    let f = fixture();
+    f.conn_owners.insert("c".into(), "alice".into());
+    f.store.refresh_session("c", "alice", ("irc.test", 6667), false, &f.conn_owners);
+    assert!(!f.store.session("c").unwrap().bouncer);
+    f.store.ensure_session_meta2("c", "alice", ("irc.test", 6667), &f.conn_owners);
+    f.store.refresh_session("c", "alice", ("irc.test", 6667), true, &f.conn_owners);
+    let record = f.store.session("c").unwrap();
+    assert!(record.bouncer && record.meta2);
+    f.store.refresh_session("c", "alice", ("irc.test", 6667), true, &f.conn_owners);
+    assert_eq!(f.store.session("c"), Some(record.clone()));
+    f.store.refresh_session("c", "alice", ("irc.test", 6667), false, &f.conn_owners);
+    assert_eq!(f.store.session("c"), Some(record), "facts never loosen saved bouncer evidence");
+}
+
+#[tokio::test]
+async fn restart_with_enabled_metadata_facts_republishes_updates_and_withdrawal() {
+    use cryptirc::ipc::{IpcMessage, RegistrationFacts};
+    let same = ReplayEvidence { first_backlog: Some(false), ..Default::default() };
+    for ev in [Some(same), None] {
+        let f = fixture();
+        f.store.set_public_base(Some("https://chat.example".into()));
+        f.give_avatar("alice", [200, 10, 10]).await;
+        let id = f.add_conn("alice", "alice", "irc.test", 6667, &[]);
+        let conn = f.connections.get(&id).unwrap().clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut c = conn.lock().await;
+            *c.ipc_out.lock().await = Some(tx);
+            c.cap_ls_done = false; // a fresh web, with no saved record
+            assert!(!c.avx.meta2_on && f.store.session(&id).is_none());
+            apply_registration_facts(&mut c, &RegistrationFacts {
+                caps: vec![remote::META_CAP.into()], enabled_caps: vec![remote::META_CAP.into()],
+                cap_ls_done: true, ..Default::default()
+            });
+            assert!(c.avx.meta2_on);
+            c.avx.learn("bob", remote::Binding { url: "https://f.example/a.png".into(), userhost: String::new(), source: remote::Source::Meta, at: Instant::now() });
+            let dropped = remote_after_attach(&mut c, ev);
+            assert_eq!(dropped, ev.is_none());
+            assert_eq!(c.avx.binding("bob").is_some(), ev.is_some());
+            assert!(c.avx.meta2_on, "cleanup must retain the authoritative enabled state");
+            recheck_meta_after_attach(&mut c, true, dropped).await;
+            assert!(rx.try_recv().is_err(), "an enabled cap needs no new negotiation");
+        }
+        for change in 0..3 {
+            if change == 1 { f.give_avatar("alice", [10, 200, 10]).await; }
+            if change == 2 { f.store.set_share("alice", false).await.unwrap(); }
+            let url = f.store.public_url("alice");
+            assert_eq!(url.is_some(), change != 2);
+            let expected = remote::meta_sync_line(url.as_deref());
+            remote::republish(&f.auth, &f.store, &f.connections, &f.conn_owners, "alice").await;
+            assert!(matches!(rx.try_recv().unwrap(), IpcMessage::RawSend { conn_id, line } if conn_id == id && line == expected));
+            assert!(rx.try_recv().is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn restart_requests_offered_but_not_enabled_metadata_even_with_continuity() {
+    use cryptirc::ipc::{IpcMessage, RegistrationFacts};
+    let same = ReplayEvidence { first_backlog: Some(false), ..Default::default() };
+    for ev in [Some(same), None] {
+        for (offered, enabled, truncated, disabled, live, request) in [
+            (true, false, false, false, true, true),
+            (true, true, false, false, true, false),
+            (true, true, true, false, true, false),
+            (true, false, false, true, true, false),
+            (true, false, false, false, false, false),
+            (false, false, false, false, true, false),
+        ] {
+            let mut c = IrcConnection::for_test("c", "me", "irc.test", 6667);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            *c.ipc_out.lock().await = Some(tx);
+            if disabled { c.cfg.disabled_caps.push(remote::META_CAP.into()); }
+            c.connected = live;
+            c.cap_ls_done = false; // fresh web process, no registration replay
+            apply_registration_facts(&mut c, &RegistrationFacts {
+                caps: if offered { vec![remote::META_CAP.into()] } else { vec![] },
+                enabled_caps: if enabled { vec![remote::META_CAP.into()] } else { vec![] },
+                cap_ls_done: true, truncated, ..Default::default()
+            });
+            request_registration_metadata(&mut c).await; // SessionSync must request now
+            let dropped = remote_after_attach(&mut c, ev);
+            recheck_meta_after_attach(&mut c, true, dropped).await;
+            request_registration_metadata(&mut c).await; // repeated snapshot is inert
+            assert_eq!(c.avx.meta2_on, enabled && !truncated);
+            assert_eq!(c.avx.meta2_requested, request);
+            if request {
+                assert!(matches!(rx.try_recv().unwrap(), IpcMessage::RawSend { line, .. } if line == "CAP REQ :draft/metadata-2\r\n"));
+                assert!(!c.avx.meta2_on, "publication still waits for the live ACK facts");
+            }
+            assert!(rx.try_recv().is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn no_facts_keeps_legacy_attach_metadata_recheck_rules() {
+    use cryptirc::ipc::IpcMessage;
+    let same = ReplayEvidence { first_backlog: Some(false), ..Default::default() };
+    for ev in [Some(same), None] {
+        for had_meta in [false, true] {
+            let mut c = IrcConnection::for_test("c", "me", "irc.test", 6667);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            *c.ipc_out.lock().await = Some(tx);
+            assert!(!c.daemon_registration);
+            c.avx.meta2_on = had_meta;
+            let dropped = remote_after_attach(&mut c, ev);
+            recheck_meta_after_attach(&mut c, had_meta, dropped).await;
+            assert_eq!(c.avx.meta2_on, had_meta && ev.is_some());
+            assert_eq!(c.avx.meta2_requested, had_meta && ev.is_none());
+            if had_meta && ev.is_none() {
+                assert!(matches!(rx.try_recv().unwrap(), IpcMessage::RawSend { line, .. } if line == "CAP REQ :draft/metadata-2\r\n"));
+            }
+            assert!(rx.try_recv().is_err());
+        }
+    }
+}
+
+fn metadata_init_conn() -> (IrcConnection, tokio::sync::mpsc::UnboundedReceiver<cryptirc::ipc::IpcMessage>) {
+    let mut c = IrcConnection::for_test("c", "me", "irc.test", 6667);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    c.ipc_out = Arc::new(Mutex::new(Some(tx)));
+    c.channels.insert("#room".into(), crate::irc::ChannelState {
+        name: "#room".into(), topic: String::new(), names: vec![], key: None,
+    });
+    (c, rx)
+}
+
+fn metadata_snapshot(c: &mut IrcConnection, enabled: bool) {
+    apply_registration_facts(c, &cryptirc::ipc::RegistrationFacts {
+        session_epoch: 7,
+        caps: vec![remote::META_CAP.into()],
+        enabled_caps: if enabled { vec![remote::META_CAP.into()] } else { vec![] },
+        cap_ls_done: true, ..Default::default()
+    });
+}
+
+fn metadata_commands(rx: &mut tokio::sync::mpsc::UnboundedReceiver<cryptirc::ipc::IpcMessage>) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            cryptirc::ipc::IpcMessage::RawSend { conn_id, line } => { assert_eq!(conn_id, "c"); lines.push(line); }
+            other => panic!("unexpected metadata output: {other:?}"),
+        }
+    }
+    lines
+}
+
+fn metadata_initialization(url: Option<&str>) -> Vec<String> {
+    vec!["METADATA * SUB avatar\r\n".into(), remote::meta_sync_line(url), "METADATA #room SYNC\r\n".into()]
+}
+
+#[tokio::test]
+async fn replaced_epoch_recovers_metadata_after_ipc_outage() {
+    use cryptirc::{ipc::RegistrationFacts, ircproto::CaseMapping};
+    for pending_001 in [false, true] {
+        let (mut c, mut rx) = metadata_init_conn();
+        metadata_snapshot(&mut c, true);
+        c.avx.meta2_requested = true;
+        assert!(remote::initialize_meta2(&mut c, None).await);
+        assert_eq!(metadata_commands(&mut rx), metadata_initialization(None));
+        c.behind_bouncer = true;
+        c.avx.client_tag_deny = Some("*".into());
+        c.avx.client_tag_deny_incomplete = true;
+        c.who_pending.insert("#room".into());
+        c.whois_seen.note("bob");
+        c.seen_userhosts.note("bob", "u@old");
+        c.avx.learn("bob", remote::Binding { url: "https://old.example/avatar.png".into(),
+            userhost: "u@old".into(), source: remote::Source::Meta, at: Instant::now() });
+        c.resync_busy = true;
+        let generation = c.resync_gen;
+        if pending_001 {
+            // A live 001 just before the outage must not authorize adoption on
+            // a later IPC link. Do not mutate the global link counter in tests.
+            c.live_registration_link = Some(crate::ipc_client::current_link().wrapping_sub(1));
+        }
+        let replacement = RegistrationFacts { session_epoch: 8, caps: vec![remote::META_CAP.into()],
+            isupport: vec!["CLIENTTAGDENY=other/tag".into()], ..Default::default() };
+        assert!(crate::ipc_client::apply_session_registration(&mut c, Some(&replacement), "ascii"));
+        assert_eq!(c.registration_epoch, 8);
+        assert!(!c.connected && !c.registered);
+        assert!(!c.cap_ls_done && !c.behind_bouncer);
+        assert!(!c.avx.meta2_on && !c.avx.meta2_requested && !c.avx.meta2_initialized);
+        assert!(c.avx.meta2_offered && c.avx.tags_allowed());
+        assert_eq!(c.avx.client_tag_deny.as_deref(), Some("other/tag"));
+        assert_eq!(c.avx.bindings_len(), 0);
+        assert!(c.who_pending.is_empty() && c.whois_seen.fresh().next().is_none());
+        assert!(c.seen_userhosts.get("bob").is_none());
+        assert!(!c.resync_busy && c.resync_gen == generation.wrapping_add(1));
+        assert_eq!(c.casemapping, CaseMapping::Ascii);
+        // The rest of SessionSync adopts these flags before requesting metadata.
+        c.connected = true;
+        c.registered = true;
+        request_registration_metadata(&mut c).await;
+        let dropped = remote_after_attach(&mut c, None); // registration left the replay ring
+        recheck_meta_after_attach(&mut c, true, dropped).await;
+        assert!(!apply_registration_facts(&mut c, &replacement));
+        request_registration_metadata(&mut c).await;
+        assert_eq!(metadata_commands(&mut rx), vec!["CAP REQ :draft/metadata-2\r\n"]);
+        assert!(!c.avx.meta2_on && !c.avx.meta2_initialized);
+        assert!(remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, false));
+        assert!(remote::initialize_meta2(&mut c, None).await);
+        assert!(!apply_registration_facts(&mut c, &replacement)); // coalesced pre-ACK facts
+        assert!(remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, false));
+        assert!(!remote::initialize_meta2(&mut c, None).await);
+        assert_eq!(metadata_commands(&mut rx), metadata_initialization(None));
+    }
+}
+
+#[tokio::test]
+async fn live_registration_adopts_coalesced_epoch_without_erasing_live_state() {
+    use cryptirc::ipc::RegistrationFacts;
+    for snapshot_first in [false, true] {
+        for previous_epoch in [0, 6] {
+            let (mut c, mut rx) = metadata_init_conn();
+            c.registration_epoch = previous_epoch;
+            let facts = RegistrationFacts { session_epoch: 7, ..Default::default() };
+            if snapshot_first {
+                apply_registration_facts(&mut c, &facts);
+                c.connected = true;
+                c.registered = true;
+            }
+            c.note_live_registration(); // the live 001 handler
+            note_cap_line(&mut c, Some("irc.test"), "LS", false, remote::META_CAP, false);
+            note_isupport_line(&mut c, &["me".into(), "CLIENTTAGDENY=*".into()]);
+            remote::note_meta2_offer(&mut c, "NEW", remote::META_CAP, false).await;
+            assert!(remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, false));
+            assert!(remote::initialize_meta2(&mut c, None).await);
+            let generation = c.resync_gen;
+            assert!(!apply_registration_facts(&mut c, &facts));
+            assert_eq!(c.registration_epoch, 7);
+            assert_eq!(c.resync_gen, generation);
+            assert!(c.cap_ls_done && !c.avx.tags_allowed());
+            assert!(c.avx.meta2_on && c.avx.meta2_offered && c.avx.meta2_requested && c.avx.meta2_initialized);
+            remote_after_attach(&mut c, None);
+            request_registration_metadata(&mut c).await;
+            assert!(!remote::initialize_meta2(&mut c, None).await);
+            let mut expected = vec!["CAP REQ :draft/metadata-2\r\n".to_string()];
+            expected.extend(metadata_initialization(None));
+            assert_eq!(metadata_commands(&mut rx), expected);
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_epoch_preserves_legacy_monotonic_metadata_and_classification() {
+    let (mut c, mut rx) = metadata_init_conn();
+    metadata_snapshot(&mut c, true);
+    assert!(remote::initialize_meta2(&mut c, None).await);
+    c.behind_bouncer = true;
+    c.avx.client_tag_deny = Some("*".into());
+    assert!(!apply_registration_facts(&mut c, &cryptirc::ipc::RegistrationFacts::default()));
+    remote_after_attach(&mut c, None);
+    request_registration_metadata(&mut c).await;
+    assert_eq!(c.registration_epoch, 7);
+    assert!(c.behind_bouncer && !c.avx.tags_allowed());
+    assert!(c.avx.meta2_on && c.avx.meta2_initialized);
+    assert!(!remote::initialize_meta2(&mut c, None).await);
+    assert_eq!(metadata_commands(&mut rx), metadata_initialization(None));
+}
+
+#[tokio::test]
+async fn metadata_new_and_offering_snapshot_request_once_in_either_order() {
+    for snapshot_first in [false, true] {
+        let (mut c, mut rx) = metadata_init_conn();
+        // Facts are present, but NEW's offering snapshot has not arrived yet.
+        apply_registration_facts(&mut c, &cryptirc::ipc::RegistrationFacts::default());
+        for snapshot in [snapshot_first, !snapshot_first] {
+            if snapshot {
+                metadata_snapshot(&mut c, false);
+                request_registration_metadata(&mut c).await;
+            } else {
+                remote::note_meta2_offer(&mut c, "NEW", remote::META_CAP, false).await;
+            }
+            assert!(c.avx.meta2_offered && c.avx.meta2_requested);
+        }
+        // Attach cleanup and repeated offers/snapshots must preserve the request guard.
+        remote_after_attach(&mut c, None);
+        recheck_meta_after_attach(&mut c, true, true).await;
+        remote::note_meta2_offer(&mut c, "NEW", remote::META_CAP, false).await;
+        metadata_snapshot(&mut c, false);
+        request_registration_metadata(&mut c).await;
+        assert_eq!(metadata_commands(&mut rx), vec!["CAP REQ :draft/metadata-2\r\n"]);
+    }
+}
+
+#[tokio::test]
+async fn live_metadata_offers_keep_original_ls_new_and_replay_rules_with_any_facts() {
+    for facts in [None, Some(false), Some(true)] {
+        for sub in ["LS", "NEW"] {
+            for (replayed, disabled, registered) in [
+                (false, false, true), (true, false, true),
+                (false, true, true), (false, false, false),
+            ] {
+                let (mut c, mut rx) = metadata_init_conn();
+                if let Some(truncated) = facts {
+                    apply_registration_facts(&mut c, &cryptirc::ipc::RegistrationFacts { truncated, ..Default::default() });
+                }
+                c.registered = registered;
+                if disabled { c.cfg.disabled_caps.push(remote::META_CAP.into()); }
+                remote::note_meta2_offer(&mut c, sub, "server-time draft/metadata-2=value", replayed).await;
+                let offered = !replayed && !disabled;
+                assert_eq!(c.avx.meta2_offered, offered);
+                assert_eq!(c.avx.meta2_requested, offered && sub == "NEW" && registered);
+                let immediate = metadata_commands(&mut rx);
+                assert_eq!(immediate.len(), usize::from(c.avx.meta2_requested));
+                if !replayed {
+                    // The original 001 handler uses this guard after registration.
+                    c.registered = true;
+                    remote::request_meta2(&mut c).await;
+                    let all: Vec<_> = immediate.into_iter().chain(metadata_commands(&mut rx)).collect();
+                    let expected = if offered { vec!["CAP REQ :draft/metadata-2\r\n"] } else { vec![] };
+                    assert_eq!(all, expected);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn lagging_or_truncated_snapshot_never_clears_live_metadata_ack() {
+    for truncated in [false, true] {
+        let (mut c, mut rx) = metadata_init_conn();
+        remote::note_meta2_offer(&mut c, "NEW", remote::META_CAP, false).await;
+        assert!(remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, false));
+        assert!(remote::initialize_meta2(&mut c, None).await);
+        apply_registration_facts(&mut c, &cryptirc::ipc::RegistrationFacts { truncated, ..Default::default() });
+        assert!(c.avx.meta2_on && c.avx.meta2_offered && c.avx.meta2_requested && c.avx.meta2_initialized);
+        request_registration_metadata(&mut c).await;
+        assert!(!remote::initialize_meta2(&mut c, None).await);
+        let mut expected = vec!["CAP REQ :draft/metadata-2\r\n".to_string()];
+        expected.extend(metadata_initialization(None));
+        assert_eq!(metadata_commands(&mut rx), expected);
+    }
+}
+
+#[tokio::test]
+async fn metadata_ack_and_snapshot_initialize_once_in_either_order() {
+    let url = Some("https://chat.example/avatar.png");
+    for (ack_first, attaching) in [(true, false), (false, false), (true, true), (false, true)] {
+        let (mut c, mut rx) = metadata_init_conn();
+        metadata_snapshot(&mut c, false);
+        assert!(c.daemon_registration && !c.avx.meta2_on);
+        // Exercise the same CAP evidence gate and command sender as dispatch_line,
+        // interleaved with SessionSync's facts and initialization path.
+        for ack in [ack_first, !ack_first] {
+            if ack {
+                assert!(remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, false));
+            } else {
+                metadata_snapshot(&mut c, true);
+            }
+            // Live ACK always initializes, including while attach is draining.
+            // Only the snapshot caller waits for the saved-subscription check.
+            if ack || !attaching { remote::initialize_meta2(&mut c, url).await; }
+        }
+        assert!(c.avx.meta2_initialized);
+        assert_eq!(metadata_commands(&mut rx), metadata_initialization(url));
+        // A delayed non-enabling snapshot must not undo the live ACK or its init guard.
+        metadata_snapshot(&mut c, false);
+        assert!(c.avx.meta2_on && c.avx.meta2_initialized);
+        if attaching {
+            remote_after_attach(&mut c, None);
+            assert!(!remote::sync_meta_after_attach(&mut c, url).await);
+            assert_eq!(metadata_commands(&mut rx), vec![remote::meta_sync_line(url)]);
+        }
+        metadata_snapshot(&mut c, true); // periodic snapshots must be inert too
+        assert!(!remote::initialize_meta2(&mut c, url).await);
+        assert!(metadata_commands(&mut rx).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn metadata_restart_keeps_proven_subscription_or_initializes_missing_one() {
+    let same = ReplayEvidence { first_backlog: Some(false), ..Default::default() };
+    let record = SessionRecord { owner: "alice".into(), host: "irc.test".into(), port: 6667, bouncer: false, meta2: true };
+    // An enabled snapshot without a saved initialization record may be the ACK the old
+    // web never handled. Even with continuity, that case needs SUB (and channel SYNC).
+    for saved in [Some(&record), None] {
+        for ev in [Some(same), None] {
+            for url in [Some("https://chat.example/avatar.png"), None] {
+                let (mut c, mut rx) = metadata_init_conn();
+                metadata_snapshot(&mut c, true);
+                // SessionSync defers during Attach until this continuity decision.
+                remote_after_attach(&mut c, ev);
+                restore_meta2_subscription(&mut c, saved, Some("alice"), ev);
+                let subscribed = saved.is_some() && ev.is_some();
+                assert_eq!(c.avx.meta2_initialized, subscribed);
+                assert_eq!(remote::sync_meta_after_attach(&mut c, url).await, !subscribed);
+                let expected = if subscribed { vec![remote::meta_sync_line(url)] } else { metadata_initialization(url) };
+                assert_eq!(metadata_commands(&mut rx), expected);
+                assert!(c.avx.meta2_initialized);
+                // Original replay rules: ACK cannot enable; DEL disables without re-arming init.
+                assert!(!remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, true));
+                assert!(!remote::note_meta2_cap(&mut c, "DEL", remote::META_CAP, true));
+                assert!(!c.avx.meta2_on && c.avx.meta2_initialized);
+                assert!(remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, false));
+                metadata_snapshot(&mut c, true);
+                assert!(!remote::initialize_meta2(&mut c, url).await);
+                assert!(metadata_commands(&mut rx).is_empty());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn metadata_reconnect_and_live_del_rearm_initialization() {
+    let (mut c, mut rx) = metadata_init_conn();
+    for reset in 0..3 {
+        match reset {
+            0 => {}, // fresh session
+            1 => c.avx.reset(), // Connecting/Reconnecting, re-registration, Drop and Dial
+            _ => { remote::note_meta2_cap(&mut c, "DEL", remote::META_CAP, false); }
+        }
+        assert!(!c.avx.meta2_initialized);
+        assert!(!remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, true));
+        assert!(!remote::note_meta2_cap(&mut c, "ACK", "-draft/metadata-2", false));
+        assert!(!remote::initialize_meta2(&mut c, None).await);
+        assert!(metadata_commands(&mut rx).is_empty());
+        metadata_snapshot(&mut c, true);
+        assert!(remote::initialize_meta2(&mut c, None).await);
+        assert!(remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, false));
+        assert!(!remote::initialize_meta2(&mut c, None).await);
+        assert_eq!(metadata_commands(&mut rx), metadata_initialization(None));
+    }
+}
+
+#[tokio::test]
+async fn metadata_live_ack_ignores_incomplete_facts_but_init_waits_for_registration() {
+    let (mut c, mut rx) = metadata_init_conn();
+    apply_registration_facts(&mut c, &cryptirc::ipc::RegistrationFacts { truncated: true, ..Default::default() });
+    assert!(!c.avx.meta2_on, "incomplete facts alone cannot enable metadata");
+    assert!(remote::note_meta2_cap(&mut c, "ACK", remote::META_CAP, false));
+    assert!(c.avx.meta2_on, "live ACK is independent of daemon facts");
+    c.registered = false;
+    assert!(!remote::initialize_meta2(&mut c, None).await);
+    c.registered = true;
+    c.connected = false;
+    assert!(!remote::initialize_meta2(&mut c, None).await);
+    assert!(metadata_commands(&mut rx).is_empty());
+    c.connected = true;
+    assert!(remote::initialize_meta2(&mut c, None).await);
+    assert_eq!(metadata_commands(&mut rx), metadata_initialization(None));
+}
+
+#[tokio::test]
+async fn metadata_withdrawal_invalidates_the_saved_subscription() {
+    let f = fixture();
+    f.conn_owners.insert("c".into(), "alice".into());
+    f.store.ensure_session_meta2("c", "alice", ("irc.test", 6667), &f.conn_owners);
+    f.store.set_session_meta2("c", false); // live DEL
+    let record = f.store.session("c").unwrap();
+    assert!(!record.meta2);
+    let (mut c, mut rx) = metadata_init_conn();
+    metadata_snapshot(&mut c, true);
+    let same = ReplayEvidence { first_backlog: Some(false), ..Default::default() };
+    restore_meta2_subscription(&mut c, Some(&record), Some("alice"), Some(same));
+    assert!(remote::sync_meta_after_attach(&mut c, None).await);
+    assert_eq!(metadata_commands(&mut rx), metadata_initialization(None));
+}

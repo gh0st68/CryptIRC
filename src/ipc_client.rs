@@ -368,6 +368,25 @@ async fn handle_connection(stream: UnixStream, state: &AppState, colocated: bool
     result
 }
 
+/// Facts may reset the old session; the top-level mapping then corrects both the
+/// facts fallback and live 005, as it did before registration facts were added.
+pub(crate) fn apply_session_registration(c: &mut irc::IrcConnection, facts: Option<&cryptirc::ipc::RegistrationFacts>, casemapping: &str) -> bool {
+    c.daemon_registration = facts.is_some();
+    let replaced = facts.map_or(false, |f| crate::avatar::apply_registration_facts(c, f));
+    // Choose once: temporarily applying a stale, wider facts mapping can merge
+    // distinct channels before the authoritative mapping has a chance to correct it.
+    let mapping = if !casemapping.is_empty() {
+        Some(cryptirc::ircproto::CaseMapping::from_token(casemapping))
+    } else {
+        facts.filter(|f| !f.truncated).and_then(|f| cryptirc::ircproto::CaseMapping::from_isupport(&f.isupport))
+    };
+    if let Some(m) = mapping {
+        c.note_server_casemapping(m);
+        c.set_casemapping(m);
+    }
+    replaced
+}
+
 async fn handle_message(
     msg: IpcMessage,
     state: &AppState,
@@ -420,6 +439,7 @@ async fn handle_message(
                 // never re-fires ServerEvent::Connected — anything gated
                 // on "just (re)connected" goes stale until a manual reload.
                 c.registered = false;
+                c.avx.reset();
                 // Drop in-flight WHO bookkeeping: the socket that owed us a
                 // 315 ENDOFWHO is gone, so those entries would never clear
                 // and would suppress a genuine post-reconnect /who. The
@@ -455,27 +475,8 @@ async fn handle_message(
                 let evt = match lifecycle {
                     ConnLifecycle::Connecting => {
                         let mut c = conn.lock().await;
-                        // r5 (crash recovery): a connection attempt is starting, so the session is not
-                        // registered until its 001 snapshot. After an irc-core crash the web kept the
-                        // entry's `registered = true` from the dead daemon's session; AttachComplete
-                        // re-dialed it, the sessions got `connecting` (app.js: network offline) but the
-                        // fresh session's 001 snapshot was no false→true edge, so no `connected` ever
-                        // followed — the network looked down although IRC was up, until a manual
-                        // Connect / reload. Reset like the Reconnecting arm does.
-                        c.connected = false;
-                        c.registered = false;
-                        c.who_pending.clear();
-                        c.whois_seen.clear();
-                        c.seen_userhosts.clear();
-                        // A new session negotiates again (avatar classification).
-                        c.cap_ls_done = false;
-                        c.behind_bouncer = false;
-                        // Remote avatars: announces learned on the old session go with it, and
-                        // ours are announced anew on this one.
-                        c.avx.reset();
+                        c.reset_irc_session();
                         state.avatar_remote.forget_conn(&conn_id);
-                        c.resync_gen = c.resync_gen.wrapping_add(1);
-                        c.resync_busy = false;
                         let server = c.dial_endpoint.as_ref().map_or_else(|| c.cfg.server.clone(), |(s, _)| s.clone());
                         ServerEvent::Connecting { conn_id: conn_id.clone(), server }
                     }
@@ -483,23 +484,8 @@ async fn handle_message(
                     ConnLifecycle::Disconnected { .. } => return,
                     ConnLifecycle::Reconnecting { attempt, delay_secs, reason } => {
                         let mut c = conn.lock().await;
-                        c.connected = false;
-                        c.registered = false;
-                        // Same rationale as the Disconnected arm: the old socket's
-                        // outstanding WHOs will never be answered, so clear the pending
-                        // set rather than let stale keys block future auto-WHOs.
-                        c.who_pending.clear();
-                        c.whois_seen.clear();
-                        c.seen_userhosts.clear();
-                        // A new session negotiates again (avatar classification).
-                        c.cap_ls_done = false;
-                        c.behind_bouncer = false;
-                        // Remote avatars: announces learned on the old session go with it, and
-                        // ours are announced anew on this one.
-                        c.avx.reset();
+                        c.reset_irc_session();
                         state.avatar_remote.forget_conn(&conn_id);
-                        c.resync_gen = c.resync_gen.wrapping_add(1);
-                        c.resync_busy = false;
                         ServerEvent::Reconnecting { conn_id: conn_id.clone(), attempt, delay_secs, reason }
                     }
                 };
@@ -507,7 +493,7 @@ async fn handle_message(
             }
         }
 
-        IpcMessage::SessionSync { conn_id, nick, channels, registered, connected, lag_ms, message_tags, echo_message_enabled, self_userhost, casemapping, dial_server, dial_port, chanmodes } => {
+        IpcMessage::SessionSync { conn_id, nick, channels, registered, connected, lag_ms, message_tags, echo_message_enabled, self_userhost, casemapping, dial_server, dial_port, chanmodes, registration } => {
             // F2 (rust-ws2) cleanup: a live daemon session whose conn_id is a RE-CASED
             // spelling of a network UUID is a duplicate minted through the old
             // ownership bypass (the server only ever generates lower-case ids). The web
@@ -544,6 +530,15 @@ async fn handle_message(
                 let mut deferred_stale: Option<Vec<String>> = None;
                 {
                     let mut c = conn.lock().await;
+                    // Preserve the legacy registered→unregistered metadata reset,
+                    // before merging the incoming session's retained facts.
+                    if c.registered && !registered { c.avx.reset(); }
+                    // Detect replacement before adopting any fields from this snapshot.
+                    // Saved restrictions and subscription hints belong to the old epoch too.
+                    if apply_session_registration(&mut c, registration.as_ref(), &casemapping) {
+                        state.avatars.forget_session(&conn_id);
+                        state.avatar_remote.forget_conn(&conn_id);
+                    }
                     // The endpoint the daemon really dials (an r3+ irc_core reports it).
                     let reports_endpoint = !dial_server.is_empty();
                     if reports_endpoint {
@@ -573,14 +568,9 @@ async fn handle_message(
                         let tokens: Vec<String> = t.split(' ').map(str::to_string).collect();
                         c.chanmodes.learn(&tokens);
                     }
-                    // SessionSync is the single authoritative source for
-                    // registered/Connected — the daemon always calls its own
-                    // sync() BEFORE forwarding the raw "001" line, so
-                    // dispatch_line's 001 arm deliberately does nothing (see
-                    // its comment) rather than racing this same flag. Only
-                    // fire Connected on the actual false→true edge, so a
-                    // later SessionSync (still registered:true, e.g. after a
-                    // JOIN) doesn't re-emit it.
+                    // SessionSync alone owns registered/Connected. Live 001 records
+                    // epoch adoption evidence, but leaves these flags to the snapshot
+                    // even when coalescing delays it. Only fire Connected on false→true.
                     if registered && !c.registered {
                         let server = c.dial_endpoint.as_ref().map_or_else(|| c.cfg.server.clone(), |(s, _)| s.clone());
                         newly_registered = Some((c.nick.clone(), server));
@@ -624,11 +614,22 @@ async fn handle_message(
                     // is the "rebuild display state via an ordinary resync
                     // burst" mechanism: no channel-state protocol of its own,
                     // just the same commands a manual /names would send.
-                    // A daemon that knows the server's CASEMAPPING says so (additive field).
-                    if !casemapping.is_empty() {
-                        let m = cryptirc::ircproto::CaseMapping::from_token(&casemapping);
-                        c.note_server_casemapping(m);
-                        c.set_casemapping(m);
+                    if let Some(facts) = &registration {
+                        let (host, port) = c.dial_endpoint.clone().unwrap_or_else(|| (c.cfg.server.clone(), c.cfg.port));
+                        // Saved bouncer evidence may restrict facts, never loosen them.
+                        if let Some(record) = state.avatars.session(&conn_id).filter(|r|
+                            r.owner == username && r.host == crate::avatar::canonical_host(&host) && r.port == port) {
+                            c.behind_bouncer |= record.bouncer;
+                        }
+                        crate::avatar::request_registration_metadata(&mut c).await;
+                        if c.cap_ls_done {
+                            state.avatars.refresh_session(&conn_id, &username, (&host, port), c.behind_bouncer, &state.conn_owners);
+                        } else {
+                            state.avatars.forget_session(&conn_id);
+                        }
+                        if !facts.truncated && !c.avx.meta2_on {
+                            state.avatars.set_session_meta2(&conn_id, false);
+                        }
                     }
                     // codex P2 ipc_client.rs:302: the replay snapshot is authoritative for
                     // membership. A channel this web still tracks but the daemon says we
@@ -701,6 +702,12 @@ async fn handle_message(
                     }
                     if !resync.is_empty() { c.resync_busy = true; }
                     resync_gen = c.resync_gen;
+                }
+                // SyncSlot may move the enabling snapshot past its live ACK. Either
+                // arrival initializes once. Attach waits for continuity/record checks so
+                // an existing subscription only needs the legacy SET at AttachComplete.
+                if attached_link() != 0 {
+                    crate::avatar::remote::ensure_meta2_initialized(state, &username, &conn).await;
                 }
                 if let Some(stale) = deferred_stale {
                     tokio::spawn(deferred_membership_check(state.clone(), username.clone(), conn_id.clone(), conn.clone(), stale, resync_gen));
@@ -1158,7 +1165,7 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
         daemon_channels: Vec::new(),
         user_joins: std::collections::HashSet::new(),
         chanmodes: cryptirc::ircproto::ChanModes::default(),
-        whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, replay_view: None, avx: Default::default(),
+        whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, daemon_registration: false, registration_epoch: 0, live_registration_link: None, replay_view: None, avx: Default::default(),
         cfg,
     }));
     state.connections.insert(conn_id.to_string(), conn.clone());
@@ -1197,7 +1204,11 @@ pub async fn dial(state: &AppState, username: &str, cfg: NetworkConfig, out_tx: 
     persist_dialed_endpoints();
     daemon_stopped().remove(&conn_id);
     let live = state.connections.get(&conn_id).map(|c| c.clone());
-    if let Some(conn) = live { conn.lock().await.dial_endpoint = Some(endpoint); }
+    if let Some(conn) = live {
+        let mut c = conn.lock().await;
+        c.dial_endpoint = Some(endpoint);
+        c.avx.reset();
+    }
     let _ = out_tx.send(msg);
 }
 
@@ -1206,6 +1217,8 @@ pub async fn dial(state: &AppState, username: &str, cfg: NetworkConfig, out_tx: 
 /// to be down right when the user disconnects, the daemon will simply have
 /// nothing to tear down (there's no live socket for it to hold open either).
 pub async fn send_drop(state: &AppState, conn_id: &str, reason: String) {
+    let live = state.connections.get(conn_id).map(|c| c.clone());
+    if let Some(conn) = live { conn.lock().await.avx.reset(); }
     forget_dialed_endpoint(conn_id);
     daemon_stopped().remove(conn_id);
     // A re-cased alias session of this network (v-irc I1) goes with it. The entry is
