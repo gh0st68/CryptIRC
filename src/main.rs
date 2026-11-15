@@ -143,6 +143,8 @@ pub struct AppState {
     /// User avatars (avatar.rs): the per-account index, the admin on/off switch, the
     /// processing slot and the lookup limiter.
     pub avatars:             Arc<avatar::AvatarStore>,
+    /// Avatars of people on other CryptIRC servers (avatar/remote.rs): fetch cache, limits.
+    pub avatar_remote:       Arc<avatar::remote::RemoteAvatars>,
 }
 
 /// #33: max simultaneous outbound link-preview fetches, process-wide.
@@ -757,6 +759,9 @@ pub enum ServerEvent {
     IrcMessage       { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind, msg_id: u64, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String>, #[serde(default, skip_serializing_if = "std::ops::Not::not")] replayed: bool },
     /// Echo of user's own sent message — for multi-device sync
     IrcEcho          { conn_id: String, from: String, target: String, text: String, ts: i64, kind: MessageKind, msg_id: u64 },
+    /// Remote avatars: something changed for these nicks on this connection (an announce was
+    /// learned or dropped, a picture arrived) — the app asks again (POST /api/avatar/lookup).
+    AvatarHint       { conn_id: String, nicks: Vec<String> },
     IrcJoin          { conn_id: String, nick: String,  channel: String, ts: i64 },
     /// IRCv3 extended-join: includes account and realname
     IrcJoinEx        { conn_id: String, nick: String,  channel: String, account: String, realname: String, ts: i64 },
@@ -1388,6 +1393,9 @@ async fn main() -> Result<()> {
     let certs    = Arc::new(CertStore::new(&data_dir, crypto.clone()));
     let logger   = Arc::new(EncryptedLogger::new(&data_dir, crypto.clone()));
     let auth     = Arc::new(AuthManager::new(&data_dir)?);
+    // Remote avatars: existing bans must hold for announces from the first line on.
+    let disabled_n = auth.load_disabled_users().await;
+    if disabled_n > 0 { info!("{} disabled account(s)", disabled_n); }
     let vapid    = notifications::load_or_generate_vapid(&data_dir)?;
     let notifier = Arc::new(NotificationManager::new(&data_dir, vapid));
     let e2e_store = Arc::new(E2EStore::new(&data_dir));
@@ -1420,6 +1428,13 @@ async fn main() -> Result<()> {
     let bots = Arc::new(bots::load_all(&data_dir).await);
     info!("Loaded bot config for {} user(s)", bots.len());
     let avatars = Arc::new(avatar::AvatarStore::load(&data_dir, avatars_enabled).await);
+    let user_events: UserEventMap = Arc::new(DashMap::new());
+    let avatar_remote = Arc::new(avatar::remote::RemoteAvatars::new(&data_dir, preview_sem.clone(), user_events.clone(), &base_url));
+    // Sharing with other servers needs a public base URL they can reach (else: unavailable).
+    avatars.set_public_base(avatar::remote::announce_base(&base_url, avatar_remote.test_loopback()));
+    if avatars.public_base().is_none() {
+        info!("Avatars: sharing with other CryptIRC servers is unavailable (CRYPTIRC_BASE_URL is not a public https URL)");
+    }
 
     let state = AppState {
         connections:         Arc::new(DashMap::new()),
@@ -1430,7 +1445,7 @@ async fn main() -> Result<()> {
         connect_tasks:       Arc::new(DashMap::new()),
         ipc_out:             Arc::new(tokio::sync::Mutex::new(None)),
         crypto, certs, logger, auth, notifier, e2e_store, paste_store, preview_service,
-        user_events:         Arc::new(DashMap::new()),
+        user_events,
         active_sessions:     Arc::new(DashMap::new()),
         upload_dir, base_url, from_email,
         data_dir: data_dir.clone(),
@@ -1456,6 +1471,7 @@ async fn main() -> Result<()> {
         gif_client,
         news_cache:       Arc::new(tokio::sync::Mutex::new(None)),
         avatars,
+        avatar_remote,
     };
 
     // irc-core daemon split: AppState.connections/conn_owners are pure in-memory
@@ -1613,6 +1629,10 @@ async fn main() -> Result<()> {
                                          .layer(DefaultBodyLimit::max(avatar::MAX_UPLOAD_BYTES)))
         .route("/api/avatar/lookup",     post(avatar::route_lookup).layer(DefaultBodyLimit::max(avatar::LOOKUP_BODY_MAX)))
         .route("/avatar/:token",         get(avatar::route_image))
+        // Remote avatars: an owner's public picture for other servers, and pictures fetched
+        // from other servers for this instance's sessions.
+        .route("/avatar/pub/:file",      get(avatar::route_public_image))
+        .route("/avatar/remote/:rid",    get(avatar::remote::route_remote_image))
         .route("/admin/user/:username/avatar", axum::routing::delete(avatar::route_admin_remove))
         .route("/admin/users",           get(route_admin_users))
         .route("/admin/status",          get(route_admin_status))
@@ -2631,6 +2651,8 @@ async fn route_admin_disable_user(State(state): State<AppState>, headers: Header
             // account's DMs/mentions. Lowercase to match the on-disk (sanitized, lowercase)
             // username filename regardless of the case the admin typed in the URL.
             state.purge_push_subscriptions(&target.to_lowercase()).await;
+            // Remote avatars: a disabled account's IRC session may live on; clear its value.
+            avatar::remote::republish(&state.auth, &state.avatars, &state.connections, &state.conn_owners, &target.to_lowercase()).await;
             (StatusCode::OK, Json(Msg { message: format!("User '{}' disabled.", target) })).into_response()
         }
         Err(e) => (StatusCode::NOT_FOUND, Json(Msg { message: e.to_string() })).into_response(),
@@ -2826,7 +2848,11 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
         if !k.is_empty() { *state.tenor_server_key.write().await = k.to_string(); }
     }
     if let Some(e) = body.lastfm_enabled { *state.lastfm_enabled.write().await = e; }
+    let avatars_switched = body.avatars_enabled.map_or(false, |on| on != state.avatars.enabled());
     if let Some(on) = body.avatars_enabled { state.avatars.set_enabled(on); }
+    if avatars_switched {
+        avatar::remote::republish_all(&state.auth, &state.avatars, &state.connections, &state.conn_owners).await;
+    }
     if let Some(k) = body.lastfm_api_key {
         let k = k.trim();
         if !k.is_empty() { *state.lastfm_api_key.write().await = k.to_string(); }
@@ -6853,10 +6879,29 @@ async fn handle_command(
                 // PRIVMSG/NOTICE text split into pieces that reach the recipients whole, a
                 // line IRC cannot carry refused (nothing sent). Each line that went out is
                 // logged and echoed below as its own message, never more than the wire got.
-                let wire = match crate::irc::fit_outgoing_line(&safe, &nick, &self_userhost) {
+                let mut wire = match crate::irc::fit_outgoing_line(&safe, &nick, &self_userhost) {
                     Ok(w) => w,
                     Err(why) => { drop(c); send_self(ServerEvent::Error { message: why }); return; }
                 };
+                // Remote avatars: an opted-in user's PRIVMSG / NOTICE (not a CTCP other than
+                // ACTION) carries the announce tag on its first line — the first time to a
+                // target, then on a URL change or every 30 min. Dropped (never the message)
+                // when the tag would not fit; only with message-tags, unless CLIENTTAGDENY
+                // refuses it.
+                if (out.verb == "PRIVMSG" || out.verb == "NOTICE") && out.params.len() >= 2 && c.message_tags && c.avx.tags_allowed() {
+                    let text = &out.params[1];
+                    let plain_ctcp = text.starts_with('\u{1}') && !text.starts_with("\u{1}ACTION ");
+                    if !plain_ctcp {
+                        if let Some(url) = avatar::remote::share_url(&state, username) {
+                            // Account status from disk (codex astra L remote.rs:1056), only when due.
+                            if state.avatar_remote.announce_due(&conn_id, &out.params[0], &url) && avatar::remote::owner_active(&state.auth, username).await {
+                                if let Some(first) = wire.first_mut() {
+                                    if let Some(tagged) = avatar::remote::with_tag(first, &url) { *first = tagged; }
+                                }
+                            }
+                        }
+                    }
+                }
                 // F2: capture the connection's live state under the same lock as the send.
                 // If it isn't registered/connected, the daemon drops this RawSend (it's in
                 // reconnect/backoff), so we must NOT log + IrcEcho the message as sent — that

@@ -567,6 +567,31 @@ impl AuthManager {
         self.deleting_users.contains_key(uname)
     }
 
+    /// Whether `uname` is disabled by an admin, from the in-memory set (no disk read).
+    pub fn is_disabled_cached(&self, uname: &str) -> bool {
+        self.disabled_users.contains_key(uname)
+    }
+
+    /// Startup: put every account whose record says `disabled` into the in-memory set (it was
+    /// filled only by logins and admin actions, so a web restart forgot existing bans for
+    /// is_disabled_cached — codex astra L remote.rs:1056). Returns how many.
+    pub async fn load_disabled_users(&self) -> usize {
+        let dir = PathBuf::from(&self.data_dir).join("users");
+        let Ok(mut rd) = tokio::fs::read_dir(&dir).await else { return 0 };
+        let mut n = 0;
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let Some(name) = entry.file_name().to_str().and_then(|f| f.strip_suffix(".json")).map(str::to_string) else { continue };
+            if !is_safe_username(&name) || name != name.to_lowercase() {
+                continue;
+            }
+            if self.get_user(&name).await.map_or(false, |u| u.disabled) {
+                self.disabled_users.insert(name, ());
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// #22: get (creating if needed) the per-username serialization lock.
     fn user_lock(&self, uname: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.user_locks

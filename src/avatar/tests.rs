@@ -289,6 +289,7 @@ struct Fixture {
     store: Arc<AvatarStore>,
     connections: Arc<DashMap<String, Arc<Mutex<IrcConnection>>>>,
     conn_owners: Arc<DashMap<String, String>>,
+    remote: Arc<remote::RemoteAvatars>,
 }
 
 impl Drop for Fixture {
@@ -311,7 +312,16 @@ fn fixture() -> Fixture {
     .unwrap();
     let auth = Arc::new(AuthManager::new(dir.to_str().unwrap()).unwrap());
     let store = Arc::new(AvatarStore::new(dir.to_str().unwrap(), true));
-    Fixture { dir, auth, store, connections: Arc::new(DashMap::new()), conn_owners: Arc::new(DashMap::new()) }
+    std::fs::create_dir_all(dir.join("avatar_remote")).unwrap();
+    let remote = Arc::new(remote::RemoteAvatars::with(
+        dir.join("avatar_remote"),
+        Arc::new(Semaphore::new(8)),
+        Arc::new(DashMap::new()),
+        "https://cryptirc.example/chat",
+        true,
+        Duration::from_secs(2),
+    ));
+    Fixture { dir, auth, store, connections: Arc::new(DashMap::new()), conn_owners: Arc::new(DashMap::new()), remote }
 }
 
 impl Fixture {
@@ -321,12 +331,13 @@ impl Fixture {
             store: self.store.clone(),
             connections: self.connections.clone(),
             conn_owners: self.conn_owners.clone(),
+            remote: self.remote.clone(),
             link: || 1,
         }
     }
     async fn give_avatar(&self, user: &str, color: [u8; 3]) -> AvatarMeta {
         let png = encode(&DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb(color))), ImageFormat::Png);
-        self.store.save(&self.auth, user, self.auth.account_epoch(user), process_image(&png).unwrap()).await.unwrap()
+        self.store.save(&self.auth, user, self.auth.account_epoch(user), process_image(&png).unwrap(), true).await.unwrap()
     }
     /// A live connection of `owner` dialing `server:port` as `nick`, in `channels`.
     fn add_conn(&self, owner: &str, nick: &str, server: &str, port: u16, channels: &[(&str, &[&str])]) -> String {
@@ -407,21 +418,21 @@ async fn deleted_or_deleting_accounts_cannot_store_and_purge_forgets() {
     let f = fixture();
     let png = encode(&two_tone(16, 16), ImageFormat::Png);
     std::fs::remove_file(f.dir.join("users/mallory.json")).unwrap();
-    assert_eq!(f.store.save(&f.auth, "mallory", 0, process_image(&png).unwrap()).await.err(), Some(AvatarError::Gone));
-    assert_eq!(f.store.save(&f.auth, "../x", 0, process_image(&png).unwrap()).await.err(), Some(AvatarError::Gone));
+    assert_eq!(f.store.save(&f.auth, "mallory", 0, process_image(&png).unwrap(), true).await.err(), Some(AvatarError::Gone));
+    assert_eq!(f.store.save(&f.auth, "../x", 0, process_image(&png).unwrap(), true).await.err(), Some(AvatarError::Gone));
     let meta = f.give_avatar("carol", [1, 2, 3]).await;
     let epoch = f.auth.account_epoch("carol");
     f.auth.begin_account_deletion("carol").await;
-    assert_eq!(f.store.save(&f.auth, "carol", epoch, process_image(&png).unwrap()).await.err(), Some(AvatarError::Gone));
+    assert_eq!(f.store.save(&f.auth, "carol", epoch, process_image(&png).unwrap(), true).await.err(), Some(AvatarError::Gone));
     f.store.purge_user("carol").await;
     assert!(f.store.owner_of(&meta.token).is_none());
     assert!(files_of(&f.dir.join("users/carol")).is_empty());
     f.auth.end_account_deletion("carol");
     // Audit H (avatar.rs:787): an upload accepted for the deleted account, completed after
     // the same name was registered again, must not land on the new account.
-    assert_eq!(f.store.save(&f.auth, "carol", epoch, process_image(&png).unwrap()).await.err(), Some(AvatarError::Gone));
+    assert_eq!(f.store.save(&f.auth, "carol", epoch, process_image(&png).unwrap(), true).await.err(), Some(AvatarError::Gone));
     assert!(f.store.meta("carol").is_none() && files_of(&f.dir.join("users/carol")).is_empty());
-    assert!(f.store.save(&f.auth, "carol", f.auth.account_epoch("carol"), process_image(&png).unwrap()).await.is_ok(), "the new account's own upload works");
+    assert!(f.store.save(&f.auth, "carol", f.auth.account_epoch("carol"), process_image(&png).unwrap(), true).await.is_ok(), "the new account's own upload works");
     // An account re-created behind the server's back does not inherit the old token.
     let alice = f.give_avatar("alice", [9, 9, 9]).await;
     std::fs::remove_dir_all(f.dir.join("users/alice")).unwrap();
@@ -460,6 +471,8 @@ fn router(state: AvatarRouteState, base: &str) -> axum::Router {
         )
         .route("/api/avatar/lookup", post(route_lookup).layer(DefaultBodyLimit::max(LOOKUP_BODY_MAX)))
         .route("/avatar/:token", get(route_image))
+        .route("/avatar/pub/:file", get(route_public_image))
+        .route("/avatar/remote/:rid", get(remote::route_remote_image))
         .route("/admin/user/:username/avatar", delete(route_admin_remove));
     let app = if base.is_empty() { inner } else { axum::Router::new().nest(base, inner) };
     app.layer(axum::middleware::from_fn(crate::security_headers_mw)).with_state(state)
@@ -1001,7 +1014,7 @@ async fn pictures_stop_as_soon_as_the_owner_is_being_deleted() {
 
 #[test]
 fn a_record_is_restored_only_for_the_same_irc_core_session() {
-    let rec = SessionRecord { owner: "bob".into(), host: "irc.test".into(), port: 6667, bouncer: false };
+    let rec = SessionRecord { owner: "bob".into(), host: "irc.test".into(), port: 6667, bouncer: false, meta2: false };
     let same = ReplayEvidence { first_backlog: Some(false), restarted: false, no_backlog_info: false };
     let ep = Some(("IRC.Test.", 6667));
     assert_eq!(restorable(Some(&rec), Some("bob"), ep, Some(same)), Some(false), "same session, plain");
@@ -1055,7 +1068,7 @@ async fn records_are_bounded_by_saved_networks_cleared_and_persisted() {
     store.record_session(&a, "alice", ("IRC.Test.", 6667), false, &owners);
     store.record_session(&b, "mallory", ("irc.test", 6667), false, &owners);
     store.record_session(&gone, "alice", ("irc.test", 6667), false, &owners);
-    assert_eq!(store.session(&a), Some(SessionRecord { owner: "alice".into(), host: "irc.test".into(), port: 6667, bouncer: false }));
+    assert_eq!(store.session(&a), Some(SessionRecord { owner: "alice".into(), host: "irc.test".into(), port: 6667, bouncer: false, meta2: false }));
     assert!(store.session(&b).is_none(), "only for the owner's own saved network");
     assert!(store.session(&gone).is_none(), "only for a saved network");
     store.record_session(&b, "bob", ("irc.test", 6697), false, &owners);
@@ -1151,4 +1164,335 @@ fn replayed_cap_lines_only_ever_add_restrictions() {
     assert!(!apply_restore(&mut r3, None) && !r3.cap_ls_done, "no decision, no restore");
     r3.registered = false;
     assert!(!apply_restore(&mut r3, Some(false)), "not live");
+}
+
+// ─── Sharing with other servers (v2) ──────────────────────────────────────────
+
+#[tokio::test]
+async fn a_first_avatar_shares_and_the_public_id_rotates() {
+    let f = fixture();
+    f.store.set_public_base(Some("https://chat.example/cryptirc".into()));
+    let m = f.give_avatar("alice", [200, 10, 10]).await;
+    assert!(m.share && valid_token(&m.pub_id) && m.pub_id != m.token);
+    let url = f.store.public_url("alice").unwrap();
+    assert_eq!(url, format!("https://chat.example/cryptirc/avatar/pub/{}-{}.png", m.pub_id, m.v));
+    assert_eq!(f.store.owner_of_pub(&m.pub_id).as_deref(), Some("alice"));
+    // A replacement keeps the choice and the id (the URL changes with the version).
+    let m2 = f.give_avatar("alice", [10, 200, 10]).await;
+    assert_eq!((m2.share, m2.pub_id.as_str()), (true, m.pub_id.as_str()));
+    assert_ne!(f.store.public_url("alice").unwrap(), url);
+    // Off: the id is gone for good; on again: a new one.
+    let off = f.store.set_share("alice", false).await.unwrap();
+    assert!(!off.share && off.pub_id.is_empty() && f.store.public_url("alice").is_none());
+    assert!(f.store.owner_of_pub(&m.pub_id).is_none());
+    let on = f.store.set_share("alice", true).await.unwrap();
+    assert!(on.share && valid_token(&on.pub_id) && on.pub_id != m.pub_id);
+    // Hidden from local users → not shared either; avatars off → nothing; no base → nothing.
+    f.store.set_visible("alice", false).await.unwrap();
+    assert!(f.store.public_url("alice").is_none());
+    f.store.set_visible("alice", true).await.unwrap();
+    f.store.set_enabled(false);
+    assert!(f.store.public_url("alice").is_none());
+    f.store.set_enabled(true);
+    f.store.set_public_base(None);
+    assert!(f.store.public_url("alice").is_none());
+    // Removal forgets the id; a reload indexes it again.
+    f.store.set_public_base(Some("https://chat.example".into()));
+    let pid = f.store.meta("alice").unwrap().pub_id;
+    let reloaded = AvatarStore::load(f.dir.to_str().unwrap(), true).await;
+    assert_eq!(reloaded.owner_of_pub(&pid).as_deref(), Some("alice"));
+    assert!(f.store.remove("alice").await);
+    assert!(f.store.owner_of_pub(&pid).is_none());
+}
+
+#[tokio::test]
+async fn an_avatar_saved_before_sharing_existed_is_not_shared() {
+    let f = fixture();
+    f.store.set_public_base(Some("https://chat.example".into()));
+    let m = f.give_avatar("bob", [1, 2, 3]).await;
+    // A v1 avatar.json (no share / pub_id fields).
+    let legacy = serde_json::json!({ "token": m.token, "v": m.v, "visible": true });
+    std::fs::write(f.dir.join("users/bob/avatar.json"), legacy.to_string()).unwrap();
+    let store = AvatarStore::load(f.dir.to_str().unwrap(), true).await;
+    store.set_public_base(Some("https://chat.example".into()));
+    let meta = store.meta("bob").unwrap();
+    assert!(!meta.share && meta.pub_id.is_empty());
+    assert!(store.public_url("bob").is_none());
+    // A replacement upload keeps that choice.
+    let p = encode(&DynamicImage::ImageRgb8(RgbImage::from_pixel(16, 16, Rgb([9, 9, 9]))), ImageFormat::Png);
+    let m2 = store.save(&f.auth, "bob", f.auth.account_epoch("bob"), process_image(&p).unwrap(), true).await.unwrap();
+    assert!(!m2.share);
+    // A malformed public id makes the file unreadable rather than half-trusted.
+    let bad = serde_json::json!({ "token": m.token, "v": m.v, "visible": true, "share": true, "pub_id": "../x" });
+    std::fs::write(f.dir.join("users/bob/avatar.json"), bad.to_string()).unwrap();
+    assert!(read_meta(&f.dir.join("users/bob/avatar.json")).await.is_none());
+}
+
+#[tokio::test]
+async fn the_public_picture_is_served_only_while_shared() {
+    let f = fixture();
+    f.store.set_public_base(Some("https://chat.example".into()));
+    let m = f.give_avatar("alice", [200, 10, 10]).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(f.route_state(), "/cryptirc");
+    let _srv = Server(tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }));
+    let http = reqwest::Client::new();
+    let url = |pid: &str, v: &str| format!("http://{}/cryptirc/avatar/pub/{}-{}.png", addr, pid, v);
+    let r = http.get(url(&m.pub_id, &m.v)).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let h = r.headers().clone();
+    assert_eq!(h.get("content-type").unwrap(), "image/png");
+    assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
+    assert_eq!(h.get("cache-control").unwrap(), "public, max-age=300");
+    assert_eq!(h.get("etag").unwrap().to_str().unwrap(), format!("\"{}\"", m.v));
+    let body = r.bytes().await.unwrap();
+    assert_eq!(image::load_from_memory(&body).unwrap().width(), SIZE_LARGE);
+    let r = http.get(url(&m.pub_id, &m.v)).header("if-none-match", format!("\"{}\"", m.v)).send().await.unwrap();
+    assert_eq!(r.status(), 304);
+    // Wrong version / token-as-id / junk: 404, never cached.
+    for (pid, v) in [(m.pub_id.as_str(), "0000000000000000"), (m.token.as_str(), m.v.as_str()), ("x", "y")] {
+        let r = http.get(url(pid, v)).send().await.unwrap();
+        assert_eq!(r.status(), 404, "{pid}-{v}");
+        assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
+    }
+    // Hidden, disabled, avatars off, sharing off: 404.
+    f.store.set_visible("alice", false).await.unwrap();
+    assert_eq!(http.get(url(&m.pub_id, &m.v)).send().await.unwrap().status(), 404);
+    f.store.set_visible("alice", true).await.unwrap();
+    f.store.set_enabled(false);
+    assert_eq!(http.get(url(&m.pub_id, &m.v)).send().await.unwrap().status(), 404);
+    f.store.set_enabled(true);
+    assert_eq!(http.get(url(&m.pub_id, &m.v)).send().await.unwrap().status(), 200);
+    std::fs::write(f.dir.join("users/alice.json"), r#"{"username":"alice","email":"","password_hash":"x","verified":false,"created_at":0,"disabled":true}"#).unwrap();
+    assert_eq!(http.get(url(&m.pub_id, &m.v)).send().await.unwrap().status(), 404, "disabled owner");
+    let f2 = fixture();
+    f2.store.set_public_base(Some("https://chat.example".into()));
+    let m2 = f2.give_avatar("bob", [1, 1, 1]).await;
+    f2.store.set_share("bob", false).await.unwrap();
+    let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    let app2 = router(f2.route_state(), "");
+    let _srv2 = Server(tokio::spawn(async move { axum::serve(listener2, app2).await.unwrap() }));
+    assert_eq!(http.get(format!("http://{}/avatar/pub/{}-{}.png", addr2, m2.pub_id, m2.v)).send().await.unwrap().status(), 404);
+}
+
+#[tokio::test]
+async fn sharing_settings_and_remote_lookups_through_the_routes() {
+    let f = fixture();
+    f.store.set_public_base(Some("https://chat.example".into()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(f.route_state(), "/cryptirc");
+    let _srv = Server(tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }));
+    let http = reqwest::Client::new();
+    let tok = f.auth.issue_session("alice");
+    f.give_avatar("alice", [5, 5, 5]).await;
+    let me = http.get(format!("http://{}/cryptirc/api/avatar/me", addr)).bearer_auth(&tok).send().await.unwrap().json_value().await;
+    assert_eq!((me["share"].as_bool(), me["share_available"].as_bool()), (Some(true), Some(true)));
+    assert!(me["public_url"].as_str().unwrap().starts_with("https://chat.example/avatar/pub/"));
+    let me = http.put(format!("http://{}/cryptirc/api/avatar/me", addr)).bearer_auth(&tok).header("content-type", "application/json").body(serde_json::json!({"share": false}).to_string()).send().await.unwrap().json_value().await;
+    assert_eq!((me["share"].as_bool(), me["public_url"].is_null(), me["visible"].as_bool()), (Some(false), true, Some(true)));
+    let me = http.put(format!("http://{}/cryptirc/api/avatar/me", addr)).bearer_auth(&tok).header("content-type", "application/json").body(serde_json::json!({"visible": false}).to_string()).send().await.unwrap().json_value().await;
+    assert_eq!((me["share"].as_bool(), me["visible"].as_bool()), (Some(false), Some(false)));
+    // A remote announce learned on alice's connection: answered once the picture is cached.
+    let cid = f.add_conn("alice", "alice", "irc.test", 6667, &[("#x", &["alice", "bob", "carol"])]);
+    f.edit(&cid, |c| {
+        c.seen_userhosts.note("bob", "u@bob.host");
+        c.avx.learn("bob", remote::Binding { url: "http://127.0.0.1:9/b.png".into(), userhost: "u@bob.host".into(), source: remote::Source::Tag, at: Instant::now() });
+    })
+    .await;
+    let ask = |nicks: serde_json::Value, probe: serde_json::Value| {
+        let (http, tok, cid) = (http.clone(), tok.clone(), cid.clone());
+        async move {
+            http.post(format!("http://{}/cryptirc/api/avatar/lookup", addr)).bearer_auth(&tok).header("content-type", "application/json").body(serde_json::json!({"conn_id": cid, "nicks": nicks, "probe": probe}).to_string()).send().await.unwrap().json_value().await
+        }
+    };
+    let d = ask(serde_json::json!(["bob", "carol", "zed"]), serde_json::json!([])).await;
+    assert!(d["avatars"].get("bob").is_none());
+    assert_eq!(d["pending"], serde_json::json!(["bob"]), "the fetch started (it will fail: port 9)");
+    // The user@host the connection now shows for bob differs: the announce is dropped.
+    f.edit(&cid, |c| c.seen_userhosts.note("bob", "other@else")).await;
+    let d = ask(serde_json::json!(["bob"]), serde_json::json!([])).await;
+    assert_eq!(d["pending"], serde_json::json!([]));
+    assert!(f.connections.get(&cid).unwrap().lock().await.avx.binding("bob").is_none());
+    // Nicks outside the viewer's channels are never answered or queried.
+    let d = ask(serde_json::json!(["zed"]), serde_json::json!(["zed"])).await;
+    assert_eq!(d["pending"], serde_json::json!([]));
+}
+
+/// gh0st's rule: what a viewer shares (nothing, sharing / visibility off, an avatar an admin
+/// removed) and whether the viewer's own connection goes through a bouncer never decide
+/// what the viewer SEES of other servers' users — only the admin switch (and the app's "Show
+/// other people's avatars") do.
+#[tokio::test]
+async fn viewers_see_remote_avatars_whatever_their_own_settings() {
+    let f = fixture();
+    f.store.set_public_base(Some("https://chat.example".into()));
+    let url = "https://remote.example/avatar/pub/aa-bb.png";
+    let (rid, v) = f.remote.test_ready(url).await;
+    f.give_avatar("bob", [1, 2, 3]).await;
+    f.store.set_share("bob", false).await.unwrap();
+    f.store.set_visible("bob", false).await.unwrap();
+    f.give_avatar("alice", [4, 5, 6]).await;
+    assert!(f.store.remove("alice").await, "what DELETE /admin/user/alice/avatar does");
+    let mut conns = Vec::new();
+    // carol: no avatar; bob: sharing and visibility off; alice: avatar removed.
+    for viewer in ["carol", "bob", "alice"] {
+        let cid = f.add_conn(viewer, viewer, "irc.test", 6667, &[("#x", &[viewer, "remy"])]);
+        f.edit(&cid, |c| {
+            c.seen_userhosts.note("remy", "r@remote.host");
+            c.avx.learn("remy", remote::Binding { url: url.into(), userhost: "r@remote.host".into(), source: remote::Source::Tag, at: Instant::now() });
+        })
+        .await;
+        let got = remote::resolve(&f.route_state(), viewer, &cid, &["remy".to_string()], &[], &HashSet::new()).await;
+        assert_eq!(got.found.get("remy"), Some(&(rid.clone(), v.clone(), "remote.example".to_string())), "{viewer} sees remy's avatar");
+        conns.push((viewer, cid));
+    }
+    // A connection through a bouncer (or not classified) gets no remote avatars at all — v1's
+    // bouncer exclusion (codex astra re-check 2), whatever is stored; nothing is asked either.
+    let bnc = f.add_conn("mallory", "mallory", "irc.test", 6667, &[("#x", &["mallory", "remy"])]);
+    f.edit(&bnc, |c| {
+        c.behind_bouncer = true;
+        c.seen_userhosts.note("remy", "r@remote.host");
+        c.avx.learn("remy", remote::Binding { url: url.into(), userhost: "r@remote.host".into(), source: remote::Source::Tag, at: Instant::now() });
+    })
+    .await;
+    let got = remote::resolve(&f.route_state(), "mallory", &bnc, &["remy".to_string()], &["remy".to_string()], &HashSet::new()).await;
+    assert!(got.found.is_empty() && got.pending.is_empty(), "bouncer viewer: nothing shown, nothing asked");
+    // A binding without a known user@host, or one the connection no longer shows, is never
+    // shown (codex astra re-check 2 M remote.rs:583).
+    let (_, carol_cid) = conns[0].clone();
+    f.edit(&carol_cid, |c| {
+        c.avx.learn("remy", remote::Binding { url: url.into(), userhost: String::new(), source: remote::Source::Meta, at: Instant::now() });
+    })
+    .await;
+    assert!(remote::resolve(&f.route_state(), "carol", &carol_cid, &["remy".to_string()], &[], &HashSet::new()).await.found.is_empty(), "empty user@host");
+    f.edit(&carol_cid, |c| {
+        c.avx.learn("remy", remote::Binding { url: url.into(), userhost: "r@remote.host".into(), source: remote::Source::Tag, at: Instant::now() });
+        c.seen_userhosts.forget("remy");
+    })
+    .await;
+    assert!(remote::resolve(&f.route_state(), "carol", &carol_cid, &["remy".to_string()], &[], &HashSet::new()).await.found.is_empty(), "user@host no longer known");
+    f.edit(&carol_cid, |c| {
+        c.seen_userhosts.note("remy", "r@remote.host");
+        c.avx.learn("remy", remote::Binding { url: url.into(), userhost: "r@remote.host".into(), source: remote::Source::Tag, at: Instant::now() });
+    })
+    .await;
+    // Through the route too.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(f.route_state(), "/cryptirc");
+    let _srv = Server(tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }));
+    let http = reqwest::Client::new();
+    let (viewer, cid) = conns[0].clone();
+    let tok = f.auth.issue_session(viewer);
+    let d = http
+        .post(format!("http://{}/cryptirc/api/avatar/lookup", addr))
+        .bearer_auth(&tok)
+        .header("content-type", "application/json")
+        .body(serde_json::json!({"conn_id": cid, "nicks": ["remy"]}).to_string())
+        .send()
+        .await
+        .unwrap()
+        .json_value()
+        .await;
+    assert_eq!(d["avatars"]["remy"]["r"].as_str(), Some(rid.as_str()));
+    let pic = http.get(format!("http://{}/cryptirc/avatar/remote/{}?v={}&s=48", addr, rid, v)).bearer_auth(&tok).send().await.unwrap();
+    assert_eq!((pic.status().as_u16(), pic.headers().get("cache-control").unwrap().to_str().unwrap().to_string()), (200, "private, no-store".to_string()));
+    assert_eq!(http.get(format!("http://{}/cryptirc/avatar/remote/{}?v={}", addr, rid, v)).send().await.unwrap().status(), 401, "sessions only");
+    // Only the admin switch stops it.
+    f.store.set_enabled(false);
+    for (viewer, cid) in &conns {
+        let got = remote::resolve(&f.route_state(), viewer, cid, &["remy".to_string()], &[], &HashSet::new()).await;
+        assert!(got.found.is_empty(), "{viewer}: avatars off");
+    }
+}
+
+/// Codex astra M ipc_client.rs:475: what remote avatars learned survives an Attach only when
+/// the replay proves the same irc-core session.
+#[test]
+fn reattach_keeps_remote_announces_only_with_proven_continuity() {
+    let b = || remote::Binding { url: "https://f.example/a.png".into(), userhost: String::new(), source: remote::Source::Meta, at: Instant::now() };
+    let same = ReplayEvidence { first_backlog: Some(false), restarted: false, no_backlog_info: false };
+    for (ev, keep) in [
+        (Some(same), true),
+        (None, false),
+        (Some(ReplayEvidence { restarted: true, ..same }), false),
+        (Some(ReplayEvidence { first_backlog: Some(true), ..same }), false),
+        (Some(ReplayEvidence { no_backlog_info: true, ..same }), false),
+        (Some(ReplayEvidence { first_backlog: None, ..same }), false),
+    ] {
+        let mut c = IrcConnection::for_test("c1", "me", "irc.test", 6667);
+        c.avx.learn("bob", b());
+        c.avx.meta2_on = true;
+        c.avx.client_tag_deny = Some("*,-x".into());
+        let dropped = remote_after_attach(&mut c, ev);
+        assert_eq!((dropped, c.avx.binding("bob").is_some(), c.avx.meta2_on), (!keep, keep, keep), "{ev:?}");
+        assert_eq!(c.avx.client_tag_deny.as_deref(), Some("*,-x"), "ISUPPORT stays");
+    }
+}
+
+/// Codex astra M app.js:9931: a FIRST avatar is public only after the owner agreed in the
+/// upload flow (?share=1); a replacement keeps the choice.
+#[tokio::test]
+async fn a_first_upload_is_shared_only_with_consent() {
+    let f = fixture();
+    f.store.set_public_base(Some("https://chat.example".into()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = router(f.route_state(), "/cryptirc");
+    let _srv = Server(tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }));
+    let http = reqwest::Client::new();
+    let tok = f.auth.issue_session("alice");
+    let png = encode(&DynamicImage::ImageRgb8(RgbImage::from_pixel(32, 32, Rgb([9, 99, 9]))), ImageFormat::Png);
+    let up = |q: &'static str| {
+        let (http, tok, png) = (http.clone(), tok.clone(), png.clone());
+        async move { http.post(format!("http://{}/cryptirc/api/avatar/me{}", addr, q)).bearer_auth(&tok).header("content-type", "image/png").body(png).send().await.unwrap().json_value().await }
+    };
+    let me = up("").await;
+    assert_eq!((me["share"].as_bool(), me["public_url"].is_null()), (Some(false), true), "no consent: not public");
+    assert!(f.store.public_url("alice").is_none());
+    http.delete(format!("http://{}/cryptirc/api/avatar/me", addr)).bearer_auth(&tok).send().await.unwrap();
+    let me = up("?share=1").await;
+    assert_eq!(me["share"].as_bool(), Some(true), "consent given");
+    assert!(me["public_url"].as_str().unwrap().starts_with("https://chat.example/avatar/pub/"));
+    let me = up("").await;
+    assert_eq!(me["share"].as_bool(), Some(true), "a replacement keeps the choice");
+    http.put(format!("http://{}/cryptirc/api/avatar/me", addr)).bearer_auth(&tok).header("content-type", "application/json").body(r#"{"share":false}"#).send().await.unwrap();
+    let me = up("?share=1").await;
+    assert_eq!(me["share"].as_bool(), Some(false), "share=1 never overrides a replacement's choice");
+}
+
+/// Codex astra L remote.rs:1056: account status comes from disk before an announce, and bans
+/// are loaded at startup.
+#[tokio::test]
+async fn disabled_accounts_never_announce() {
+    let f = fixture();
+    assert!(remote::owner_active(&f.auth, "alice").await);
+    std::fs::write(f.dir.join("users/alice.json"), r#"{"username":"alice","email":"","password_hash":"x","verified":false,"created_at":0,"disabled":true}"#).unwrap();
+    assert!(!remote::owner_active(&f.auth, "alice").await, "disabled on disk");
+    assert!(!remote::owner_active(&f.auth, "nobody").await, "no such account");
+    let fresh = AuthManager::new(f.dir.to_str().unwrap()).unwrap();
+    assert!(!fresh.is_disabled_cached("alice"), "a new process knows nothing yet");
+    assert_eq!(fresh.load_disabled_users().await, 1);
+    assert!(fresh.is_disabled_cached("alice") && !fresh.is_disabled_cached("bob"));
+}
+
+/// Codex astra re-check 2 L avatar.rs:448: the ACK of draft/metadata-2 marks the session
+/// record — or recreates it after a reattach dropped it, conservatively (bouncer: true).
+#[tokio::test]
+async fn the_metadata_ack_recreates_the_session_record() {
+    let f = fixture();
+    let a = f.add_conn("alice", "alice", "irc.test", 6667, &[]);
+    f.store.ensure_session_meta2(&a, "alice", ("irc.test", 6667), &f.conn_owners);
+    assert_eq!(f.store.session(&a), Some(SessionRecord { owner: "alice".into(), host: "irc.test".into(), port: 6667, bouncer: true, meta2: true }), "created, unknown = bouncer");
+    f.store.record_session(&a, "alice", ("irc.test", 6667), false, &f.conn_owners);
+    assert_eq!(f.store.session(&a).map(|r| (r.bouncer, r.meta2)), Some((false, false)), "a live CAP LS records the truth");
+    f.store.ensure_session_meta2(&a, "alice", ("irc.test", 6667), &f.conn_owners);
+    assert_eq!(f.store.session(&a).map(|r| (r.bouncer, r.meta2)), Some((false, true)), "marked");
+    f.store.ensure_session_meta2(&a, "bob", ("irc.test", 6667), &f.conn_owners);
+    let b = uuid::Uuid::new_v4().to_string();
+    f.store.ensure_session_meta2(&b, "alice", ("irc.test", 6667), &f.conn_owners);
+    assert!(f.store.session(&b).is_none(), "only for a saved network of that owner");
 }

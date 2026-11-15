@@ -1,5 +1,13 @@
 # CryptIRC changelog
 
+## v0.5.10 (November 2026)
+
+New
+- Avatars now work across CryptIRC servers. If you share your avatar ("Share my avatar with people on other CryptIRC servers" — asked when you first upload; off for avatars saved before this version), other people's CryptIRC servers on the same IRC network show it in their nick list, WHOIS and nick menu.
+- Instant detection: on networks with IRCv3 message-tags, CryptIRC users see each other's avatars within seconds of joining a channel via an invisible TAGMSG — no messages, clicks or WHOIS. Also announced via a client-only tag on your messages, CTCP AVATAR (KVIrc-compatible, answered only when asked) and IRCv3 draft/metadata-2 where the server supports it. Plain IRC clients see nothing.
+- The viewer's own CryptIRC server fetches remote pictures (HTTPS, public addresses only, no redirects, size/rate limited), re-encodes them and serves them same-origin, so viewers' browsers never contact other servers. Remote avatars are bound to the nick's current user@host and dropped on NICK/QUIT/PART/KICK/host change.
+- Seeing other people's avatars never depends on your own avatar settings; only "Show other people's avatars" and the admin switch hide them. Remote avatars are not shown on connections through a bouncer (or before a connection is classified).
+
 ## v0.5.9 (November 2026)
 
 New

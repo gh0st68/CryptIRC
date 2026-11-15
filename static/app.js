@@ -2621,6 +2621,8 @@ function handleEvent(ev) {
       }
       break;
     }
+    // Remote avatars: an announce for these nicks was learned / dropped, or a picture arrived.
+    case 'avatar_hint': avatarHint(ev.conn_id, ev.nicks); break;
     // ── IRCv3: typing indicator ───────────────────────
     case 'irc_typing': {
       if(!window._typingState) window._typingState={};
@@ -4742,7 +4744,13 @@ function renderNickPanel(names){
 // are fetched once per token+version+size with the session header (the server answers
 // no-store, so logout / opt-out / removal / bans apply at once) and shown from memory as
 // same-origin blob: <img>, alt = the nick, no referrer.
-const _AV={cache:new Map(),queue:new Map(),inflight:new Set(),lastSent:new Map(),forgot:new Map(),whois:new Map(),timer:0,backoffUntil:0,offUntil:0,token:null};
+const _AV={cache:new Map(),queue:new Map(),probe:new Set(),inflight:new Set(),lastSent:new Map(),forgot:new Map(),whois:new Map(),timer:0,backoffUntil:0,offUntil:0,token:null};
+// _AV.probe: keys the user explicitly opened (nick menu / WHOIS) — the server may ask IRC
+// about such a nick when nothing is known (CTCP AVATAR / METADATA GET). Never a member list.
+// Remote avatars (people on other CryptIRC servers, announced on IRC by the nick's current
+// holder and fetched by OUR server) come back as {r,v,h}: shown like local ones, from our
+// own origin; h = the announcing server's host (shown in the nick menu).
+const _AV_PENDING_TTL=20000;
 // _AV.whois: key → when a fresh WHOIS reply showed that nick (the server counts it as seen
 // for 15 minutes, avatar.rs WHOIS_SEEN_TTL).
 const _AV_WHOIS_TTL=15*60*1000;
@@ -4757,13 +4765,19 @@ const _AVIMG=new Map();
 // A new session (sign-out, another account) never sees the previous one's answers or pictures.
 function _avSession(){
   if(_AV.token!==sessionToken){
-    _AV.cache.clear(); _AV.queue.clear(); _AV.forgot.clear(); _AV.whois.clear(); _AV.token=sessionToken; _AV.offUntil=0; _AV.backoffUntil=0;
+    _AV.cache.clear(); _AV.queue.clear(); _AV.probe.clear(); _AV.forgot.clear(); _AV.whois.clear(); _AV.token=sessionToken; _AV.offUntil=0; _AV.backoffUntil=0;
     for(const r of _AVIMG.values()) if(r.url) try{ URL.revokeObjectURL(r.url); }catch(_){}
     _AVIMG.clear();
   }
 }
-function _avValid(e){ return !!e&&typeof e.t==='string'&&/^[0-9a-f]{32}$/.test(e.t)&&typeof e.v==='string'&&/^[0-9a-f]{16}$/.test(e.v); }
-function _avUrl(e,size){ return '/cryptirc/avatar/'+e.t+'?v='+e.v+(size===48?'&s=48':''); }
+function _avValid(e){
+  if(!e||typeof e.v!=='string'||!/^[0-9a-f]{16}$/.test(e.v))return false;
+  if(typeof e.t==='string') return /^[0-9a-f]{32}$/.test(e.t);
+  return typeof e.r==='string'&&/^[0-9a-f]{32}$/.test(e.r)&&(e.h==null||(typeof e.h==='string'&&e.h.length<=255));
+}
+// The picture's identity (local token, or 'r'+remote id) — never the same for the two kinds.
+function _avId(e){ return e.t?e.t:'r'+e.r; }
+function _avUrl(e,size){ return (e.t?'/cryptirc/avatar/'+e.t:'/cryptirc/avatar/remote/'+e.r)+'?v='+e.v+(size===48?'&s=48':''); }
 // The vouched, unexpired answer for this nick on this connection, or null. `notBefore`: only
 // an answer obtained at or after that time (ms) counts.
 function avatarFor(conn,nick,notBefore){
@@ -4779,7 +4793,7 @@ function avatarFor(conn,nick,notBefore){
 // with backoff (30 s, doubling, at most 30 min) — never given up for good.
 function _avLoad(e,size){
   _avSession();
-  const k=e.t+'.'+e.v+'.'+size, now=Date.now();
+  const k=_avId(e)+'.'+e.v+'.'+size, now=Date.now();
   let r=_AVIMG.get(k);
   if(r){
     if(r.state==='ok') return Promise.resolve(r.url);
@@ -4803,14 +4817,14 @@ function _avLoad(e,size){
 }
 // The loaded blob: URL for this picture, or null (and its load is started / retried).
 function _avReady(e,size){
-  const r=_AVIMG.get(e.t+'.'+e.v+'.'+size);
+  const r=_AVIMG.get(_avId(e)+'.'+e.v+'.'+size);
   if(r&&r.state==='ok') return r.url;
   _avLoad(e,size);
   return null;
 }
 // A picture that would not decode: forget it and retry later like a failed load.
 function _avDecodeFailed(e,size){
-  const r=_AVIMG.get(e.t+'.'+e.v+'.'+size);
+  const r=_AVIMG.get(_avId(e)+'.'+e.v+'.'+size);
   if(!r||r.state!=='ok') return;
   try{ URL.revokeObjectURL(r.url); }catch(_){}
   r.state='fail'; r.url=null; r.retryAt=Date.now()+Math.min(30000*2**r.fails,1800000); r.fails++;
@@ -4818,7 +4832,7 @@ function _avDecodeFailed(e,size){
 // Drop pictures no current answer refers to.
 function _avPrunePictures(){
   const live=new Set(), now=Date.now();
-  for(const e of _AV.cache.values()) if(!e.none&&now<e.until) live.add(e.t+'.'+e.v);
+  for(const e of _AV.cache.values()) if(!e.none&&now<e.until) live.add(_avId(e)+'.'+e.v);
   for(const [k,r] of _AVIMG){
     if(r.state==='loading'||live.has(k.slice(0,k.lastIndexOf('.'))))continue;
     if(r.url) try{ URL.revokeObjectURL(r.url); }catch(_){}
@@ -4826,8 +4840,8 @@ function _avPrunePictures(){
   }
 }
 // Queue nicks for a lookup. Asked again only when missing, expired, due for refresh or —
-// with `minAge` (ms) — older than that.
-function avatarRequest(conn,nicks,minAge){
+// with `minAge` (ms) — older than that. `probe`: the user explicitly opened these nicks.
+function avatarRequest(conn,nicks,minAge,probe){
   if(!conn||!sessionToken||!avatarsShown()||isMessagesConn(conn)||isUploadsConn(conn))return;
   _avSession();
   const now=Date.now();
@@ -4840,6 +4854,7 @@ function avatarRequest(conn,nicks,minAge){
     if(e&&now<e.refreshAt&&!(minAge!=null&&now-e.at>=minAge))continue;
     if(!q){ q=new Set(); _AV.queue.set(conn,q); }
     q.add(n);
+    if(probe){ if(_AV.probe.size>500) _AV.probe.clear(); _AV.probe.add(_avKey(conn,n)); }
   }
   if(q&&q.size&&!_AV.timer) _AV.timer=setTimeout(_avFlush,150);
 }
@@ -4862,13 +4877,15 @@ function _avNoteForgot(key){
 async function _avLookup(conn,chunk){
   const token=sessionToken, sent=Date.now();
   _AV.lastSent.set(conn,sent);
+  const probe=chunk.filter(n=>_AV.probe.delete(_avKey(conn,n)));
   let r;
   try{
-    r=await fetch('/cryptirc/api/avatar/lookup',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({conn_id:conn,nicks:chunk})});
+    r=await fetch('/cryptirc/api/avatar/lookup',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(probe.length?{conn_id:conn,nicks:chunk,probe}:{conn_id:conn,nicks:chunk})});
   }catch(_){ r=null; }
   if(token!==sessionToken)return 'stale';
   const now=Date.now();
-  if(r&&r.status===429){ _AV.backoffUntil=now+30000; return 'retry'; }
+  // Rate-limited: the retry keeps the user's explicit looks (codex astra L app.js:4880).
+  if(r&&r.status===429){ for(const n of probe) _AV.probe.add(_avKey(conn,n)); _AV.backoffUntil=now+30000; return 'retry'; }
   let d=null;
   if(r&&r.ok){ try{ d=await r.json(); }catch(_){ d=null; } }
   if(token!==sessionToken)return 'stale';
@@ -4879,14 +4896,18 @@ async function _avLookup(conn,chunk){
   }
   if(d.enabled===false){ _AV.offUntil=now+600000; return 'off'; }
   const ttl=Math.min(Math.max((+d.ttl||180)*1000,30000),600000);
-  const got=new Map();
+  const got=new Map(), pending=new Set();
   for(const [nick,e] of Object.entries(d.avatars||{})) if(_avValid(e)) got.set(_avFold(nick),e);
+  for(const nick of (Array.isArray(d.pending)?d.pending:[])) if(typeof nick==='string') pending.add(_avFold(nick));
   const stale=[];
   for(const n of chunk){
     // Forgotten while this request was in flight: its answer predates that event.
     if(_avForgotSince(conn,n,sent)){ stale.push(n); continue; }
     const e=got.get(_avFold(n));
-    if(e) _avStore(conn,n,{t:e.t,v:e.v,at:now,until:now+ttl,refreshAt:now+ttl*0.6});
+    if(e&&e.t) _avStore(conn,n,{t:e.t,v:e.v,at:now,until:now+ttl,refreshAt:now+ttl*0.6});
+    else if(e) _avStore(conn,n,{r:e.r,v:e.v,h:typeof e.h==='string'?e.h:'',at:now,until:now+ttl,refreshAt:now+ttl*0.6});
+    // Being fetched / asked on IRC: ask again soon (an avatar_hint usually comes first).
+    else if(pending.has(_avFold(n))) _avStore(conn,n,{none:true,at:now,until:now+_AV_PENDING_TTL,refreshAt:now+_AV_PENDING_TTL});
     else _avStore(conn,n,{none:true,at:now,until:now+_AV_NEG_TTL,refreshAt:now+_AV_NEG_TTL});
   }
   if(stale.length) avatarRequest(conn,stale);
@@ -4942,6 +4963,26 @@ function avatarForgetConn(conn){
   if(hit) _avApply(conn);
 }
 function avatarForgetAll(){ _avNoteForgot('*'); _AV.cache.clear(); _AV.queue.clear(); _AV.offUntil=0; _avApplyAll(); }
+// The server says something changed for these nicks on this connection (remote avatars):
+// forget them, and ask again for the ones this view can show (shared channel, open WHOIS /
+// nick menu) — no lookups while "Show other people's avatars" is off.
+function avatarHint(conn,nicks){
+  if(!conn||!Array.isArray(nicks))return;
+  const list=nicks.filter(n=>typeof n==='string'&&n&&n.length<=64).slice(0,500);
+  if(!list.length)return;
+  // Invalidations apply even while other people's avatars are hidden (codex astra L
+  // app.js:4969): turning them back on must not show a withdrawn answer again.
+  for(const n of list){ const k=_avKey(conn,n); _avNoteForgot(k); _AV.cache.delete(k); }
+  _avApply(conn);
+  if(!avatarsShown())return;
+  const shared=_avSharedNicks(conn);
+  const head=nickCtx&&nickCtx.querySelector('.nick-ctx-head[data-av-conn]');
+  const open=new Set();
+  if(head&&head.dataset.avConn===conn) open.add(_avFold(head.dataset.avNick));
+  for(const row of document.querySelectorAll('.whois-head[data-whois-nick]')) if(row.dataset.whoisConn===conn) open.add(_avFold(row.dataset.whoisNick));
+  const again=list.filter(n=>shared.has(_avFold(n))||open.has(_avFold(n)));
+  if(again.length) avatarRequest(conn,again,0);
+}
 // Folded nicks this connection shares a channel with (optionally ignoring one channel).
 function _avSharedNicks(conn,exceptChannel){
   const out=new Set(), net=networks.find(n=>n.config.id===conn);
@@ -4981,7 +5022,7 @@ function _avImg(url,e,size,nick,cls){
   img.referrerPolicy='no-referrer';
   img.decoding='async';
   img.draggable=false;
-  img.dataset.av=e.t+'.'+e.v;
+  img.dataset.av=_avId(e)+'.'+e.v;
   img.dataset.avSize=String(size);
   img.addEventListener('error',()=>{ _avDecodeFailed(e,size); img.remove(); },{once:true});
   img.src=url;
@@ -4995,7 +5036,14 @@ function _avSync(host,conn,nick,sizes,cls,notBefore){
   if(av){
     for(const sz of [].concat(sizes)){ const u=_avReady(av,sz); if(u&&!url){ url=u; size=sz; } if(u) break; }
   }
-  const want=url?av.t+'.'+av.v+'.'+size:'', have=cur?cur.dataset.av+'.'+cur.dataset.avSize:'';
+  const want=url?_avId(av)+'.'+av.v+'.'+size:'', have=cur?cur.dataset.av+'.'+cur.dataset.avSize:'';
+  // The nick menu says when a picture comes from another server (announced there; public).
+  if(cls==='nick-ctx-av'){
+    let from=host.querySelector(':scope > .nick-ctx-av-from');
+    const text=url&&av.r?('via '+(av.h||'another server')):'';
+    if(text&&!from){ from=document.createElement('span'); from.className='nick-ctx-av-from'; host.appendChild(from); }
+    if(from){ if(text){ from.textContent=text; from.title='Avatar shared publicly from another CryptIRC server ('+(av.h||'?')+') by whoever holds this nick now'; } else from.remove(); }
+  }
   if(want===have)return;
   if(cur) cur.remove();
   if(url) host.insertBefore(_avImg(url,av,size,nick,cls),host.firstChild);
@@ -5051,7 +5099,8 @@ function _avWhoisRow(row,msg,conv){
   if(fresh) _AV.whois.set(_avKey(c.conn_id,m[1]),Date.now());
   const body=row.querySelector('.msg-body');
   if(body) _avSync(body,c.conn_id,m[1],128,'whois-av',_avNotBefore(c.conn_id,m[1]));
-  avatarRequest(c.conn_id,[m[1]],fresh?0:30000);
+  // A fresh WHOIS is an explicit look at this nick: the server may ask IRC about it.
+  avatarRequest(c.conn_id,[m[1]],fresh?0:30000,fresh);
 }
 // "Show other people's avatars" (Settings ▸ Profile ▸ Avatar). Stored with the synced
 // appearance only when off, so the default adds nothing to the 4 KB appearance budget.
@@ -9855,10 +9904,10 @@ async function renderProfilePanel(){
 }
 // Settings ▸ Profile ▸ Avatar: upload / replace / remove your picture, "Show my avatar to
 // other CryptIRC users" (server-side) and "Show other people's avatars" (this app).
-async function _avatarApi(method,body,type){
+async function _avatarApi(method,body,type,query){
   const headers={'Authorization':'Bearer '+sessionToken};
   if(type) headers['Content-Type']=type;
-  const r=await fetch('/cryptirc/api/avatar/me',{method,headers,body});
+  const r=await fetch('/cryptirc/api/avatar/me'+(query||''),{method,headers,body});
   let d={};
   try{ d=await r.json(); }catch(_){}
   return {ok:r.ok,status:r.status,d};
@@ -9883,9 +9932,15 @@ async function renderProfileAvatar(username,note,noteOk){
       </div>
     </div>
     <div style="font-size:11px;color:var(--text3);margin-top:10px;line-height:1.5">${st.enabled
-      ?'PNG, JPEG or WebP, up to 2 MB. It is cropped to a square and shown next to your nick to other CryptIRC users of this server who are on the same IRC server with you — never sent to IRC.'
+      ?'PNG, JPEG or WebP, up to 2 MB. It is cropped to a square and shown next to your nick to other CryptIRC users of this server who are on the same IRC server with you — and, only if you choose to share it, to people on other CryptIRC servers.'
       :'Avatars are turned off on this server.'}</div>
     ${has?`<div style="${row}"><span style="font-size:12px;color:var(--text2)">Show my avatar to other CryptIRC users</span><button class="appear-toggle${st.visible?' on':''}" id="profile-avatar-visible" role="switch" aria-checked="${st.visible?'true':'false'}" aria-label="Show my avatar to other CryptIRC users"></button></div>`:''}
+    ${has&&st.enabled?`<div style="${row}"><span style="font-size:12px;color:var(--text2)">Share my avatar with people on other CryptIRC servers</span><button class="appear-toggle${st.share?' on':''}" id="profile-avatar-share" role="switch" aria-checked="${st.share?'true':'false'}" aria-label="Share my avatar with people on other CryptIRC servers"${st.share_available&&st.visible?'':' disabled'}></button></div>
+    <div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">${!st.share_available
+      ?'Not available here: this server has no public https address configured.'
+      :!st.visible?'Turn on “Show my avatar” first.'
+      :'Sharing makes this picture <b>public</b>: anyone with its link can see it. While it is on, your server tells other IRC users the link (an invisible tag on your messages and channel joins, and an answer to avatar requests). Turning it off disables the link for good.'}</div>
+    ${st.share&&st.public_url?`<div style="font-size:11px;color:var(--text3);margin-top:6px;word-break:break-all">Public link: <span style="font-family:monospace;color:var(--text2);user-select:all">${esc(st.public_url)}</span></div>`:''}`:''}
     <div style="${row}"><span style="font-size:12px;color:var(--text2)">Show other people's avatars</span><button class="appear-toggle${avatarsShown()?' on':''}" id="profile-avatar-others" role="switch" aria-checked="${avatarsShown()?'true':'false'}" aria-label="Show other people's avatars"></button></div>
     <div id="profile-avatar-msg" style="font-size:11px;margin-top:8px;min-height:14px"></div>`;
   if(has){
@@ -9909,9 +9964,16 @@ async function renderProfileAvatar(username,note,noteOk){
     if(!f) return;
     if(f.type&&!/^image\/(png|jpeg|webp)$/.test(f.type)){ say('Use a PNG, JPEG or WebP image.'); return; }
     if(f.size>(st.max_bytes||2097152)){ say('That image is larger than 2 MB.'); return; }
+    // A FIRST avatar is shared with other servers only if the owner agrees here, before it
+    // is uploaded (codex astra M app.js:9931). A replacement keeps the current choice.
+    let query='';
+    if(!has&&st.share_available&&st.visible!==false){
+      const share=await customConfirm('Share this avatar with people on other CryptIRC servers?\n\nSharing makes the picture PUBLIC: anyone with its link can see it, and your server tells other IRC users the link (an invisible tag on your messages and channel joins, and an answer to avatar requests).\n\nYou can change this later here. “This server only” uploads it without sharing.','Share it publicly','This server only');
+      if(share) query='?share=1';
+    }
     say('Uploading…',true);
     try{
-      const res=await _avatarApi('POST',f,f.type||'application/octet-stream');
+      const res=await _avatarApi('POST',f,f.type||'application/octet-stream',query);
       if(!res.ok){ say(res.d.message||'Upload failed.'); return; }
       avatarForgetAll(); avatarRefreshActive();
       renderProfileAvatar(username,'Avatar saved.',true);
@@ -9933,8 +9995,18 @@ async function renderProfileAvatar(username,note,noteOk){
     try{
       const res=await _avatarApi('PUT',JSON.stringify({visible:on}),'application/json');
       if(!res.ok){ say(res.d.message||'Not saved.'); return; }
-      vis.classList.toggle('on',on); vis.setAttribute('aria-checked',String(on));
-      say(on?'Other CryptIRC users can see your avatar.':'Your avatar is hidden from other users.',true);
+      renderProfileAvatar(username,on?'Other CryptIRC users can see your avatar.':'Your avatar is hidden from other users.',true);
+    }catch(_){ say('Network error.'); }
+  });
+  const share=document.getElementById('profile-avatar-share');
+  if(share) share.addEventListener('click',async()=>{
+    if(share.disabled)return;
+    const on=!share.classList.contains('on');
+    if(on&&!(await customConfirm('Share your avatar publicly? Anyone with its link — and people on other CryptIRC servers who see your nick on IRC — will be able to see it.','Share')))return;
+    try{
+      const res=await _avatarApi('PUT',JSON.stringify({share:on}),'application/json');
+      if(!res.ok){ say(res.d.message||'Not saved.'); return; }
+      renderProfileAvatar(username,on?'Your avatar is shared with other CryptIRC servers.':'Sharing is off — the public link no longer works.',true);
     }catch(_){ say('Network error.'); }
   });
   const others=document.getElementById('profile-avatar-others');
@@ -17754,8 +17826,9 @@ function showNickMenu(e,nick){
   const _ctxConn=_nickMenuConn(e);
   const _ctxShared=!!_ctxConn&&_avShared(_ctxConn,nick);
   const _ctxAv=_ctxShared?avatarFor(_ctxConn,nick):null;
-  if(_ctxConn&&!_ctxShared) avatarRequest(_ctxConn,[nick],0);
-  else if(_ctxConn&&!_ctxAv) avatarRequest(_ctxConn,[nick]);
+  // Opening the menu is an explicit look at this nick (probe: the server may ask IRC when it
+  // knows nothing about it — never for a member list).
+  if(_ctxConn&&(!_ctxShared||!_ctxAv)) avatarRequest(_ctxConn,[nick],0,true);
   const _ctxHead=(el)=>{ el.classList.add('nick-ctx-head'); el.dataset.avConn=_ctxConn; el.dataset.avNick=nick; _avSync(el,_ctxConn,nick,[128,48],'nick-ctx-av'); };
   if(_ctxAv&&!isMobile&&(_avReady(_ctxAv,128)||_avReady(_ctxAv,48))){
     const head=document.createElement('div');

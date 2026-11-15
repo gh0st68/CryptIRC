@@ -470,6 +470,10 @@ async fn handle_message(
                         // A new session negotiates again (avatar classification).
                         c.cap_ls_done = false;
                         c.behind_bouncer = false;
+                        // Remote avatars: announces learned on the old session go with it, and
+                        // ours are announced anew on this one.
+                        c.avx.reset();
+                        state.avatar_remote.forget_conn(&conn_id);
                         c.resync_gen = c.resync_gen.wrapping_add(1);
                         c.resync_busy = false;
                         let server = c.dial_endpoint.as_ref().map_or_else(|| c.cfg.server.clone(), |(s, _)| s.clone());
@@ -490,6 +494,10 @@ async fn handle_message(
                         // A new session negotiates again (avatar classification).
                         c.cap_ls_done = false;
                         c.behind_bouncer = false;
+                        // Remote avatars: announces learned on the old session go with it, and
+                        // ours are announced anew on this one.
+                        c.avx.reset();
+                        state.avatar_remote.forget_conn(&conn_id);
                         c.resync_gen = c.resync_gen.wrapping_add(1);
                         c.resync_busy = false;
                         ServerEvent::Reconnecting { conn_id: conn_id.clone(), attempt, delay_secs, reason }
@@ -1150,7 +1158,7 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
         daemon_channels: Vec::new(),
         user_joins: std::collections::HashSet::new(),
         chanmodes: cryptirc::ircproto::ChanModes::default(),
-        whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, replay_view: None,
+        whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, replay_view: None, avx: Default::default(),
         cfg,
     }));
     state.connections.insert(conn_id.to_string(), conn.clone());

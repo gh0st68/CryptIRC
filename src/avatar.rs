@@ -1,5 +1,7 @@
-//! User avatars, v1: an account's picture, shown next to its IRC nick to OTHER CryptIRC
-//! users of THIS instance only — never sent to IRC, never to another instance.
+//! User avatars. v1 (this file): an account's picture, shown next to its IRC nick to other
+//! CryptIRC users of THIS instance, vouched for by this server. v2 (`remote`): an owner who
+//! opts in shares it publicly with people on OTHER CryptIRC servers (announced on IRC by the
+//! nick's current holder, fetched and re-encoded by the viewer's server).
 //!
 //! - Processing (`process_image`): PNG / JPEG / WebP up to 2 MB, decoded on the blocking
 //!   pool under strict limits (at most 4096 px per side, a capped decode buffer, one image
@@ -159,6 +161,13 @@ pub struct Processed {
 /// Decode, orient, crop, resize and re-encode one uploaded picture. Synchronous and
 /// CPU-bound: call it through `process_in_background`.
 pub fn process_image(bytes: &[u8]) -> Result<Processed, AvatarError> {
+    process_image_with(bytes, MAX_DIMENSION, MAX_DECODE_ALLOC)
+}
+
+/// `process_image` with its own dimension and decoder-allocation limits (remote pictures
+/// use smaller ones, `remote::REMOTE_MAX_DIMENSION`).
+pub fn process_image_with(bytes: &[u8], max_dimension: u32, max_alloc: u64) -> Result<Processed, AvatarError> {
+    let max_decoded = u64::from(max_dimension) * u64::from(max_dimension) * 4;
     if bytes.is_empty() {
         return Err(AvatarError::Empty);
     }
@@ -168,15 +177,15 @@ pub fn process_image(bytes: &[u8]) -> Result<Processed, AvatarError> {
     let format = sniff_format(bytes).ok_or(AvatarError::Unsupported)?;
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_DIMENSION);
-    limits.max_image_height = Some(MAX_DIMENSION);
-    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    limits.max_image_width = Some(max_dimension);
+    limits.max_image_height = Some(max_dimension);
+    limits.max_alloc = Some(max_alloc);
     reader.limits(limits);
     // Only the header has been read here; the dimensions are checked before any pixel
     // buffer exists.
     let mut decoder = reader.into_decoder().map_err(classify)?;
     let (w, h) = decoder.dimensions();
-    if w == 0 || h == 0 || w > MAX_DIMENSION || h > MAX_DIMENSION || decoder.total_bytes() > MAX_DECODED_BYTES {
+    if w == 0 || h == 0 || w > max_dimension || h > max_dimension || decoder.total_bytes() > max_decoded.min(MAX_DECODED_BYTES) {
         return Err(AvatarError::Dimensions);
     }
     let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
@@ -241,13 +250,20 @@ pub async fn process_in_background(slots: &Arc<Semaphore>, bytes: Vec<u8>) -> Re
 
 /// `users/<name>/avatar.json`. `token` names the avatar in URLs; `v` is the content
 /// version of the stored pictures; `visible` is the owner's "show my avatar to other
-/// CryptIRC users" choice (default on).
+/// CryptIRC users" choice (default on). `share` is "share my avatar with people on other
+/// CryptIRC servers" (public link `pub_id`): on for an avatar uploaded with this version,
+/// off for one saved before it (its owner never agreed to a public link). `pub_id` is
+/// random, empty while not sharing, and new each time sharing is turned on again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AvatarMeta {
     pub token: String,
     pub v: String,
     #[serde(default = "default_visible")]
     pub visible: bool,
+    #[serde(default)]
+    pub share: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pub_id: String,
 }
 
 fn default_visible() -> bool {
@@ -356,6 +372,23 @@ pub fn take_replay_evidence(conn_id: &str) -> Option<ReplayEvidence> {
     replay_evidence().remove(conn_id).map(|(_, e)| e)
 }
 
+/// Does an Attach replay prove that the irc-core session is the one this process knew (replay
+/// information present, its first line delivered before, no session start while no web was
+/// attached)? Missing evidence → no.
+pub fn replay_proves_session(ev: Option<ReplayEvidence>) -> bool {
+    ev.map_or(false, |e| !e.no_backlog_info && !e.restarted && e.first_backlog == Some(false))
+}
+
+/// At AttachComplete, for one connection: drop what remote avatars learned unless the replay
+/// proves the same irc-core session. True when dropped.
+pub fn remote_after_attach(c: &mut IrcConnection, ev: Option<ReplayEvidence>) -> bool {
+    if replay_proves_session(ev) {
+        return false;
+    }
+    c.avx.drop_unproven();
+    true
+}
+
 /// May `record` be restored for a connection after a web restart? Some(behind_bouncer) only
 /// when the record's owner and dial endpoint match the live connection's, and the replay
 /// proves the same irc-core session: replay information present, its first line already
@@ -378,6 +411,7 @@ pub fn restorable(record: Option<&SessionRecord>, owner: Option<&str>, endpoint:
 /// At AttachComplete: give each connection the irc-core session still has its recorded
 /// classification back, when `restorable` allows; otherwise drop the record (fail closed).
 pub async fn restore_after_attach(state: &crate::AppState, seen: &HashSet<String>) {
+    let mut sync_meta: Vec<(String, Arc<Mutex<IrcConnection>>)> = Vec::new();
     for conn_id in seen {
         let ev = take_replay_evidence(conn_id);
         let Some(conn) = state.connections.get(conn_id).map(|c| c.clone()) else { continue };
@@ -385,12 +419,45 @@ pub async fn restore_after_attach(state: &crate::AppState, seen: &HashSet<String
         let record = state.avatars.session(conn_id);
         let mut c = conn.lock().await;
         c.replay_view = None; // the replay is over (IrcConnection::replay_view)
+        // Remote avatars (codex astra M ipc_client.rs:475): announces learned before this
+        // Attach — or from its replay — are kept only when the replay proves the same
+        // irc-core session; the IRC connection may have restarted while no link was up (its
+        // lifecycle events are not replayed) and a nick changed hands.
+        let had_meta = c.avx.meta2_on || c.avx.meta2_offered || record.as_ref().map_or(false, |r| r.meta2);
+        if remote_after_attach(&mut c, ev) {
+            state.avatar_remote.forget_conn(conn_id);
+            // …but never leave draft/metadata-2 off for good: ask again (ACK → SUB / SET /
+            // SYNC, so publication and opt-out deletion keep working; NAK → not offered).
+            let disabled = c.cfg.disabled_caps.iter().any(|d| d == remote::META_CAP);
+            let live = c.connected && c.registered;
+            if remote::meta_recheck(had_meta, true, live, disabled) {
+                c.avx.meta2_offered = true;
+                c.avx.meta2_requested = true;
+                let _ = c.send_raw(&format!("CAP REQ :{}\r\n", remote::META_CAP)).await;
+            }
+        }
         if c.cap_ls_done {
+            // Metadata-2 kept across this Attach: sync our value too (a change made while the
+            // link was down could not be sent then).
+            if c.avx.meta2_on {
+                if let Some(o) = owner.clone() {
+                    sync_meta.push((o, conn.clone()));
+                }
+            }
             continue; // this process saw it negotiate (backlog) — already classified
         }
         let endpoint = c.dial_endpoint.clone();
         let decision = restorable(record.as_ref(), owner.as_deref(), endpoint.as_ref().map(|(h, p)| (h.as_str(), *p)), ev);
-        if !apply_restore(&mut c, decision) {
+        if apply_restore(&mut c, decision) {
+            c.avx.meta2_on = record.as_ref().map_or(false, |r| r.meta2);
+            // Metadata-2 is active again: sync our value (it may have changed while no web
+            // was attached — a withdrawal must reach IRC).
+            if c.avx.meta2_on {
+                if let Some(o) = owner.clone() {
+                    sync_meta.push((o, conn.clone()));
+                }
+            }
+        } else {
             drop(c);
             if record.is_some() {
                 state.avatars.forget_session(conn_id);
@@ -398,6 +465,9 @@ pub async fn restore_after_attach(state: &crate::AppState, seen: &HashSet<String
         }
     }
     replay_evidence().clear();
+    for (owner, conn) in sync_meta {
+        remote::meta_sync(state, &owner, &conn).await;
+    }
 }
 
 /// Apply a `restorable` decision to a live connection. A saved bouncer mark is kept, and so
@@ -418,6 +488,11 @@ pub struct AvatarStore {
     enabled: AtomicBool,
     by_user: DashMap<String, AvatarMeta>,
     by_token: DashMap<String, String>,
+    /// pub_id → owner, for owners sharing publicly (remote avatars).
+    by_pub: DashMap<String, String>,
+    /// CRYPTIRC_BASE_URL when other servers can reach it (remote::announce_base), else None:
+    /// nothing is announced.
+    public_base: std::sync::RwLock<Option<String>>,
     locks: DashMap<String, Arc<Mutex<()>>>,
     pub slots: Arc<Semaphore>,
     lookup_rate: DashMap<String, (Instant, u32)>,
@@ -445,6 +520,9 @@ pub struct SessionRecord {
     pub host: String,
     pub port: u16,
     pub bouncer: bool,
+    /// The session negotiated draft/metadata-2 (remote avatars).
+    #[serde(default)]
+    pub meta2: bool,
 }
 
 impl AvatarStore {
@@ -454,6 +532,8 @@ impl AvatarStore {
             enabled: AtomicBool::new(enabled),
             by_user: DashMap::new(),
             by_token: DashMap::new(),
+            by_pub: DashMap::new(),
+            public_base: std::sync::RwLock::new(None),
             locks: DashMap::new(),
             slots: Arc::new(Semaphore::new(PROCESS_SLOTS)),
             lookup_rate: DashMap::new(),
@@ -473,7 +553,7 @@ impl AvatarStore {
         if conn_owners.get(conn_id).map_or(true, |o| o.value().as_str() != owner) {
             return;
         }
-        let rec = SessionRecord { owner: owner.to_string(), host: canonical_host(endpoint.0), port: endpoint.1, bouncer };
+        let rec = SessionRecord { owner: owner.to_string(), host: canonical_host(endpoint.0), port: endpoint.1, bouncer, meta2: false };
         if rec.host.is_empty() {
             return;
         }
@@ -489,6 +569,38 @@ impl AvatarStore {
         let changed = match self.sessions.get_mut(conn_id) {
             Some(mut r) if !r.bouncer => {
                 r.bouncer = true;
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            self.persist_sessions();
+        }
+    }
+    /// The session on `conn_id` negotiated draft/metadata-2 (remote avatars): mark the record,
+    /// or create one when a reattach dropped it (codex astra re-check 2 L avatar.rs:448). A
+    /// record created here knows nothing about the connection's classification, so it says
+    /// `bouncer: true` — unknown counts as a bouncer — until a live CAP LS records the truth.
+    pub fn ensure_session_meta2(&self, conn_id: &str, owner: &str, endpoint: (&str, u16), conn_owners: &DashMap<String, String>) {
+        if self.sessions.contains_key(conn_id) {
+            self.mark_session_meta2(conn_id);
+            return;
+        }
+        if conn_owners.get(conn_id).map_or(true, |o| o.value().as_str() != owner) {
+            return;
+        }
+        let host = canonical_host(endpoint.0);
+        if host.is_empty() {
+            return;
+        }
+        self.sessions.insert(conn_id.to_string(), SessionRecord { owner: owner.to_string(), host, port: endpoint.1, bouncer: true, meta2: true });
+        self.persist_sessions();
+    }
+    /// The session on `conn_id` negotiated draft/metadata-2 (remote avatars).
+    pub fn mark_session_meta2(&self, conn_id: &str) {
+        let changed = match self.sessions.get_mut(conn_id) {
+            Some(mut r) if !r.meta2 => {
+                r.meta2 = true;
                 true
             }
             _ => false,
@@ -566,6 +678,9 @@ impl AvatarStore {
             }
             if let Some(meta) = read_meta(&entry.path().join(META_FILE)).await {
                 store.by_token.insert(meta.token.clone(), name.clone());
+                if meta.share {
+                    store.by_pub.insert(meta.pub_id.clone(), name.clone());
+                }
                 store.by_user.insert(name, meta);
             }
         }
@@ -583,6 +698,28 @@ impl AvatarStore {
     }
     pub fn owner_of(&self, token: &str) -> Option<String> {
         self.by_token.get(token).map(|u| u.clone())
+    }
+    pub fn owner_of_pub(&self, pub_id: &str) -> Option<String> {
+        self.by_pub.get(pub_id).map(|u| u.clone())
+    }
+    pub fn set_public_base(&self, base: Option<String>) {
+        if let Ok(mut b) = self.public_base.write() {
+            *b = base;
+        }
+    }
+    pub fn public_base(&self) -> Option<String> {
+        self.public_base.read().ok().and_then(|b| b.clone())
+    }
+    /// The public URL `user` shares right now: avatars on, an avatar, visible, sharing on and
+    /// a public base URL. (The account's own state — disabled, being deleted — is checked by
+    /// the callers: remote::share_url.)
+    pub fn public_url(&self, user: &str) -> Option<String> {
+        if !self.enabled() {
+            return None;
+        }
+        let base = self.public_base()?;
+        let m = self.meta(user)?;
+        (m.visible && m.share && valid_token(&m.pub_id)).then(|| format!("{}/avatar/pub/{}-{}.png", base, m.pub_id, m.v))
     }
     fn user_dir(&self, user: &str) -> PathBuf {
         self.users_dir.join(user)
@@ -606,19 +743,21 @@ impl AvatarStore {
     /// (AuthManager::account_epoch) when the request was accepted: an upload that outlives
     /// its account (deleted, perhaps re-registered under the same name meanwhile) is refused
     /// — checked before writing and again before committing.
-    pub async fn save(&self, auth: &AuthManager, user: &str, epoch: u64, p: Processed) -> Result<AvatarMeta, AvatarError> {
+    /// `share_first`: a FIRST avatar is shared with other servers only when the owner agreed
+    /// in the upload flow (a replacement keeps the owner's choice).
+    pub async fn save(&self, auth: &AuthManager, user: &str, epoch: u64, p: Processed, share_first: bool) -> Result<AvatarMeta, AvatarError> {
         if !crate::auth::is_safe_username(user) {
             return Err(AvatarError::Gone);
         }
         let lock = self.user_lock(user);
         let guard = lock.lock().await;
-        let out = self.save_locked(auth, user, epoch, p).await;
+        let out = self.save_locked(auth, user, epoch, p, share_first).await;
         drop(guard);
         self.release_lock(user, lock);
         out
     }
 
-    async fn save_locked(&self, auth: &AuthManager, user: &str, epoch: u64, p: Processed) -> Result<AvatarMeta, AvatarError> {
+    async fn save_locked(&self, auth: &AuthManager, user: &str, epoch: u64, p: Processed, share_first: bool) -> Result<AvatarMeta, AvatarError> {
         if !auth.account_ticket_live(user, epoch) || !auth.account_exists(user).await {
             return Err(AvatarError::Gone);
         }
@@ -630,13 +769,25 @@ impl AvatarStore {
         if let Some(stale) = self.meta(user) {
             if prev.as_ref().map_or(true, |p| p.token != stale.token) {
                 self.by_token.remove(&stale.token);
+                self.by_pub.remove(&stale.pub_id);
                 self.by_user.remove(user);
             }
         }
+        // A first avatar is shared only with the owner's consent given in the upload flow
+        // (codex astra M app.js:9931: never public before the owner saw what sharing means);
+        // a replacement keeps the owner's choice and public id.
+        let (share, pub_id) = match &prev {
+            Some(m) if m.share => (true, if valid_token(&m.pub_id) { m.pub_id.clone() } else { new_token() }),
+            Some(_) => (false, String::new()),
+            None if share_first => (true, new_token()),
+            None => (false, String::new()),
+        };
         let meta = AvatarMeta {
             token: prev.as_ref().map(|m| m.token.clone()).unwrap_or_else(new_token),
             v: p.version.clone(),
             visible: prev.as_ref().map_or(true, |m| m.visible),
+            share,
+            pub_id,
         };
         let json = serde_json::to_vec(&meta).map_err(|_| AvatarError::Internal)?;
         for (bytes, size) in [(&p.large, SIZE_LARGE), (&p.small, SIZE_SMALL)] {
@@ -656,8 +807,14 @@ impl AvatarStore {
             if old.token != meta.token {
                 self.by_token.remove(&old.token);
             }
+            if old.pub_id != meta.pub_id {
+                self.by_pub.remove(&old.pub_id);
+            }
         }
         self.by_token.insert(meta.token.clone(), user.to_string());
+        if meta.share {
+            self.by_pub.insert(meta.pub_id.clone(), user.to_string());
+        }
         self.by_user.insert(user.to_string(), meta.clone());
         self.remove_files(user, Some(&meta.v)).await;
         Ok(meta)
@@ -673,6 +830,7 @@ impl AvatarStore {
         let had = match self.by_user.remove(user) {
             Some((_, m)) => {
                 self.by_token.remove(&m.token);
+                self.by_pub.remove(&m.pub_id);
                 true
             }
             None => false,
@@ -702,6 +860,41 @@ impl AvatarStore {
                 meta.visible = visible;
                 match serde_json::to_vec(&meta) {
                     Ok(json) if crate::write_user_file_atomic(&self.user_dir(user).join(META_FILE), &json).await.is_ok() => {
+                        self.by_user.insert(user.to_string(), meta.clone());
+                        Some(meta)
+                    }
+                    _ => None,
+                }
+            }
+            None => None,
+        };
+        drop(guard);
+        self.release_lock(user, lock);
+        out
+    }
+
+    /// The owner's "share my avatar with people on other CryptIRC servers" choice. Turning it
+    /// off discards the public id (the old link stops working for good); turning it on
+    /// mints a new one. None without an avatar.
+    pub async fn set_share(&self, user: &str, share: bool) -> Option<AvatarMeta> {
+        if !crate::auth::is_safe_username(user) {
+            return None;
+        }
+        let lock = self.user_lock(user);
+        let guard = lock.lock().await;
+        let out = match self.meta(user) {
+            Some(mut meta) => {
+                let old = meta.pub_id.clone();
+                meta.share = share;
+                meta.pub_id = if share { if valid_token(&old) { old.clone() } else { new_token() } } else { String::new() };
+                match serde_json::to_vec(&meta) {
+                    Ok(json) if crate::write_user_file_atomic(&self.user_dir(user).join(META_FILE), &json).await.is_ok() => {
+                        if old != meta.pub_id {
+                            self.by_pub.remove(&old);
+                        }
+                        if meta.share {
+                            self.by_pub.insert(meta.pub_id.clone(), user.to_string());
+                        }
                         self.by_user.insert(user.to_string(), meta.clone());
                         Some(meta)
                     }
@@ -773,7 +966,14 @@ async fn read_meta(path: &std::path::Path) -> Option<AvatarMeta> {
     if !md.is_file() || md.len() > 4096 {
         return None;
     }
-    let meta: AvatarMeta = serde_json::from_slice(&tokio::fs::read(path).await.ok()?).ok()?;
+    let mut meta: AvatarMeta = serde_json::from_slice(&tokio::fs::read(path).await.ok()?).ok()?;
+    if !(meta.pub_id.is_empty() || valid_token(&meta.pub_id)) {
+        return None;
+    }
+    if !meta.share || meta.pub_id.is_empty() {
+        meta.share = false;
+        meta.pub_id.clear();
+    }
     (valid_token(&meta.token) && valid_version(&meta.v)).then_some(meta)
 }
 
@@ -849,6 +1049,10 @@ impl SeenHosts {
     }
     pub fn forget(&mut self, nick: &str) {
         self.map.remove(&nick.to_ascii_lowercase());
+    }
+    /// The newest user@host shown for this nick (ASCII-lowercased match).
+    pub fn get(&self, nick: &str) -> Option<&str> {
+        self.map.get(&nick.to_ascii_lowercase()).map(|v| v.1.as_str())
     }
     pub fn clear(&mut self) {
         self.map.clear();
@@ -1071,6 +1275,7 @@ async fn owner_shown(auth: &AuthManager, owner: &str) -> bool {
 pub struct AvatarRouteState {
     pub auth: Arc<AuthManager>,
     pub store: Arc<AvatarStore>,
+    pub remote: Arc<remote::RemoteAvatars>,
     pub connections: Arc<DashMap<String, Arc<Mutex<IrcConnection>>>>,
     pub conn_owners: Arc<DashMap<String, String>>,
     /// The live irc-core link generation once its Attach replay is complete
@@ -1083,6 +1288,7 @@ impl FromRef<crate::AppState> for AvatarRouteState {
         AvatarRouteState {
             auth: s.auth.clone(),
             store: s.avatars.clone(),
+            remote: s.avatar_remote.clone(),
             connections: s.connections.clone(),
             conn_owners: s.conn_owners.clone(),
             link: crate::ipc_client::attached_link,
@@ -1151,10 +1357,18 @@ fn own_state(store: &AvatarStore, user: &str) -> Response {
             "enabled": store.enabled(),
             "avatar": meta.as_ref().map(|m| serde_json::json!({ "t": m.token, "v": m.v })),
             "visible": meta.as_ref().map_or(true, |m| m.visible),
+            "share": meta.as_ref().map_or(false, |m| m.share),
+            "share_available": store.public_base().is_some(),
+            "public_url": store.public_url(user),
             "max_bytes": MAX_UPLOAD_BYTES,
         }))
         .into_response(),
     )
+}
+
+/// Publish / clear the owner's metadata value after a change (remote::republish).
+async fn republish(state: &AvatarRouteState, owner: &str) {
+    remote::republish(&state.auth, &state.store, &state.connections, &state.conn_owners, owner).await;
 }
 
 /// GET /api/avatar/me — the caller's own avatar state.
@@ -1163,9 +1377,11 @@ pub async fn route_me_get(State(state): State<AvatarRouteState>, headers: Header
     own_state(&state.store, &user)
 }
 
-/// POST /api/avatar/me — upload or replace (the raw image is the body). The session is
-/// checked before the body is read.
-pub async fn route_me_upload(State(state): State<AvatarRouteState>, headers: HeaderMap, body: Body) -> Response {
+/// POST /api/avatar/me[?share=1] — upload or replace (the raw image is the body). The session
+/// is checked before the body is read. `share=1`: the owner agreed (in the upload flow) that a
+/// FIRST avatar is shared with other CryptIRC servers; without it a first avatar is not.
+pub async fn route_me_upload(State(state): State<AvatarRouteState>, Query(params): Query<HashMap<String, String>>, headers: HeaderMap, body: Body) -> Response {
+    let share_first = params.get("share").map(String::as_str) == Some("1");
     let Some(user) = api_user(&state, &headers) else { return unauthorized() };
     // The account generation this upload belongs to (see AvatarStore::save).
     let epoch = state.auth.account_epoch(&user);
@@ -1202,8 +1418,11 @@ pub async fn route_me_upload(State(state): State<AvatarRouteState>, headers: Hea
         Ok(p) => p,
         Err(e) => return json_message(e.status(), e.message()),
     };
-    match state.store.save(&state.auth, &user, epoch, processed).await {
-        Ok(_) => own_state(&state.store, &user),
+    match state.store.save(&state.auth, &user, epoch, processed, share_first).await {
+        Ok(_) => {
+            republish(&state, &user).await;
+            own_state(&state.store, &user)
+        }
         Err(e) => json_message(e.status(), e.message()),
     }
 }
@@ -1212,31 +1431,51 @@ pub async fn route_me_upload(State(state): State<AvatarRouteState>, headers: Hea
 pub async fn route_me_delete(State(state): State<AvatarRouteState>, headers: HeaderMap) -> Response {
     let Some(user) = api_user(&state, &headers) else { return unauthorized() };
     state.store.remove(&user).await;
+    republish(&state, &user).await;
     own_state(&state.store, &user)
 }
 
 #[derive(Deserialize)]
 pub struct SettingsBody {
-    visible: bool,
+    #[serde(default)]
+    visible: Option<bool>,
+    #[serde(default)]
+    share: Option<bool>,
 }
 
-/// PUT /api/avatar/me {"visible": bool} — "Show my avatar to other CryptIRC users".
+/// PUT /api/avatar/me {"visible"?: bool, "share"?: bool} — "Show my avatar to other CryptIRC
+/// users" / "Share my avatar with people on other CryptIRC servers".
 pub async fn route_me_settings(
     State(state): State<AvatarRouteState>,
     headers: HeaderMap,
     Json(body): Json<SettingsBody>,
 ) -> Response {
     let Some(user) = api_user(&state, &headers) else { return unauthorized() };
-    match state.store.set_visible(&user, body.visible).await {
-        Some(_) => own_state(&state.store, &user),
-        None => json_message(StatusCode::NOT_FOUND, "You have no avatar."),
+    if state.store.meta(&user).is_none() {
+        return json_message(StatusCode::NOT_FOUND, "You have no avatar.");
     }
+    if let Some(v) = body.visible {
+        if state.store.set_visible(&user, v).await.is_none() {
+            return json_message(StatusCode::INTERNAL_SERVER_ERROR, "Not saved.");
+        }
+    }
+    if let Some(s) = body.share {
+        if state.store.set_share(&user, s).await.is_none() {
+            return json_message(StatusCode::INTERNAL_SERVER_ERROR, "Not saved.");
+        }
+    }
+    republish(&state, &user).await;
+    own_state(&state.store, &user)
 }
 
 #[derive(Deserialize)]
 pub struct LookupBody {
     conn_id: String,
     nicks: Vec<String>,
+    /// Nicks the user explicitly opened (nick menu / WHOIS): may be queried on IRC when
+    /// nothing is known about them (remote::resolve).
+    #[serde(default)]
+    probe: Vec<String>,
 }
 
 /// POST /api/avatar/lookup {"conn_id", "nicks": [...]} — see `discover`.
@@ -1246,7 +1485,7 @@ pub async fn route_lookup(
     Json(body): Json<LookupBody>,
 ) -> Response {
     let Some(user) = api_user(&state, &headers) else { return unauthorized() };
-    if body.nicks.len() > LOOKUP_MAX_NICKS {
+    if body.nicks.len() > LOOKUP_MAX_NICKS || body.probe.len() > LOOKUP_MAX_NICKS {
         return json_message(StatusCode::BAD_REQUEST, "Too many nicks in one lookup.");
     }
     if !state.store.lookup_rate_ok(&user) {
@@ -1258,18 +1497,73 @@ pub async fn route_lookup(
         Ok(f) => f,
         Err(LookupError::NotYourConnection) => return not_found(),
     };
-    let avatars: serde_json::Map<String, serde_json::Value> = found
+    // Same-instance answers come first; other servers' announces only for the rest.
+    let local: HashSet<String> = found.keys().map(|n| cryptirc::ircproto::strip_pfx(n).to_ascii_lowercase()).collect();
+    let remote = remote::resolve(&state, &user, &body.conn_id, &body.nicks, &body.probe, &local).await;
+    let mut avatars: serde_json::Map<String, serde_json::Value> = found
         .into_iter()
         .map(|(nick, m)| (nick, serde_json::json!({ "t": m.token, "v": m.v })))
         .collect();
+    for (nick, (rid, v, host)) in remote.found {
+        avatars.entry(nick).or_insert_with(|| serde_json::json!({ "r": rid, "v": v, "h": host }));
+    }
     no_store(
         Json(serde_json::json!({
             "enabled": state.store.enabled(),
             "avatars": avatars,
+            "pending": remote.pending,
             "ttl": LOOKUP_TTL_SECS,
         }))
         .into_response(),
     )
+}
+
+/// GET /avatar/pub/<pub_id>-<version>.png — the 128 px picture an owner shares with people on
+/// other CryptIRC servers. Public (no session): only while avatars are on and the owner has
+/// this avatar, keeps it visible, shares it under this id, and the account exists and is
+/// neither disabled nor being deleted; otherwise 404 (no-store). `nosniff`, a short public
+/// cache and an ETag.
+pub async fn route_public_image(State(state): State<AvatarRouteState>, UrlPath(file): UrlPath<String>, headers: HeaderMap) -> Response {
+    let gone = || {
+        let mut r = StatusCode::NOT_FOUND.into_response();
+        r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        r.headers_mut().insert(header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
+        r
+    };
+    let Some((pid, v)) = file.strip_suffix(".png").and_then(|n| n.split_once('-')) else { return gone() };
+    if !state.store.enabled() || !valid_token(pid) || !valid_version(v) {
+        return gone();
+    }
+    let Some(owner) = state.store.owner_of_pub(pid) else { return gone() };
+    let Some(meta) = state.store.meta(&owner) else { return gone() };
+    if !(meta.visible && meta.share && meta.pub_id == pid && meta.v == v) || !owner_shown(&state.auth, &owner).await {
+        return gone();
+    }
+    let etag = format!("\"{}\"", v);
+    let revalidated = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|h| h.to_str().ok())
+        .map_or(false, |h| h.split(',').any(|t| t.trim() == etag || t.trim() == "*"));
+    let mut r = if revalidated {
+        let mut r = Response::new(Body::empty());
+        *r.status_mut() = StatusCode::NOT_MODIFIED;
+        r
+    } else {
+        let Some(bytes) = state.store.read_image(&owner, &meta.v, SIZE_LARGE).await else { return gone() };
+        let mut r = Response::new(Body::from(bytes));
+        r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+        r
+    };
+    let h = r.headers_mut();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=300"));
+    h.insert(header::HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
+    h.insert(header::HeaderName::from_static("cross-origin-resource-policy"), HeaderValue::from_static("cross-origin"));
+    h.insert(header::HeaderName::from_static("content-security-policy"), HeaderValue::from_static("default-src 'none'; sandbox"));
+    h.insert(header::HeaderName::from_static("referrer-policy"), HeaderValue::from_static("no-referrer"));
+    if let Ok(v) = HeaderValue::from_str(&etag) {
+        h.insert(header::ETAG, v);
+    }
+    r
 }
 
 /// GET /avatar/<token>?v=<version>[&s=48] — the picture, for sessions of this instance
@@ -1344,6 +1638,7 @@ pub async fn route_admin_remove(
         return json_message(StatusCode::BAD_REQUEST, "Invalid username.");
     }
     if state.store.remove(&target).await {
+        republish(&state, &target).await;
         json_message(StatusCode::OK, "Avatar removed.")
     } else {
         json_message(StatusCode::NOT_FOUND, "That user has no avatar.")
@@ -1357,6 +1652,8 @@ pub fn admin_roster_info(store: &AvatarStore, username: &str) -> serde_json::Val
         None => serde_json::Value::Null,
     }
 }
+
+pub mod remote;
 
 #[cfg(test)]
 mod tests;

@@ -168,6 +168,9 @@ pub struct IrcConnection {
     /// current nick earlier in the ring (before we took it) count as ours — 069f376's `nick`
     /// started and moved exactly the same way.
     pub replay_view: Option<(String, String)>,
+    /// Remote avatars (avatar::remote): announces other CryptIRC servers' users made on this
+    /// connection, and what it negotiated for them. Reset with the IRC session (ipc_client).
+    pub avx: crate::avatar::remote::ConnState,
     /// Cached at connection-creation time (Dial or Attach-rehydration) so
     /// `dispatch_line` never needs a disk read per IRC line — the original
     /// single-process code kept this as a stable in-memory variable for the
@@ -194,7 +197,7 @@ impl IrcConnection {
             casemapping: CaseMapping::default(), server_casemapping: None,
             dial_endpoint: Some((server.to_string(), port)),
             statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(), chanmodes: ChanModes::default(),
-            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 1, cap_ls_done: true, behind_bouncer: false, replay_view: None, cfg: NetworkConfig::default(),
+            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 1, cap_ls_done: true, behind_bouncer: false, replay_view: None, avx: Default::default(), cfg: NetworkConfig::default(),
         }
     }
 
@@ -1113,6 +1116,19 @@ pub(crate) fn incoming_channel_target(c: &IrcConnection, target: &str) -> Option
     target.starts_with(['#', '&', '+', '!']).then(|| (target.to_string(), false))
 }
 
+/// Remote avatars: drop announces of nicks this connection no longer sees (after a PART /
+/// KICK — v1's rule: a nick outside the viewer's channels is not vouched for).
+/// `left`: the nick that left (someone else), or None for our own PART / KICK.
+async fn prune_remote_avatars(send: &impl Fn(ServerEvent), conn: &Arc<Mutex<IrcConnection>>, conn_id: &str, left: Option<&str>) {
+    let gone = {
+        let mut c = conn.lock().await;
+        crate::avatar::remote::on_departure(&mut c, left)
+    };
+    if !gone.is_empty() {
+        send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: gone });
+    }
+}
+
 /// Where an incoming NOTICE is shown: None = an echo-message echo of our own NOTICE
 /// (suppressed, as for PRIVMSG), else the buffer — a channel (incl. a STATUSMSG `@#chan`
 /// target, r4), "status" for the server, the recipient for our own outgoing NOTICE, the
@@ -1202,6 +1218,7 @@ pub async fn dispatch_line(
     // ascii server switching the web to ascii would turn such a stub (`#a{b}` for
     // `#a[b]`) into a separate phantom channel. With an old daemon nothing changes.
     let mut isupport_bouncer = false;
+    let promoted: Vec<String>;
     let cm = {
         let mut c = conn.lock().await;
         if p.command == "005" {
@@ -1212,9 +1229,12 @@ pub async fn dispatch_line(
             if let Some(s) = statusmsg_from_isupport(&p.params) { c.statusmsg = Some(s); }
             c.chanmodes.learn(&p.params);
             if crate::avatar::isupport_names_a_bouncer(&p.params) { c.behind_bouncer = true; isupport_bouncer = true; }
+            if let Some(d) = crate::avatar::remote::clienttagdeny_from_isupport(&p.params) { c.avx.client_tag_deny = d; }
         }
         // Avatars: the user@host this line shows for a nick (see avatar::discover rule 5).
         crate::avatar::observe_line(&mut c, p.prefix.as_deref(), &p.command, &p.params);
+        // Remote avatars: metadata values held until their nick's user@host was known.
+        promoted = crate::avatar::remote::promote_held(&mut c);
         c.casemapping
     };
     if isupport_bouncer { state.avatars.mark_session_bouncer(conn_id); }
@@ -1248,6 +1268,11 @@ pub async fn dispatch_line(
         .map(|dt| dt.timestamp())
         .filter(|t| (received - SERVER_TIME_MAX_PAST..=received + SERVER_TIME_MAX_FUTURE).contains(t))
         .unwrap_or(received);
+    // Remote avatars: announces count only on a classified, non-bouncer connection and never
+    // on playback (avatar::remote::announce_is_fresh); a restricted connection (behind a
+    // bouncer, or not classified) learns no remote avatar at all and never answers CTCP AVATAR.
+    let arrival = crate::avatar::remote::Arrival { replayed, restricted: crate::avatar::remote::restricted(&*conn.lock().await) };
+    let announce_fresh = crate::avatar::remote::announce_is_fresh(&p.tags, received, arrival);
     // What browsers are told: backlog is news to them.
     let ui_replayed = replayed && !backlog;
     let send = |evt: ServerEvent| {
@@ -1263,6 +1288,21 @@ pub async fn dispatch_line(
         };
         state.send_to_user(username, evt)
     };
+
+    if !promoted.is_empty() { send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: promoted }); }
+    // Remote avatars: draft/metadata-2 lines about the `avatar` key (and our subscription)
+    // are consumed here — learned, never shown.
+    if matches!(p.command.as_str(), "760" | "761" | "766" | "770" | "771" | "772" | "774" | "METADATA" | "FAIL" | "WARN" | "NOTE") {
+        let consumed = {
+            let mut c = conn.lock().await;
+            let own = c.echo_nick(replayed);
+            crate::avatar::remote::metadata_line(&mut c, &state.avatar_remote, &p.command, &p.tags, &p.params, &own, received, arrival)
+        };
+        if let Some(changed) = consumed {
+            if let Some(n) = changed { send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: vec![n] }); }
+            return Ok(());
+        }
+    }
 
     match p.command.as_str() {
 
@@ -1291,11 +1331,30 @@ pub async fn dispatch_line(
                     } else if c.behind_bouncer {
                         state.avatars.mark_session_bouncer(conn_id);
                     }
+                    // Remote avatars: the server offers draft/metadata-2 (live lines only; not
+                    // when the network config disables it). Requested once registered (001),
+                    // or now for a CAP NEW after registration — never during irc-core's own
+                    // CAP negotiation.
+                    let meta = crate::avatar::remote::META_CAP;
+                    if !replayed && crate::avatar::remote::cap_list_has(&caps, meta) && !c.cfg.disabled_caps.iter().any(|d| d == meta) {
+                        c.avx.meta2_offered = true;
+                        if sub == "NEW" && c.registered && !c.avx.meta2_on && !c.avx.meta2_requested {
+                            c.avx.meta2_requested = true;
+                            let _ = c.send_raw(&format!("CAP REQ :{}\r\n", meta)).await;
+                        }
+                    }
                 }
                 "ACK" => {
                     // L43: Set capability flags on ACK, not on REQ
                     if caps.contains("echo-message") { conn.lock().await.echo_message_enabled = true; }
                     if caps.contains("message-tags") { conn.lock().await.message_tags = true; }
+                    if !replayed && crate::avatar::remote::cap_list_has(&caps, crate::avatar::remote::META_CAP) {
+                        crate::avatar::remote::on_meta2_ack(state, username, conn).await;
+                        // The session record says metadata-2 is on — recreated if a reattach
+                        // dropped it, so the next restart re-establishes it too.
+                        let endpoint = { let c = conn.lock().await; c.dial_endpoint.clone().unwrap_or_else(|| (c.cfg.server.clone(), c.cfg.port)) };
+                        state.avatars.ensure_session_meta2(conn_id, username, (&endpoint.0, endpoint.1), &state.conn_owners);
+                    }
                 }
                 "NAK" => {
                     let sasl_configured = { let c = conn.lock().await; c.cfg.sasl_external || c.cfg.sasl_plain.is_some() };
@@ -1305,6 +1364,7 @@ pub async fn dispatch_line(
                 }
                 "DEL" => {
                     if caps.contains("echo-message") { conn.lock().await.echo_message_enabled = false; }
+                    if crate::avatar::remote::cap_list_has(&caps, crate::avatar::remote::META_CAP) { conn.lock().await.avx.meta2_on = false; }
                 }
                 _ => {}
             }
@@ -1339,7 +1399,16 @@ pub async fn dispatch_line(
         // silently never fired even though the connection worked perfectly.
         // SessionSync is now the single authoritative source for nick/
         // registered/connected/Connected-emission; see ipc_client.rs.
-        "001" => {}
+        "001" => {
+            // Remote avatars: ask for draft/metadata-2 now that registration is over.
+            if !replayed {
+                let mut c = conn.lock().await;
+                if c.avx.meta2_offered && !c.avx.meta2_on && !c.avx.meta2_requested {
+                    c.avx.meta2_requested = true;
+                    let _ = c.send_raw(&format!("CAP REQ :{}\r\n", crate::avatar::remote::META_CAP)).await;
+                }
+            }
+        }
 
         // S4: bounded nick collision retry — ONLY while still registering (pre-001).
         // During registration we need *a* nick to finish connecting, so auto-append
@@ -1385,6 +1454,12 @@ pub async fn dispatch_line(
             let text   = p.params.get(1).cloned().unwrap_or_default();
             // On replay, the nick we had when the line arrived (IrcConnection::echo_nick).
             let (user_nick, label) = { let c = conn.lock().await; (c.echo_nick(replayed), c.cfg.label.clone()) };
+            // Remote avatars: an announce tag from the line's sender (never a server source,
+            // never ourselves) — avatar::remote::learn_from_prefix.
+            if let Some(v) = p.tags.get(crate::avatar::remote::TAG_KEY).filter(|_| announce_fresh) {
+                let learned = { let mut c = conn.lock().await; crate::avatar::remote::learn_from_prefix(&mut c, &state.avatar_remote, p.prefix.as_deref(), v, crate::avatar::remote::Source::Tag, &user_nick) };
+                if let Some(n) = learned { send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: vec![n] }); }
+            }
             // echo-message: if server echoes our own PRIVMSG, skip it here —
             // the Send handler already broadcasts IrcEcho for multi-device sync.
             // Suppress regardless of prefix form: a real IRCd echoes the full
@@ -1396,6 +1471,16 @@ pub async fn dispatch_line(
             let in_batch = p.tags.contains_key("batch");
             let echo_message_enabled = { conn.lock().await.echo_message_enabled };
             if echo_message_enabled && same_nick(&from, &user_nick) && !in_batch {
+                return Ok(());
+            }
+            // CTCP AVATAR (remote avatars, KVIrc's query): answered only when addressed to us
+            // directly on a live line that is not playback (no batch, a fresh stamp — codex
+            // astra L irc.rs:1486), and only for an owner who shares; never shown.
+            if crate::avatar::remote::ctcp_avatar(&text).is_some() {
+                let direct = { let c = conn.lock().await; incoming_channel_target(&c, &target).is_none() };
+                if crate::avatar::remote::may_answer_ctcp(replayed, announce_fresh, direct, same_nick(&from, &user_nick), arrival.restricted) {
+                    crate::avatar::remote::answer_ctcp(state, username, conn, conn_id, p.prefix.as_deref()).await;
+                }
                 return Ok(());
             }
             // Reply to CTCP VERSION
@@ -1462,6 +1547,37 @@ pub async fn dispatch_line(
             // journal of an app sold on encrypted logs. Metadata only, at debug.
             debug!("[{}] NOTICE: from={} target={} ({} chars)", conn_id, from, target, text.chars().count());
             let in_batch = p.tags.contains_key("batch");
+            // Remote avatars: a CTCP AVATAR answer counts only from the nick we just asked
+            // (live); an announce tag counts like on PRIVMSG. CTCP AVATAR lines are never shown.
+            let own = { conn.lock().await.echo_nick(replayed) };
+            let ctcp = crate::avatar::remote::ctcp_avatar(&text).map(str::to_string);
+            // A negative CTCP answer (ERRMSG, …) also voids our query to that nick.
+            if ctcp.is_none() && text.starts_with('\u{1}') { state.avatar_remote.forget_query(conn_id, &from); }
+            let tagged = p.tags.get(crate::avatar::remote::TAG_KEY).filter(|_| announce_fresh).cloned();
+            if ctcp.is_some() || tagged.is_some() {
+                let mut learned = None;
+                {
+                    let mut c = conn.lock().await;
+                    if let Some(args) = &ctcp {
+                        // Any answer voids our query (once); it counts only on a live, fresh,
+                        // non-playback line from the user we asked (same user@host), within
+                        // 20 s — and never on a restricted connection (announce_fresh).
+                        let asked = state.avatar_remote.take_ctcp_answer(conn_id, &from);
+                        if let Some(asked) = asked {
+                            let ok = !replayed && !in_batch && announce_fresh && !same_nick(&from, &own)
+                                && crate::avatar::remote::answer_matches(asked.as_deref(), &userhost_from_prefix(&p.prefix));
+                            if let (true, Some(url)) = (ok, crate::avatar::remote::reply_url(args)) {
+                                learned = crate::avatar::remote::learn_from_prefix(&mut c, &state.avatar_remote, p.prefix.as_deref(), url, crate::avatar::remote::Source::Ctcp, &own);
+                            }
+                        }
+                    }
+                    if let Some(v) = &tagged {
+                        learned = learned.or(crate::avatar::remote::learn_from_prefix(&mut c, &state.avatar_remote, p.prefix.as_deref(), v, crate::avatar::remote::Source::Tag, &own));
+                    }
+                }
+                if let Some(n) = learned { send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: vec![n] }); }
+                if ctcp.is_some() { return Ok(()); }
+            }
             let routed = { let c = conn.lock().await; notice_display_target(&c, &from, &target, p.prefix.is_some(), replayed, in_batch) };
             let Some(display_target) = routed else { return Ok(()) };   // our own echo
             let msg_id = if first_seen { log_line(state, username, conn_id, &display_target, ts, &from, &text, "notice").await } else { 0 };
@@ -1602,6 +1718,12 @@ pub async fn dispatch_line(
                 crate::bots::maybe_automode(state, username, conn_id, conn, &channel, &nick, &mask);
                 // IP/host logging, seen-tracking, pending-tell delivery on join.
                 crate::bots::maybe_join_bots(state, username, conn_id, conn, &channel, &nick, &mask);
+                // Remote avatars: a bounded, delayed, invisible welcome to the joiner.
+                crate::avatar::remote::on_other_join(state, username, conn, conn_id, &channel, &nick).await;
+            }
+            // Remote avatars: our own live JOIN announces us to the channel (invisibly).
+            if accepted && !replayed && is_self {
+                crate::avatar::remote::on_self_join(state, username, conn, conn_id, &channel).await;
             }
             // #43: don't surface a JOIN for a channel we refused to track
             // (a cap-rejected forged self-JOIN) — keep client and server state in sync.
@@ -1619,6 +1741,10 @@ pub async fn dispatch_line(
             // r5 (codex P2 irc.rs:865): only for a channel we track (an untracked one is
             // neither logged — a new log target each — nor shown; our own PART is still shown).
             let (tracked, is_self) = { let mut c = conn.lock().await; let k = cm.fold(&channel); if same_nick(&nick, &c.echo_nick(replayed)) { (c.channels.remove(&k).is_some(), true) } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| !same_nick(strip_pfx(n), &nick)); (true, false) } else { (false, false) } };
+            prune_remote_avatars(&send, conn, conn_id, (!is_self).then_some(nick.as_str())).await;
+            if is_self && !replayed { state.avatar_remote.forget_target(conn_id, &channel); }
+            if !is_self && !replayed { state.avatar_remote.forget_welcome(conn_id, &nick); }
+            if !is_self { state.avatar_remote.forget_query(conn_id, &nick); }
             crate::bots::member_changed(conn_id, cm, Some(&channel), &nick);   // r9: queued auto op/voice
             let part_text = if reason.is_empty() { format!("← {} left", nick) } else { format!("← {} left ({})", nick, reason) };
             if first_seen && tracked { let _ = log_line(state, &username, &conn_id, &channel, ts, &nick, &part_text, "part").await; }
@@ -1633,6 +1759,11 @@ pub async fn dispatch_line(
                 // QUIT is logged to the shared channel(s), not misfiled to the status buffer.
                 let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n).eq_ignore_ascii_case(&nick))).map(|(_, ch)| ch.name.clone()).collect();
                 for ch in c.channels.values_mut() { ch.names.retain(|n| !strip_pfx(n).eq_ignore_ascii_case(&nick)); }
+                // Remote avatars: whatever this nick announced is gone with it (and it may be
+                // welcomed again when it comes back).
+                if c.avx.forget(&nick) { send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: vec![nick.clone()] }); }
+                if !replayed { state.avatar_remote.forget_welcome(conn_id, &nick); }
+                state.avatar_remote.forget_query(conn_id, &nick);
                 chans
             };
             crate::bots::member_changed(conn_id, cm, None, &nick);   // r9: queued auto op/voice
@@ -1652,6 +1783,7 @@ pub async fn dispatch_line(
             crate::bots::member_changed(conn_id, cm, None, &old); crate::bots::member_changed(conn_id, cm, None, &new);   // r9: no grant follows or lands on a nick
             // #30: source user@host, used to verify a self-NICK really identifies us.
             let src_userhost = userhost_from_prefix(&p.prefix);
+            let ours;
             let affected: Vec<String> = {
                 let mut c = conn.lock().await;
                 let chans: Vec<String> = c.channels.iter().filter(|(_, ch)| ch.names.iter().any(|n| strip_pfx(n).eq_ignore_ascii_case(&old))).map(|(_, ch)| ch.name.clone()).collect();
@@ -1666,8 +1798,14 @@ pub async fn dispatch_line(
                 // the nick (agy P2 #30 bypass), rejecting our own NICK would desync us.
                 // Live lines only: a replayed NICK never rewrites our identity
                 // (IrcConnection::adopt_self_nick).
-                c.adopt_self_nick(&old, &new, &src_userhost, replayed);
+                ours = !replayed && c.adopt_self_nick(&old, &new, &src_userhost, replayed);
                 if replayed { c.replay_follow_nick(&old, &new, &src_userhost); }
+                // Remote avatars: the old nick's announce goes (a metadata value follows the
+                // user); after our own nick change other servers forget ours — announce anew.
+                if c.avx.renamed(&old, &new) { send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: vec![old.clone(), new.clone()] }); }
+                state.avatar_remote.forget_query(conn_id, &old);
+                state.avatar_remote.forget_query(conn_id, &new);
+                if ours { state.avatar_remote.forget_conn(conn_id); }
                 // An implausibly long new nick (NAMES_ENTRY_MAX_BYTES) is dropped from the
                 // member lists rather than stored — renames can't inflate them either.
                 let new_ok = new.len() <= NAMES_ENTRY_MAX_BYTES;
@@ -1694,6 +1832,7 @@ pub async fn dispatch_line(
                 }
             }
             send(ServerEvent::IrcNick { conn_id: conn_id.to_string(), old, new, ts });
+            if ours { crate::avatar::remote::reannounce(state, username, conn, conn_id).await; }
         }
         "CHGHOST" => {
             let nick = nick_from_prefix(&p.prefix);
@@ -1710,6 +1849,15 @@ pub async fn dispatch_line(
                 let nh = p.params.get(1).cloned().unwrap_or_default();
                 c.adopt_self_chghost(&nick, &src_userhost, &nu, &nh, replayed);
                 if replayed && !nu.is_empty() && !nh.is_empty() { c.replay_follow_userhost(&nick, &src_userhost, &format!("{}@{}", nu, nh), true); }
+            }
+            // Remote avatars: an announce is bound to the sender's user@host — a host change
+            // drops it (the user announces again); after our own, other servers forgot ours.
+            if c.avx.forget(&nick) { send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: vec![nick.clone()] }); }
+            if !replayed && same_nick(&nick, &c.nick) {
+                state.avatar_remote.forget_conn(conn_id);
+                drop(c);
+                crate::avatar::remote::reannounce(state, username, conn, conn_id).await;
+                return Ok(());   // our own host change is never shown (see below)
             }
             // Our own host change (our nick) is never announced: services re-apply a vhost on
             // every (re)connect, so it was shown again in every channel each time. Someone
@@ -1788,6 +1936,22 @@ pub async fn dispatch_line(
         "TAGMSG" => {
             let from = nick_from_prefix(&p.prefix);
             let target = p.params.get(0).cloned().unwrap_or_default();
+            // Remote avatars: an invisible announce (a join announce to a channel, or a
+            // welcome to us) — learned like the tag on PRIVMSG.
+            if let Some(v) = p.tags.get(crate::avatar::remote::TAG_KEY).filter(|_| announce_fresh) {
+                let (learned, to_channel) = {
+                    let mut c = conn.lock().await;
+                    let own = c.echo_nick(replayed);
+                    let to_channel = incoming_channel_target(&c, &target).is_some();
+                    (crate::avatar::remote::learn_from_prefix(&mut c, &state.avatar_remote, p.prefix.as_deref(), v, crate::avatar::remote::Source::Tag, &own), to_channel)
+                };
+                tracing::debug!("avatars: TAGMSG announce from {} on {} (to channel: {}, new: {})", from, conn_id, to_channel, learned.is_some());
+                if let Some(n) = learned {
+                    send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: vec![n.clone()] });
+                    // A peer's new channel announce: it may not know us — answer privately.
+                    if to_channel && !replayed { crate::avatar::remote::on_peer_announce(state, username, conn, conn_id, &n).await; }
+                }
+            }
             // Check for typing indicator (+typing or +draft/typing tag)
             if let Some(typing_state) = p.tags.get("+typing").or_else(|| p.tags.get("+draft/typing")) {
                 let (our_nick, chan_target) = { let c = conn.lock().await; (c.echo_nick(replayed), incoming_channel_target(&c, &target)) };
@@ -1808,6 +1972,12 @@ pub async fn dispatch_line(
             // are handled normally via their own handlers
             let ref_tag = p.params.get(0).cloned().unwrap_or_default();
             let batch_type = p.params.get(1).cloned().unwrap_or_default();
+            // Remote avatars: which open batches are metadata ones (avatar::remote::metadata_line).
+            {
+                let mut c = conn.lock().await;
+                if let Some(r) = ref_tag.strip_prefix('+') { c.avx.batch_open(r, &batch_type, p.tags.get("batch").map(String::as_str)); }
+                else if let Some(r) = ref_tag.strip_prefix('-') { c.avx.batch_close(r); }
+            }
             if ref_tag.starts_with('+') {
                 info!("[{}] BATCH opened: {} type={}", conn_id, ref_tag, batch_type);
             } else {
@@ -1881,6 +2051,10 @@ pub async fn dispatch_line(
             let reason  = p.params.get(2).cloned().unwrap_or_default();
             // r5 (codex P2 irc.rs:865): only for a channel we track (see PART).
             let (tracked, is_self) = { let mut c = conn.lock().await; let k = cm.fold(&channel); if same_nick(&kicked, &c.echo_nick(replayed)) { (c.channels.remove(&k).is_some(), true) } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| !same_nick(strip_pfx(n), &kicked)); (true, false) } else { (false, false) } };
+            prune_remote_avatars(&send, conn, conn_id, (!is_self).then_some(kicked.as_str())).await;
+            if is_self && !replayed { state.avatar_remote.forget_target(conn_id, &channel); }
+            if !is_self && !replayed { state.avatar_remote.forget_welcome(conn_id, &kicked); }
+            if !is_self { state.avatar_remote.forget_query(conn_id, &kicked); }
             crate::bots::member_changed(conn_id, cm, Some(&channel), &kicked);   // r9: queued auto op/voice
             let kick_text = if reason.is_empty() { format!("✗ {} kicked by {}", kicked, by) } else { format!("✗ {} kicked by {} ({})", kicked, by, reason) };
             if first_seen && tracked { let _ = log_line(state, &username, &conn_id, &channel, ts, &kicked, &kick_text, "kick").await; }
@@ -2661,7 +2835,7 @@ mod tests {
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
             casemapping: CaseMapping::default(), server_casemapping: None, dial_endpoint: None,
             statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(), chanmodes: ChanModes::default(),
-            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, replay_view: None, cfg: NetworkConfig::default(),
+            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, replay_view: None, avx: Default::default(), cfg: NetworkConfig::default(),
         }
     }
 
