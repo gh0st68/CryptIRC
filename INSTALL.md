@@ -269,6 +269,11 @@ yourdomain.com {
             request>uri query {
                 replace token REDACTED
                 replace password REDACTED
+                # link / X previews: the chat URL being previewed, and the signed
+                # media-fallback values (see "X post previews" below)
+                replace url REDACTED
+                replace sig REDACTED
+                replace a REDACTED
             }
             request>headers>Referer delete
         }
@@ -436,6 +441,11 @@ Already running nginx for CryptIRC with the default access log? Add the `log_for
 | `CRYPTIRC_IPC_SOCK` | `$CRYPTIRC_DATA/irc-core.sock` | Unix socket between the web server and the `irc-core` daemon. If you set it, set the same value in **both** units. |
 | `CRYPTIRC_TRUSTED_PROXIES` | (none) | Extra reverse proxies (IPs or CIDRs, comma- or space-separated, e.g. `10.0.0.5, 2001:db8::/64`) whose forwarding headers are believed. Loopback is always trusted. See [Client IP addresses](#client-ip-addresses-behind-a-proxy). |
 | `CRYPTIRC_REAL_IP_HEADER` | `auto` | Which header a trusted proxy's client address is read from: `auto`, `x-forwarded-for` (or `xff`), `x-real-ip`, or `off`. See below. |
+| `CRYPTIRC_X_GUEST_ENABLED` | (off) | `1` enables the X guest-GraphQL post provider (needs `CRYPTIRC_X_GUEST_BEARER`). See [X post previews](#x-post-previews-optional). |
+| `CRYPTIRC_X_GUEST_BEARER` | (none) | Operator-supplied bearer for the guest provider. A secret: put it in `/etc/cryptirc/cryptirc.env`, never in an `Environment=` line. |
+| `CRYPTIRC_X_GRAPHQL_CONFIG` | (bundled snapshot) | Optional absolute path to a ≤16 KiB operation-ID/feature JSON for the guest provider. |
+| `CRYPTIRC_X_FXTWITTER_ENABLED` | (off) | `1` enables the secret-free FixTweet post provider (used only when the guest provider is not configured). |
+| `CRYPTIRC_X_THREADREADER_ENABLED` | (off) | `1` enables the optional published-thread viewer (ThreadReaderApp), independent of the post providers. |
 | `CRYPTIRC_AI_ALLOW_PRIVATE` | (off) | `1`/`true`/`yes`/`on` lets the AI bot's **custom** provider reach private, loopback, link-local or internal-name endpoints (e.g. a self-hosted Ollama on `127.0.0.1`). Off by default. See below. |
 | `RUST_LOG` | `info` | Log level: `error`, `warn`, `info`, `debug`, `trace` |
 
@@ -488,6 +498,78 @@ Leave `CRYPTIRC_TRUSTED_PROXIES` empty in these setups. It is only for a proxy t
 The built-in AI bot's **custom** provider lets a user point it at any OpenAI-compatible URL. By default CryptIRC refuses URLs that resolve to a private, loopback, link-local or internal-name address, so a user can't make the server fetch from its own loopback admin APIs, the cloud metadata service or the intranet (an SSRF guard). On a multi-user server **any** account can set a custom endpoint, so this applies to everyone.
 
 To point the bot at a self-hosted model (Ollama, LM Studio, a LAN box), set `CRYPTIRC_AI_ALLOW_PRIVATE=1` in the service environment (a `systemctl edit cryptirc` drop-in, or a line in `/etc/cryptirc/cryptirc.env` — re-running the installer keeps lines you add there) and restart `cryptirc`. Only enable it when every account on the instance is trusted. The installer never sets it.
+
+### X post previews (optional)
+
+CryptIRC can render X/Twitter status links as rich cards (author, text, exact counts, photo galleries, native video/GIF playback after Play, one level of quoted post, and an optional published-thread viewer). **Everything is off by default.** With none of the variables below set, the server never contacts an X preview provider (X's API, FixTweet or ThreadReaderApp); `GET <base>/tweet/config` tells browsers nothing is offered, and X links behave exactly as they did before this feature — the ordinary link, plus the generic link preview if your admin link-preview policy allows `x.com`/`twitter.com` (the default whitelist does), with the usual click-to-load step for links in encrypted messages (a recognized X status link is never fetched as an image or video, whatever it ends with). Once a provider is offered, X links switch to X cards and are never sent to the generic `/preview` fetcher.
+
+**Providers** (read once at startup; restart the web service after a change):
+
+| Variable | What it enables | Who learns what |
+|---|---|---|
+| `CRYPTIRC_X_FXTWITTER_ENABLED=1` | Post cards from the public FixTweet API (`api.fxtwitter.com`). No credential, no rotating operation IDs. Used only when the guest provider below is not configured. | FixTweet receives the post ID and your server's IP for each preview. Third-party service; its response shape is unverified live. |
+| `CRYPTIRC_X_GUEST_ENABLED=1` + `CRYPTIRC_X_GUEST_BEARER` (+ optional `CRYPTIRC_X_GRAPHQL_CONFIG`) | Post cards from X's guest GraphQL endpoint on `api.x.com`. Requires a bearer you are permitted to use. The bundled operation snapshot (`src/twitter/provider-config.json`) drifts when X rotates operation IDs; point `CRYPTIRC_X_GRAPHQL_CONFIG` at an updated file (absolute path, ≤16 KiB, keys `tweet_query_id` and `tweet_features` only, no credentials). | X receives the post ID and your server's IP. |
+| `CRYPTIRC_X_THREADREADER_ENABLED=1` | A separate "Read thread…" action: after the viewer confirms, one published thread document is fetched from `threadreaderapp.com`. Independent of the post providers. | ThreadReaderApp receives the post ID. |
+
+Invalid configuration (e.g. guest enabled without a bearer, a bad config file) turns **post previews off** with one coarse log line — even if `CRYPTIRC_X_FXTWITTER_ENABLED` is also set, there is never a silent switch to another provider or host. (The thread viewer is independent.) Only enable a provider you are permitted to use; offline tests do not establish live availability.
+
+**Secret setup.** The bearer is a secret. Put it in the root-only environment file the unit already loads (`EnvironmentFile=-/etc/cryptirc/cryptirc.env`, created as in Step 6), not in an `Environment=` line (`systemctl show` exposes those):
+
+```bash
+sudo install -d -m 700 /etc/cryptirc
+sudo touch /etc/cryptirc/cryptirc.env && sudo chmod 600 /etc/cryptirc/cryptirc.env
+echo 'CRYPTIRC_X_GUEST_ENABLED=1'              | sudo tee -a /etc/cryptirc/cryptirc.env >/dev/null
+echo 'CRYPTIRC_X_GUEST_BEARER="<bearer text, without the Bearer prefix>"' | sudo tee -a /etc/cryptirc/cryptirc.env >/dev/null
+# or, secret-free:  echo 'CRYPTIRC_X_FXTWITTER_ENABLED=1' | sudo tee -a /etc/cryptirc/cryptirc.env >/dev/null
+sudo systemctl restart cryptirc        # the web service only — irc-core needs no restart
+```
+
+systemd reads that file as root, so it can stay `0600 root:root` inside the root-only `/etc/cryptirc`. A `CRYPTIRC_X_GRAPHQL_CONFIG` file is read by the **service user** instead, so it must not live in `/etc/cryptirc` (the `cryptirc` user cannot enter that `0700` directory). Give it its own directory the service group can read, and point the variable at it:
+
+```bash
+sudo install -d -m 750 -o root -g cryptirc /etc/cryptirc-x
+sudo install -m 640 -o root -g cryptirc x-graphql.json /etc/cryptirc-x/x-graphql.json
+echo 'CRYPTIRC_X_GRAPHQL_CONFIG=/etc/cryptirc-x/x-graphql.json' | sudo tee -a /etc/cryptirc/cryptirc.env >/dev/null
+sudo -u cryptirc cat /etc/cryptirc-x/x-graphql.json >/dev/null && echo readable   # check before restarting
+```
+
+(The unit's `ProtectSystem=strict` keeps `/etc` read-only for the service, which is all it needs.) Never put a CryptIRC session token, cookies or login credentials anywhere in this configuration.
+
+**Admin policy.** Settings → Admin → Link previews also governs X, immediately and without a restart: **Off** disables every X provider; **Whitelist** allows X only if the list contains an exact X/Twitter host (`x.com`, `twitter.com`, `www.x.com`, `mobile.x.com`, `www.twitter.com`, `mobile.twitter.com`, `m.twitter.com`); **All** allows it (the fixed provider hosts and public-address checks still apply). Changing the policy drops every cached X result.
+
+**Limits.** All `/tweet/*` routes require the normal Bearer session and share the per-user 30 requests/minute link-preview budget (cache hits included). Retrieval shares the existing eight outbound preview permits; requests for the same post coalesce; results are cached per viewer in memory only (10 min posts, 5 min threads, 100 per user, 1,000 / 32 MiB total). Responses are `private, no-store`.
+
+**Media.** Card media loads directly from `pbs.twimg.com` / `video.twimg.com` in the viewer's browser (the External media setting decides avatars/thumbnails/posters; video only after Play). If a privacy extension blocks those CDNs, the browser may ask for a signed same-origin copy (`POST <base>/tweet/media/sign`, then `GET <base>/tweet/media`). That fallback uses your server's bandwidth and lets it see which media is played. It only signs assets the same account just retrieved in a preview, only recognized X CDN image/MP4 paths, and only while the admin policy allows X and a provider is configured; links expire after 15 minutes and are bound to the account; responses must be raster images or MP4 (HTML, SVG and HLS playlists are refused) and are never cacheable (`private, no-store`); single byte ranges only, at most 128 MiB, 16 streams server-wide and 3 per account; DNS + connect + response headers must finish within 12 s, and a stream is cut off after 30 s without progress (either side) or 5 minutes total. Browsers batch and de-duplicate signing requests, and stop a pending fallback if External media is switched off meanwhile. No cookies, credentials or Referer are forwarded and redirects are refused.
+
+**Reverse-proxy logs.** CryptIRC's own logs never contain preview URLs, post IDs, tokens or text (the HTML tokenizer's trace output is always filtered out, whatever `RUST_LOG` says), but your proxy's access log records query strings unless told otherwise. `/tweet/preview` and `/tweet/thread` carry the previewed post URL in `?url=`, and `/tweet/media` carries `url`, `a` (an opaque account handle) and `sig`. The nginx config above already logs `$uri` without the query string; the Caddyfile above redacts `url`, `sig` and `a` (add those three `replace` lines to an existing Caddy `format filter`, including any Caddyfile written by `deploy/deploy.sh`). Also review any CDN/WAF in front of the proxy. If you use your own nginx log format, you can instead turn logging off for these routes (adapt the prefix; keep your normal proxy headers):
+
+```nginx
+location ~ ^/cryptirc/tweet/(preview|thread|media)$ {
+    access_log off;
+    proxy_pass http://127.0.0.1:9001;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+**What viewers see.** On a configured server, X links in public, unencrypted channel messages load automatically near the viewport (expanded layout by default — Appearance → X preview layout). Encrypted messages, DMs, the server window and unknown contexts stay click-to-load; any row of an end-to-end-encrypted conversation counts as encrypted. Security → X preview loading offers Auto in public (default) / Click to load / Hide on this device, plus per-conversation overrides; these choices are device-local and never synced. The global Link previews switch and Hide always win. If a browser cannot reach `/tweet/config` (e.g. during a reconnect), it retries with backoff and meanwhile shows X links through the generic link preview — never less private than the viewer's X settings. Nothing X-related loads while the vault or device is locked.
+
+**Checking it.** After enabling a provider, sign in and open `<base>/tweet/config` with your session (or watch the browser's network panel): `"preview": true` means cards are offered. One authorized request for a public post you are allowed to fetch is enough to confirm the schema; don't log credentials or response bodies. No live provider check is part of the automated tests.
+
+**Rollback.** Set Admin → Link previews to **Off** (immediate), then remove the `CRYPTIRC_X_*` lines from `/etc/cryptirc/cryptirc.env` and `sudo systemctl restart cryptirc`. Restart clears guest tokens and every cached result; nothing is stored on disk and messages need no migration. To roll back only threads, remove `CRYPTIRC_X_THREADREADER_ENABLED`. Reverting the code itself is a normal web-binary downgrade; irc-core is unaffected.
+
+Offline test commands and results: [docs/x-preview-verification.md](docs/x-preview-verification.md).
+
+### Avatars
+
+Users upload a picture in Settings → Profile → Avatar (PNG, JPEG or WebP, up to 2 MB). The server decodes it (at most 4096 × 4096, one picture at a time), applies the EXIF orientation, crops it to a square and keeps only re-encoded 128 px and 48 px PNGs — no metadata, never the original — in `<data dir>/users/<name>/` (`avatar.json`, `avatar-<version>-<size>.png`). Deleting the account removes them.
+
+**Who sees it.** Other CryptIRC users of the same instance, next to the owner's nick in the nick list, the WHOIS view and the nick menu — only while the owner's live connection dials the same IRC server host as the viewer's (the port may differ; a network name never counts), currently holds that nick (with the user@host the viewer's server shows for it, when it showed one), and the viewer's own connection sees the nick (a shared channel or a WHOIS reply). Pictures are never sent to IRC. Each user can hide theirs ("Show my avatar to other CryptIRC users") or turn off other people's ("Show other people's avatars").
+
+**Bouncers.** A bouncer (ZNC, soju, …) shared by several people proves only the bouncer, not the network behind each account, so avatars are never matched for a connection that shows it goes through one — the viewer's or the other user's: `soju.im/*`, `draft/bouncer-networks`, pounce's `causal.agency/*` or ZNC's `znc.in/batch` / `znc.in/server-time-iso` capabilities, CAP replies from `irc.znc.in`, or `BOUNCER_NETID`. (`znc.in/playback` and `znc.in/self-message` alone do not count: Ergo, a real IRC server, advertises them.) Both connections must have negotiated their capabilities where this server saw it — that is how a bouncer is recognised, per connection. Each connection's result is kept in `<data dir>/avatar_sessions.json` (only for saved networks; cleared when the network reconnects, is edited or removed, or the account is deleted), so a web-only restart keeps avatars while irc-core keeps that same IRC session; if irc-core reconnected meanwhile (or anything is unclear), that connection's avatars come back once it has negotiated again. Residual: a bouncer configured to hide all of that looks like a plain IRC server; on such a host the user@host check and "exactly one CryptIRC account holds the nick" still apply.
+
+**Admin.** Admin → Avatars turns the feature off (saved pictures are kept but neither served nor shown, and uploads are refused); a user's entry has **Remove avatar**. The switch is `avatars_enabled` in `admin_settings.json` (default on). Web binary only: irc-core is unchanged and needs no restart.
 
 ---
 

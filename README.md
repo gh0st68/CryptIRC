@@ -7,7 +7,7 @@
 <p align="center"><strong>IRC that stays connected.</strong><br>Self-hosted. Encrypted history. All your devices.</p>
 
 <p align="center">
-  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.8-00b894?style=flat-square" alt="Version 0.5.8"></a>
+  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.9-00b894?style=flat-square" alt="Version 0.5.8"></a>
   <img src="https://img.shields.io/badge/server-Linux-5a7085?style=flat-square" alt="Linux server">
   <img src="https://img.shields.io/badge/client-desktop%20%C2%B7%20mobile%20%C2%B7%20terminal-5a7085?style=flat-square" alt="Desktop, mobile, and terminal clients">
 </p>
@@ -165,6 +165,7 @@ The server also includes **19 bots** for weather, lookups, quotes, seen records,
 - **GIF picker** — type `/gif <search>` (or `/giphy`) for a smooth in-line grid of results, navigable by tap or arrow keys + Enter. Powered by **Giphy or Tenor** — the admin picks the provider and can set a shared key so it works for everyone with no setup, or each user can supply their own
 - **Image lightbox** — click to zoom, scroll wheel zoom, pinch-to-zoom on mobile, pan when zoomed
 - **Link previews** — server-side metadata fetcher with admin whitelist (SSRF protected)
+- **X post previews (optional, off by default)** — rich cards for X/Twitter links: author, text, exact counts, photo galleries, video/GIF after Play, one quoted post, optional published threads. Public unencrypted channels load them automatically; encrypted messages, DMs and unknown contexts stay click-to-load, and disclosure choices stay on the device. No preview provider is contacted until the operator enables one; until then X links behave exactly as before (the generic link preview) — see [X post previews](INSTALL.md#x-post-previews-optional)
 - **Pastebin** — share text snippets with password protection and expiration
 - **URL shortener** — built-in `/shorten` command creates short redirect URLs with interstitial page
 - **Smart paste** — paste multi-line text and it auto-offers "send as pastebin?" instead of flooding

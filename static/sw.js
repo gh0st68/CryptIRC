@@ -100,8 +100,10 @@ self.addEventListener('fetch', e => {
   // network error they handle. Nothing dynamic was ever cached.
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  // Skip API calls entirely
-  if (['/cryptirc/ws', '/cryptirc/auth', '/cryptirc/upload', '/cryptirc/files', '/cryptirc/push', '/cryptirc/pub'].some(p =>
+  // Skip API calls entirely. /tweet (X preview JSON, signed media fallback) is private,
+  // per-viewer and no-store: never cached here (it is not in STATIC/APP_SCRIPTS either).
+  // /avatar pictures are per-session (private HTTP cache only) and /api answers are no-store.
+  if (['/cryptirc/ws', '/cryptirc/auth', '/cryptirc/upload', '/cryptirc/files', '/cryptirc/push', '/cryptirc/pub', '/cryptirc/tweet', '/cryptirc/avatar', '/cryptirc/api'].some(p =>
       url.pathname.startsWith(p))) return;
 
   // Main HTML page — always network-first so deploys take effect immediately.

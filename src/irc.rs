@@ -145,6 +145,29 @@ pub struct IrcConnection {
     /// r7 (codex P2 ircproto.rs:490): the server's CHANMODES / PREFIX from its 005 lines —
     /// which mode letters carry a parameter (see ircproto::ChanModes).
     pub chanmodes: ChanModes,
+    /// Avatars: nicks this connection's server returned in a WHOIS reply recently — they
+    /// count as "seen by the viewer" for avatar discovery (avatar::discover).
+    pub whois_seen: crate::avatar::SeenNicks,
+    /// Avatars: the user@host this connection's server showed for each nick (avatar::observe_line).
+    pub seen_userhosts: crate::avatar::SeenHosts,
+    /// Avatars: the irc-core link generation of the latest SessionSync for this connection
+    /// (ipc_client::current_link) — its live flags are trusted only on that same link.
+    pub synced_link: u64,
+    /// Avatars: this connection's CAP LS listing was seen (negotiation completed) / one of its
+    /// CAP or ISUPPORT lines was a bouncer's (avatar::note_cap_line). Reset on reconnect.
+    pub cap_ls_done: bool,
+    pub behind_bouncer: bool,
+    /// During an Attach replay only: the (nick, user@host) we had when each replayed line
+    /// arrived, as 069f376 tracked it in `nick` — set from the snapshot, moved by replayed
+    /// self NICK / JOIN / CHGHOST lines under the same ident rule, cleared at AttachComplete.
+    /// Used ONLY to tell which REPLAYED lines are ours — echoes among PRIVMSG / NOTICE, our
+    /// own JOIN / PART / KICK / typing, where 069f376 read its moving `nick`; the real
+    /// identity (`nick`, `self_userhost`) never follows replayed lines (adopt_self_nick).
+    /// Known residual, pre-existing and accepted: the view starts from the CURRENT nick (the
+    /// snapshot), not the nick we had when the ring began, so lines from someone who held our
+    /// current nick earlier in the ring (before we took it) count as ours — 069f376's `nick`
+    /// started and moved exactly the same way.
+    pub replay_view: Option<(String, String)>,
     /// Cached at connection-creation time (Dial or Attach-rehydration) so
     /// `dispatch_line` never needs a disk read per IRC line — the original
     /// single-process code kept this as a stable in-memory variable for the
@@ -159,6 +182,78 @@ pub struct IrcConnection {
 const USER_JOINS_MAX: usize = 1024;
 
 impl IrcConnection {
+    /// A registered, connected test connection dialing `server:port` as `nick`.
+    #[cfg(test)]
+    pub(crate) fn for_test(conn_id: &str, nick: &str, server: &str, port: u16) -> IrcConnection {
+        IrcConnection {
+            conn_id: conn_id.into(), nick: nick.into(), connected: true, lag_ms: None,
+            channels: HashMap::new(), ipc_out: Arc::new(tokio::sync::Mutex::new(None)), message_tags: false,
+            self_userhost: String::new(), registered: true, echo_message_enabled: false,
+            names_buf: HashMap::new(), who_pending: HashSet::new(), who_away: HashMap::new(),
+            resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
+            casemapping: CaseMapping::default(), server_casemapping: None,
+            dial_endpoint: Some((server.to_string(), port)),
+            statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(), chanmodes: ChanModes::default(),
+            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 1, cap_ls_done: true, behind_bouncer: false, replay_view: None, cfg: NetworkConfig::default(),
+        }
+    }
+
+    /// Our own identity (nick, user@host) from a NICK / JOIN / CHGHOST line. A REPLAYED line
+    /// never changes it: the attach snapshot (SessionSync, sent before any replayed line) is
+    /// the current state, and a historical line could otherwise make this connection "be"
+    /// whoever held its nick earlier — e.g. replaying `:Old!u@victim NICK Victim` on the
+    /// connection that holds Old NOW (codex re-check H avatar.rs:1005; it fed avatar
+    /// discovery, E2E nick resolution, self-echo suppression and the #30 spoof guard).
+    /// Live lines keep the #30 rule: the source must carry the ident we recorded (or ours is
+    /// not known yet). Returns whether the nick changed.
+    pub(crate) fn adopt_self_nick(&mut self, old: &str, new: &str, src_userhost: &str, replayed: bool) -> bool {
+        if replayed || !same_nick(old, &self.nick)
+            || !(self.self_userhost.is_empty() || cryptirc::irc_daemon::same_ident(src_userhost, &self.self_userhost))
+        {
+            return false;
+        }
+        self.nick = strip_crlf(new);
+        if !src_userhost.is_empty() { self.self_userhost = src_userhost.to_string(); }
+        true
+    }
+    /// Replayed self NICK: move the replay-only view (see `replay_view`) like 069f376 moved
+    /// `nick` — the old nick is ours and the source carries our ident (or ours is unknown).
+    pub(crate) fn replay_follow_nick(&mut self, old: &str, new: &str, src_userhost: &str) {
+        if let Some((nick, uh)) = self.replay_view.as_mut() {
+            if same_nick(old, nick) && (uh.is_empty() || cryptirc::irc_daemon::same_ident(src_userhost, uh)) {
+                *nick = strip_crlf(new);
+                if !src_userhost.is_empty() { *uh = src_userhost.to_string(); }
+            }
+        }
+    }
+    /// Replayed self JOIN / guarded CHGHOST: the replay-only view's user@host.
+    pub(crate) fn replay_follow_userhost(&mut self, nick: &str, src_userhost: &str, new_userhost: &str, guarded: bool) {
+        if let Some((vn, uh)) = self.replay_view.as_mut() {
+            if !same_nick(nick, vn) || new_userhost.is_empty() { return; }
+            if guarded && !(uh.is_empty() || cryptirc::irc_daemon::same_ident(src_userhost, uh)) { return; }
+            *uh = new_userhost.to_string();
+        }
+    }
+    /// The nick we had when this line arrived — what our own lines (echoes, self JOIN / PART
+    /// / KICK) carry: during an Attach replay the replay-only view, otherwise the real nick.
+    pub(crate) fn echo_nick(&self, replayed: bool) -> String {
+        match (&self.replay_view, replayed) {
+            (Some((n, _)), true) => n.clone(),
+            _ => self.nick.clone(),
+        }
+    }
+
+    /// Our own user@host from a live self-JOIN (see adopt_self_nick).
+    pub(crate) fn adopt_self_join_userhost(&mut self, nick: &str, userhost: &str, replayed: bool) {
+        if !replayed && same_nick(nick, &self.nick) && !userhost.is_empty() { self.self_userhost = userhost.to_string(); }
+    }
+    /// Our own user@host from a live, guarded CHGHOST (see adopt_self_nick).
+    pub(crate) fn adopt_self_chghost(&mut self, nick: &str, src_userhost: &str, user: &str, host: &str, replayed: bool) {
+        if replayed || !same_nick(nick, &self.nick) { return; }
+        if !(self.self_userhost.is_empty() || cryptirc::irc_daemon::same_ident(src_userhost, &self.self_userhost)) { return; }
+        if !user.is_empty() && !host.is_empty() { self.self_userhost = format!("{}@{}", user, host); }
+    }
+
     /// r6: remember the channels of an outgoing `JOIN` (see `user_joins`).
     fn note_user_join(&mut self, line: &str) {
         let mut rest = line.trim_end_matches(['\r', '\n']).trim_start_matches(' ');
@@ -282,6 +377,13 @@ fn known_casemappings() -> &'static dashmap::DashMap<String, CaseMapping> {
 }
 pub(crate) fn known_casemapping(conn_id: &str) -> Option<CaseMapping> {
     known_casemappings().get(conn_id).map(|v| *v)
+}
+
+/// CHGHOST from someone else: did the host change at all? Not when the line's own source prefix
+/// already carries the new host. An unknown source host counts as a change (as before).
+fn chghost_host_changed(src_userhost: &str, new_host: &str) -> bool {
+    let old = src_userhost.rsplit_once('@').map_or("", |(_, h)| h);
+    old.is_empty() || !old.eq_ignore_ascii_case(new_host)
 }
 
 /// The join-time key seed for `channel` from the cached config: exact spelling first,
@@ -1011,6 +1113,27 @@ pub(crate) fn incoming_channel_target(c: &IrcConnection, target: &str) -> Option
     target.starts_with(['#', '&', '+', '!']).then(|| (target.to_string(), false))
 }
 
+/// Where an incoming NOTICE is shown: None = an echo-message echo of our own NOTICE
+/// (suppressed, as for PRIVMSG), else the buffer — a channel (incl. a STATUSMSG `@#chan`
+/// target, r4), "status" for the server, the recipient for our own outgoing NOTICE, the
+/// sender's nick otherwise. "Our own" is decided like PRIVMSG: on a replayed line, the
+/// nick we had when it arrived (IrcConnection::echo_nick — the replay-only view), on a live
+/// line the real nick. Match on the nick only — ZNC echoes self-messages with a bare
+/// `:nick` prefix. Batch (playback) NOTICEs are never treated as echoes.
+pub(crate) fn notice_display_target(c: &IrcConnection, from: &str, target: &str, has_prefix: bool, replayed: bool, in_batch: bool) -> Option<String> {
+    let user_nick = c.echo_nick(replayed);
+    if c.echo_message_enabled && same_nick(from, &user_nick) && !in_batch { return None; }
+    Some(if let Some((ch, _)) = incoming_channel_target(c, target) {
+        ch
+    } else if from == "*" || from.contains('.') || !has_prefix {
+        "status".to_string()
+    } else if same_nick(from, &user_nick) {
+        target.to_string()
+    } else {
+        from.to_string()
+    })
+}
+
 /// Forget our membership of a channel the server says we are not in (a refused rejoin,
 /// or the daemon's snapshot), and tell the account's sessions so they stop showing it as
 /// joined. `nick` = our nick, for the synthesized self-PART.
@@ -1071,11 +1194,14 @@ pub async fn dispatch_line(
     recv_ts: i64,
 ) -> anyhow::Result<()> {
     let p = parse_irc(line);
+    // Avatars: what this Attach replay says about the irc-core session (avatar::restorable).
+    if replayed { crate::avatar::note_replayed_line(conn_id, backlog, recv_ts, &p.command, &p.params); }
     // The channel-name fold for this connection (adopting a CASEMAPPING announced now).
     // Only with a daemon that folds the same way (it sends recv_ts): an older irc_core
     // folds everything rfc1459 and sends SessionSync channel names in that fold, so on an
     // ascii server switching the web to ascii would turn such a stub (`#a{b}` for
     // `#a[b]`) into a separate phantom channel. With an old daemon nothing changes.
+    let mut isupport_bouncer = false;
     let cm = {
         let mut c = conn.lock().await;
         if p.command == "005" {
@@ -1085,9 +1211,13 @@ pub async fn dispatch_line(
             }
             if let Some(s) = statusmsg_from_isupport(&p.params) { c.statusmsg = Some(s); }
             c.chanmodes.learn(&p.params);
+            if crate::avatar::isupport_names_a_bouncer(&p.params) { c.behind_bouncer = true; isupport_bouncer = true; }
         }
+        // Avatars: the user@host this line shows for a nick (see avatar::discover rule 5).
+        crate::avatar::observe_line(&mut c, p.prefix.as_deref(), &p.command, &p.params);
         c.casemapping
     };
+    if isupport_bouncer { state.avatars.mark_session_bouncer(conn_id); }
     // First time this web process (or any web, for backlog) handles this line: the only
     // case in which it is written to history.
     let first_seen = !replayed || backlog;
@@ -1148,6 +1278,20 @@ pub async fn dispatch_line(
                 p.params.last().cloned().unwrap_or_default()
             };
             match sub {
+                // Avatars: classify this connection from what it negotiated (behind a bouncer /
+                // CAP negotiation completed) — avatar::note_cap_line, discover rule 3.
+                "LS" | "NEW" => {
+                    let mut c = conn.lock().await;
+                    crate::avatar::note_cap_line(&mut c, p.prefix.as_deref(), sub, is_multiline, &caps, replayed);
+                    // A LIVE negotiation is recorded so a web-only restart keeps it
+                    // (avatar::SessionRecord); replayed CAP lines can only add a bouncer mark.
+                    if sub == "LS" && !is_multiline && !replayed {
+                        let (host, port) = c.dial_endpoint.clone().unwrap_or_else(|| (c.cfg.server.clone(), c.cfg.port));
+                        state.avatars.record_session(conn_id, &username, (&host, port), c.behind_bouncer, &state.conn_owners);
+                    } else if c.behind_bouncer {
+                        state.avatars.mark_session_bouncer(conn_id);
+                    }
+                }
                 "ACK" => {
                     // L43: Set capability flags on ACK, not on REQ
                     if caps.contains("echo-message") { conn.lock().await.echo_message_enabled = true; }
@@ -1239,7 +1383,8 @@ pub async fn dispatch_line(
             let from   = nick_from_prefix(&p.prefix);
             let target = p.params.get(0).cloned().unwrap_or_default();
             let text   = p.params.get(1).cloned().unwrap_or_default();
-            let (user_nick, label) = { let c = conn.lock().await; (c.nick.clone(), c.cfg.label.clone()) };
+            // On replay, the nick we had when the line arrived (IrcConnection::echo_nick).
+            let (user_nick, label) = { let c = conn.lock().await; (c.echo_nick(replayed), c.cfg.label.clone()) };
             // echo-message: if server echoes our own PRIVMSG, skip it here —
             // the Send handler already broadcasts IrcEcho for multi-device sync.
             // Suppress regardless of prefix form: a real IRCd echoes the full
@@ -1312,33 +1457,13 @@ pub async fn dispatch_line(
             let from   = nick_from_prefix(&p.prefix);
             let target = p.params.get(0).cloned().unwrap_or_default();
             let text   = p.params.get(1).cloned().unwrap_or_default();
-            let user_nick = { conn.lock().await.nick.clone() };
             // Never log the NOTICE text: private notices, services replies (some echo a
             // freshly set password) and CTCP replies would land in plaintext in the
             // journal of an app sold on encrypted logs. Metadata only, at debug.
             debug!("[{}] NOTICE: from={} target={} ({} chars)", conn_id, from, target, text.chars().count());
-            // Suppress echo-message echoes of our own NOTICEs (same as PRIVMSG).
-            // Match on `from == user_nick` only — ZNC echoes self-messages with a
-            // bare `:nick` prefix, so gating on `prefix.contains('!')` let them
-            // through and duplicated. Don't suppress batch (playback) NOTICEs.
             let in_batch = p.tags.contains_key("batch");
-            let echo_message_enabled = { conn.lock().await.echo_message_enabled };
-            if echo_message_enabled && same_nick(&from, &user_nick) && !in_batch {
-                return Ok(());
-            }
-            // Route notices: channel (incl. a STATUSMSG `@#chan` target, r4) → channel,
-            // server → status, our own outgoing → keep target (recipient), incoming →
-            // sender's nick
-            let chan_target = { let c = conn.lock().await; incoming_channel_target(&c, &target) };
-            let display_target = if let Some((ch, _)) = chan_target {
-                ch
-            } else if from == "*" || from.contains('.') || p.prefix.is_none() {
-                "status".to_string()
-            } else if same_nick(&from, &user_nick) {
-                target.clone() // Our own NOTICE — route to recipient's PM window
-            } else {
-                from.clone() // Incoming NOTICE — route to sender's nick
-            };
+            let routed = { let c = conn.lock().await; notice_display_target(&c, &from, &target, p.prefix.is_some(), replayed, in_batch) };
+            let Some(display_target) = routed else { return Ok(()) };   // our own echo
             let msg_id = if first_seen { log_line(state, username, conn_id, &display_target, ts, &from, &text, "notice").await } else { 0 };
             send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from, target: display_target, text, ts, kind: MessageKind::Notice, msg_id, prefix: None });
         }
@@ -1363,15 +1488,23 @@ pub async fn dispatch_line(
             // `is_self` = it's our nick regardless of already-tracked status
             // (used below to suppress a REPLAYED duplicate of our own join log/
             // event — see the `replayed` check after this block).
-            let is_self = same_nick(&nick, &conn.lock().await.nick);
+            // Self = the nick we had when the line arrived (replay: the replay-only view, like
+            // the echo checks; live: the real nick — 069f376's moving `nick` on both).
+            let is_self = { let c = conn.lock().await; same_nick(&nick, &c.echo_nick(replayed)) };
             let (accepted, is_self_join) = {
                 let mut c = conn.lock().await;
                 let chan_key = cm.fold(&channel); // #92
                 if same_nick(&nick, &c.nick) {
                     // #30: learn our own user@host from a self-JOIN so a later forged
                     // `:<ournick> NICK <x>` whose prefix does not match us cannot rewrite c.nick.
+                    // Live lines only (see IrcConnection::adopt_self_nick).
+                    c.adopt_self_join_userhost(&nick, &userhost_from_prefix(&p.prefix), replayed);
+                }
+                if replayed {
                     let uh = userhost_from_prefix(&p.prefix);
-                    if !uh.is_empty() { c.self_userhost = uh; }
+                    c.replay_follow_userhost(&nick, &uh, &uh, false);
+                }
+                if is_self {
                     if c.channels.contains_key(&chan_key) {
                         // #43: a server can repeat ":<ournick> JOIN #chan" to force
                         // unbounded outbound NAMES/WHO. Only issue NAMES/WHO when the
@@ -1485,7 +1618,7 @@ pub async fn dispatch_line(
             let reason  = p.params.get(1).cloned().unwrap_or_default();
             // r5 (codex P2 irc.rs:865): only for a channel we track (an untracked one is
             // neither logged — a new log target each — nor shown; our own PART is still shown).
-            let (tracked, is_self) = { let mut c = conn.lock().await; let k = cm.fold(&channel); if same_nick(&nick, &c.nick) { (c.channels.remove(&k).is_some(), true) } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| !same_nick(strip_pfx(n), &nick)); (true, false) } else { (false, false) } };
+            let (tracked, is_self) = { let mut c = conn.lock().await; let k = cm.fold(&channel); if same_nick(&nick, &c.echo_nick(replayed)) { (c.channels.remove(&k).is_some(), true) } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| !same_nick(strip_pfx(n), &nick)); (true, false) } else { (false, false) } };
             crate::bots::member_changed(conn_id, cm, Some(&channel), &nick);   // r9: queued auto op/voice
             let part_text = if reason.is_empty() { format!("← {} left", nick) } else { format!("← {} left ({})", nick, reason) };
             if first_seen && tracked { let _ = log_line(state, &username, &conn_id, &channel, ts, &nick, &part_text, "part").await; }
@@ -1531,13 +1664,10 @@ pub async fn dispatch_line(
                 // base. The host is not compared (same rule as irc-core): a vhost/cloak can
                 // change it without a CHGHOST, and since a snapshot no longer pre-applies
                 // the nick (agy P2 #30 bypass), rejecting our own NICK would desync us.
-                if same_nick(&old, &c.nick)
-                    && (c.self_userhost.is_empty()
-                        || cryptirc::irc_daemon::same_ident(&src_userhost, &c.self_userhost))
-                {
-                    c.nick = strip_crlf(&new);
-                    if !src_userhost.is_empty() { c.self_userhost = src_userhost.clone(); }
-                }
+                // Live lines only: a replayed NICK never rewrites our identity
+                // (IrcConnection::adopt_self_nick).
+                c.adopt_self_nick(&old, &new, &src_userhost, replayed);
+                if replayed { c.replay_follow_nick(&old, &new, &src_userhost); }
                 // An implausibly long new nick (NAMES_ENTRY_MAX_BYTES) is dropped from the
                 // member lists rather than stored — renames can't inflate them either.
                 let new_ok = new.len() <= NAMES_ENTRY_MAX_BYTES;
@@ -1575,12 +1705,17 @@ pub async fn dispatch_line(
             // guarded like NICK — only a CHGHOST whose source is us as we know us (or
             // before our user@host is known) may rewrite it; a forged `:<ournick> CHGHOST`
             // could otherwise re-arm the NICK guard with an attacker-chosen user@host.
-            if same_nick(&nick, &c.nick)
-                && (c.self_userhost.is_empty() || cryptirc::irc_daemon::same_ident(&src_userhost, &c.self_userhost))
             {
                 let nu = p.params.get(0).cloned().unwrap_or_default();
                 let nh = p.params.get(1).cloned().unwrap_or_default();
-                if !nu.is_empty() && !nh.is_empty() { c.self_userhost = format!("{}@{}", nu, nh); }
+                c.adopt_self_chghost(&nick, &src_userhost, &nu, &nh, replayed);
+                if replayed && !nu.is_empty() && !nh.is_empty() { c.replay_follow_userhost(&nick, &src_userhost, &format!("{}@{}", nu, nh), true); }
+            }
+            // Our own host change (our nick) is never announced: services re-apply a vhost on
+            // every (re)connect, so it was shown again in every channel each time. Someone
+            // else's is, unless the host did not actually change.
+            if same_nick(&nick, &c.nick) || !chghost_host_changed(&src_userhost, &new_host) {
+                return Ok(());
             }
             let chans: Vec<String> = c.channels.iter()
                 .filter(|(_, ch)| ch.names.iter().any(|n| same_nick(strip_pfx(n), &nick)))
@@ -1655,7 +1790,7 @@ pub async fn dispatch_line(
             let target = p.params.get(0).cloned().unwrap_or_default();
             // Check for typing indicator (+typing or +draft/typing tag)
             if let Some(typing_state) = p.tags.get("+typing").or_else(|| p.tags.get("+draft/typing")) {
-                let (our_nick, chan_target) = { let c = conn.lock().await; (c.nick.clone(), incoming_channel_target(&c, &target)) };
+                let (our_nick, chan_target) = { let c = conn.lock().await; (c.echo_nick(replayed), incoming_channel_target(&c, &target)) };
                 if !same_nick(&from, &our_nick) {
                     let display_target = chan_target.map_or_else(|| from.clone(), |(ch, _)| ch);
                     send(ServerEvent::IrcTyping {
@@ -1745,7 +1880,7 @@ pub async fn dispatch_line(
             let kicked  = p.params.get(1).cloned().unwrap_or_default();
             let reason  = p.params.get(2).cloned().unwrap_or_default();
             // r5 (codex P2 irc.rs:865): only for a channel we track (see PART).
-            let (tracked, is_self) = { let mut c = conn.lock().await; let k = cm.fold(&channel); if same_nick(&kicked, &c.nick) { (c.channels.remove(&k).is_some(), true) } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| !same_nick(strip_pfx(n), &kicked)); (true, false) } else { (false, false) } };
+            let (tracked, is_self) = { let mut c = conn.lock().await; let k = cm.fold(&channel); if same_nick(&kicked, &c.echo_nick(replayed)) { (c.channels.remove(&k).is_some(), true) } else if let Some(ch) = c.channels.get_mut(&k) { ch.names.retain(|n| !same_nick(strip_pfx(n), &kicked)); (true, false) } else { (false, false) } };
             crate::bots::member_changed(conn_id, cm, Some(&channel), &kicked);   // r9: queued auto op/voice
             let kick_text = if reason.is_empty() { format!("✗ {} kicked by {}", kicked, by) } else { format!("✗ {} kicked by {} ({})", kicked, by, reason) };
             if first_seen && tracked { let _ = log_line(state, &username, &conn_id, &channel, ts, &kicked, &kick_text, "kick").await; }
@@ -1969,6 +2104,9 @@ pub async fn dispatch_line(
         // 311-318 = WHOIS replies — route to nick's query buffer
         "311" => { // RPL_WHOISUSER: nick user host * :realname
             let nick = p.params.get(1).cloned().unwrap_or_default();
+            // Avatars: the viewer's server just showed this nick (a live reply, not ring
+            // replay), so avatar discovery may answer for it for a while.
+            if !replayed { conn.lock().await.whois_seen.note(&nick); }
             let user = p.params.get(2).cloned().unwrap_or_default();
             let host = p.params.get(3).cloned().unwrap_or_default();
             let real = p.params.get(5).cloned().unwrap_or_default();
@@ -2432,6 +2570,88 @@ mod tests {
         assert!(c.user_joins.len() <= USER_JOINS_MAX, "bounded");
     }
 
+    /// CHGHOST from someone else: announced only when the host really changed. (Our own —
+    /// the line's nick is our current nick — is never announced; see the CHGHOST arm.)
+    #[test]
+    fn chghost_unchanged_host_is_not_announced() {
+        assert!(chghost_host_changed("u@cloak.example", "vhost.example"));
+        assert!(!chghost_host_changed("u@vhost.example", "vhost.example"), "identical host");
+        assert!(!chghost_host_changed("u@VHost.Example", "vhost.example"), "case-insensitive");
+        assert!(chghost_host_changed("", "vhost.example"), "unknown source host: shown as before");
+    }
+
+    /// While no web was attached we went Alice → Away, someone took Alice and spoke, then we
+    /// took Alice back. The snapshot says we are Alice; on replay the other person's line is
+    /// kept (as at 069f376), and the real identity never moves (codex final check).
+    #[test]
+    fn replay_view_tells_our_echoes_from_an_earlier_holder_of_our_nick() {
+        let mut c = test_conn();
+        c.nick = "Alice".into();
+        c.self_userhost = "me@my.host".into();
+        c.replay_view = Some((c.nick.clone(), c.self_userhost.clone()));
+        c.replay_follow_nick("Alice", "Away", "me@my.host");
+        assert!(!same_nick("Alice", &c.echo_nick(true)), "the other Alice's line is not our echo");
+        c.replay_follow_nick("Bob", "Alice", "other@host");   // someone else taking Alice
+        assert_eq!(c.echo_nick(true), "Away");
+        c.replay_follow_nick("Away", "Alice", "me@my.host");
+        assert!(same_nick("Alice", &c.echo_nick(true)), "our lines after we took Alice back are");
+        assert_eq!((c.nick.as_str(), c.self_userhost.as_str()), ("Alice", "me@my.host"), "real identity untouched");
+        assert_eq!(c.echo_nick(false), "Alice", "live lines use the real nick");
+        c.replay_view = None;
+        assert_eq!(c.echo_nick(true), "Alice", "no replay view outside an Attach replay");
+    }
+
+    /// Our vhost changed (reapplied on connect); a replayed echo of our own X3DH header from
+    /// before it carries the OLD host — still our echo (codex final check).
+    #[test]
+    fn a_replayed_own_echo_from_before_a_host_change_is_still_suppressed() {
+        let mut c = test_conn();
+        c.nick = "Alice".into();
+        c.self_userhost = "me@new.vhost".into();
+        c.replay_view = Some((c.nick.clone(), c.self_userhost.clone()));
+        // ":Alice!me@old.host PRIVMSG Bob :+E2E-HDR…" — echo-message suppression is by nick.
+        assert!(same_nick("Alice", &c.echo_nick(true)));
+        // A replayed CHGHOST to the new host and a replayed self-JOIN keep the view consistent.
+        c.replay_follow_userhost("Alice", "me@old.host", "me@new.vhost", true);
+        c.replay_follow_userhost("Alice", "me@new.vhost", "me@new.vhost", false);
+        assert_eq!(c.replay_view.as_ref().map(|v| v.1.as_str()), Some("me@new.vhost"));
+        c.replay_follow_userhost("Alice", "evil@x", "evil@x", true);
+        assert_eq!(c.replay_view.as_ref().map(|v| v.1.as_str()), Some("me@new.vhost"), "a CHGHOST from another ident is ignored");
+    }
+
+    /// Replayed NOTICEs decide "ours" by the replay view, exactly like PRIVMSG (codex narrow
+    /// check: NOTICE read the real nick — while we were Away, another Alice's channel notice
+    /// was dropped as our echo and our own Away notices were routed as foreign).
+    #[test]
+    fn replayed_notices_use_the_replay_view_like_privmsg() {
+        let mut c = test_conn();
+        c.nick = "Alice".into();
+        c.self_userhost = "me@my.host".into();
+        c.echo_message_enabled = true;
+        c.replay_view = Some((c.nick.clone(), c.self_userhost.clone()));
+        let route = |c: &IrcConnection, from: &str, target: &str, replayed: bool| notice_display_target(c, from, target, true, replayed, false);
+        // Ring: we go Alice → Away; another Alice speaks; we take Alice back.
+        c.replay_follow_nick("Alice", "Away", "me@my.host");
+        assert_eq!(route(&c, "Alice", "#chan", true).as_deref(), Some("#chan"), "the other Alice's channel notice is kept");
+        assert_eq!(route(&c, "Alice", "Away", true).as_deref(), Some("Alice"), "her private notice goes to her window");
+        assert_eq!(route(&c, "Away", "#chan", true), None, "our own notice as Away is our echo");
+        c.echo_message_enabled = false;
+        assert_eq!(route(&c, "Away", "Bob", true).as_deref(), Some("Bob"), "without echo-message, our own notice goes to its recipient");
+        c.echo_message_enabled = true;
+        c.replay_follow_nick("Away", "Alice", "me@my.host");
+        assert_eq!(route(&c, "Alice", "#chan", true), None, "after we took Alice back, Alice's notices are ours");
+        // Live lines are unchanged: the real nick decides.
+        c.replay_follow_nick("Alice", "Away", "me@my.host");
+        assert_eq!(route(&c, "Alice", "#chan", false), None, "live: Alice is us");
+        assert_eq!(route(&c, "Away", "Alice", false).as_deref(), Some("Away"), "live: Away is someone else");
+        // Batch (playback) notices and server notices are unaffected.
+        assert_eq!(notice_display_target(&c, "Away", "#chan", true, true, true).as_deref(), Some("#chan"), "a batch notice is never an echo");
+        assert_eq!(notice_display_target(&c, "irc.example.net", "Alice", true, true, false).as_deref(), Some("status"));
+        assert_eq!(notice_display_target(&c, "Bob", "Alice", false, true, false).as_deref(), Some("status"), "no prefix → status");
+        c.replay_view = None;
+        assert_eq!(route(&c, "Alice", "#chan", true), None, "no replay view outside an Attach replay: the real nick");
+    }
+
     fn test_conn() -> IrcConnection {
         IrcConnection {
             conn_id: "c0".into(), nick: "me".into(), connected: true, lag_ms: None,
@@ -2440,7 +2660,8 @@ mod tests {
             names_buf: HashMap::new(), who_pending: HashSet::new(), who_away: HashMap::new(),
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
             casemapping: CaseMapping::default(), server_casemapping: None, dial_endpoint: None,
-            statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(), chanmodes: ChanModes::default(), cfg: NetworkConfig::default(),
+            statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(), chanmodes: ChanModes::default(),
+            whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, replay_view: None, cfg: NetworkConfig::default(),
         }
     }
 

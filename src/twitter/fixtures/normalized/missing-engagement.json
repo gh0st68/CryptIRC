@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "1800000000000000007",
+  "url": "https://x.com/i/status/1800000000000000007",
+  "availability": {
+    "state": "available",
+    "reason": null
+  },
+  "author": null,
+  "created_at": null,
+  "text": "No available engagement data except an explicit zero likes count.",
+  "text_source": "legacy",
+  "text_complete": true,
+  "entities": [],
+  "metrics": {
+    "likes": {
+      "state": "available",
+      "value": "0"
+    },
+    "reposts": {
+      "state": "unavailable",
+      "value": null
+    },
+    "replies": {
+      "state": "unavailable",
+      "value": null
+    },
+    "quotes": {
+      "state": "unavailable",
+      "value": null
+    },
+    "bookmarks": {
+      "state": "unavailable",
+      "value": null
+    },
+    "views": {
+      "state": "unavailable",
+      "value": null
+    }
+  },
+  "media": [],
+  "quote": {
+    "state": "none",
+    "id": null,
+    "url": null,
+    "post": null,
+    "reason": null
+  },
+  "reply": null,
+  "thread": {
+    "state": "disabled",
+    "provider": null,
+    "count": null
+  },
+  "fetched_at": "2026-10-20T12:01:00Z",
+  "expires_at": "2026-10-20T12:11:00Z",
+  "media_complete": true
+}

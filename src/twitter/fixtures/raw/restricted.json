@@ -1,0 +1,11 @@
+{
+  "data": {
+    "tweetResult": {
+      "result": {
+        "__typename": "TweetUnavailable",
+        "rest_id": "123",
+        "reason": "restricted"
+      }
+    }
+  }
+}

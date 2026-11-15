@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "id": "1800000000000000004",
+  "url": "https://x.com/i/status/1800000000000000004",
+  "availability": {
+    "state": "available",
+    "reason": null
+  },
+  "author": {
+    "id": "1700000000000000001",
+    "name": "Example Author 🌿",
+    "handle": "example_author",
+    "avatar_url": "https://pbs.twimg.com/profile_images/synthetic/avatar.jpg",
+    "verification": {
+      "legacy_verified": null,
+      "blue_verified": false
+    }
+  },
+  "created_at": "2026-10-20T12:00:00Z",
+  "text": "An animated GIF represented as silent video.",
+  "text_source": "legacy",
+  "text_complete": true,
+  "entities": [],
+  "metrics": {
+    "likes": {
+      "state": "available",
+      "value": "1200"
+    },
+    "reposts": {
+      "state": "available",
+      "value": "24"
+    },
+    "replies": {
+      "state": "available",
+      "value": "0"
+    },
+    "quotes": {
+      "state": "available",
+      "value": "3"
+    },
+    "bookmarks": {
+      "state": "available",
+      "value": "8"
+    },
+    "views": {
+      "state": "available",
+      "value": "45000"
+    }
+  },
+  "media": [
+    {
+      "id": "synthetic-media-6",
+      "kind": "animated_gif",
+      "thumbnail_url": "https://pbs.twimg.com/media/synthetic_6.jpg?name=medium",
+      "original_url": "https://pbs.twimg.com/media/synthetic_6.jpg?name=orig",
+      "alt_text": "Synthetic attachment 6",
+      "width": 640,
+      "height": 480,
+      "duration_ms": 3000,
+      "mp4": [
+        {
+          "url": "https://video.twimg.com/synthetic/animation/loop.mp4",
+          "content_type": "video/mp4",
+          "bitrate": null,
+          "width": 640,
+          "height": 480
+        }
+      ],
+      "hls_url": null
+    }
+  ],
+  "quote": {
+    "state": "none",
+    "id": null,
+    "url": null,
+    "post": null,
+    "reason": null
+  },
+  "reply": null,
+  "thread": {
+    "state": "disabled",
+    "provider": null,
+    "count": null
+  },
+  "fetched_at": "2026-10-20T12:01:00Z",
+  "expires_at": "2026-10-20T12:11:00Z",
+  "media_complete": true
+}

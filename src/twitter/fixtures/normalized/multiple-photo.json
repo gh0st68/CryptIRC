@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "id": "1800000000000000002",
+  "url": "https://x.com/i/status/1800000000000000002",
+  "availability": {
+    "state": "available",
+    "reason": null
+  },
+  "author": {
+    "id": "1700000000000000001",
+    "name": "Example Author 🌿",
+    "handle": "example_author",
+    "avatar_url": "https://pbs.twimg.com/profile_images/synthetic/avatar.jpg",
+    "verification": {
+      "legacy_verified": null,
+      "blue_verified": false
+    }
+  },
+  "created_at": "2026-10-20T12:00:00Z",
+  "text": "Four synthetic photos, in source order.",
+  "text_source": "legacy",
+  "text_complete": true,
+  "entities": [],
+  "metrics": {
+    "likes": {
+      "state": "available",
+      "value": "1200"
+    },
+    "reposts": {
+      "state": "available",
+      "value": "24"
+    },
+    "replies": {
+      "state": "available",
+      "value": "0"
+    },
+    "quotes": {
+      "state": "available",
+      "value": "3"
+    },
+    "bookmarks": {
+      "state": "available",
+      "value": "8"
+    },
+    "views": {
+      "state": "available",
+      "value": "45000"
+    }
+  },
+  "media": [
+    {
+      "id": "synthetic-media-1",
+      "kind": "photo",
+      "thumbnail_url": "https://pbs.twimg.com/media/synthetic_1.jpg?name=medium",
+      "original_url": "https://pbs.twimg.com/media/synthetic_1.jpg?name=orig",
+      "alt_text": "Synthetic attachment 1",
+      "width": 1200,
+      "height": 800,
+      "duration_ms": null,
+      "mp4": [],
+      "hls_url": null
+    },
+    {
+      "id": "synthetic-media-2",
+      "kind": "photo",
+      "thumbnail_url": "https://pbs.twimg.com/media/synthetic_2.jpg?name=medium",
+      "original_url": "https://pbs.twimg.com/media/synthetic_2.jpg?name=orig",
+      "alt_text": "Synthetic attachment 2",
+      "width": 800,
+      "height": 1200,
+      "duration_ms": null,
+      "mp4": [],
+      "hls_url": null
+    },
+    {
+      "id": "synthetic-media-3",
+      "kind": "photo",
+      "thumbnail_url": "https://pbs.twimg.com/media/synthetic_3.jpg?name=medium",
+      "original_url": "https://pbs.twimg.com/media/synthetic_3.jpg?name=orig",
+      "alt_text": "Synthetic attachment 3",
+      "width": 1200,
+      "height": 800,
+      "duration_ms": null,
+      "mp4": [],
+      "hls_url": null
+    },
+    {
+      "id": "synthetic-media-4",
+      "kind": "photo",
+      "thumbnail_url": "https://pbs.twimg.com/media/synthetic_4.jpg?name=medium",
+      "original_url": "https://pbs.twimg.com/media/synthetic_4.jpg?name=orig",
+      "alt_text": "Synthetic attachment 4",
+      "width": 1200,
+      "height": 800,
+      "duration_ms": null,
+      "mp4": [],
+      "hls_url": null
+    }
+  ],
+  "quote": {
+    "state": "none",
+    "id": null,
+    "url": null,
+    "post": null,
+    "reason": null
+  },
+  "reply": null,
+  "thread": {
+    "state": "disabled",
+    "provider": null,
+    "count": null
+  },
+  "fetched_at": "2026-10-20T12:01:00Z",
+  "expires_at": "2026-10-20T12:11:00Z",
+  "media_complete": true
+}

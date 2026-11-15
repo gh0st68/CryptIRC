@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "id": "1800000000000000005",
+  "url": "https://x.com/i/status/1800000000000000005",
+  "availability": {
+    "state": "available",
+    "reason": null
+  },
+  "author": {
+    "id": "1700000000000000001",
+    "name": "Example Author 🌿",
+    "handle": "example_author",
+    "avatar_url": "https://pbs.twimg.com/profile_images/synthetic/avatar.jpg",
+    "verification": {
+      "legacy_verified": null,
+      "blue_verified": false
+    }
+  },
+  "created_at": "2026-10-20T12:00:00Z",
+  "text": "Commenting on the quoted example.",
+  "text_source": "legacy",
+  "text_complete": true,
+  "entities": [],
+  "metrics": {
+    "likes": {
+      "state": "available",
+      "value": "1200"
+    },
+    "reposts": {
+      "state": "available",
+      "value": "24"
+    },
+    "replies": {
+      "state": "available",
+      "value": "0"
+    },
+    "quotes": {
+      "state": "available",
+      "value": "3"
+    },
+    "bookmarks": {
+      "state": "available",
+      "value": "8"
+    },
+    "views": {
+      "state": "available",
+      "value": "45000"
+    }
+  },
+  "media": [],
+  "quote": {
+    "state": "available",
+    "id": "1800000000000000015",
+    "url": "https://x.com/i/status/1800000000000000015",
+    "post": {
+      "schema_version": 1,
+      "id": "1800000000000000015",
+      "url": "https://x.com/i/status/1800000000000000015",
+      "availability": {
+        "state": "available",
+        "reason": null
+      },
+      "author": {
+        "id": "1700000000000000015",
+        "name": "Quoted Example",
+        "handle": "quoted_example",
+        "avatar_url": "https://pbs.twimg.com/profile_images/synthetic/avatar.jpg",
+        "verification": {
+          "legacy_verified": null,
+          "blue_verified": false
+        }
+      },
+      "created_at": "2026-10-20T12:00:00Z",
+      "text": "Quoted content with a photo.",
+      "text_source": "legacy",
+      "text_complete": true,
+      "entities": [],
+      "metrics": {
+        "likes": {
+          "state": "available",
+          "value": "1200"
+        },
+        "reposts": {
+          "state": "available",
+          "value": "24"
+        },
+        "replies": {
+          "state": "available",
+          "value": "0"
+        },
+        "quotes": {
+          "state": "available",
+          "value": "3"
+        },
+        "bookmarks": {
+          "state": "available",
+          "value": "8"
+        },
+        "views": {
+          "state": "available",
+          "value": "45000"
+        }
+      },
+      "media": [
+        {
+          "id": "synthetic-media-7",
+          "kind": "photo",
+          "thumbnail_url": "https://pbs.twimg.com/media/synthetic_7.jpg?name=medium",
+          "original_url": "https://pbs.twimg.com/media/synthetic_7.jpg?name=orig",
+          "alt_text": "Synthetic attachment 7",
+          "width": 1200,
+          "height": 800,
+          "duration_ms": null,
+          "mp4": [],
+          "hls_url": null
+        }
+      ],
+      "quote": {
+        "state": "omitted",
+        "id": "1800000000000000025",
+        "url": "https://x.com/i/status/1800000000000000025",
+        "post": null,
+        "reason": "depth_limit"
+      },
+      "reply": null,
+      "thread": {
+        "state": "disabled",
+        "provider": null,
+        "count": null
+      },
+      "fetched_at": "2026-10-20T12:01:00Z",
+      "expires_at": "2026-10-20T12:11:00Z",
+      "media_complete": true
+    },
+    "reason": null
+  },
+  "reply": {
+    "id": "1800000000000000009",
+    "author_handle": "reply_example"
+  },
+  "thread": {
+    "state": "disabled",
+    "provider": null,
+    "count": null
+  },
+  "fetched_at": "2026-10-20T12:01:00Z",
+  "expires_at": "2026-10-20T12:11:00Z",
+  "media_complete": true
+}

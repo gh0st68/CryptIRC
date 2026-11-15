@@ -198,6 +198,8 @@ const _detMode = _qsDet.get('detached') === '1';
 const _detConn = _qsDet.get('conn') || '';
 const _detTarget = _qsDet.get('target') || '';
 if(_detMode) document.documentElement.classList.add('detached-mode');
+// r11: a detached window's own query string ('' elsewhere) — kept by the URL cleanups.
+function _detSearch(){ return (_detMode&&_detConn&&_detTarget)?'?detached=1&conn='+encodeURIComponent(_detConn)+'&target='+encodeURIComponent(_detTarget):''; }
 
 const _detachedChannel = (typeof BroadcastChannel!=='undefined') ? new BroadcastChannel('cryptirc-detached') : null;
 let _detachedTargets = new Set();
@@ -782,6 +784,7 @@ async function loadLoginCaptcha(){
 }
 async function doLogout() {
   if(!(await customConfirm('Sign out?','Sign out'))) return;
+  clearTweetData();
   try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){}
   // #6/F25: unsubscribe push BEFORE the logout POST (and before dropping the token).
   // DELETE /cryptirc/push/subscribe needs the Bearer token to remove the server
@@ -901,8 +904,9 @@ async function _finishPendingWipe(){
   }catch(_){}
 }
 function _cryptircHardReload(){
-  // Drop the query string too (notification targets, detached-window params).
-  try{ location.replace(location.pathname); }catch(_){ location.reload(); }
+  // Drop the query string too (notification targets). r11: a detached window keeps its own
+  // ?detached=1&conn=…&target= — it used to come back as a full client window.
+  try{ location.replace(location.pathname+_detSearch()); }catch(_){ location.reload(); }
 }
 // Account switch WITHOUT sign-out (session expired → someone else signs in on the
 // login screen): if the local data belongs to a different account — or to an
@@ -1105,8 +1109,9 @@ function showApp() {
     // Stash as pending nav — will execute once networks load via the state handler.
     // (jumpToMessage re-stashes if networks aren't ready yet.)
     _pendingNotifNav={conn_id:cid, target:tgt||'', ts:ts?parseInt(ts):null, from:from||null};
-    // Clean the URL so a refresh doesn't re-trigger the nav
-    try{history.replaceState(null,'',location.pathname+location.hash);}catch(e){}
+    // Clean the URL so a refresh doesn't re-trigger the nav. r11: a detached window keeps its
+    // own ?detached=1&conn=…&target= (F5 turned it into a full client window).
+    try{history.replaceState(null,'',location.pathname+_detSearch()+location.hash);}catch(e){}
   }
   // Also check the SW cache bridge (in case SW wrote intent but postMessage was missed)
   _readNotifClickCache();
@@ -1760,7 +1765,9 @@ function handleEvent(ev) {
       if(document.getElementById('bot-overlay')?.classList.contains('show')) _aiProviderChange();
       break;
     case 'auth_ok':
-      currentUser=ev.username;
+      // Avatars: NICK/QUIT/JOIN missed while the socket was down are not replayed.
+      avatarForgetAll();
+      currentUser=ev.username;ensureTweetAccount();refreshTweetCapabilities();
       _checkFrontendId(ev.assets);   // r10: redeployed while this page stayed open? → reload banner
       // If idle on reconnect, tell server immediately after auth
       if(_isIdle&&ws&&ws.readyState===1)ws.send(JSON.stringify({type:'idle'}));
@@ -1798,7 +1805,7 @@ function handleEvent(ev) {
     // mark them "not sent"; hide the previous account's UI behind the login screen;
     // and only drop the stored token if it is the one that failed (another tab may
     // already hold a newer one, e.g. after a password change).
-    case 'auth_failed': { hideBootSplash(); try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){} const _ft=sessionToken; sessionToken=null; _wsAuthed=false; _failRateQueue(); try{ if(localStorage.getItem('cryptirc_token')===_ft){ localStorage.removeItem('cryptirc_token'); document.cookie='cryptirc_token=;max-age=0;path=/cryptirc'; } }catch(_){} document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break; }
+    case 'auth_failed': { clearTweetData(); hideBootSplash(); try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){} const _ft=sessionToken; sessionToken=null; _wsAuthed=false; _failRateQueue(); try{ if(localStorage.getItem('cryptirc_token')===_ft){ localStorage.removeItem('cryptirc_token'); document.cookie='cryptirc_token=;max-age=0;path=/cryptirc'; } }catch(_){} document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break; }
     case 'vault_unlocked': {
       // Locked→unlocked transition (overlay still up ⇒ we were locked): Messages
       // preview get_logs sent while locked got EMPTY log_lines replies (read_logs
@@ -1808,8 +1815,10 @@ function handleEvent(ev) {
       // unlocks arrive as State{vault_unlocked:true} instead (vault_unlocked goes
       // only to the unlocking socket) — the 'state' case has the same reset.
       const _vo=document.getElementById('vault-overlay');
-      if(_vo.classList.contains('show')){ _msgsPreviewAsked.clear(); if(isMessagesActive()) _scheduleMessagesRender(); }
+      const _wasLocked=_vo.classList.contains('show');
+      if(_wasLocked){ _msgsPreviewAsked.clear(); if(isMessagesActive()) _scheduleMessagesRender(); }
       _vo.classList.remove('show'); renderSidebar();
+      if(_wasLocked) tweetVaultUnlocked();   // X previews were torn down at the lock
       {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
       // C1: E2E derives its own key (client-held keyring); the event only carries the
       // pepper/legacy key for a passphrase-proven unlock. Always hand it to e2e.js.
@@ -1829,7 +1838,7 @@ function handleEvent(ev) {
     case 'state':
       networks=ev.networks||[];
       try{ _runPendingCycles(ev); }catch(_){}   // r3: /cycle waits for a fresh State (key)
-      if(!ev.vault_unlocked){ const _vo0=document.getElementById('vault-overlay'); if(!_vo0.classList.contains('show')) _closeSecretPanels(); _vo0.classList.add('show'); if(typeof e2eOnVaultLocked==='function'&&window.E2E&&(E2E.keyReady||E2E.identityReady)) e2eOnVaultLocked(); }
+      if(!ev.vault_unlocked){ clearTweetData(); const _vo0=document.getElementById('vault-overlay'); if(!_vo0.classList.contains('show')) _closeSecretPanels(); _vo0.classList.add('show'); if(typeof e2eOnVaultLocked==='function'&&window.E2E&&(E2E.keyReady||E2E.identityReady)) e2eOnVaultLocked(); }
       else {
         // C1: vault unlocked (maybe by another device) — let E2E start from this
         // browser's cached key (or ask for the passphrase). Idempotent.
@@ -1840,8 +1849,10 @@ function handleEvent(ev) {
         // the 'vault_unlocked' case: attempts burned by empty replies while locked
         // must retry now that logs decrypt. On the unlocking socket vault_unlocked
         // already ran and removed .show, so this doesn't double-fire.
-        if(_vo.classList.contains('show')){ _msgsPreviewAsked.clear(); if(isMessagesActive()) _scheduleMessagesRender(); }
+        const _wasLocked=_vo.classList.contains('show');
+        if(_wasLocked){ _msgsPreviewAsked.clear(); if(isMessagesActive()) _scheduleMessagesRender(); }
         _vo.classList.remove('show');
+        if(_wasLocked) tweetVaultUnlocked();
         const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}
         if(!_chanStatsLoaded)loadStatsFromServer();
       }
@@ -1899,9 +1910,10 @@ function handleEvent(ev) {
       // Drain any pending notification-click nav now that networks are loaded
       _drainPendingNotifNav();
       break;
-    case 'connecting':   sysMsg(ev.conn_id,'status',`Connecting to ${ev.server}…`,'system'); setNetDot(ev.conn_id,'connecting'); break;
-    case 'connected':    sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); keepnickStartPoll(ev.conn_id); break;
+    case 'connecting':   avatarForgetConn(ev.conn_id); sysMsg(ev.conn_id,'status',`Connecting to ${ev.server}…`,'system'); setNetDot(ev.conn_id,'connecting'); break;
+    case 'connected':    avatarForgetConn(ev.conn_id); sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); keepnickStartPoll(ev.conn_id); break;
     case 'disconnected':
+      avatarForgetConn(ev.conn_id);
       sysMsg(ev.conn_id,'status',`Disconnected: ${ev.reason}`,'error'); setNetDot(ev.conn_id,'offline'); lagMap[ev.conn_id]=null; if(active&&active.conn_id===ev.conn_id) updateLagDisplay();
       if(ev.reason&&ev.reason.includes('certificate verify failed')&&!window._certWarnShown?.[ev.conn_id]){
         if(!window._certWarnShown)window._certWarnShown={};
@@ -1910,6 +1922,7 @@ function handleEvent(ev) {
       }
       break;
     case 'reconnecting': {
+      avatarForgetConn(ev.conn_id);
       sysMsg(ev.conn_id,'status',`↻ Reconnecting in ${ev.delay_secs}s (attempt ${ev.attempt})…`,'system');
       // Detect self-signed cert error and show helpful popup (once per network)
       if(ev.reason&&ev.reason.includes('certificate verify failed')&&!window._certWarnShown?.[ev.conn_id]){
@@ -2177,7 +2190,7 @@ function handleEvent(ev) {
         const _recordMention = !ev.replayed;
         const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts,_recordMention,ev.msg_id,encrypted);
         // ZNC playback detection — batch old messages silently
-        const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null};
+        const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null,_tgt:ev.target};
         // Daemon ring-buffer replay (a cryptirc.service restart reattaching to the
         // live daemon) sets ev.replayed — a DETERMINISTIC signal to take the silent
         // path (render to scrollback, dedup, but no notification/unread/sound),
@@ -2241,7 +2254,7 @@ function handleEvent(ev) {
             trackSeen(ev.from,ev.target,ev.ts);
             trackStat(ev.conn_id,ev.target,ev.from);
           }
-          if(!_zdup&&isActive(ev.conn_id,ev.target))appendMsgRow(zncMsg);
+          if(!_zdup&&isActive(ev.conn_id,ev.target))appendMsgRow(zncMsg,ev.conn_id,ev.target);
           // A replayed DM must still SURFACE its conversation (row in the sidebar +
           // Messages inbox) even though it stays silent (no unread/sound): a browser
           // that reconnects across a web restart may receive a brand-new PM ONLY as
@@ -2301,6 +2314,7 @@ function handleEvent(ev) {
     case 'irc_join': // fallthrough to irc_join_ex
     case 'irc_join_ex': {
       monitorUpdate(ev.nick,ev.conn_id,ev.channel,null);
+      avatarForget(ev.conn_id,[ev.nick]);
       // extended-join: show account + realname if available
       let joinMsg = `→ ${ev.nick} joined`;
       if(ev.account && ev.account !== '*') joinMsg += ` (${ev.account})`;
@@ -2349,6 +2363,8 @@ function handleEvent(ev) {
           setActive(ev.conn_id,altCh?altCh.name:'status');
         }
       }
+      // Avatars: answers for nicks no longer in any shared channel are dropped.
+      avatarPruneUnshared(ev.conn_id);
       // Only a SELF-part changes the sidebar (channel row removed). Other users
       // parting don't alter any sidebar row — skip the full rebuild (flicker source).
       if(ev.nick===getNick(ev.conn_id)) renderSidebar();
@@ -2357,6 +2373,7 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_quit': {
+      avatarForget(ev.conn_id,[ev.nick]);
       const net=networks.find(n=>n.config.id===ev.conn_id);
       // IRC nicks are case-insensitive — match members case-insensitively so a quit
       // never falls through to the status window on a nick-case drift.
@@ -2369,6 +2386,7 @@ function handleEvent(ev) {
         refreshUserCount(ev.conn_id,ch.name);
       }
       if(!quitChans.length) sysMsg(ev.conn_id,'status',`⊗ ${ev.nick} quit${ev.reason?' ('+ev.reason+')':''}`,'quit',{ts:ev.ts,from:ev.nick,self:quitSelf,subject:ev.nick});
+      avatarPruneUnshared(ev.conn_id);
       // Another user quitting doesn't change any sidebar row — skip the rebuild
       // (a major flicker source during netsplits). Nick panel/count still refresh above.
       if(quitSelf) renderSidebar();
@@ -2378,6 +2396,7 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_nick': {
+      avatarForget(ev.conn_id,[ev.old,ev.new]);
       const nNet=networks.find(n=>n.config.id===ev.conn_id);
       // Case-insensitive member match (IRC nicks are case-insensitive).
       const _no=String(ev.old||'').toLowerCase(),_nw=String(ev.new||'').toLowerCase();
@@ -2422,9 +2441,18 @@ function handleEvent(ev) {
       }
       break;
     }
-    case 'irc_names':  updateNames(ev.conn_id,ev.channel,ev.names); renderSidebar(); monitorRefreshOnline(); break;
-    case 'irc_kick':
+    case 'irc_names':  if(isActive(ev.conn_id,ev.channel)) avatarRequest(ev.conn_id,ev.names,30000); updateNames(ev.conn_id,ev.channel,ev.names); renderSidebar(); monitorRefreshOnline(); break;
+    case 'irc_kick': {
       sysMsg(ev.conn_id,ev.channel,`✗ ${ev.kicked} kicked by ${ev.by}${ev.reason?' ('+ev.reason+')':''}`, 'kick',{ts:ev.ts,from:ev.kicked,self:(ev.kicked===getNick(ev.conn_id)||ev.by===getNick(ev.conn_id)),subject:ev.kicked,subject2:ev.by});
+      // The kicked user is no longer a member (the server's list already dropped them).
+      const kSelf=ev.kicked===getNick(ev.conn_id);
+      if(!kSelf){
+        const kNet=networks.find(n=>n.config.id===ev.conn_id), kCh=kNet?.channels?.find(c=>_sameChan(c.name,ev.channel));
+        const _kn=_avFold(String(ev.kicked||''));
+        if(kCh){ kCh.names=kCh.names.filter(n=>_avFold(stripPfx(n))!==_kn); refreshUserCount(ev.conn_id,ev.channel); }
+      }
+      // Avatars: as for PART (after our own kick, that channel no longer counts as shared).
+      avatarPruneUnshared(ev.conn_id,kSelf?ev.channel:undefined);
       // Auto-rejoin on kick if enabled
       if(ev.kicked===getNick(ev.conn_id) && localStorage.getItem('cryptirc_autorejoin')!=='false'){
         const _rjKey=bk(ev.conn_id,ev.channel),_rjSavedKey=localStorage.getItem('cryptirc_chankeys');
@@ -2432,6 +2460,7 @@ function handleEvent(ev) {
         setTimeout(()=>{markUserJoin(ev.conn_id,ev.channel);wsend({type:'join_channel',conn_id:ev.conn_id,channel:ev.channel,key:_rjKeyVal||''});sysMsg(ev.conn_id,ev.channel,'Auto-rejoining after kick...','system');},3000);
       }
       break;
+    }
     case 'irc_mode': {
       // Parse setter|modes format (e.g. "gh0st|+v felon_1" or just "+v felon_1")
       // The separator is the LAST '|' in the first space-delimited token: nicks may
@@ -2794,8 +2823,10 @@ function handleEvent(ev) {
     case 'appearance':
       try{
         const cfg={...APPEAR_DEFAULTS,...JSON.parse(ev.settings)};
+        const _lpWas=loadAppearance().linkPreviews!==false;
         localStorage.setItem('cryptirc_appear',ev.settings);
         invalidateAppearCache(); // so an open Appearance modal / next load sees synced custom themes
+        if((cfg.linkPreviews!==false)!==_lpWas) refreshTweetPolicyUI();   // X previews follow the global switch
         // Reap device-local background blobs for themes deleted on another device,
         // so localStorage doesn't accumulate orphans we can never reach again.
         try{
@@ -3175,6 +3206,9 @@ function _notifyChatMessage(conn_id,target,msg,isDM){
 }
 
 function addMessage(conn_id,target,msg){
+  // r11: the conversation the line really belongs to (bk() lowercases with Unicode, so e.g.
+  // #Ä and #ä share one buffer on an ASCII-casemapping network): Reply binds to it.
+  if(msg&&typeof msg==='object'&&msg._tgt==null&&target!=null) msg._tgt=String(target);
   const buf=getBuf(conn_id,target);
   // History view: the buffer is a focused window from the past, not the live
   // tail. The user's OWN message means they're chatting again → snap back to
@@ -3247,7 +3281,7 @@ function addMessage(conn_id,target,msg){
     if(_newQueryRow) renderSidebar();
   }
   if(isActive(conn_id,target)){
-    appendMsgRow(msg);
+    appendMsgRow(msg,conn_id,target);
     const isOwn=_isOwnMsg(conn_id,msg);
     if(isOwn){
       scrollForce();
@@ -3516,7 +3550,7 @@ async function prependLogs(conn_id,target,lines){
   const buf=getBuf(conn_id,target);
   const wasEmpty=buf.length===0;
   const _selfNick=getNick(conn_id);
-  const newMsgs=lines.map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted},conn_id));
+  const newMsgs=lines.map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target},conn_id));
   // Track highest msg_id from log lines
   for(const m of newMsgs) trackMsgId(conn_id,target,m.id);
   // A device that never saw this connection's live 005 (new browser, cleared data)
@@ -3680,7 +3714,7 @@ async function appendSyncLines(conn_id,target,lines){
     // above, which were computed once before the loop.
     if(id>0) existingIds.add(id);
     existingKeys.add(fk);
-    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted},conn_id));
+    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target},conn_id));
     added++;
   }
   if(added>0){
@@ -3903,6 +3937,7 @@ function updateLagDisplay(){
   }
 }
 function setActive(conn_id,target,options){
+  disposeTweetPreviews(document.getElementById('chat-area'));
   ++_messageJumpSerial;
   try{ _replyOnSwitch(conn_id,target); }catch(_){}   // r6: a reply quote stays with its conversation
   active={conn_id,target};
@@ -3963,6 +3998,7 @@ function setActive(conn_id,target,options){
 
 function renderChat(){
   const area=document.getElementById('chat-area');
+  ++_tweetViewGeneration;
   const welcome=document.getElementById('welcome');
   if(!active){area.style.display='none';welcome.style.display='flex';return;}
   // Uploads pseudo-channel uses its own renderer; bail before IRC paths run.
@@ -3981,8 +4017,9 @@ function renderChat(){
   // rebuilds an empty buffer, where holding scrollTop would strand the anchor
   // with no release path; fall through to scrollForce (which releases) instead.
   const _anchorKeepPos=(_jumpAnchor && _jumpAnchorBk===bk(active.conn_id,active.target) && getBuf(active.conn_id,active.target).length>0)?area.scrollTop:null;
-  area.style.display='block'; welcome.style.display='none'; area.innerHTML='';
+  disposeTweetPreviews(area); area.style.display='block'; welcome.style.display='none'; area.innerHTML='';
   const buf=getBuf(active.conn_id,active.target);
+  const _tweetConv=tweetConversation(active.conn_id,active.target);   // X previews: evidence from THIS buffer
   // History-view banner — buffer is a window from the past; tap to return to live.
   if(_historyView && _historyView.bk===bk(active.conn_id,active.target)){
     const hb=document.createElement('div');
@@ -4035,10 +4072,10 @@ function renderChat(){
       if(group.length>=2){
         area.appendChild(buildCondensedRow(group));
       } else {
-        area.appendChild(buildRow(msg));
+        area.appendChild(buildRow(msg,undefined,_tweetConv));
       }
     } else {
-      area.appendChild(buildRow(msg));
+      area.appendChild(buildRow(msg,undefined,_tweetConv));
     }
     i++;
   }
@@ -4139,7 +4176,7 @@ function _pruneChatDOM(area){
       node=node.nextSibling;
       if(!node)break;
     }
-    area.removeChild(node);
+    disposeTweetPreviews(node);area.removeChild(node);
     toRemove--;
   }
   // Rows vanished from above the viewport, so the browser adjusts scrollTop and
@@ -4155,7 +4192,7 @@ let _lastAppendTs=0;
 // their unique server id (so genuinely-repeated text with distinct ids survives);
 // id-less ones key on ts|from|kind|text.
 function _msgFp(m){ return (m && m.id>0) ? 'id:'+m.id : 'k:'+((m&&m.ts)|0)+'|'+((m&&m.from)||'')+'|'+((m&&m.kind)||'')+'|'+((m&&m.text)||'').slice(0,80); }
-function appendMsgRow(msg){
+function appendMsgRow(msg,connId,target){
   const area=document.getElementById('chat-area');if(area.style.display==='none')return;
   // A live line / optimistic echo can land before get_logs returns — drop the
   // "Loading messages…" placeholder so the message doesn't sit beneath it.
@@ -4206,7 +4243,9 @@ function appendMsgRow(msg){
       scrollBottom();return;
     }
   }
-  const r=buildRow(msg);
+  // X previews: evidence from the buffer this line was appended to (callers pass it;
+  // without it the row has no evidence and X previews stay click-to-load).
+  const r=buildRow(msg,undefined,(typeof connId==='string'&&typeof target==='string')?tweetConversation(connId,target):undefined);
   // Burst suppression: when rows land back-to-back (a WHOIS reply's ~10 numerics,
   // a paste flood, history playback), skip the per-row fade so the view doesn't
   // visibly pulse/flash. Single messages (gap > BURST) keep their fade-in.
@@ -4496,7 +4535,7 @@ function buildCondensedRow(group){
 }
 // r7 (codex-p3 app.js:5215): `conv` = the conversation the row is shown for when that is
 // NOT the active one (the split pane) — its Reply quote belongs there.
-function buildRow(msg,conv){
+function buildRow(msg,conv,tweetConv){
   const row=document.createElement('div'); row.className=`msg-row row-${msg.kind}`; row.dataset.ts=msg.ts; row.dataset.from=msg.from||''; row.dataset.msgId=msg.id||0; row._jumpText=msg.text||''; row.dataset.fp=_msgFp(msg);
   if(msg.self) row.dataset.self='1';
   if(msg.mentioned) row.dataset.mentioned='1';
@@ -4534,6 +4573,7 @@ function buildRow(msg,conv){
     bodyHtml=`<span class="msg-body">${renderText(msg.text)}</span>`;
   }
   row.innerHTML=`<span class="msg-ts">${ts}</span>${nickHtml}${bodyHtml}`;
+  if(msg.from==='*') _avWhoisRow(row,msg,conv);
   // Small lock badge on encrypted messages
   const msgBody=row.querySelector('.msg-body');
   if (msg.encrypted && msgBody) {
@@ -4543,14 +4583,15 @@ function buildRow(msg,conv){
     lock.style.cssText = 'opacity:.5;margin-left:4px;flex-shrink:0;color:var(--accent);';
     msgBody.appendChild(lock);
   }
-  if(msgBody){for(const url of extractMediaUrls(msg.text)){const el=buildMediaEl(url,!!msg.encrypted);if(el)msgBody.appendChild(el);}}
+  if(msgBody)mountMessageMedia(msg,tweetConv,msgBody);
   // Reply button on chat messages
   if(isChat&&msg.from!=='*'){
     const replyBtn=document.createElement('span');
     replyBtn.className='msg-reply-btn';
     replyBtn.title='Reply';
     replyBtn.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 17H4V12"/><path d="M4 17L15 6"/><path d="M15 6H20V11"/></svg>';
-    replyBtn.onclick=(e)=>{e.stopPropagation();setReply(msg.from,msg.text,conv);};
+    // r11: the row's own conversation (msg._tgt) — not just the pane's: rows of a shared buffer can come from another.
+    replyBtn.onclick=(e)=>{e.stopPropagation();const base=conv||active;setReply(msg.from,msg.text,(msg._tgt&&base)?{conn_id:base.conn_id,target:msg._tgt}:conv);};
     row.appendChild(replyBtn);
   }
   row._msgRef=msg;
@@ -4683,9 +4724,343 @@ function renderNickPanel(names){
       el.dataset.nick=nick;
       el.innerHTML=topPfx?`<span class="nick-pfx${'~&@'.includes(topPfx)?' op':''}">${topPfx}</span>${esc(nick)}`:esc(nick);
       el.style.cursor='pointer';
+      // Avatar only for a nick the server vouched for on this connection (else the plain row).
+      if(active) _avSync(el,active.conn_id,nick,48,'nick-av');
       list.appendChild(el);
     }
   }
+  if(active&&names.length) avatarRequest(active.conn_id,names);
+}
+// ─── Avatars (other CryptIRC users of this server) ───────────────────────────
+// The server vouches for a nick (POST /api/avatar/lookup, avatar.rs `discover`) only when
+// that account's live connection dials the same IRC server host as ours, holds that nick
+// right now, and our connection can see the nick (shared channel or a WHOIS reply). This
+// client never shows a picture the server did not vouch for on THIS connection for THIS
+// nick: answers are cached per connection + ASCII-folded nick (never a wider fold), expire,
+// and are dropped on that nick's NICK/QUIT/JOIN, on reconnect and on every WebSocket
+// (re)authentication (events missed while the socket was down are not replayed). Pictures
+// are fetched once per token+version+size with the session header (the server answers
+// no-store, so logout / opt-out / removal / bans apply at once) and shown from memory as
+// same-origin blob: <img>, alt = the nick, no referrer.
+const _AV={cache:new Map(),queue:new Map(),inflight:new Set(),lastSent:new Map(),forgot:new Map(),whois:new Map(),timer:0,backoffUntil:0,offUntil:0,token:null};
+// _AV.whois: key → when a fresh WHOIS reply showed that nick (the server counts it as seen
+// for 15 minutes, avatar.rs WHOIS_SEEN_TTL).
+const _AV_WHOIS_TTL=15*60*1000;
+// _AV.forgot: when a key (or a whole connection, key conn+'\n') was last forgotten — an
+// answer to a request sent before that is stale (computed before the NICK/QUIT/JOIN).
+const _AV_NEG_TTL=300000, _AV_ERR_TTL=60000, _AV_CHUNK=200, _AV_MAX_ENTRIES=5000, _AV_MIN_GAP=1000;
+function _avFold(n){ return String(n||'').replace(/[A-Z]/g,c=>c.toLowerCase()); }
+function _avKey(conn,nick){ return conn+'\n'+_avFold(nick); }
+function avatarsShown(){ try{ return loadAppearance().avatars!==false; }catch(_){ return true; } }
+// Loaded pictures: token.version.size → {state:'loading'|'ok'|'fail', url, p, fails, retryAt}.
+const _AVIMG=new Map();
+// A new session (sign-out, another account) never sees the previous one's answers or pictures.
+function _avSession(){
+  if(_AV.token!==sessionToken){
+    _AV.cache.clear(); _AV.queue.clear(); _AV.forgot.clear(); _AV.whois.clear(); _AV.token=sessionToken; _AV.offUntil=0; _AV.backoffUntil=0;
+    for(const r of _AVIMG.values()) if(r.url) try{ URL.revokeObjectURL(r.url); }catch(_){}
+    _AVIMG.clear();
+  }
+}
+function _avValid(e){ return !!e&&typeof e.t==='string'&&/^[0-9a-f]{32}$/.test(e.t)&&typeof e.v==='string'&&/^[0-9a-f]{16}$/.test(e.v); }
+function _avUrl(e,size){ return '/cryptirc/avatar/'+e.t+'?v='+e.v+(size===48?'&s=48':''); }
+// The vouched, unexpired answer for this nick on this connection, or null. `notBefore`: only
+// an answer obtained at or after that time (ms) counts.
+function avatarFor(conn,nick,notBefore){
+  if(!conn||!nick||!avatarsShown())return null;
+  _avSession();
+  if(Date.now()<_AV.offUntil)return null;
+  const e=_AV.cache.get(_avKey(conn,stripPfx(String(nick))));
+  if(!e||e.none||Date.now()>=e.until)return null;
+  if(notBefore&&!(e.at>=notBefore))return null;
+  return e;
+}
+// Fetch one picture into memory (Promise of a blob: URL, or null). A failed load is retried
+// with backoff (30 s, doubling, at most 30 min) — never given up for good.
+function _avLoad(e,size){
+  _avSession();
+  const k=e.t+'.'+e.v+'.'+size, now=Date.now();
+  let r=_AVIMG.get(k);
+  if(r){
+    if(r.state==='ok') return Promise.resolve(r.url);
+    if(r.state==='loading') return r.p;
+    if(now<r.retryAt) return Promise.resolve(null);
+  }
+  const fails=r?r.fails:0, token=sessionToken;
+  r={state:'loading',fails,retryAt:0,url:null};
+  _AVIMG.set(k,r);
+  r.p=fetch(_avUrl(e,size),{headers:{'Authorization':'Bearer '+token},cache:'no-store',credentials:'omit',referrerPolicy:'no-referrer'})
+    .then(async res=>{
+      if(!res.ok||res.headers.get('content-type')!=='image/png') throw new Error('status '+res.status);
+      const b=await res.blob();
+      if(b.size>524288||token!==sessionToken) throw new Error('refused');
+      r.url=URL.createObjectURL(b); r.state='ok';
+      return r.url;
+    })
+    .catch(()=>{ r.state='fail'; r.fails=fails+1; r.retryAt=Date.now()+Math.min(30000*2**fails,1800000); return null; })
+    .finally(()=>{ try{ _avApplyAll(); }catch(_){} });
+  return r.p;
+}
+// The loaded blob: URL for this picture, or null (and its load is started / retried).
+function _avReady(e,size){
+  const r=_AVIMG.get(e.t+'.'+e.v+'.'+size);
+  if(r&&r.state==='ok') return r.url;
+  _avLoad(e,size);
+  return null;
+}
+// A picture that would not decode: forget it and retry later like a failed load.
+function _avDecodeFailed(e,size){
+  const r=_AVIMG.get(e.t+'.'+e.v+'.'+size);
+  if(!r||r.state!=='ok') return;
+  try{ URL.revokeObjectURL(r.url); }catch(_){}
+  r.state='fail'; r.url=null; r.retryAt=Date.now()+Math.min(30000*2**r.fails,1800000); r.fails++;
+}
+// Drop pictures no current answer refers to.
+function _avPrunePictures(){
+  const live=new Set(), now=Date.now();
+  for(const e of _AV.cache.values()) if(!e.none&&now<e.until) live.add(e.t+'.'+e.v);
+  for(const [k,r] of _AVIMG){
+    if(r.state==='loading'||live.has(k.slice(0,k.lastIndexOf('.'))))continue;
+    if(r.url) try{ URL.revokeObjectURL(r.url); }catch(_){}
+    _AVIMG.delete(k);
+  }
+}
+// Queue nicks for a lookup. Asked again only when missing, expired, due for refresh or —
+// with `minAge` (ms) — older than that.
+function avatarRequest(conn,nicks,minAge){
+  if(!conn||!sessionToken||!avatarsShown()||isMessagesConn(conn)||isUploadsConn(conn))return;
+  _avSession();
+  const now=Date.now();
+  if(now<_AV.offUntil)return;
+  let q=_AV.queue.get(conn);
+  for(const raw of nicks||[]){
+    const n=stripPfx(String(raw||'')).trim();
+    if(!n||n.length>64||/[\s,\x00-\x1f]/.test(n))continue;
+    const e=_AV.cache.get(_avKey(conn,n));
+    if(e&&now<e.refreshAt&&!(minAge!=null&&now-e.at>=minAge))continue;
+    if(!q){ q=new Set(); _AV.queue.set(conn,q); }
+    q.add(n);
+  }
+  if(q&&q.size&&!_AV.timer) _AV.timer=setTimeout(_avFlush,150);
+}
+function _avStore(conn,nick,entry){
+  if(_AV.cache.size>_AV_MAX_ENTRIES){
+    const now=Date.now();
+    for(const [k,e] of _AV.cache) if(now>=e.until) _AV.cache.delete(k);
+    if(_AV.cache.size>_AV_MAX_ENTRIES) _AV.cache.clear();
+  }
+  _AV.cache.set(_avKey(conn,nick),entry);
+}
+function _avForgotSince(conn,nick,sent){
+  return (_AV.forgot.get(_avKey(conn,nick))||0)>=sent||(_AV.forgot.get(conn+'\n')||0)>=sent||(_AV.forgot.get('*')||0)>=sent;
+}
+function _avNoteForgot(key){
+  const now=Date.now();
+  if(_AV.forgot.size>2000) for(const [k,t] of _AV.forgot) if(now-t>120000) _AV.forgot.delete(k);
+  _AV.forgot.set(key,now);
+}
+async function _avLookup(conn,chunk){
+  const token=sessionToken, sent=Date.now();
+  _AV.lastSent.set(conn,sent);
+  let r;
+  try{
+    r=await fetch('/cryptirc/api/avatar/lookup',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({conn_id:conn,nicks:chunk})});
+  }catch(_){ r=null; }
+  if(token!==sessionToken)return 'stale';
+  const now=Date.now();
+  if(r&&r.status===429){ _AV.backoffUntil=now+30000; return 'retry'; }
+  let d=null;
+  if(r&&r.ok){ try{ d=await r.json(); }catch(_){ d=null; } }
+  if(token!==sessionToken)return 'stale';
+  if(!d){
+    // Network error / not our connection: nothing is vouched for; ask again later.
+    for(const n of chunk) _avStore(conn,n,{none:true,at:now,until:now+_AV_ERR_TTL,refreshAt:now+_AV_ERR_TTL});
+    return 'done';
+  }
+  if(d.enabled===false){ _AV.offUntil=now+600000; return 'off'; }
+  const ttl=Math.min(Math.max((+d.ttl||180)*1000,30000),600000);
+  const got=new Map();
+  for(const [nick,e] of Object.entries(d.avatars||{})) if(_avValid(e)) got.set(_avFold(nick),e);
+  const stale=[];
+  for(const n of chunk){
+    // Forgotten while this request was in flight: its answer predates that event.
+    if(_avForgotSince(conn,n,sent)){ stale.push(n); continue; }
+    const e=got.get(_avFold(n));
+    if(e) _avStore(conn,n,{t:e.t,v:e.v,at:now,until:now+ttl,refreshAt:now+ttl*0.6});
+    else _avStore(conn,n,{none:true,at:now,until:now+_AV_NEG_TTL,refreshAt:now+_AV_NEG_TTL});
+  }
+  if(stale.length) avatarRequest(conn,stale);
+  return 'done';
+}
+async function _avFlush(){
+  _AV.timer=0;
+  const wait=_AV.backoffUntil-Date.now();
+  if(wait>0){ _AV.timer=setTimeout(_avFlush,wait); return; }
+  let soonest=Infinity;
+  for(const [conn,set] of [..._AV.queue]){
+    if(_AV.inflight.has(conn))continue;
+    // At most one lookup per connection per _AV_MIN_GAP (a trickle of JOINs coalesces).
+    const gap=(_AV.lastSent.get(conn)||0)+_AV_MIN_GAP-Date.now();
+    if(gap>0){ soonest=Math.min(soonest,gap); continue; }
+    _AV.queue.delete(conn);
+    _AV.inflight.add(conn);
+    (async()=>{
+      const all=[...set];
+      try{
+        for(let i=0;i<all.length;i+=_AV_CHUNK){
+          const res=await _avLookup(conn,all.slice(i,i+_AV_CHUNK));
+          if(res==='stale')return;
+          if(res==='off'){ _avApplyAll(); return; }
+          if(res==='retry'){ avatarRequest(conn,all.slice(i),0); break; }
+          _avApply(conn);
+        }
+      }finally{
+        _AV.inflight.delete(conn);
+        if(_AV.queue.size&&!_AV.timer) _AV.timer=setTimeout(_avFlush,150);
+      }
+    })();
+  }
+  if(soonest!==Infinity&&!_AV.timer) _AV.timer=setTimeout(_avFlush,soonest);
+}
+// Forget answers for these nicks (NICK / QUIT / JOIN: someone else may hold them now).
+function avatarForget(conn,nicks){
+  let hit=false;
+  for(const n of nicks||[]){
+    if(!n)continue;
+    const k=_avKey(conn,stripPfx(String(n)));
+    _avNoteForgot(k);
+    if(_AV.cache.delete(k)) hit=true;
+  }
+  if(hit) _avApply(conn);
+}
+function avatarForgetConn(conn){
+  const pre=conn+'\n';
+  _avNoteForgot(pre);
+  let hit=false;
+  for(const k of [..._AV.cache.keys()]) if(k.startsWith(pre)){ _AV.cache.delete(k); hit=true; }
+  _AV.queue.delete(conn);
+  if(hit) _avApply(conn);
+}
+function avatarForgetAll(){ _avNoteForgot('*'); _AV.cache.clear(); _AV.queue.clear(); _AV.offUntil=0; _avApplyAll(); }
+// Folded nicks this connection shares a channel with (optionally ignoring one channel).
+function _avSharedNicks(conn,exceptChannel){
+  const out=new Set(), net=networks.find(n=>n.config.id===conn);
+  for(const ch of (net?.channels||[])){
+    if(exceptChannel&&_sameChan(ch.name,exceptChannel))continue;
+    for(const n of (ch.names||[])) out.add(_avFold(stripPfx(n)));
+  }
+  return out;
+}
+function _avWhoisFresh(conn,nick){ const t=_AV.whois.get(_avKey(conn,nick)); return !!t&&Date.now()-t<_AV_WHOIS_TTL; }
+function _avShared(conn,nick){ return _avSharedNicks(conn).has(_avFold(stripPfx(String(nick||'')))); }
+// The earliest answer time usable for this nick right now: any for a nick in a shared
+// channel; for any other nick only one obtained after its fresh WHOIS (a WHOIS makes a nick
+// eligible for a lookup, it does not prove the same account still holds it — codex
+// re-check 2 M app.js:4961); none without one.
+function _avNotBefore(conn,nick){
+  if(_avShared(conn,nick)) return 0;
+  return _avWhoisFresh(conn,nick)?_AV.whois.get(_avKey(conn,nick)):Infinity;
+}
+// PART / KICK / QUIT: drop answers and queued lookups for nicks no longer in any shared
+// channel on this connection — WHOIS'd or not (a nick changing hands outside the viewer's
+// channels is never seen here; codex re-checks M app.js:2346 / app.js:4961). Only an
+// explicit nick menu or WHOIS row asks the server about such a nick again.
+function avatarPruneUnshared(conn,exceptChannel){
+  const shared=_avSharedNicks(conn,exceptChannel), pre=conn+'\n', now=Date.now();
+  let hit=false;
+  for(const k of [..._AV.cache.keys()]) if(k.startsWith(pre)&&!shared.has(k.slice(pre.length))){ _AV.cache.delete(k); _avNoteForgot(k); hit=true; }
+  const q=_AV.queue.get(conn);
+  if(q) for(const n of [...q]) if(!shared.has(_avFold(n))) q.delete(n);
+  for(const [k,t] of _AV.whois) if(now-t>=_AV_WHOIS_TTL) _AV.whois.delete(k);
+  if(hit) _avApply(conn);
+}
+function _avImg(url,e,size,nick,cls){
+  const img=document.createElement('img');
+  img.className=cls;
+  img.alt=nick;
+  img.referrerPolicy='no-referrer';
+  img.decoding='async';
+  img.draggable=false;
+  img.dataset.av=e.t+'.'+e.v;
+  img.dataset.avSize=String(size);
+  img.addEventListener('error',()=>{ _avDecodeFailed(e,size); img.remove(); },{once:true});
+  img.src=url;
+  return img;
+}
+// Bring one element's avatar in line with the cache (add, swap or remove). `sizes`: the
+// picture sizes acceptable here, best first (the first one is also loaded when missing).
+function _avSync(host,conn,nick,sizes,cls,notBefore){
+  const av=avatarFor(conn,nick,notBefore), cur=host.querySelector(':scope > img.'+cls);
+  let url=null, size=0;
+  if(av){
+    for(const sz of [].concat(sizes)){ const u=_avReady(av,sz); if(u&&!url){ url=u; size=sz; } if(u) break; }
+  }
+  const want=url?av.t+'.'+av.v+'.'+size:'', have=cur?cur.dataset.av+'.'+cur.dataset.avSize:'';
+  if(want===have)return;
+  if(cur) cur.remove();
+  if(url) host.insertBefore(_avImg(url,av,size,nick,cls),host.firstChild);
+}
+function _avApply(conn){
+  if(active&&active.conn_id===conn){
+    const list=document.getElementById('nick-list');
+    if(list) for(const el of list.querySelectorAll('.nick-entry[data-nick]')) _avSync(el,conn,el.dataset.nick,48,'nick-av');
+  }
+  for(const row of document.querySelectorAll('.whois-head[data-whois-nick]')){
+    if(row.dataset.whoisConn!==conn)continue;
+    const body=row.querySelector('.msg-body');
+    if(body) _avSync(body,conn,row.dataset.whoisNick,128,'whois-av',_avNotBefore(conn,row.dataset.whoisNick));
+  }
+  // An open nick menu follows the same answers (NICK / QUIT / PART / opt-out / expiry remove it).
+  const head=nickCtx&&nickCtx.querySelector('.nick-ctx-head[data-av-conn]');
+  if(head&&head.dataset.avConn===conn) _avSync(head,conn,head.dataset.avNick,[128,48],'nick-ctx-av',_avShared(conn,head.dataset.avNick)?0:Infinity);
+}
+function _avApplyAll(){
+  const conns=new Set();
+  if(active) conns.add(active.conn_id);
+  for(const row of document.querySelectorAll('.whois-head[data-whois-conn]')) conns.add(row.dataset.whoisConn);
+  const head=nickCtx&&nickCtx.querySelector('.nick-ctx-head[data-av-conn]');
+  if(head) conns.add(head.dataset.avConn);
+  for(const c of conns) _avApply(c);
+}
+// The connection a nick menu is about: the split pane's for a click inside it, else the
+// active view's (each pane's rows belong to their own connection).
+function _nickMenuConn(e){
+  const t=e&&e.target&&e.target.closest?e.target:null;
+  if(t&&t.closest('#split-panel')) return _splitParse(_splitTarget)[0];
+  return active?active.conn_id:null;
+}
+// Re-check the active channel's members (expired / due answers) and drop expired pictures.
+function avatarRefreshActive(){
+  if(!active||!/^[#&+!]/.test(String(active.target||'')))return;
+  const net=networks.find(n=>n.config.id===active.conn_id);
+  const ch=net?.channels?.find(c=>_sameChan(c.name,active.target));
+  if(ch) avatarRequest(active.conn_id,ch.names);
+}
+setInterval(()=>{ try{ _avApplyAll(); avatarRefreshActive(); _avPrunePictures(); }catch(_){} },60000);
+// WHOIS: the RPL_WHOISUSER line ("nick!user@host (realname)") in nick's query buffer gets
+// the larger picture. A fresh reply re-asks at once (the server has just seen the nick).
+function _avWhoisRow(row,msg,conv){
+  const c=conv||active;
+  if(!c||!c.conn_id||typeof c.target!=='string'||!avatarsShown())return;
+  const m=/^([^\s!]+)![^\s@]+@\S+ \(/.exec(String(msg.text||''));
+  if(!m||_avFold(m[1])!==_avFold(c.target))return;
+  row.classList.add('whois-head');
+  row.dataset.whoisNick=m[1];
+  row.dataset.whoisConn=c.conn_id;
+  const fresh=Math.abs(Date.now()/1000-(+msg.ts||0))<60;
+  if(fresh) _AV.whois.set(_avKey(c.conn_id,m[1]),Date.now());
+  const body=row.querySelector('.msg-body');
+  if(body) _avSync(body,c.conn_id,m[1],128,'whois-av',_avNotBefore(c.conn_id,m[1]));
+  avatarRequest(c.conn_id,[m[1]],fresh?0:30000);
+}
+// "Show other people's avatars" (Settings ▸ Profile ▸ Avatar). Stored with the synced
+// appearance only when off, so the default adds nothing to the 4 KB appearance budget.
+function setAvatarsShown(on){
+  invalidateAppearCache();
+  const cfg=loadAppearance();
+  if(on) delete cfg.avatars; else cfg.avatars=false;
+  saveAppearance(cfg);
+  if(on){ _avApplyAll(); avatarRefreshActive(); } else _avApplyAll();
 }
 function updateTypingIndicator(){
   const el=document.getElementById('typing-indicator');
@@ -4932,7 +5307,1116 @@ function mediaPlaceholder(kind,url,buildReal){
   wrap.appendChild(btn);
   return wrap;
 }
-function buildMediaEl(url,fromEncrypted){
+// ─── X previews: pure validation and viewer-local state ────────────────────────
+// Port of the community "rich X previews" reference (docs/x-preview-verification.md).
+// Everything here is inert unless the server reports a configured provider
+// (GET /cryptirc/tweet/config): on a default install X links stay plain links and no
+// preview request is made. Disclosure is decided per row from the buffer the row was
+// rendered from (tweetConversation/tweetRowContext), never from the conversation that
+// happens to be selected when a callback fires.
+const TWEET_HOSTS=['x.com','www.x.com','mobile.x.com','twitter.com','www.twitter.com','mobile.twitter.com','m.twitter.com'];
+function validTweetId(id){return typeof id==='string'&&/^[1-9][0-9]{0,19}$/.test(id);}
+function strictTweetHttps(value){
+  if(typeof value!=='string'||new TextEncoder().encode(value).length>2048||/[\u0000-\u0020\u007f\\]/.test(value))return null;
+  const parts=value.split('://');if(parts.length<2||parts[0].toLowerCase()!=='https')return null;
+  const authority=parts[1].split(/[/?#]/)[0];if(/[@%]/.test(authority)||authority.endsWith('.'))return null;
+  try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')?u:null;}catch(_){return null;}
+}
+function parseTweetUrl(value,trimPunctuation=false){
+  const u=strictTweetHttps(value);if(!u||!TWEET_HOSTS.includes(u.hostname))return null;
+  const rest=value.slice(value.indexOf('://')+3),start=rest.search(/[/?#]/);
+  if(start<0)return null;
+  const raw=rest.slice(start).split(/[?#]/)[0];
+  if(/[^\x00-\x7f]|%/.test(raw))return null;
+  const match=raw.match(/^\/(?:[A-Za-z0-9_]{1,15}\/status|i\/web\/status)\/([1-9][0-9]{0,19})(?:\/(?:photo|video)\/([0-9]+))?\/?$/);
+  if(!match){
+    if(trimPunctuation&&!/[?#]/.test(value)&&/[.,!?:;)\]}]$/.test(value))return parseTweetUrl(value.replace(/[.,!?:;)\]}]+$/,''));
+    return null;
+  }
+  if(match[2]&&!/[1-9]/.test(match[2]))return null;
+  return {id:match[1],url:'https://x.com/i/status/'+match[1]};
+}
+function isTweetUrl(value){return !!parseTweetUrl(value);}
+function validateTweetMediaUrl(value,video=false){
+  const u=strictTweetHttps(value);if(!u||u.hostname!==(video?'video.twimg.com':'pbs.twimg.com')||value.includes('#'))return null;
+  if(/%|\.svgz?$/i.test(u.pathname)||['svg','html'].includes((u.searchParams.get('format')||'').toLowerCase()))return null;
+  return u.href;
+}
+function validateTweetNavigationUrl(value){
+  if(typeof value!=='string'||new TextEncoder().encode(value).length>2048||/[\u0000-\u0020\u007f\\]/.test(value))return null;
+  const rest=value.split('://')[1];if(!rest||rest.split(/[/?#]/)[0].includes('@'))return null;
+  try{const u=new URL(value);return ['http:','https:'].includes(u.protocol)&&u.hostname&&!u.username&&!u.password?u.href:null;}catch(_){return null;}
+}
+function validTweetCount(value){
+  return typeof value==='string'&&/^(0|[1-9][0-9]{0,19})$/.test(value)
+    &&(value.length<20||value<='18446744073709551615');
+}
+function validTweetPayload(value,id){
+  return !!value&&value.schema_version===1&&validTweetId(value.id)&&value.id===id
+    &&parseTweetUrl(value.url)?.id===id&&['available','unavailable'].includes(value.availability?.state)
+    &&typeof value.text==='string'&&new TextEncoder().encode(value.text).length<=32768
+    &&(!value.entities||Array.isArray(value.entities)&&value.entities.length<=100)
+    &&(!value.media||Array.isArray(value.media)&&value.media.length<=16);
+}
+function validThreadPayload(value,id){
+  return !!value&&value.schema_version===1&&value.root_id===id&&value.provider==='threadreader'
+    &&['available','unavailable'].includes(value.availability?.state)&&Array.isArray(value.entries)&&value.entries.length<=20
+    &&value.entries.every(e=>e&&typeof e.text==='string'&&new TextEncoder().encode(e.text).length<=32768
+      &&(!e.media||Array.isArray(e.media)&&e.media.length<=16)&&(!e.entities||Array.isArray(e.entities)&&e.entities.length<=100));
+}
+// Only proven IDs establish same-post identity (audit fix): entries without one are kept
+// even when their text/media repeat ("Yes.", a reused image).
+function normalizedThreadEntries(data,rootId){
+  const known=new Set(),entries=[];
+  for(const entry of (data.entries||[]).slice(0,20)){
+    if(validTweetId(entry.id)){
+      if(entry.id===rootId||known.has(entry.id))continue;known.add(entry.id);
+    }
+    entries.push(entry);
+  }
+  return entries;
+}
+// known=false until GET /tweet/config answers; then preview/thread say what is offered.
+let _tweetCaps={known:false,preview:false,thread:false,failed:false},_tweetCapsSerial=0,_tweetCapsRetry=0,_tweetCapsRetryDelay=30000;
+let _tweetAccount=null,_tweetGeneration=0,_tweetViewGeneration=0,_tweetActive=0,_tweetCacheBytes=0,_tweetRemovalObserver=null,_tweetViewportObserver=null;
+const _tweetPending=new Map(),_tweetCache=new Map(),_tweetQueue=[],_tweetCards=new Set(),_tweetProxyCache=new Map();
+class TweetFetchError extends Error{
+  constructor(code='upstream_failure',retryable=true,delay=null){super(code);this.code=code;this.retryable=retryable;this.delay=delay;}
+}
+function clearTweetData(){
+  ++_tweetGeneration;
+  for(const state of [..._tweetCards])state.dispose();
+  for(const task of _tweetPending.values()){
+    task.cancelled=true;task.controller.abort();
+    if(!task.started){task.settled=true;task.reject(new TweetFetchError('cancelled',false));}
+  }
+  _tweetPending.clear();_tweetQueue.length=0;_tweetCache.clear();_tweetCacheBytes=0;_tweetProxyCache.clear();
+  if(typeof cancelTweetSigning==='function')cancelTweetSigning();
+  if(typeof _tweetGenericNodes!=='undefined')for(const node of [..._tweetGenericNodes])node._disposeTweet();
+}
+function ensureTweetRemovalObserver(){
+  if(_tweetRemovalObserver||typeof MutationObserver!=='function')return;
+  const area=document.getElementById('chat-area');if(!area)return;
+  _tweetRemovalObserver=new MutationObserver(records=>{
+    for(const record of records)for(const node of record.removedNodes)if(!node.isConnected)disposeTweetPreviews(node);
+  });
+  _tweetRemovalObserver.observe(area,{childList:true,subtree:true});
+  area.addEventListener('scroll',()=>{if(_tweetCards.size&&!_tweetLayoutFrame)_tweetStableLayout=captureTweetLayout();},{passive:true});
+}
+function ensureTweetAccount(){
+  if(_tweetAccount!==currentUser){clearTweetData();_tweetAccount=currentUser;_tweetCaps={known:false,preview:false,thread:false,failed:false};++_tweetCapsSerial;
+    clearTimeout(_tweetCapsRetry);_tweetCapsRetry=0;_tweetCapsRetryDelay=30000;}
+}
+// Ask the server what it offers (provider flag set at startup AND admin policy allows X).
+// No answer / an error = nothing offered: X links stay plain links.
+async function refreshTweetCapabilities(){
+  ensureTweetAccount();
+  clearTimeout(_tweetCapsRetry);_tweetCapsRetry=0;
+  // Re-check fix: the answer is applied only if no teardown (lock, logout, revocation) or
+  // account change happened while it was in flight.
+  const serial=++_tweetCapsSerial,generation=_tweetGeneration,token=typeof sessionToken==='string'?sessionToken:null;
+  let caps=null;
+  if(token&&currentUser){
+    try{
+      const response=await fetch('/cryptirc/tweet/config',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+      const data=response.ok?await response.json():null;
+      if(data&&data.schema_version===1)caps={preview:data.preview===true,thread:data.thread===true};
+    }catch(_){}
+  }
+  if(serial!==_tweetCapsSerial)return;
+  if(generation!==_tweetGeneration){
+    // Torn down meanwhile: drop the answer; ask again once nothing is locked (the unlock
+    // hook re-asks otherwise).
+    if(!tweetVaultLocked())queueMicrotask(refreshTweetCapabilities);
+    return;
+  }
+  if(!caps){
+    // Re-check fix: a failed probe is NOT "no X provider". Fall back to the generic path
+    // without ever being less private than the viewer's X choices (renderTweetSlots), and
+    // ask again with backoff (30 s … 5 min).
+    caps={preview:false,thread:false,failed:true};
+    const delay=_tweetCapsRetryDelay;_tweetCapsRetryDelay=Math.min(300000,_tweetCapsRetryDelay*2);
+    _tweetCapsRetry=setTimeout(refreshTweetCapabilities,delay);
+  }else _tweetCapsRetryDelay=30000;
+  setTweetCapabilities(caps);
+}
+// Is this browser locked (vault overlay up, or the device lock)? Nothing X-related is built
+// or fetched behind a lock; tweetVaultUnlocked rebuilds after the unlock.
+function tweetVaultLocked(){
+  try{ if(typeof _deviceLocked!=='undefined'&&_deviceLocked)return true; }catch(_){}
+  const overlay=typeof document!=='undefined'&&document.getElementById?document.getElementById('vault-overlay'):null;
+  return !!overlay&&!!overlay.classList&&overlay.classList.contains('show');
+}
+function tweetVaultUnlocked(){
+  if(!currentUser)return;
+  if(!_tweetCaps.known||_tweetCaps.failed)refreshTweetCapabilities();
+  else refreshTweetPolicyUI();
+}
+function setTweetCapabilities(caps){
+  // An answer (even "nothing", or a failed probe) makes the capabilities known.
+  const next={known:true,preview:caps.preview===true,thread:caps.thread===true,failed:caps.failed===true};
+  if(_tweetCaps.known&&next.preview===_tweetCaps.preview&&next.thread===_tweetCaps.thread&&next.failed===_tweetCaps.failed)return;
+  _tweetCaps=next;++_tweetCapsSerial;refreshTweetPolicyUI();
+}
+// Conversation-level evidence, computed once per rendered buffer: a known IRC
+// conversation (not a pseudo-view or the server window), whether it is private, and
+// its E2E status by the strict E2E name rules (true = E2E conversation, false = known
+// not E2E, null = not known yet → fail closed).
+function tweetConversation(connId,target){
+  const known=typeof connId==='string'&&typeof target==='string'&&!!target&&target!=='status'
+    &&networks.some(n=>n.config.id===connId)&&!isUploadsConn(connId)&&!isMessagesConn(connId);
+  if(!known)return null;
+  let e2e=null;
+  try{
+    if(typeof _isE2eConversation==='function'&&_isE2eConversation(target,connId))e2e=true;
+    else if(typeof _e2eKnown==='function'&&_e2eKnown())e2e=false;
+  }catch(_){e2e=null;}
+  return Object.freeze({connId,target,isPrivate:!/^[#&+!]/.test(target),e2e});
+}
+// Immutable per-row context. encrypted===true always wins. A row is unencrypted
+// (false) only with positive evidence: the message says so, or the conversation is
+// known not to be E2E. Any row of an E2E conversation that is not itself marked
+// encrypted stays unknown (null), so it never auto-loads.
+function tweetRowContext(conv,encrypted){
+  if(!conv)return Object.freeze({connId:null,target:null,isPrivate:null,encrypted:encrypted===true?true:null});
+  const enc=encrypted===true?true:conv.e2e===true?null:encrypted===false||conv.e2e===false?false:null;
+  return Object.freeze({connId:conv.connId,target:conv.target,isPrivate:conv.isPrivate,encrypted:enc});
+}
+function tweetPreviewContext(connId,target,encrypted){return tweetRowContext(tweetConversation(connId,target),encrypted);}
+// Disclosure policy storage. Missing (never set) → the fresh-install default, auto_public.
+// Any explicitly stored choice is kept as stored (a v1 Manual stays Manual: no silent
+// upgrade to auto). Present but unreadable, unparseable or unknown → fail closed (manual,
+// no overrides), since a damaged record may have held a stricter choice.
+function xPolicyClosed(){return {version:2,load:'manual',conversations:{}};}
+function normalizeXPolicy(raw){
+  if(raw===null||raw===undefined)return {version:2,load:'auto_public',conversations:{}};
+  if(typeof raw!=='object'||Array.isArray(raw)||![1,2].includes(raw.version)||!['manual','auto_public','hidden'].includes(raw.load)
+    ||!raw.conversations||typeof raw.conversations!=='object'||Array.isArray(raw.conversations))return xPolicyClosed();
+  const conversations={};
+  for(const [key,value] of Object.entries(raw.conversations).slice(-100)){
+    if(key.length<=512&&key.includes('/')&&!key.includes('://')&&!/[\u0000-\u0020\u007f]/.test(key)&&['manual','auto','hidden'].includes(value?.load))conversations[key]={load:value.load};
+  }
+  return {version:2,load:raw.load,conversations};
+}
+function parseStoredXPolicy(text){
+  if(text===null||text===undefined)return normalizeXPolicy(null);
+  if(typeof text!=='string'||text.length>65536)return xPolicyClosed();
+  let raw;try{raw=JSON.parse(text);}catch(_){return xPolicyClosed();}
+  return raw&&typeof raw==='object'?normalizeXPolicy(raw):xPolicyClosed();
+}
+function loadXPolicy(){
+  if(!currentUser)return xPolicyClosed();
+  let text;
+  try{text=localStorage.getItem('cryptirc_x_policy_v1:'+currentUser);}catch(_){return xPolicyClosed();}
+  return parseStoredXPolicy(text);
+}
+function knownTweetConversation(context){
+  return !!context&&typeof context.connId==='string'&&typeof context.target==='string'&&typeof context.isPrivate==='boolean'
+    &&networks.some(n=>n.config.id===context.connId)&&!isUploadsConn(context.connId)&&!isMessagesConn(context.connId);
+}
+function tweetLoadPolicy(context){
+  if(!_tweetCaps.preview||tweetVaultLocked())return 'hidden';
+  return tweetDisclosure(context);
+}
+// The viewer's own choice for this row (global switch, X policy, overrides, context).
+function tweetDisclosure(context){
+  if(loadAppearance().linkPreviews===false)return 'hidden';
+  const policy=loadXPolicy();if(policy.load==='hidden')return 'hidden';
+  if(!knownTweetConversation(context))return 'manual';
+  const override=policy.conversations[bk(context.connId,context.target)]?.load;
+  if(override)return override;
+  if(policy.load==='auto_public'&&context.isPrivate===false&&context.encrypted===false)return 'auto';
+  return 'manual';
+}
+function saveXPolicy(policy){
+  if(!currentUser)return;
+  try{localStorage.setItem('cryptirc_x_policy_v1:'+currentUser,JSON.stringify(normalizeXPolicy(policy)));}catch(_){return;}
+  refreshTweetPolicyUI();populateXDisclosureControls();
+}
+function setXDisclosure(load){const policy=loadXPolicy();policy.load=load;saveXPolicy(policy);}
+function setTweetPreviewMode(mode){
+  const cfg={...loadAppearance(),xPreviewMode:mode==='expanded'?'expanded':'compact'};saveAppearance(cfg);
+  const select=document.getElementById('a-x-preview-mode');if(select)select.value=cfg.xPreviewMode;
+}
+function setXConversationDisclosure(load){
+  const context=tweetPreviewContext(active?.conn_id,active?.target,null);if(!knownTweetConversation(context))return;
+  const policy=loadXPolicy(),key=bk(context.connId,context.target);delete policy.conversations[key];
+  if(['manual','auto','hidden'].includes(load))policy.conversations[key]={load};
+  while(Object.keys(policy.conversations).length>100)delete policy.conversations[Object.keys(policy.conversations)[0]];
+  saveXPolicy(policy);
+}
+function resetXDisclosure(){
+  if(currentUser)try{localStorage.removeItem('cryptirc_x_policy_v1:'+currentUser);}catch(_){}
+  refreshTweetPolicyUI();populateXDisclosureControls();
+}
+function populateXDisclosureControls(){
+  const global=document.getElementById('sec-x-mode'),conversation=document.getElementById('sec-x-conversation');
+  if(!global||!conversation)return;
+  const policy=loadXPolicy(),context=tweetPreviewContext(active?.conn_id,active?.target,null);global.value=policy.load;
+  const known=knownTweetConversation(context);conversation.disabled=!known;
+  conversation.value=known?policy.conversations[bk(context.connId,context.target)]?.load||'inherit':'inherit';
+  const label=document.getElementById('sec-x-conversation-label');if(label)label.textContent=known?'This conversation: '+context.target:'Select an IRC conversation to set an override';
+  const unavailable=document.getElementById('sec-x-unavailable');if(unavailable)unavailable.hidden=_tweetCaps.preview;
+}
+function refreshTweetPolicyUI(){
+  withTweetLayoutChange(()=>{
+    clearTweetData();
+    for(const body of document.querySelectorAll('#chat-area .msg-body,#split-chat-area .msg-body')){
+      if(body._tweetSlots)renderTweetSlots(body);
+    }
+  });
+}
+function tweetWithinViewport(root){
+  const area=document.getElementById('chat-area');if(!area||!area.contains(root))return false;
+  const r=root.getBoundingClientRect(),view=area.getBoundingClientRect();return r.bottom>=view.top-300&&r.top<=view.bottom+300;
+}
+function observeTweetAuto(state){
+  if(typeof IntersectionObserver!=='function'||tweetLoadPolicy(state.context)!=='auto')return;
+  const area=document.getElementById('chat-area');
+  // Audit fix: only the main pane has the viewport observer. Elsewhere (the split pane)
+  // an "auto" card would wait forever, so show the click-to-load button instead.
+  if(!area||!area.contains(state.root)){state.manualOnly=true;state.showDormant?.();return;}
+  if(!_tweetViewportObserver)_tweetViewportObserver=new IntersectionObserver(entries=>{
+    for(const entry of entries){const current=entry.target._tweetState;if(!current?.alive())continue;
+      if(entry.isIntersecting&&!current.granted&&tweetLoadPolicy(current.context)==='auto')current.reload(false,true);
+      else if(!entry.isIntersecting&&current.automatic&&!current.loaded)current.pauseAuto?.();
+    }
+  },{root:area,rootMargin:'300px 0px'});
+  _tweetViewportObserver.observe(state.root);
+}
+function cacheTweetResult(key,value,error){
+  const now=Date.now();let ttl=300000;
+  if(error){if(error.code==='cancelled')return;ttl=error.code==='rate_limited'?(error.delay||30)*1000:15000;}
+  else{
+    if(value.availability?.state==='unavailable')ttl=value.availability.reason==='provider_disabled'?30000:60000;
+    const expiry=Date.parse(value.expires_at);if(Number.isFinite(expiry))ttl=Math.min(ttl,expiry-now);
+    if(value.availability?.reason==='provider_disabled'){
+      for(const [k,entry] of _tweetCache)if(!key.startsWith('thread:')||k.startsWith('thread:')){_tweetCache.delete(k);_tweetCacheBytes-=entry.bytes;}
+    }
+  }
+  const bytes=error?128:new TextEncoder().encode(JSON.stringify(value)).length;
+  if(bytes>8*1024*1024||ttl<=0)return;
+  const old=_tweetCache.get(key);if(old)_tweetCacheBytes-=old.bytes;
+  _tweetCache.delete(key);
+  for(const [k,entry] of _tweetCache)if(entry.expires<=now){_tweetCache.delete(k);_tweetCacheBytes-=entry.bytes;}
+  while(_tweetCache.size>=200||_tweetCacheBytes+bytes>8*1024*1024){const k=_tweetCache.keys().next().value;_tweetCacheBytes-=_tweetCache.get(k).bytes;_tweetCache.delete(k);}
+  _tweetCache.set(key,{value,error,bytes,expires:now+ttl});_tweetCacheBytes+=bytes;
+}
+function fetchTweetPreview(id,{permission=false,refresh=false,operation='preview',priority=false,canStart=()=>true}={}){
+  // Permission always precedes both completed-cache access and pending joins.
+  if(!permission||!validTweetId(id)||!['preview','thread'].includes(operation)||!currentUser||!sessionToken
+    ||(operation==='thread'?!_tweetCaps.thread:!_tweetCaps.preview)){
+    return {promise:Promise.reject(new TweetFetchError('permission_required',false)),dispose(){}};
+  }
+  ensureTweetAccount();
+  const key=operation+':'+id;
+  let task=_tweetPending.get(key);
+  if(task?.cancelled){_tweetPending.delete(key);task=null;}
+  if(!task&&!refresh){
+    const cached=_tweetCache.get(key);
+    if(cached&&cached.expires>Date.now()){
+      _tweetCache.delete(key);_tweetCache.set(key,cached);
+      return {promise:cached.error?Promise.reject(cached.error):Promise.resolve(cached.value),dispose(){}};
+    }
+    if(cached){_tweetCache.delete(key);_tweetCacheBytes-=cached.bytes;}
+  }
+  if(!task){
+    if(_tweetQueue.length>=50)return {promise:Promise.reject(new TweetFetchError('busy')),dispose(){}};
+    let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});
+    task={key,id,operation,refresh,promise,resolve,reject,controller:new AbortController(),subscribers:0,
+      account:currentUser,token:sessionToken,generation:_tweetGeneration,started:false,settled:false,cancelled:false,permits:new Set()};
+    _tweetPending.set(key,task);if(priority)_tweetQueue.unshift(task);else _tweetQueue.push(task);
+    queueMicrotask(drainTweetQueue);
+  }else if(priority&&!task.started){const i=_tweetQueue.indexOf(task);if(i>=0){_tweetQueue.splice(i,1);_tweetQueue.unshift(task);}}
+  const permit=()=>canStart();task.subscribers++;task.permits.add(permit);let disposed=false;
+  return {promise:task.promise,dispose(){
+    if(disposed)return;disposed=true;task.subscribers--;task.permits.delete(permit);
+    if(!task.settled&&task.subscribers===0){
+      task.cancelled=true;task.controller.abort();
+      if(!task.started){const i=_tweetQueue.indexOf(task);if(i>=0)_tweetQueue.splice(i,1);
+        if(_tweetPending.get(key)===task)_tweetPending.delete(key);task.settled=true;task.reject(new TweetFetchError('cancelled',false));}
+    }
+  }};
+}
+function drainTweetQueue(){
+  while(_tweetActive<3&&_tweetQueue.length){const task=_tweetQueue.shift();if(task.cancelled)continue;
+    if(![...task.permits].some(check=>check())){task.cancelled=true;task.settled=true;_tweetPending.delete(task.key);task.reject(new TweetFetchError('cancelled',false));continue;}
+    task.started=true;_tweetActive++;runTweetTask(task);}
+}
+async function runTweetTask(task){
+  let timedOut=false;
+  const timeout=setTimeout(()=>{timedOut=true;task.controller.abort();},15000);
+  try{
+    const response=await fetch(`/cryptirc/tweet/${task.operation}?url=${encodeURIComponent('https://x.com/i/status/'+task.id)}${task.refresh?'&refresh=1':''}`,
+      {headers:{Authorization:'Bearer '+task.token},signal:task.controller.signal,cache:'no-store'});
+    const data=await response.json();
+    if(!response.ok){const e=data?.schema_version===1?data.error:null;
+      throw new TweetFetchError(e?.code||'upstream_failure',e?.retryable!==false,
+        Number.isInteger(e?.retry_after_seconds)?Math.max(1,Math.min(900,e.retry_after_seconds)):null);}
+    if(task.operation==='preview'&&!validTweetPayload(data,task.id))throw new TweetFetchError('unsupported_response',false);
+    if(task.operation==='thread'&&!validThreadPayload(data,task.id))throw new TweetFetchError('unsupported_response',false);
+    if(task.cancelled||task.account!==currentUser||task.generation!==_tweetGeneration)throw new TweetFetchError('cancelled',false);
+    if(data.availability?.reason==='provider_disabled'){
+      // The server stopped offering this (admin policy changed): forget the capability.
+      queueMicrotask(()=>setTweetCapabilities(task.operation==='thread'?{..._tweetCaps,thread:false}:{preview:false,thread:false}));
+    }
+    if(task.operation==='preview'&&data.availability?.state==='unavailable')for(const state of _tweetCards){
+      if(state.loaded&&state.alive()&&(state.id===task.id||data.availability.reason==='provider_disabled')){
+        withTweetLayoutChange(()=>{releaseTweetResources(state);state.root.replaceChildren(
+          tweetNode('span','msg-tweet-status','X post unavailable.'),tweetLink('https://x.com/i/status/'+state.id,'Open on X'));});
+      }
+    }
+    cacheTweetResult(task.key,data,null);task.resolve(data);
+  }catch(error){
+    const safe=task.cancelled?new TweetFetchError('cancelled',false):timedOut?new TweetFetchError('timeout'):
+      error instanceof TweetFetchError?error:new TweetFetchError('upstream_failure');
+    if(task.account===currentUser&&task.generation===_tweetGeneration)cacheTweetResult(task.key,null,safe);
+    task.reject(safe);
+  }finally{
+    clearTimeout(timeout);task.settled=true;task.token=null;
+    if(_tweetPending.get(task.key)===task)_tweetPending.delete(task.key);
+    _tweetActive--;drainTweetQueue();
+  }
+}
+let _tweetLayoutFrame=0,_tweetLayoutSnapshot=null,_tweetStableLayout=null,_tweetTimeTimer=null;
+function captureTweetLayout(){
+  const area=document.getElementById('chat-area'),key=active?bk(active.conn_id,active.target):null;
+  if(!area)return null;
+  const top=area.getBoundingClientRect().top,rows=area.querySelectorAll('.msg-row');
+  // Rows are in document (vertical) order: binary-search the first one below the top
+  // edge instead of measuring up to 1,000 rows on every scroll event.
+  let lo=0,hi=rows.length;
+  while(lo<hi){const mid=(lo+hi)>>1;if(rows[mid].getBoundingClientRect().bottom>top)hi=mid;else lo=mid+1;}
+  const row=rows[lo];
+  return {area,key,generation:_tweetViewGeneration,away:_userScrolledAway,anchor:_jumpAnchor,row,top:row?.getBoundingClientRect().top};
+}
+function scheduleTweetLayoutRestore(){
+  if(!_tweetLayoutFrame)_tweetLayoutFrame=requestAnimationFrame(()=>{
+    _tweetLayoutFrame=0;const s=_tweetLayoutSnapshot;_tweetLayoutSnapshot=null;
+    if(!s||!s.area.isConnected||s.generation!==_tweetViewGeneration||s.key!==(active?bk(active.conn_id,active.target):null)){_tweetStableLayout=captureTweetLayout();return;}
+    if(s.away||s.anchor){if(s.row?.isConnected){s.area.scrollTop+=s.row.getBoundingClientRect().top-s.top;_markProgrammaticScroll(s.area);}}
+    else if(!_userScrolledAway&&!_jumpAnchor)scrollBottom();
+    _tweetStableLayout=captureTweetLayout();
+  });
+}
+function withTweetLayoutChange(change){
+  if(!_tweetLayoutSnapshot)_tweetLayoutSnapshot=captureTweetLayout();
+  change();scheduleTweetLayoutRestore();
+}
+function tweetNode(tag,className,text){
+  const node=document.createElement(tag);if(className)node.className=className;
+  if(text!==undefined)node.textContent=text;return node;
+}
+function tweetButton(text,action,className){
+  const button=tweetNode('button',className||'msg-tweet-button',text);button.type='button';
+  button.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' ')event.stopPropagation();});
+  button.addEventListener('click',event=>{if(!button.isConnected)return;event.stopPropagation();action(event);});return button;
+}
+function tweetLink(url,text){
+  const safe=validateTweetNavigationUrl(url);if(!safe)return tweetNode('span','',text);
+  const link=tweetNode('a','msg-tweet-link',text);link.href=safe;link.target='_blank';link.rel='noopener noreferrer';link.referrerPolicy='no-referrer';return link;
+}
+const TWEET_ICON_PATHS=Object.freeze({
+  heart:'M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8z',
+  repost:'M17 1l4 4-4 4M3 11V9a4 4 0 0 1 4-4h14M7 23l-4-4 4-4M21 13v2a4 4 0 0 1-4 4H3',
+  reply:'M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z',
+  quote:'M9 7H5a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h4l-2 4M21 7h-4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h4l-2 4',
+  bookmark:'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z',
+  views:'M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+  info:'M12 16v-4M12 8h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z',
+  refresh:'M21 2v6h-6M3 22v-6h6M3.5 9a9 9 0 0 1 14.9-3.4L21 8M20.5 15a9 9 0 0 1-14.9 3.4L3 16',
+  external:'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3',
+  chevronDown:'M6 9l6 6 6-6',
+  chevronUp:'M18 15l-6-6-6 6',
+  check:'M20 6 9 17l-5-5',
+  thread:'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01'
+});
+function tweetIcon(name,size=16){
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('width',String(size));svg.setAttribute('height',String(size));
+  svg.setAttribute('fill','none');svg.setAttribute('stroke','currentColor');svg.setAttribute('stroke-width','1.8');
+  svg.setAttribute('stroke-linecap','round');svg.setAttribute('stroke-linejoin','round');
+  svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
+  const path=document.createElementNS('http://www.w3.org/2000/svg','path');
+  path.setAttribute('d',TWEET_ICON_PATHS[name]||'');svg.appendChild(path);return svg;
+}
+function tweetIconButton(icon,label,action,className='msg-tweet-icon-button'){
+  const button=tweetButton('',action,className);button.setAttribute('aria-label',label);button.title=label;
+  button.appendChild(tweetIcon(icon,18));return button;
+}
+function tweetIconLink(url,label,icon){
+  const safe=validateTweetNavigationUrl(url);if(!safe)return tweetNode('span','msg-tweet-action-text',label);
+  const link=tweetNode('a','msg-tweet-icon-link');link.href=safe;link.target='_blank';link.rel='noopener noreferrer';
+  link.referrerPolicy='no-referrer';link.setAttribute('aria-label',label);link.title=label;link.appendChild(tweetIcon(icon,18));return link;
+}
+// Signed same-origin fallback URLs. Audit fixes: concurrent callers for one asset share one
+// request, distinct assets queued within 25 ms go out in one batch (≤16, one unit of the
+// shared preview budget), and a response that arrives after clearTweetData (logout, lock,
+// revocation, account change) is dropped instead of repopulating the cleared cache.
+const _tweetSignItems=new Map(),_tweetSignActive=new Set();let _tweetSignQueue=[],_tweetSignTimer=0;
+const TWEET_SIGN_MAX_ACTIVE=2,TWEET_SIGN_TIMEOUT_MS=10000;
+// Re-check fix: at most TWEET_SIGN_MAX_ACTIVE batches in flight, each aborted after
+// TWEET_SIGN_TIMEOUT_MS or by teardown (cancelTweetSigning).
+function scheduleTweetSignFlush(){
+  if(!_tweetSignTimer&&_tweetSignQueue.length&&_tweetSignActive.size<TWEET_SIGN_MAX_ACTIVE)_tweetSignTimer=setTimeout(flushTweetSignQueue,25);
+}
+// `owner` (re-check 2): a liveness check for the requesting card/media; queued items whose
+// owners are all gone are dropped, and a batch whose items all lost their owners is aborted
+// (pruneTweetSigning, run on card disposal, lightbox close and before every batch).
+function proxyTweetMedia(value,owner=null){
+  if(typeof sessionToken==='undefined'||!sessionToken||!currentUser)return Promise.resolve(null);
+  let parsed;try{parsed=new URL(value);}catch(_){return Promise.resolve(null);}
+  const safe=validateTweetMediaUrl(value,parsed.hostname==='video.twimg.com');if(!safe)return Promise.resolve(null);
+  const cached=_tweetProxyCache.get(safe);
+  if(cached&&cached.expires>Date.now()+5000){_tweetProxyCache.delete(safe);_tweetProxyCache.set(safe,cached);return Promise.resolve(cached.url);}
+  const alive=typeof owner==='function'?owner:()=>true;
+  const existing=_tweetSignItems.get(safe);if(existing){existing.owners.add(alive);return existing.promise;}
+  let resolve;const promise=new Promise(r=>{resolve=r;});
+  const item={safe,resolve,promise,owners:new Set([alive])};
+  _tweetSignItems.set(safe,item);_tweetSignQueue.push(item);
+  scheduleTweetSignFlush();
+  return promise;
+}
+function tweetSignWanted(item){
+  for(const alive of item.owners){try{if(alive())return true;}catch(_){}}
+  return false;
+}
+function pruneTweetSigning(){
+  _tweetSignQueue=_tweetSignQueue.filter(item=>{
+    if(tweetSignWanted(item))return true;
+    if(_tweetSignItems.get(item.safe)===item)_tweetSignItems.delete(item.safe);
+    item.resolve(null);return false;
+  });
+  for(const flight of _tweetSignActive)if(!flight.batch.some(tweetSignWanted))flight.controller.abort();
+}
+function cancelTweetSigning(){
+  clearTimeout(_tweetSignTimer);_tweetSignTimer=0;
+  const queued=_tweetSignQueue;_tweetSignQueue=[];_tweetSignItems.clear();
+  for(const item of queued)item.resolve(null);
+  for(const flight of _tweetSignActive)flight.controller.abort();   // their batches resolve null
+}
+async function flushTweetSignQueue(){
+  _tweetSignTimer=0;
+  if(_tweetSignActive.size>=TWEET_SIGN_MAX_ACTIVE)return;
+  pruneTweetSigning();
+  const batch=_tweetSignQueue.splice(0,16);
+  if(!batch.length)return;
+  const flight={controller:new AbortController(),batch};_tweetSignActive.add(flight);
+  scheduleTweetSignFlush();
+  const timer=setTimeout(()=>flight.controller.abort(),TWEET_SIGN_TIMEOUT_MS);
+  const generation=_tweetGeneration,account=currentUser,token=sessionToken;
+  let results=[];
+  try{
+    const response=await fetch('/cryptirc/tweet/media/sign',{method:'POST',cache:'no-store',signal:flight.controller.signal,
+      headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify({urls:batch.map(item=>item.safe)})});
+    if(response.ok){
+      const data=await response.json();
+      if(generation===_tweetGeneration&&account===currentUser&&Array.isArray(data?.urls)&&data.urls.length===batch.length){
+        const expires=Date.now()+Math.max(30,Math.min(900,Number(data.expires_in)||900))*1000;
+        results=data.urls.map(entry=>typeof entry?.proxy_url==='string'&&entry.proxy_url.startsWith('/')?entry.proxy_url:null);
+        batch.forEach((item,i)=>{if(results[i])_tweetProxyCache.set(item.safe,{url:results[i],expires});});
+        while(_tweetProxyCache.size>200)_tweetProxyCache.delete(_tweetProxyCache.keys().next().value);
+      }
+    }
+  }catch(_){results=[];}
+  clearTimeout(timer);_tweetSignActive.delete(flight);
+  const current=generation===_tweetGeneration&&account===currentUser;
+  batch.forEach((item,i)=>{
+    if(current&&_tweetSignItems.get(item.safe)===item)_tweetSignItems.delete(item.safe);
+    item.resolve(current?results[i]||null:null);
+  });
+  scheduleTweetSignFlush();
+}
+function buildTweetAvatar(author){
+  const initial=String(author?.name||author?.handle||'?').trim().charAt(0).toUpperCase()||'?';
+  const node=tweetNode('span','msg-tweet-avatar',initial);node.setAttribute('aria-hidden','true');
+  return {node,initial,url:validateTweetMediaUrl(author?.avatar_url)};
+}
+function loadTweetAvatar(avatar,state){
+  if(!avatar.url||avatar.node.querySelector('img')||!(state.assetsGranted||_mediaAutoLoad(avatar.url)))return;
+  const img=tweetNode('img');img.alt='';img.referrerPolicy='no-referrer';
+  let proxyTried=false;
+  const fallback=()=>{img.remove();avatar.node.textContent=avatar.initial;};
+  const permitted=()=>state.alive()&&(state.assetsGranted||_mediaAutoLoad(avatar.url));
+  img.onerror=()=>{
+    if(!img.isConnected)return;
+    if(!permitted())return fallback();
+    if(!proxyTried){proxyTried=true;proxyTweetMedia(avatar.url,()=>img.isConnected&&permitted()).then(proxy=>{if(!img.isConnected)return;if(proxy&&permitted())img.src=proxy;else fallback();}).catch(fallback);return;}
+    fallback();
+  };
+  img.src=avatar.url;avatar.node.replaceChildren(img);
+}
+function disposeTweetPreviews(root){
+  if(!root)return;
+  if(root._disposeTweet)root._disposeTweet();
+  for(const node of root.querySelectorAll?.('.msg-tweet')||[])node._disposeTweet?.();
+  // …and any registered generic node already detached by its own removal path.
+  for(const node of [..._tweetGenericNodes])if(!node.isConnected||root.contains?.(node))node._disposeTweet();
+}
+function releaseTweetResources(state){
+  if(typeof _lbOpener!=='undefined'&&_lbOpener&&state.root.contains(_lbOpener))closeLightbox();
+  for(const media of state.root.querySelectorAll('video,audio')){media.onerror=null;media.onloadedmetadata=null;media.pause();media.removeAttribute('src');media.load();}
+  for(const image of state.root.querySelectorAll('img')){image.onerror=null;image.removeAttribute('src');}
+  for(const clean of state.cleanup)clean();state.cleanup.length=0;state.mediaUpdate=null;state.applyMode=null;state.loaded=null;state.quoteMounted=false;state.assetUpdates=[];
+}
+function buildTweetPlaceholder(identity,context){
+  if(tweetLoadPolicy(context)==='hidden')return null;
+  ensureTweetAccount();
+  ensureTweetRemovalObserver();
+  const root=tweetNode('article','msg-tweet msg-tweet-dormant');
+  const state={root,id:identity.id,context:Object.freeze({...context}),account:currentUser,generation:_tweetGeneration,
+    granted:false,assetsGranted:false,disposed:false,lease:null,loaded:null,expanded:loadAppearance().xPreviewMode==='expanded',textExpanded:false,
+    observers:[],cleanup:[],assetUpdates:[],alive(){return !this.disposed&&this.root.isConnected&&this.account===currentUser
+      &&this.generation===_tweetGeneration&&tweetLoadPolicy(this.context)!=='hidden';},
+    dispose(){if(this.disposed)return;this.disposed=true;this.lease?.dispose();for(const observer of this.observers)observer.disconnect();
+      _tweetViewportObserver?.unobserve(this.root);
+      if(typeof _lbOpener!=='undefined'&&_lbOpener&&this.root.contains(_lbOpener))closeLightbox();
+      releaseTweetResources(this);
+      this.loaded=null;this.reload=null;this.root._tweetState=null;this.root._disposeTweet=null;this.root.remove();
+      _tweetCards.delete(this);if(!_tweetCards.size&&_tweetTimeTimer){clearInterval(_tweetTimeTimer);_tweetTimeTimer=null;}
+      queueMicrotask(pruneTweetSigning);}
+  };
+  _tweetCards.add(state);root._disposeTweet=()=>state.dispose();root._tweetState=state;
+  if(typeof ResizeObserver==='function'){
+    const observer=new ResizeObserver(()=>{
+      if(!state.alive())return;
+      if(!_tweetLayoutSnapshot)_tweetLayoutSnapshot=_tweetStableLayout||captureTweetLayout();
+      scheduleTweetLayoutRestore();
+    });observer.observe(root);state.observers.push(observer);
+  }
+  const showDormant=()=>{
+    if(!state.manualOnly&&tweetLoadPolicy(state.context)==='auto'&&typeof IntersectionObserver==='function'){
+      root.classList.add('msg-tweet-loading');
+      root.replaceChildren(tweetNode('span','msg-tweet-status','Loading X preview…'));
+      return;
+    }
+    root.classList.remove('msg-tweet-loading');
+    root.replaceChildren(tweetButton('Load X preview',()=>load(false)));
+    root.appendChild(tweetNode('small','msg-tweet-disclosure','Server learns this post; X may be contacted.'));
+  };
+  const load=async(refresh,automatic=false)=>{
+    if(!state.alive())return;
+    if(automatic&&(tweetLoadPolicy(state.context)!=='auto'||!tweetWithinViewport(root)))return;
+    state.automatic=automatic;
+    state.granted=true;state.lease?.dispose();root.setAttribute('aria-busy','true');
+    withTweetLayoutChange(()=>{releaseTweetResources(state);root.classList.add('msg-tweet-loading');root.replaceChildren(tweetNode('span','msg-tweet-status','Loading X preview…'));});
+    const lease=fetchTweetPreview(identity.id,{permission:state.granted,priority:!automatic,refresh,
+      canStart:()=>state.alive()&&(!automatic||tweetLoadPolicy(state.context)==='auto'&&tweetWithinViewport(root))});state.lease=lease;
+    try{
+      const data=await lease.promise;if(!state.alive()||state.lease!==lease)return;
+      state.loaded=data;withTweetLayoutChange(()=>{
+        root.classList.remove('msg-tweet-dormant','msg-tweet-loading');root.replaceChildren();
+        if(data.availability.state==='available')buildTweetCard(data,state,()=>load(true));
+        else{root.appendChild(tweetNode('span','msg-tweet-status',data.availability.reason==='provider_disabled'?'X previews unavailable on this server.':'X post unavailable.'));
+          root.appendChild(tweetLink(identity.url,'Open on X'));}
+      });
+    }catch(error){
+      if(!state.alive()||state.lease!==lease||error.code==='cancelled')return;
+      withTweetLayoutChange(()=>{
+        root.classList.remove('msg-tweet-loading');const status=tweetNode('span','msg-tweet-status',error.code==='rate_limited'?`Try again in ${error.delay||30}s.`:'Preview could not load.');
+        if(!state.automatic)status.setAttribute('role','status');root.replaceChildren(status);
+        if(error.retryable)root.appendChild(tweetButton('Retry',()=>load(true)));
+        root.appendChild(tweetLink(identity.url,'Open on X'));
+      });
+    }finally{if(state.alive()&&state.lease===lease)root.setAttribute('aria-busy','false');}
+  };
+  state.reload=load;state.showDormant=showDormant;state.pauseAuto=()=>{state.lease?.dispose();state.lease=null;state.granted=false;
+    root.classList.remove('msg-tweet-loading');root.setAttribute('aria-busy','false');showDormant();};
+  showDormant();queueMicrotask(()=>{if(state.alive())observeTweetAuto(state);});return root;
+}
+function compactTweetCount(value){
+  if(!validTweetCount(value))return null;
+  if(typeof BigInt!=='function')return value;
+  const n=BigInt(value),ten=BigInt(10),two=BigInt(2),units=[['1000000000000000000','E'],['1000000000000000','P'],['1000000000000','T'],['1000000000','B'],['1000000','M'],['1000','K']].map(([digits,label])=>[BigInt(digits),label]);
+  for(const [unit,suffix] of units)if(n>=unit){
+    if(n<unit*ten){const v=(n*ten+unit/two)/unit;return (v/ten).toString()+(v%ten?'.'+(v%ten):'')+suffix;}
+    return ((n+unit/two)/unit).toString()+suffix;
+  }
+  return value;
+}
+function buildTweetText(data){
+  const node=tweetNode('div','msg-tweet-text'),text=data.text||'';
+  const boundary=offset=>Number.isInteger(offset)&&offset>=0&&offset<=text.length
+    &&!(offset>0&&offset<text.length&&/[\uD800-\uDBFF]/.test(text[offset-1])&&/[\uDC00-\uDFFF]/.test(text[offset]));
+  let end=0;
+  for(const entity of (data.entities||[]).slice(0,100)){
+    if(!['url','mention','hashtag','media'].includes(entity.kind)||!boundary(entity.start)||!boundary(entity.end)||entity.start<end||entity.end<=entity.start||!validateTweetNavigationUrl(entity.url))continue;
+    node.appendChild(document.createTextNode(text.slice(end,entity.start)));
+    node.appendChild(tweetLink(entity.url,typeof entity.display==='string'?entity.display.slice(0,1024):text.slice(entity.start,entity.end)));end=entity.end;
+  }
+  node.appendChild(document.createTextNode(text.slice(end)));return node;
+}
+function tweetCardVisible(root){
+  const r=root.getBoundingClientRect(),area=root.closest('#chat-area,#split-chat-area')?.getBoundingClientRect()||{top:0,bottom:innerHeight};
+  return r.width>0&&r.height>0&&r.bottom>area.top&&r.top<area.bottom;
+}
+function tweetRelativeTime(seconds){
+  const abs=Math.abs(seconds);
+  if(abs<45)return 'now';
+  if(abs<3600)return Math.max(1,Math.round(abs/60))+'m';
+  if(abs<86400)return Math.max(1,Math.round(abs/3600))+'h';
+  if(abs<604800)return Math.max(1,Math.round(abs/86400))+'d';
+  if(abs<2629800)return Math.max(1,Math.round(abs/604800))+'w';
+  return new Date(Date.now()+seconds*1000).toLocaleDateString(undefined,{month:'short',day:'numeric'});
+}
+function updateTweetTimes(root){
+  const roots=root?.querySelectorAll?[root]:[..._tweetCards].filter(state=>state.alive()&&tweetCardVisible(state.root)).map(state=>state.root);
+  for(const card of roots)for(const node of card.querySelectorAll('time[data-tweet-time]')){
+    const seconds=Math.round((Date.parse(node.dateTime)-Date.now())/1000);
+    node.textContent=tweetRelativeTime(seconds);
+  }
+}
+function buildTweetMetrics(metrics,expanded){
+  const wrap=tweetNode('div',expanded?'msg-tweet-metrics msg-tweet-metrics-all':'msg-tweet-metrics');
+  for(const [key,label,icon] of [['likes','Likes','heart'],['reposts','Reposts','repost'],['replies','Replies','reply'],['quotes','Quotes','quote'],['bookmarks','Bookmarks','bookmark'],['views','Views','views']]){
+    if(!expanded&&!['likes','reposts','replies'].includes(key))continue;
+    const metric=metrics?.[key];if(metric?.state!=='available'||!validTweetCount(metric.value))continue;
+    const span=tweetNode('span','msg-tweet-metric');span.title=`${label}: ${metric.value}`;
+    span.appendChild(tweetIcon(icon,14));
+    span.appendChild(tweetNode('span','msg-tweet-sr',`${label}: ${metric.value}`));
+    const value=tweetNode('span','msg-tweet-metric-value',compactTweetCount(metric.value));value.setAttribute('aria-hidden','true');
+    span.appendChild(value);wrap.appendChild(span);
+  }
+  return wrap;
+}
+function buildTweetMetricInfo(data){
+  const missing=[];
+  for(const [key,label] of [['likes','Likes'],['reposts','Reposts'],['replies','Replies'],['quotes','Quotes'],['bookmarks','Bookmarks'],['views','Views']]){
+    const metric=data.metrics?.[key];if(metric?.state==='available'&&validTweetCount(metric.value))continue;
+    missing.push([label,metric?.state==='unsupported'?'not supported by this provider':'not returned']);
+  }
+  if(!missing.length)return null;
+  const details=tweetNode('details','msg-tweet-info');
+  const summary=tweetNode('summary');summary.setAttribute('aria-label','Metric availability');summary.title='Metric availability';summary.appendChild(tweetIcon('info',18));
+  const body=tweetNode('div','msg-tweet-info-body');
+  for(const [label,state] of missing)body.appendChild(tweetNode('div','',`${label}: ${state}`));
+  details.append(summary,body);return details;
+}
+function buildTweetIdentity(data){
+  const identity=tweetNode('div','msg-tweet-author');
+  const author=data.author,name=typeof author?.name==='string'?author.name:'Author unavailable';
+  const nameNode=tweetNode('b','msg-tweet-name',name||'Author unavailable');nameNode.title=name;identity.appendChild(nameNode);
+  const verification=author?.verification;
+  if(verification?.blue_verified===true||verification?.legacy_verified===true){
+    const label=verification.blue_verified===true
+      ?(verification.legacy_verified===true?'Blue verification reported by X; legacy verification also reported':'Blue verification reported by X')
+      :'Verified (legacy)';
+    const badge=tweetNode('span','msg-tweet-verified');badge.title=label;badge.setAttribute('role','img');badge.setAttribute('aria-label',label);
+    badge.appendChild(tweetIcon('check',13));identity.appendChild(badge);
+  }
+  if(typeof author?.handle==='string'&&/^[A-Za-z0-9_]{1,15}$/.test(author.handle))identity.appendChild(tweetLink('https://x.com/'+author.handle,'@'+author.handle));
+  if(typeof data.created_at==='string'&&Number.isFinite(Date.parse(data.created_at))){
+    const time=tweetNode('time','msg-tweet-time');time.dateTime=data.created_at;time.dataset.tweetTime='1';
+    time.title=new Date(data.created_at).toLocaleString();time.setAttribute('aria-label',time.title);identity.appendChild(time);
+  }
+  return identity;
+}
+function buildTweetCard(data,state,refresh){
+  const root=state.root;root.setAttribute('aria-label','X post preview');
+  const header=tweetNode('div','msg-tweet-header'),identity=buildTweetIdentity(data),avatar=buildTweetAvatar(data.author);
+  header.append(avatar.node,identity);
+  const details=tweetNode('div','msg-tweet-details');details.id='tweet-details-'+Math.random().toString(36).slice(2);
+  const text=buildTweetText(data),more=tweetButton('Show more text',()=>{state.textExpanded=!state.textExpanded;applyMode();},'msg-tweet-more-text');
+  more.setAttribute('aria-controls',details.id+'-text');text.id=details.id+'-text';
+  const setMode=()=>{
+    const label=state.expanded?'Collapse':'Expand';
+    mode.replaceChildren(tweetIcon(state.expanded?'chevronUp':'chevronDown',18));
+    mode.title=label;mode.setAttribute('aria-label',label);mode.setAttribute('aria-expanded',String(state.expanded));
+  };
+  const applyMode=()=>withTweetLayoutChange(()=>{
+    root.classList.toggle('msg-tweet-expanded',state.expanded);text.classList.toggle('msg-tweet-text-open',state.textExpanded&&state.expanded);
+    details.hidden=!state.expanded;setMode();
+    more.textContent=state.textExpanded?'Show less text':'Show more text';more.setAttribute('aria-expanded',String(state.textExpanded));
+    more.hidden=!state.expanded;for(const video of root.querySelectorAll('video'))if(!state.expanded)video.pause();state.mediaUpdate?.();
+    if(state.expanded&&!state.quoteMounted&&data.quote?.state!=='none'){
+      state.quoteMounted=true;details.prepend(buildTweetQuote(data.quote,state));
+    }
+    requestAnimationFrame(()=>{if(state.alive())more.hidden=!state.expanded||!state.textExpanded&&text.scrollHeight<=text.clientHeight+1;});
+  });
+  const mode=tweetIconButton(state.expanded?'chevronUp':'chevronDown',state.expanded?'Collapse':'Expand',()=>{state.expanded=!state.expanded;applyMode();},'msg-tweet-mode');
+  mode.setAttribute('aria-controls',details.id);header.appendChild(mode);
+  state.applyMode=applyMode;
+  root.append(header,text,more);
+  if(data.text_complete!==true){
+    const note=tweetNode('small','msg-tweet-note','Partial text · ');note.appendChild(tweetLink(data.url,'Continue on X'));root.appendChild(note);
+  }
+  const media=tweetNode('div','msg-tweet-media');root.appendChild(media);
+  root.appendChild(buildTweetMetrics(data.metrics,false));
+  const footer=tweetNode('div','msg-tweet-footer'),actions=tweetNode('div','msg-tweet-actions');
+  const info=buildTweetMetricInfo(data);if(info)actions.appendChild(info);
+  actions.append(tweetIconButton('refresh','Refresh preview',refresh),tweetIconLink(data.url,'Open on X','external'));
+  footer.append(buildTweetMetrics(data.metrics,true),actions);details.appendChild(footer);
+  const thread=buildTweetThreadControls(data,state);if(thread)details.appendChild(thread);
+  root.appendChild(details);
+  const populateAssets=()=>{
+    if(!state.alive())return;
+    loadTweetAvatar(avatar,state);
+    if(typeof buildTweetMedia==='function')buildTweetMedia(data.media||[],media,state,data.url);
+    for(const update of state.assetUpdates)update();
+  };
+  const mediaAssets=(data.media||[]).map(m=>m.thumbnail_url).filter(v=>validateTweetMediaUrl(v));
+  const assets=avatar.url?[...mediaAssets,avatar.url]:mediaAssets;
+  if(mediaAssets.length&&assets.some(url=>!_mediaAutoLoad(url)))root.appendChild(tweetButton('Load external media',event=>{
+    state.assetsGranted=true;populateAssets();event.currentTarget.remove();
+  },'msg-tweet-button msg-tweet-media-load'));
+  populateAssets();
+  if(data.media_complete===false){const note=tweetNode('small','msg-tweet-note','Some media unavailable · ');note.appendChild(tweetLink(data.url,'Open on X'));root.appendChild(note);}
+  updateTweetTimes(root);if(!_tweetTimeTimer)_tweetTimeTimer=setInterval(updateTweetTimes,60000);applyMode();
+}
+function buildTweetQuote(quote,parent){
+  const wrap=tweetNode('div','msg-tweet-quote');
+  const link=quote?.url&&parseTweetUrl(quote.url)?.id===quote.id?quote.url:null;
+  if(quote?.state!=='available'||!validTweetPayload(quote.post,quote.id)){
+    const label=quote?.state==='omitted'?'Further quoted post':quote?.reason&&quote.reason!=='unknown'?`Quoted post ${quote.reason}`:'Quoted post unavailable';
+    wrap.appendChild(tweetNode('small','msg-tweet-status',label));if(link)wrap.appendChild(tweetLink(link,'Open quoted post'));return wrap;
+  }
+  const post=quote.post,author=post.author;
+  const child={...parent,root:wrap,expanded:true,cleanup:[],loaded:post,
+    alive(){return parent.alive()&&wrap.isConnected;},assetsGranted:parent.assetsGranted};
+  const header=tweetNode('div','msg-tweet-header'),avatar=buildTweetAvatar(author);
+  header.append(avatar.node,buildTweetIdentity(post));
+  wrap.append(header,buildTweetText(post));wrap.querySelector('.msg-tweet-text').classList.add('msg-tweet-text-open');
+  const media=tweetNode('div','msg-tweet-media');wrap.appendChild(media);
+  const populate=()=>{
+    loadTweetAvatar(avatar,child);
+    buildTweetMedia(post.media||[],media,child,post.url);updateTweetTimes(wrap);
+  };
+  // Mount the quote before creating media so detached nodes never acquire src.
+  queueMicrotask(()=>{if(child.alive())populate();});
+  const quoteMedia=(post.media||[]).map(m=>m.thumbnail_url).filter(v=>validateTweetMediaUrl(v));
+  if(quoteMedia.length&&!parent.assetsGranted&&quoteMedia.some(v=>!_mediaAutoLoad(v))){const load=tweetButton('Load quoted media',event=>{child.assetsGranted=true;populate();event.currentTarget.remove();});wrap.appendChild(load);}
+  if(post.text_complete!==true)wrap.appendChild(tweetNode('small','msg-tweet-partial','Partial quoted text'));
+  if(post.quote?.url)wrap.appendChild(tweetLink(post.quote.url,'Further quoted post'));
+  wrap.appendChild(tweetLink(post.url,'Open quoted post'));
+  parent.assetUpdates.push(()=>{child.assetsGranted=child.assetsGranted||parent.assetsGranted;populate();});
+  parent.cleanup.push(()=>releaseTweetResources(child));return wrap;
+}
+function buildTweetThreadControls(data,state){
+  if(data.thread?.provider!=='threadreader'||data.thread.state==='disabled')return null;
+  const wrap=tweetNode('div','msg-tweet-thread');
+  const content=tweetNode('div','msg-tweet-thread-content');content.id='tweet-thread-'+Math.random().toString(36).slice(2);content.hidden=true;
+  const status=tweetNode('div','msg-tweet-status');status.setAttribute('role','status');
+  let loaded=false,visible=0,entries=[],consent=null,requesting=false;
+  const children=[];
+  state.threadExpanded=false;state.threadLease=null;
+  state.cleanup.push(()=>{state.threadLease?.dispose();state.threadLease=null;for(const child of children)releaseTweetResources(child);children.length=0;});
+  const setLabel=label=>button.replaceChildren(tweetIcon('thread',16),document.createTextNode(label));
+  const button=tweetButton('',()=>{
+    if(loaded){state.threadExpanded=!state.threadExpanded;apply();return;}
+    if(consent||requesting)return;
+    consent=tweetNode('div','msg-tweet-thread-consent');
+    consent.append(tweetNode('p','','Fetch published thread from ThreadReaderApp; this service receives the post ID.'),
+      tweetButton('Fetch thread',fetchThread),tweetButton('Cancel',()=>{consent.remove();consent=null;}));wrap.insertBefore(consent,content);
+  },'msg-tweet-action-text');
+  setLabel('Read thread…');
+  button.setAttribute('aria-controls',content.id);button.setAttribute('aria-expanded','false');
+  const apply=()=>withTweetLayoutChange(()=>{
+    content.hidden=!state.threadExpanded;setLabel(state.threadExpanded?'Collapse thread':'Read thread…');button.setAttribute('aria-expanded',String(state.threadExpanded));
+    if(!state.threadExpanded)for(const video of content.querySelectorAll('video'))video.pause();
+  });
+  const appendBatch=()=>{
+    const batch=entries.slice(visible,visible+5);visible+=batch.length;
+    for(const entry of batch){
+      const item=tweetNode('section','msg-tweet-thread-entry');
+      item.appendChild(buildTweetIdentity(entry));
+      if(!validTweetId(entry.id))item.appendChild(tweetNode('small','msg-tweet-status','Post identity unavailable'));
+      item.appendChild(buildTweetText(entry));
+      const media=tweetNode('div','msg-tweet-media');item.appendChild(media);content.insertBefore(item,more);
+      const child={...state,root:item,expanded:true,cleanup:[],alive(){return state.alive()&&item.isConnected;}};children.push(child);
+      buildTweetMedia(entry.media||[],media,child,validTweetId(entry.id)?'https://x.com/i/status/'+entry.id:data.url);
+      state.assetUpdates.push(()=>{child.assetsGranted=child.assetsGranted||state.assetsGranted;child.mediaUpdate?.();});
+      if((entry.media||[]).some(m=>{const src=validateTweetMediaUrl(m.thumbnail_url);return src&&!_mediaAutoLoad(src);})){
+        item.appendChild(tweetButton('Load external thread media',event=>{child.assetsGranted=true;child.mediaUpdate?.();event.currentTarget.remove();}));
+      }
+      if(validTweetId(entry.id))item.appendChild(tweetLink('https://x.com/i/status/'+entry.id,'Open on X'));
+    }
+    more.hidden=visible>=entries.length;
+  };
+  const more=tweetButton('Show more posts',()=>withTweetLayoutChange(appendBatch));
+  async function fetchThread(){
+    if(!state.alive()||requesting)return;
+    requesting=true;consent?.remove();consent=null;status.textContent='Loading published thread…';wrap.setAttribute('aria-busy','true');
+    state.threadLease?.dispose();const lease=fetchTweetPreview(data.id,{operation:'thread',permission:true,priority:true});state.threadLease=lease;
+    try{
+      const thread=await lease.promise;if(!state.alive()||!wrap.isConnected||state.threadLease!==lease)return;
+    if(thread.availability.state!=='available'){
+      status.textContent='Published thread unavailable. The original post remains available.';
+      if(thread.availability.reason==='provider_disabled'){button.disabled=true;wrap.appendChild(tweetLink(data.url,'Continue on X'));}
+      return;
+    }
+      entries=normalizedThreadEntries(thread,data.id);loaded=true;state.threadExpanded=true;status.textContent=thread.partial?'Partial published thread · identities may be unavailable':'';
+      withTweetLayoutChange(()=>{content.appendChild(more);appendBatch();content.appendChild(tweetLink(thread.continuation_url||data.url,'Continue on X'));apply();});
+    }catch(error){if(state.alive()&&wrap.isConnected&&error.code!=='cancelled')status.textContent='Thread could not load. Read the original post on X.';}
+    finally{requesting=false;if(wrap.isConnected)wrap.setAttribute('aria-busy','false');}
+  }
+  wrap.append(button,status,content);return wrap;
+}
+function tweetPhotoSize(value,size){
+  const safe=validateTweetMediaUrl(value);if(!safe)return null;
+  const u=new URL(safe);if(u.pathname.startsWith('/media/'))u.searchParams.set('name',size);return u.href;
+}
+function tweetVideoCandidates(media,{saveData=false,effectiveType='',viewportWidth=innerWidth,displayWidth=viewportWidth,canPlayType=()=>true}={}){
+  const candidates=(media.mp4||[]).slice(0,8).filter(v=>validateTweetMediaUrl(v.url,true)
+    &&typeof v.content_type==='string'&&/^video\/mp4(?:;|$)/i.test(v.content_type)&&canPlayType(v.content_type));
+  const known=candidates.filter(v=>Number.isFinite(v.bitrate)&&v.bitrate>=0),unknown=candidates.filter(v=>!known.includes(v));
+  known.sort((a,b)=>a.bitrate-b.bitrate);
+  let chosen;
+  if(saveData||['slow-2g','2g'].includes(effectiveType))chosen=known[0]||unknown[0];
+  else{
+    const budget=viewportWidth<=600?2500000:5000000;
+    let eligible=known.filter(v=>v.bitrate<=budget);
+    const fit=eligible.filter(v=>Number.isFinite(v.width)&&v.width>0&&v.width<=displayWidth*2);if(fit.length)eligible=fit;
+    chosen=eligible.at(-1)||known[0]||unknown[0];
+  }
+  const hls=validateTweetMediaUrl(media.hls_url,true);
+  const nativeHls=hls&&(canPlayType('application/vnd.apple.mpegurl')||canPlayType('application/x-mpegURL'));
+  if(!chosen)return nativeHls?[{url:hls,content_type:'application/vnd.apple.mpegurl'}]:[];
+  const lower=[...known].reverse().find(v=>v!==chosen&&v.bitrate<chosen.bitrate);
+  return [chosen,...(lower?[lower]:nativeHls?[{url:hls,content_type:'application/vnd.apple.mpegurl'}]:[])];
+}
+function buildTweetMedia(items,container,state,postUrl){
+  if(container._tweetMedia){container._tweetMedia();return;}
+  const media=items.slice(0,16).filter(m=>m&&['photo','video','animated_gif'].includes(m.kind));
+  const photos=media.filter(m=>m.kind==='photo'&&validateTweetMediaUrl(m.original_url||m.thumbnail_url));
+  const compact=tweetNode('div','msg-tweet-media-compact'),expanded=tweetNode('div','msg-tweet-gallery');
+  let built=false,all=false;const updaters=[];
+  const allowed=url=>state.assetsGranted||_mediaAutoLoad(url);
+  const image=(entry,parent,size,label,optional=false)=>{
+    const supplied=validateTweetMediaUrl(entry.original_url||entry.thumbnail_url);
+    const src=tweetPhotoSize(entry.thumbnail_url||entry.original_url,size);if(!src)return;
+    const img=tweetNode('img','');img.alt=entry.alt_text||label;img.referrerPolicy='no-referrer';img.decoding='async';
+    let failed=false,retried=false,proxyTried=false;
+    const failImage=()=>withTweetLayoutChange(()=>{failed=true;img.removeAttribute('src');img.remove();
+      if(!optional)parent.appendChild(tweetNode('span','msg-tweet-status','Media unavailable · Refresh metadata or open on X'));});
+    // Audit fix: a fallback may only continue while external media is still permitted
+    // (state grant or the External media setting) — the user may revoke it mid-flight.
+    const revoked=()=>{img.removeAttribute('src');return true;};
+    img.onerror=()=>{if(!state.alive()||!img.isConnected)return;
+      if(!allowed(src))return void revoked();
+      if(!retried&&supplied&&supplied!==src){retried=true;img.src=supplied;return;}
+      if(!proxyTried){proxyTried=true;proxyTweetMedia(supplied||src,()=>state.alive()&&img.isConnected&&allowed(src)).then(proxy=>{if(!state.alive()||!img.isConnected)return;if(!allowed(src))return void revoked();if(proxy)img.src=proxy;else failImage();}).catch(failImage);return;}
+      failImage();};
+    parent.prepend(img);updaters.push(()=>{if(!failed&&img.isConnected&&allowed(src)&&!img.getAttribute('src'))img.src=src;});
+  };
+  const photo=(entry,index,size)=>{
+    const button=tweetButton(`Photo ${index+1} of ${media.length}`,()=>{
+      if(!state.alive())return;
+      const src=validateTweetMediaUrl(entry.original_url||entry.thumbnail_url);if(!src)return;
+      if(!allowed(src)){state.assetsGranted=true;update();return;}
+      const gallery=photos.map(m=>({src:tweetPhotoSize(m.original_url||m.thumbnail_url,'orig'),alt:m.alt_text||'Photo from X post'}));
+      openLightbox(tweetPhotoSize(src,'orig'),{items:gallery,index:photos.indexOf(entry),opener:button});
+    });
+    button.classList.add('msg-tweet-photo');button.setAttribute('aria-label',`Open photo ${index+1} of ${media.length}${entry.alt_text?': '+entry.alt_text:''}`);
+    image(entry,button,size,`Photo ${index+1} of ${media.length} from X post`);return button;
+  };
+  const video=(entry,index)=>{
+    const cell=tweetNode('div','msg-tweet-video');
+    const kind=entry.kind==='animated_gif'?'Animation':'Video';
+    image(entry,cell,'medium',`${kind} ${index+1} from X post`,true);
+    const play=tweetButton(`Play ${kind.toLowerCase()}`,()=>{
+      if(!state.alive())return;
+      const player=tweetNode('video','msg-tweet-player');player.controls=true;player.playsInline=true;player.preload='none';
+      player.addEventListener('keydown',event=>{if([' ','Enter','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End'].includes(event.key))event.stopPropagation();});
+      player.muted=entry.kind==='animated_gif';player.loop=entry.kind==='animated_gif';player.referrerPolicy='no-referrer';player.setAttribute('referrerpolicy','no-referrer');
+      const hints=navigator.connection||{};
+      const candidates=tweetVideoCandidates(entry,{saveData:!!hints.saveData,effectiveType:hints.effectiveType,
+        viewportWidth:innerWidth,displayWidth:cell.clientWidth,canPlayType:type=>player.canPlayType(type)});
+      if(!candidates.length){play.disabled=true;play.textContent=kind+' unavailable';cell.appendChild(tweetLink(postUrl,'Open on X'));return;}
+      let attempt=0,proxyTried=false;
+      // Port hardening: a source may be switched (and playback resumed) only while this
+      // same player is still mounted, visible, expanded and permitted — re-checked after
+      // every async step, so a late fallback can't restart a collapsed/revoked video.
+      const usable=()=>state.alive()&&player.isConnected&&state.expanded&&player.getClientRects().length>0;
+      const release=()=>{player.onerror=null;player.onloadedmetadata=null;player.pause();player.removeAttribute('src');player.load();};
+      const fail=()=>{release();player.remove();
+        cell.append(tweetNode('span','msg-tweet-status','Media unavailable'),tweetLink(postUrl,'Open on X'));};
+      const nextSource=()=>{
+        if(!usable()){if(state.alive()&&player.isConnected)fail();else release();return;}
+        if(attempt>=candidates.length-1){fail();return;}
+        const time=player.currentTime;attempt++;player.src=candidates[attempt].url;
+        player.onloadedmetadata=()=>{if(Number.isFinite(time)&&time>0&&time<player.duration)player.currentTime=time;};
+        player.play().catch(()=>{});
+      };
+      player.onerror=()=>{
+        if(!state.alive()||!player.isConnected){release();return;}
+        if(!usable()){fail();return;}
+        if(!proxyTried&&/^video\/mp4/i.test(candidates[attempt]?.content_type||'')){
+          proxyTried=true;
+          proxyTweetMedia(candidates[attempt].url,usable).then(proxy=>{
+            if(!usable()){if(state.alive()&&player.isConnected)fail();else release();return;}
+            if(proxy){player.src=proxy;player.play().catch(()=>{});}else nextSource();
+          }).catch(()=>nextSource());
+          return;
+        }
+        nextSource();
+      };
+      const poster=validateTweetMediaUrl(entry.thumbnail_url);if(poster&&(state.assetsGranted||_mediaAutoLoad(poster)))player.poster=poster;
+      player.src=candidates[0].url;cell.replaceChildren(player);player.play().catch(()=>{});
+    });
+    cell.appendChild(play);
+    if(Number.isFinite(entry.duration_ms)&&entry.duration_ms>=0){const seconds=Math.floor(entry.duration_ms/1000);
+      cell.appendChild(tweetNode('small','msg-tweet-duration',`${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`));}
+    return cell;
+  };
+  const renderExpanded=()=>{
+    const visible=all?media:media.slice(0,4);
+    for(let i=expanded.children.length;i<visible.length;i++){
+      const entry=visible[i],cell=entry.kind==='photo'?photo(entry,i,'medium'):video(entry,i);
+      cell.classList.add('msg-tweet-cell');
+      const w=entry.width,h=entry.height;if(Number.isFinite(w)&&w>0&&w<=32768&&Number.isFinite(h)&&h>0&&h<=32768)cell.style.setProperty('--tweet-ratio',String(w/h));
+      expanded.appendChild(cell);
+      if(i===3&&media.length>4&&!all)cell.appendChild(tweetNode('span','msg-tweet-more',`+${media.length-4} more`));
+    }
+    expanded.dataset.count=String(Math.min(visible.length,4));
+  };
+  const update=()=>{
+    compact.hidden=state.expanded;expanded.hidden=!state.expanded;
+    if(state.expanded&&!built){built=true;renderExpanded();}
+    for(const fn of updaters)fn();
+  };
+  if(media.length){
+    const first=media[0];
+    if(first.kind==='photo')compact.appendChild(photo(first,0,'small'));
+    else{const expand=tweetButton(first.kind==='animated_gif'?'Animation · Expand to play':'Video · Expand to play',()=>{state.expanded=true;state.applyMode();});image(first,expand,'small','X media preview',true);compact.appendChild(expand);}
+    compact.appendChild(tweetNode('small','msg-tweet-media-count',`${media.length} attachment${media.length===1?'':'s'}`));
+    container.append(compact,expanded);
+    if(media.length>4){const more=tweetButton(`Show ${media.length-4} more attachments`,()=>{all=true;withTweetLayoutChange(()=>{renderExpanded();update();more.remove();});});
+      more.classList.add('msg-tweet-extra-media');container.appendChild(more);}
+  }
+  container._tweetMedia=update;state.mediaUpdate=update;update();
+}
+// Called by buildRow for every message body. `tweetConv` is the conversation the row
+// was rendered from (tweetConversation), or undefined for callers with no evidence.
+// Generic media keeps the v0.5.8 contract: buildMediaEl(url, encrypted-flag). Every
+// recognized X link gets an invisible slot marker at its position; what fills the slot is
+// decided by renderTweetSlots from the server's capabilities, and re-decided when they
+// (or the disclosure policy) change.
+function mountMessageMedia(msg,tweetConv,msgBody){
+  const fromEncrypted=!!msg.encrypted;
+  msgBody._tweetContext=tweetRowContext(tweetConv||null,msg.encrypted);
+  msgBody._tweetEncrypted=fromEncrypted;
+  msgBody._tweetChat=msg.kind==='privmsg'||msg.kind==='action';
+  const slots=[];
+  for(const url of extractMediaUrls(msg.text)){
+    const identity=parseTweetUrl(url,true);
+    if(!identity){const node=buildMediaEl(url,fromEncrypted);if(node)msgBody.appendChild(node);continue;}
+    const marker=document.createComment('x-link');msgBody.appendChild(marker);
+    slots.push({url,identity,marker,nodes:[]});
+  }
+  if(!slots.length)return;
+  msgBody._tweetSlots=slots;
+  renderTweetSlots(msgBody);
+}
+// Generic link previews built for X slots (no X provider offered, or a failed probe).
+// Every node — including the card a click-to-load button turns into — is registered here
+// and in its slot, so slot re-rendering, clearTweetData (lock, logout, revocation) and
+// disposeTweetPreviews remove it; its asynchronous render re-checks the permission.
+const _tweetGenericNodes=new Set();
+function registerTweetGeneric(node){
+  if(!node)return node;
+  node._disposeTweet=()=>{_tweetGenericNodes.delete(node);node.remove();};
+  _tweetGenericNodes.add(node);return node;
+}
+// mode: 'auto' (card now), 'encrypted' (the v0.5.8 encrypted click gate), 'click'
+// (click-to-load for rows whose X disclosure choice is click-to-load).
+function buildTweetGenericSlot(slot,msgBody,mode){
+  if(loadAppearance().linkPreviews===false||!slot.url.startsWith('https://'))return null;
+  const generation=_tweetGeneration;
+  const permitted=()=>generation===_tweetGeneration&&!tweetVaultLocked()&&!_tweetCaps.preview
+    &&loadAppearance().linkPreviews!==false&&(!_tweetCaps.failed||tweetDisclosure(msgBody._tweetContext)!=='hidden');
+  const card=()=>{const node=buildLinkPreviewEl(slot.url,false,()=>permitted()&&node.isConnected);return node;};
+  if(mode==='auto')return registerTweetGeneric(card());
+  const wrap=document.createElement('div');wrap.className='msg-media';
+  const btn=document.createElement('button');btn.type='button';btn.className='msg-media-load';
+  let host=slot.url;try{host=new URL(slot.url).hostname;}catch(_){}
+  if(mode==='encrypted'){
+    btn.textContent=`🔒 Load link preview — ${host}`;
+    btn.title='This link came in an end-to-end encrypted message. Loading a preview sends the link to your CryptIRC server, which fetches the page.';
+  }else{
+    btn.textContent=`Load link preview — ${host}`;
+    btn.title='Loading a preview sends the link to your CryptIRC server, which fetches the page.';
+  }
+  btn.style.cssText='max-width:100%;padding:6px 10px;border:1px dashed var(--border,#555);border-radius:8px;background:var(--surface2,rgba(127,127,127,.12));color:var(--text2,inherit);font-size:12px;cursor:pointer;text-align:left;white-space:normal;word-break:break-all;';
+  btn.onclick=e=>{
+    e.stopPropagation();
+    if(!permitted()){wrap._disposeTweet?.();return;}
+    const real=registerTweetGeneric(card());
+    wrap._disposeTweet?.();
+    if(!real)return;
+    slot.marker.parentNode?.insertBefore(real,slot.marker.nextSibling);
+    slot.nodes=slot.nodes.filter(n=>n!==wrap);slot.nodes.push(real);
+  };
+  wrap.appendChild(btn);
+  return registerTweetGeneric(wrap);
+}
+// Fill a message's X slots:
+// - capabilities not known yet: nothing (decided as soon as GET /tweet/config answers);
+// - server offers no X provider (the default): exactly the v0.5.8 behaviour — the generic
+//   link-preview path, including its encrypted click-to-load gate;
+// - X previews offered: X cards for chat lines (never the generic /preview fetcher), up to
+//   three distinct posts plus explicit batches of three, or nothing when hidden.
+function renderTweetSlots(msgBody){
+  const slots=msgBody._tweetSlots||[],context=msgBody._tweetContext;
+  for(const slot of slots){for(const node of slot.nodes){node._disposeTweet?.();node.remove();}slot.nodes=[];}
+  for(const more of msgBody.querySelectorAll(':scope > .msg-tweet-more-links'))more.remove();
+  if(!_tweetCaps.known||tweetVaultLocked())return;
+  const place=(slot,node)=>{if(!node)return;slot.marker.parentNode?.insertBefore(node,slot.marker.nextSibling);slot.nodes.push(node);};
+  if(!_tweetCaps.preview){
+    // Generic link-preview path only (never the direct-media branches). Server says "no X
+    // provider": the v0.5.8 behaviour (encrypted rows click-to-load). Probe failed: never
+    // less private than the X choice — Hide shows nothing, click-to-load contexts and
+    // encrypted rows get a click-to-load preview.
+    const enc=msgBody._tweetEncrypted===true;
+    for(const slot of slots){
+      let mode=enc?'encrypted':'auto';
+      if(_tweetCaps.failed){
+        const choice=tweetDisclosure(context);
+        if(choice==='hidden')continue;
+        if(!enc&&choice!=='auto')mode='click';
+      }
+      place(slot,buildTweetGenericSlot(slot,msgBody,mode));
+    }
+    return;
+  }
+  if(!msgBody._tweetChat||tweetLoadPolicy(context)==='hidden')return;
+  const seen=new Set(),extra=[];let count=0;
+  for(const slot of slots){
+    if(seen.has(slot.identity.id))continue;
+    seen.add(slot.identity.id);if(count++>=3){extra.push(slot);continue;}
+    place(slot,buildTweetPlaceholder(slot.identity,context));
+  }
+  if(extra.length){
+    const more=tweetButton('Load more X previews',()=>{
+      for(const slot of extra.splice(0,3))place(slot,buildTweetPlaceholder(slot.identity,context));
+      if(!extra.length)more.remove();
+    });more.classList.add('msg-tweet-more-links');msgBody.appendChild(more);
+  }
+}
+if(typeof window!=='undefined')window.addEventListener('storage',event=>{
+  if(event.key==='cryptirc_x_policy_v1:'+currentUser){refreshTweetPolicyUI();populateXDisclosureControls();return;}
+  if(event.key==='cryptirc_appear'){
+    invalidateAppearCache();
+    try{if((JSON.parse(event.oldValue||'{}')?.linkPreviews!==false)!==(JSON.parse(event.newValue||'{}')?.linkPreviews!==false))refreshTweetPolicyUI();}
+    catch(_){refreshTweetPolicyUI();}
+  }
+});
+// ─── End X previews ──────────────────────────────────────────────────────────
+
+function buildMediaEl(url,fromEncrypted,genericOnly=false){
+  // Where X previews are offered, a recognized X status link never takes the generic path
+  // (and so never reaches the generic /preview fetcher). Callers here carry no conversation
+  // evidence: unknown context ⇒ click-to-load at most. buildRow routes X links via
+  // mountMessageMedia/renderTweetSlots. Where they are not offered (the default), X links
+  // keep the v0.5.8 generic behaviour; before the server has answered, nothing is built.
+  const tweet=parseTweetUrl(url,true);
+  if(tweet&&!genericOnly){
+    if(!_tweetCaps.known)return null;
+    if(_tweetCaps.preview)return buildTweetPlaceholder(tweet,tweetRowContext(null,fromEncrypted===true));
+  }
+  // Re-check 2: a recognized X status URL is never a media file, whatever it ends with
+  // (`…/status/1?x=.jpg`): only the generic link-preview path, encrypted gate first.
+  if(tweet)return buildLinkPreviewEl(url,fromEncrypted);
   const authedUrl=appendFileToken(url);
   // Images
   if(IMG_EXTS.test(url)||url.includes('/files/')){
@@ -5065,7 +6549,12 @@ function buildMediaEl(url,fromEncrypted){
     if((loadAppearance().ytPreview||'auto')!=='click' && _mediaAutoLoad(url)) setTimeout(_ytReveal,0);
     return wrap;
   }
-  // Link preview — fetch metadata from server for non-media HTTPS links.
+  return buildLinkPreviewEl(url,fromEncrypted);
+}
+// Link preview — fetch metadata from server for non-media HTTPS links. (Split out of
+// buildMediaEl unchanged; `guard` — used only for X links — is re-checked before the
+// asynchronous card renders and before its image loads, and must stay true.)
+function buildLinkPreviewEl(url,fromEncrypted,guard=null){
   // r2 (codex-p3 MED app.js:4503): a link that arrived inside an END-TO-END ENCRYPTED
   // message is not sent to the CryptIRC server for a preview automatically (that would
   // disclose it to the server the encryption is meant to keep out). The user can still
@@ -5087,10 +6576,12 @@ function buildMediaEl(url,fromEncrypted){
     card.href=url;card.target='_blank';card.rel='noopener noreferrer';
     card.className='msg-link-preview';card.id=previewId;
     card.style.display='none'; // Hidden until metadata loads
+    // A card registered for an X slot must leave the registry on every removal path.
+    const dropCard=()=>{if(card._disposeTweet)card._disposeTweet();else card.remove();};
     // Fetch preview asynchronously
     fetch(`/cryptirc/preview?url=${encodeURIComponent(url)}`,{headers:{'Authorization':'Bearer '+sessionToken}})
       .then(r=>r.ok?r.json():null).then(d=>{
-        if(!d||!d.title){card.remove();return;}
+        if(!d||!d.title||(guard&&!guard())){dropCard();return;}
         const el=document.getElementById(previewId);
         if(!el)return;
         let html=`<div class="msg-link-preview-domain">${esc(d.site_name||d.domain)}</div>`;
@@ -5103,6 +6594,7 @@ function buildMediaEl(url,fromEncrypted){
         // click-to-load chip. Never sends a Referer.
         if(d.image&&d.image.startsWith('https://')){
           const _addImg=()=>{
+            if(guard&&!guard())return;
             const img=document.createElement('img');
             img.className='msg-link-preview-img'; img.loading='lazy'; img.referrerPolicy='no-referrer';
             img.onload=()=>{ if(!_userScrolledAway) scrollBottom(); };
@@ -5127,7 +6619,7 @@ function buildMediaEl(url,fromEncrypted){
         // threshold covers a revealed preview + small image without
         // snapping users who deliberately scrolled up.
         if(!_userScrolledAway) scrollBottom();
-      }).catch(()=>card.remove());
+      }).catch(dropCard);
     return card;
   }
   return null;
@@ -5284,7 +6776,21 @@ let _lastTypingSent=0;
 // quote of a private / decrypted line went out with the next line typed in a public
 // channel. It is dropped on a switch and only ever sent to its own conversation.
 let _replyTo=null; // {nick, text, conn_id, target}
-function _replyKey(conn_id,target){ return String(conn_id||'')+'\n'+String(target||'').toLowerCase(); }
+// r11: "the same conversation" for the reply guard and the update-reload draft, by a rule
+// that needs no knowledge of the network's casemapping (client-side detection proved
+// unreliable): exactly equal, OR both pure ASCII without [ ] { } \ | ~ ^ and equal with only
+// A-Z lowercased — every casemapping agrees there. No Unicode folding: toLowerCase made #Ä
+// and #ä (and the Kelvin sign K and k) "the same". Spellings that differ in any other way
+// count as different, so the guard refuses (the text is kept) rather than send elsewhere.
+function _sameConv(a,b){
+  a=String(a==null?'':a); b=String(b==null?'':b);
+  if(a===b) return true;
+  const plain=x=>/^[\x00-\x7f]*$/.test(x)&&!/[\[\]{}\\|~^]/.test(x);
+  if(!plain(a)||!plain(b)) return false;
+  const lo=x=>x.replace(/[A-Z]/g,c=>String.fromCharCode(c.charCodeAt(0)+32));
+  return lo(a)===lo(b);
+}
+function _sameConvAt(c1,t1,c2,t2){ return String(c1==null?'':c1)===String(c2==null?'':c2)&&_sameConv(t1,t2); }
 function setReply(nick,text,conv){
   // r7 (codex-p3 app.js:5215): bound to the conversation of the clicked row (the split
   // pane passes its own) — the global `active` is only the default for the main view.
@@ -5292,7 +6798,7 @@ function setReply(nick,text,conv){
   if(!c) return;
   _replyTo={nick,text:String(text||'').slice(0,200),conn_id:c.conn_id,target:c.target};
   const bar=document.getElementById('reply-bar');
-  const elsewhere=!active||_replyKey(c.conn_id,c.target)!==_replyKey(active.conn_id,active.target);
+  const elsewhere=!active||!_sameConvAt(c.conn_id,c.target,active.conn_id,active.target);
   document.getElementById('reply-bar-nick').textContent=elsewhere?`${nick} (in ${c.target} — only sent there)`:nick;
   document.getElementById('reply-bar-text').textContent=text.slice(0,100);
   bar.classList.add('show');
@@ -5303,14 +6809,14 @@ function cancelReply(){
   document.getElementById('reply-bar').classList.remove('show');
 }
 function _replyOnSwitch(conn_id,target){
-  if(_replyTo&&_replyKey(_replyTo.conn_id,_replyTo.target)!==_replyKey(conn_id,target)) cancelReply();
+  if(_replyTo&&!_sameConvAt(_replyTo.conn_id,_replyTo.target,conn_id,target)) cancelReply();
 }
 // r8 (agy-flash app.js:6320): null = the reply belongs to ANOTHER conversation (picked in
 // the split pane) — the caller sends nothing (it used to drop the quote but still send
 // the reply text to the main pane's conversation). The reply stays armed.
 function getReplyPrefix(conn_id,target){
   if(!_replyTo) return '';
-  if(_replyKey(_replyTo.conn_id,_replyTo.target)!==_replyKey(conn_id,target)){
+  if(!_sameConvAt(_replyTo.conn_id,_replyTo.target,conn_id,target)){
     try{ showToast(`Not sent — this reply belongs to ${_replyTo.target}: open it to send there, or cancel the reply`); }catch(_){}
     return null;
   }
@@ -7308,6 +8814,7 @@ function _onUploadRemoved(id){
 // ─── Renderers ───────────────────────────────────────────────────────────────
 function renderUploadsView(){
   const area=document.getElementById('chat-area');
+  disposeTweetPreviews(area);
   area.style.display='block';
   area.innerHTML='';
   const wrap=document.createElement('div');
@@ -7670,6 +9177,7 @@ function _scheduleMessagesRender(){
 }
 function renderMessagesView(){
   const area=document.getElementById('chat-area');
+  disposeTweetPreviews(area);
   area.style.display='block';
   area.innerHTML='';
   const wrap=document.createElement('div');
@@ -8126,6 +9634,7 @@ function _wipeE2EMemory(){
 // after the unlock), the profile and certificate popups and any open modal.
 function _closeSecretPanels(){
   // r4 (C3-3)
+  try{ clearTweetData(); }catch(_){}   // X previews: drop cards, pending work and cached results on every lock
   try{ const mv=document.getElementById('monitor-msg-overlay'); if(mv) mv.remove(); }catch(_){}
   try{ if(document.getElementById('monitor-overlay')?.classList.contains('show')) closeMonitorPanel(); const ml=document.getElementById('monitor-list'); if(ml) ml.innerHTML=''; }catch(_){}
   try{ if(document.getElementById('encrypt-overlay')?.classList.contains('show')) closeEncryptPanel(); const eb=document.getElementById('encrypt-panel-body'); if(eb) eb.innerHTML=''; }catch(_){}
@@ -8164,6 +9673,7 @@ function _deviceUnlock(){
   document.body.classList.remove('cryptirc-device-locked','cryptirc-device-locked-ui');
   const dn=document.getElementById('vault-devlock-note'); if(dn) dn.style.display='none';
   try{ renderSidebar(); renderChat(); updateTopbar(); if(typeof _splitActive!=='undefined'&&_splitActive) renderSplitChat(); }catch(_){}
+  try{ tweetVaultUnlocked(); }catch(_){}
   try{ resetVaultAutoLock(); }catch(_){}
 }
 // Dispatcher wrapper (same pattern as the window.addMessage ignore wrapper): runs the
@@ -8309,6 +9819,10 @@ async function renderProfilePanel(){
       ${hasEmail?'':'<div style="font-size:11px;color:var(--warn);margin-top:8px">⚠ Without an email you cannot reset your password if you forget it.</div>'}
       <div id="profile-email-msg" style="font-size:11px;margin-top:8px;min-height:14px"></div>
     </div>
+    <div style="${card}" id="profile-avatar-card">
+      <div style="${lbl}">Avatar</div>
+      <div id="profile-avatar-body" style="color:var(--text3);font-size:12px">Loading…</div>
+    </div>
     ${me.lastfm_enabled?`
     <div style="${card}">
       <div style="${lbl}">Last.fm 🎵</div>
@@ -8337,6 +9851,98 @@ async function renderProfilePanel(){
     </div>`;
   const inp=document.getElementById('profile-email');
   if(inp) inp.addEventListener('keydown',e=>{ if(e.key==='Enter') saveProfileEmail(); });
+  renderProfileAvatar(me.username||currentUser||'');
+}
+// Settings ▸ Profile ▸ Avatar: upload / replace / remove your picture, "Show my avatar to
+// other CryptIRC users" (server-side) and "Show other people's avatars" (this app).
+async function _avatarApi(method,body,type){
+  const headers={'Authorization':'Bearer '+sessionToken};
+  if(type) headers['Content-Type']=type;
+  const r=await fetch('/cryptirc/api/avatar/me',{method,headers,body});
+  let d={};
+  try{ d=await r.json(); }catch(_){}
+  return {ok:r.ok,status:r.status,d};
+}
+async function renderProfileAvatar(username,note,noteOk){
+  const box=document.getElementById('profile-avatar-body'); if(!box) return;
+  let st=null;
+  try{ const res=await _avatarApi('GET'); if(res.ok) st=res.d; }catch(_){}
+  if(!document.body.contains(box)) return;
+  if(!st){ box.textContent='Could not load your avatar settings.'; return; }
+  const has=!!(st.avatar&&_avValid(st.avatar));
+  const initial=esc((username||'?').charAt(0).toUpperCase());
+  const row='display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px';
+  const btn='background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:8px 13px;cursor:pointer';
+  box.style.color='';
+  box.innerHTML=`
+    <div style="display:flex;align-items:center;gap:14px">
+      <div id="profile-avatar-preview" class="profile-av-preview">${initial}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;min-width:0">
+        ${st.enabled?`<button type="button" id="profile-avatar-pick" style="${btn};background:var(--accent);border-color:var(--accent);color:#04212a;font-weight:700">${has?'Replace':'Upload'}</button><input id="profile-avatar-file" type="file" accept="image/png,image/jpeg,image/webp" tabindex="-1" aria-hidden="true" style="display:none">`:''}
+        ${has?`<button id="profile-avatar-remove" style="${btn}">Remove</button>`:''}
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-top:10px;line-height:1.5">${st.enabled
+      ?'PNG, JPEG or WebP, up to 2 MB. It is cropped to a square and shown next to your nick to other CryptIRC users of this server who are on the same IRC server with you — never sent to IRC.'
+      :'Avatars are turned off on this server.'}</div>
+    ${has?`<div style="${row}"><span style="font-size:12px;color:var(--text2)">Show my avatar to other CryptIRC users</span><button class="appear-toggle${st.visible?' on':''}" id="profile-avatar-visible" role="switch" aria-checked="${st.visible?'true':'false'}" aria-label="Show my avatar to other CryptIRC users"></button></div>`:''}
+    <div style="${row}"><span style="font-size:12px;color:var(--text2)">Show other people's avatars</span><button class="appear-toggle${avatarsShown()?' on':''}" id="profile-avatar-others" role="switch" aria-checked="${avatarsShown()?'true':'false'}" aria-label="Show other people's avatars"></button></div>
+    <div id="profile-avatar-msg" style="font-size:11px;margin-top:8px;min-height:14px"></div>`;
+  if(has){
+    const pv=document.getElementById('profile-avatar-preview');
+    _avLoad(st.avatar,128).then(url=>{
+      if(!url||!document.body.contains(pv)) return;
+      const img=document.createElement('img');
+      img.alt=username||'avatar'; img.decoding='async';
+      img.addEventListener('load',()=>{ pv.textContent=''; pv.appendChild(img); },{once:true});
+      img.src=url;
+    });
+  }
+  const msg=document.getElementById('profile-avatar-msg');
+  const say=(t,ok)=>{ if(msg){ msg.textContent=t||''; msg.style.color=ok?'var(--join)':'var(--error)'; } };
+  if(note) say(note,noteOk);
+  const file=document.getElementById('profile-avatar-file');
+  const pick=document.getElementById('profile-avatar-pick');
+  if(pick&&file) pick.addEventListener('click',()=>file.click());
+  if(file) file.addEventListener('change',async()=>{
+    const f=file.files&&file.files[0]; file.value='';
+    if(!f) return;
+    if(f.type&&!/^image\/(png|jpeg|webp)$/.test(f.type)){ say('Use a PNG, JPEG or WebP image.'); return; }
+    if(f.size>(st.max_bytes||2097152)){ say('That image is larger than 2 MB.'); return; }
+    say('Uploading…',true);
+    try{
+      const res=await _avatarApi('POST',f,f.type||'application/octet-stream');
+      if(!res.ok){ say(res.d.message||'Upload failed.'); return; }
+      avatarForgetAll(); avatarRefreshActive();
+      renderProfileAvatar(username,'Avatar saved.',true);
+    }catch(_){ say('Network error.'); }
+  });
+  const rm=document.getElementById('profile-avatar-remove');
+  if(rm) rm.addEventListener('click',async()=>{
+    if(!(await customConfirm('Remove your avatar?','Remove')))return;
+    try{
+      const res=await _avatarApi('DELETE');
+      if(!res.ok){ say(res.d.message||'Could not remove it.'); return; }
+      avatarForgetAll(); avatarRefreshActive();
+      renderProfileAvatar(username,'Avatar removed.',true);
+    }catch(_){ say('Network error.'); }
+  });
+  const vis=document.getElementById('profile-avatar-visible');
+  if(vis) vis.addEventListener('click',async()=>{
+    const on=!vis.classList.contains('on');
+    try{
+      const res=await _avatarApi('PUT',JSON.stringify({visible:on}),'application/json');
+      if(!res.ok){ say(res.d.message||'Not saved.'); return; }
+      vis.classList.toggle('on',on); vis.setAttribute('aria-checked',String(on));
+      say(on?'Other CryptIRC users can see your avatar.':'Your avatar is hidden from other users.',true);
+    }catch(_){ say('Network error.'); }
+  });
+  const others=document.getElementById('profile-avatar-others');
+  if(others) others.addEventListener('click',()=>{
+    const on=!others.classList.contains('on');
+    others.classList.toggle('on',on); others.setAttribute('aria-checked',String(on));
+    setAvatarsShown(on);
+  });
 }
 async function saveProfileEmail(){
   const inp=document.getElementById('profile-email'); const msg=document.getElementById('profile-email-msg'); if(!inp) return;
@@ -10013,6 +11619,9 @@ const APPEAR_DEFAULTS={
   // videos show without a click; playback still needs a click), 'click' = the
   // dormant privacy-safe card (no third-party request until clicked).
   ytPreview:'auto',
+  // X preview cards: 'expanded' (default) | 'compact'. Device-synced like the rest of
+  // Appearance; the disclosure policy (what may load) is device-local, never synced.
+  xPreviewMode:'expanded',
   // Media & previews: shape/size/border/radius controls for images, videos,
   // YouTube thumbs, and link-preview cards. Defaults preserve the old look.
   mediaShape:'rounded',    // rounded | square | pronounced | circle | custom
@@ -10089,6 +11698,7 @@ function loadAppearance(){
   if(_appearCache&&now-_appearCacheTs<2000)return _appearCache;
   try{_appearCache={...APPEAR_DEFAULTS,...JSON.parse(localStorage.getItem('cryptirc_appear')||'{}')};}
   catch{_appearCache={...APPEAR_DEFAULTS};}
+  if(!['compact','expanded'].includes(_appearCache.xPreviewMode))_appearCache.xPreviewMode='expanded';
   _appearCacheTs=now;
   return _appearCache;
 }
@@ -10097,6 +11707,7 @@ let _appearOversizeWarned=false;
 function _utf8Len(str){ try{ return new TextEncoder().encode(str).length; }catch(_){ return unescape(encodeURIComponent(str)).length; } }
 function saveAppearance(cfg){
   invalidateAppearCache();
+  cfg.xPreviewMode=cfg.xPreviewMode==='compact'?'compact':'expanded';
   const json=JSON.stringify(cfg);
   try{localStorage.setItem('cryptirc_appear',json);}catch(e){}
   // The server silently drops appearance payloads over 4KB (main.rs). Sending one
@@ -10140,6 +11751,8 @@ function applyAppearance(){
     nickList:   el('a-nicklist').classList.contains('on'),
     spellcheck: prev.spellcheck!==undefined?prev.spellcheck:true,
     linkPreviews: prev.linkPreviews!==undefined?prev.linkPreviews:true,
+    // "Show other people's avatars" — stored only when off (setAvatarsShown).
+    ...(prev.avatars===false?{avatars:false}:{}),
     msgGap:     +el('a-msg-gap').value||prev.msgGap||4,
     inputH:     +el('a-input-h').value||prev.inputH||36,
     accent:     el('a-accent-color').value||prev.accent||'#00d4aa',
@@ -10186,6 +11799,7 @@ function applyAppearance(){
     extMedia:       el('a-ext-media')?.value || prev.extMedia || 'all',
     extMediaHosts:  el('a-ext-media-hosts') ? el('a-ext-media-hosts').value.split(/[\s,]+/).map(h=>h.trim()).filter(Boolean) : (prev.extMediaHosts||[]),
     ytPreview:      el('a-yt-preview')?.value || prev.ytPreview || 'auto',
+    xPreviewMode:   el('a-x-preview-mode')?.value || prev.xPreviewMode || 'expanded',
     mediaShape:     el('a-media-shape')?.value || prev.mediaShape || 'rounded',
     mediaSize:      el('a-media-size')?.value || prev.mediaSize || 'medium',
     mediaBorder:    el('a-media-border')?.value || prev.mediaBorder || 'none',
@@ -11168,6 +12782,7 @@ function populateAppearanceModal(cfg){
   if (el('a-ext-media')) el('a-ext-media').value = cfg.extMedia || 'all';
   if (el('a-ext-media-hosts')) el('a-ext-media-hosts').value = (Array.isArray(cfg.extMediaHosts)?cfg.extMediaHosts:[]).join('\n');
   if (el('a-yt-preview')) el('a-yt-preview').value = cfg.ytPreview || 'auto';
+  if (el('a-x-preview-mode')) el('a-x-preview-mode').value = cfg.xPreviewMode==='compact'?'compact':'expanded';
   _toggleExtMediaHostsRow();
   if (el('a-media-shape'))  el('a-media-shape').value  = cfg.mediaShape  || 'rounded';
   if (el('a-media-size'))   el('a-media-size').value   = cfg.mediaSize   || 'medium';
@@ -12765,6 +14380,7 @@ async function giphyFetchTop(query){
 })();
 // ─── Security panel ──────────────────────────────────────────────────────────
 function showSecurityPanel(){
+  populateXDisclosureControls();
   const el=id=>document.getElementById(id);
   el('sec-vault-autolock').value=String(getVaultAutoLock());
   el('sec-msg-expiry').value=String(getMessageExpiry());
@@ -12784,6 +14400,7 @@ function secSaveToggle(key,val){
   cfg[key]=val;
   saveAppearance(cfg);
   applyThemeCSS(cfg);
+  if(key==='linkPreviews')refreshTweetPolicyUI();
 }
 
 // ─── IRC Oper Panel ──────────────────────────────────────────────────────────
@@ -13196,20 +14813,88 @@ function toggleLightboxZoom(e){
   else{_lbZoom=1;img.classList.remove('zoomed');_lbPanX=0;_lbPanY=0;}
   img.style.transform=`translate(${_lbPanX}px,${_lbPanY}px) scale(${_lbZoom})`;
 }
-function openLightbox(src){
+// X previews extend the viewer to an ordered gallery: openLightbox(src, {items, index,
+// opener}). openLightbox(src) alone keeps the legacy single-image viewer (zoom/pan,
+// close) exactly as before. Only gallery (X) items may use the signed media fallback.
+let _lbItems=[],_lbIndex=0,_lbOpener=null,_lbToken=0;
+function showLightboxItem(index){
+  _lbIndex=Math.max(0,Math.min(_lbItems.length-1,index));
   _lbZoom=1;_lbPanX=0;_lbPanY=0;
-  const img=document.getElementById('lightbox-img');
-  img.src=src;img.classList.remove('zoomed');img.style.transform='';
+  const item=_lbItems[_lbIndex],img=document.getElementById('lightbox-img'),status=document.getElementById('lightbox-status');
+  const token=++_lbToken;
+  img.onerror=null;img.onload=null;
+  img.classList.remove('zoomed');img.style.transform='';
+  if(status)status.textContent='';
+  img.alt=item.alt||'Enlarged image preview';
+  if(item.tweet){
+    // Only the current original is loaded; on a direct-CDN failure (privacy extension)
+    // try the signed same-origin copy once, guarded against a later navigation/close.
+    img.onerror=()=>{
+      if(token!==_lbToken||!img.isConnected||item.proxySrc)return;
+      if(status)status.textContent='Loading image…';
+      proxyTweetMedia(item.src,()=>token===_lbToken&&img.isConnected).then(proxy=>{
+        if(token!==_lbToken||!img.isConnected)return;
+        if(proxy){item.proxySrc=proxy;img.onerror=()=>{if(token===_lbToken&&status)status.textContent='Image unavailable';};img.src=proxy;}
+        else if(status)status.textContent='Image unavailable';
+      }).catch(()=>{if(token===_lbToken&&status)status.textContent='Image unavailable';});
+    };
+    img.onload=()=>{if(token===_lbToken&&status)status.textContent='';};
+  }
+  img.referrerPolicy='no-referrer';img.src=item.proxySrc||item.src;
+  const count=document.getElementById('lightbox-count'),prev=document.getElementById('lightbox-prev'),next=document.getElementById('lightbox-next');
+  if(count)count.textContent=_lbItems.length>1?`${_lbIndex+1} of ${_lbItems.length}`:'';
+  if(prev){prev.hidden=_lbItems.length<2;prev.disabled=_lbIndex===0;}
+  if(next){next.hidden=_lbItems.length<2;next.disabled=_lbIndex===_lbItems.length-1;}
+}
+function navigateLightbox(delta){const next=_lbIndex+delta;if(next>=0&&next<_lbItems.length&&next!==_lbIndex)showLightboxItem(next);}
+function openLightbox(src,options=null){
+  const gallery=Array.isArray(options?.items);
+  _lbItems=gallery?options.items.filter(item=>item&&validateTweetMediaUrl(item.src)).slice(0,16).map(item=>({src:item.src,alt:item.alt,tweet:true}))
+    :[{src,alt:'Enlarged image preview',tweet:false}];
+  if(!_lbItems.length)return;
+  _lbOpener=options?.opener||document.activeElement;
+  showLightboxItem(gallery?(options.index||0):0);
   document.getElementById('lightbox').classList.add('show');
   _overlayOpen('lightbox', closeLightbox);
+  if(gallery)document.getElementById('lightbox-close')?.focus();
 }
 function closeLightbox(){
   _overlayClose('lightbox');
   document.getElementById('lightbox').classList.remove('show');
-  const img=document.getElementById('lightbox-img');img.classList.remove('zoomed');img.style.transform='';
+  const img=document.getElementById('lightbox-img');img.onerror=null;img.onload=null;img.classList.remove('zoomed');img.style.transform='';
+  const wasGallery=_lbItems.some(item=>item.tweet);
+  if(wasGallery)img.removeAttribute('src');   // release the original (legacy viewer unchanged)
+  const status=document.getElementById('lightbox-status');if(status)status.textContent='';
+  _lbToken++;_lbItems=[];_lbZoom=1;_lbPanX=0;_lbPanY=0;
+  if(wasGallery&&typeof pruneTweetSigning==='function')pruneTweetSigning();
+  const opener=_lbOpener;_lbOpener=null;
+  if(wasGallery&&opener?.isConnected)opener.focus();
 }
 (function(){
   const lb=document.getElementById('lightbox');if(!lb)return;
+  const prev=document.getElementById('lightbox-prev'),next=document.getElementById('lightbox-next');
+  if(prev)prev.onclick=event=>{event.stopPropagation();navigateLightbox(-1);};
+  if(next)next.onclick=event=>{event.stopPropagation();navigateLightbox(1);};
+  document.addEventListener('keydown',event=>{
+    if(!lb.classList.contains('show'))return;
+    if(event.key==='Escape'){event.preventDefault();closeLightbox();return;}
+    if(_lbItems.length<2)return;
+    if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();navigateLightbox(event.key==='ArrowRight'?1:-1);return;}
+    if(event.key==='Tab'){
+      const controls=[...lb.querySelectorAll('button')].filter(b=>!b.hidden&&!b.disabled);
+      const index=controls.indexOf(document.activeElement),to=event.shiftKey?(index-1+controls.length)%controls.length:(index+1)%controls.length;
+      event.preventDefault();controls[to]?.focus();
+    }
+  });
+  // One-finger horizontal swipe (only when not zoomed) moves through a gallery.
+  let swipe=null;
+  lb.addEventListener('touchstart',event=>{swipe=event.touches.length===1&&_lbZoom===1&&_lbItems.length>1?{x:event.touches[0].clientX,y:event.touches[0].clientY}:null;},{passive:true});
+  lb.addEventListener('touchmove',event=>{if(event.touches.length!==1||_lbZoom>1)swipe=null;},{passive:true});
+  lb.addEventListener('touchend',event=>{
+    if(!swipe||_lbZoom!==1)return;const touch=event.changedTouches[0];if(!touch)return;
+    const dx=touch.clientX-swipe.x,dy=touch.clientY-swipe.y;swipe=null;
+    if(Math.abs(dx)>=50&&Math.abs(dx)>Math.abs(dy)*1.3)navigateLightbox(dx<0?1:-1);
+  },{passive:true});
   // Pinch zoom for mobile
   let _lastDist=0;
   lb.addEventListener('touchstart',e=>{
@@ -13955,6 +15640,8 @@ function toggleSplitView(){
   } else {
     main.classList.remove('split-active');
     clearInterval(_splitWatch); _splitWatch=null;
+    // Re-check fix: stop the hidden pane's X playback, pending loads and media callbacks.
+    disposeTweetPreviews(document.getElementById('split-chat-area'));
     if(active)sysMsg(active.conn_id,active.target,'Split view disabled','system');
   }
 }
@@ -14006,12 +15693,13 @@ function renderSplitChat(){
   const atBottom=_splitLastTarget!==_splitTarget || area.scrollHeight-area.scrollTop-area.clientHeight<40;
   const prevTop=area.scrollTop;
   _splitLastTarget=_splitTarget;
-  area.innerHTML='';
+  disposeTweetPreviews(area);area.innerHTML='';
   _splitSig=_splitBufSig();
   if(!_splitTarget){area.innerHTML='<div style="padding:20px;color:var(--text3);font-size:12px">Select a channel above</div>';return;}
   const[cid,tgt]=_splitParse(_splitTarget);if(!cid||!tgt)return;
   const buf=getBuf(cid,tgt);
-  for(const msg of buf.slice(-100)){const r=buildRow(msg,{conn_id:cid,target:tgt});area.appendChild(r);}
+  const _tweetConv=tweetConversation(cid,tgt);
+  for(const msg of buf.slice(-100)){const r=buildRow(msg,{conn_id:cid,target:tgt},_tweetConv);area.appendChild(r);}
   area.scrollTop=atBottom?area.scrollHeight:prevTop;
 }
 
@@ -16057,6 +17745,26 @@ function showNickMenu(e,nick){
     el.addEventListener('click',()=>{if(!it.label.startsWith('───')){it.action();closeNickMenu();if(isMobile)closeNickPanelMobile();}});
     menu.appendChild(el);
   }
+  // Avatar header — for the connection of the pane that was clicked — only when the
+  // picture is already vouched for and loaded (the menu never grows under the pointer);
+  // otherwise warm the cache for next time. It stays bound to that connection + nick
+  // (_avApply re-validates it while the menu is open).
+  // A cached answer is rendered only for a nick in a shared channel; for any other nick
+  // (e.g. a PM partner or a WHOIS'd nick) the server is always asked again.
+  const _ctxConn=_nickMenuConn(e);
+  const _ctxShared=!!_ctxConn&&_avShared(_ctxConn,nick);
+  const _ctxAv=_ctxShared?avatarFor(_ctxConn,nick):null;
+  if(_ctxConn&&!_ctxShared) avatarRequest(_ctxConn,[nick],0);
+  else if(_ctxConn&&!_ctxAv) avatarRequest(_ctxConn,[nick]);
+  const _ctxHead=(el)=>{ el.classList.add('nick-ctx-head'); el.dataset.avConn=_ctxConn; el.dataset.avNick=nick; _avSync(el,_ctxConn,nick,[128,48],'nick-ctx-av'); };
+  if(_ctxAv&&!isMobile&&(_avReady(_ctxAv,128)||_avReady(_ctxAv,48))){
+    const head=document.createElement('div');
+    const name=document.createElement('span');
+    name.textContent=nick;
+    head.appendChild(name);
+    menu.insertBefore(head,menu.firstChild);
+    _ctxHead(head);
+  }
   if(isMobile){
     // On mobile: show a full-screen overlay with the menu centered
     const overlay=document.createElement('div');
@@ -16070,6 +17778,7 @@ function showNickMenu(e,nick){
     const hdr=document.createElement('div');
     hdr.style.cssText='padding:8px 12px;font-weight:700;color:var(--accent);border-bottom:1px solid var(--border);font-size:13px;';
     hdr.textContent=nick;
+    if(_ctxAv) _ctxHead(hdr);
     menu.insertBefore(hdr,menu.firstChild);
     menu.style.cssText='position:fixed;z-index:200;background:var(--bg2);border:1px solid var(--border2);border-radius:10px;padding:4px 0;min-width:180px;max-width:min(260px,85vw);max-height:min(65vh,400px);overflow-y:auto;box-shadow:0 8px 30px rgba(0,0,0,.6);font-size:13px;';
     document.body.appendChild(overlay);
@@ -18241,7 +19950,7 @@ async function _reloadForUpdate(force,acc){
   const inp=document.getElementById('msg-input');
   const draftOf=()=>inp&&inp.value&&inp.value.trim()?inp.value:'';
   const pwDirty=()=>typeof _pwSafeDirty!=='undefined'&&!!_pwSafeDirty;
-  const crossReply=()=>(typeof _replyTo!=='undefined'&&_replyTo&&active&&_replyKey(_replyTo.conn_id,_replyTo.target)!==_replyKey(active.conn_id,active.target))?_replyTo.target:'';
+  const crossReply=()=>(typeof _replyTo!=='undefined'&&_replyTo&&active&&!_sameConvAt(_replyTo.conn_id,_replyTo.target,active.conn_id,active.target))?_replyTo.target:'';
   const np=()=>document.getElementById('notepad-area');
   // a notepad edit whose save did not go out (no autosave pending any more)
   const npFailed=()=>!!np()&&_notepadLoaded&&_notepadEdited&&!_notepadSaveTimer;
@@ -18282,14 +19991,14 @@ async function _reloadForUpdate(force,acc){
   if((!flushNotepad()||npUnloaded())&&!acc.notepad){ abort(); return; }
   const draft=draftOf();
   if(draft&&active&&!crossReply()&&!acc.draftLost){
-    try{ sessionStorage.setItem('cryptirc_reload_draft',JSON.stringify({k:bk(active.conn_id,active.target),v:draft,t:Date.now()})); }
+    try{ sessionStorage.setItem('cryptirc_reload_draft',JSON.stringify({c:active.conn_id,g:active.target,v:draft,t:Date.now()})); }   // r11: conn + the exact target spelling
     catch(_){ abort({noStore:true}); return; }   // e.g. storage full: the text would be lost
   }
   window._updateReloading=true;   // a detached window does not say "bye" to the main window for this reload
   // A detached window's own URL (?detached=1&conn=…&target=…) is cleaned right after it
   // opens (the notification-click parameter cleanup), so a plain reload would turn it into
   // a full client window: reopen it as the detached window it is.
-  if(typeof _detMode!=='undefined'&&_detMode&&_detConn&&_detTarget){ location.replace('/cryptirc/?detached=1&conn='+encodeURIComponent(_detConn)+'&target='+encodeURIComponent(_detTarget)); return; }
+  if(typeof _detMode!=='undefined'&&_detMode&&_detConn&&_detTarget){ location.replace(location.pathname+_detSearch()); return; }
   location.reload();
 }
 // The text that was in the input box when the update reload was clicked (see above). It
@@ -18299,10 +20008,15 @@ async function _reloadForUpdate(force,acc){
 var _reloadDraft=null;
 try{
   const _rd=sessionStorage.getItem('cryptirc_reload_draft');
-  if(_rd){ const d=JSON.parse(_rd); if(d&&typeof d.k==='string'&&typeof d.v==='string'&&!(Date.now()-(+d.t||0)>86400000)) _reloadDraft=d; else sessionStorage.removeItem('cryptirc_reload_draft'); }
+  // r11: only {c, g} records; one saved by an earlier build ({k: bk()}, Unicode lowercase)
+  // cannot tell which conversation it was typed in (#Ä / #ä, K / k) — discarded, never shown.
+  if(_rd){ const d=JSON.parse(_rd); if(d&&typeof d.c==='string'&&typeof d.g==='string'&&typeof d.v==='string'&&!(Date.now()-(+d.t||0)>86400000)) _reloadDraft=d; else sessionStorage.removeItem('cryptirc_reload_draft'); }
 }catch(_){ _reloadDraft=null; }
 function _restoreReloadDraft(conn_id,target){
-  if(!_reloadDraft||_reloadDraft.k!==bk(conn_id,target)) return;
+  // r11: back only into the conversation it was typed in (same conn; target equal by the
+  // reply guard's rule, _sameConv).
+  const d=_reloadDraft; if(!d||typeof d.c!=='string'||typeof d.g!=='string') return;
+  if(!_sameConvAt(d.c,d.g,conn_id,target)) return;
   const i=document.getElementById('msg-input'); if(!i||i.value) return;   // not empty: kept for later
   i.value=_reloadDraft.v; _reloadDraft=null;
   try{ sessionStorage.removeItem('cryptirc_reload_draft'); }catch(_){}
@@ -18797,6 +20511,12 @@ async function showAdminPanel(){
         <div class="adm-hint" style="margin-top:8px">One free key serves everyone — get it at last.fm/api. Users set their Last.fm username in Settings ▸ Profile; a user who pastes their own key uses theirs.</div>
       </div>
 
+      <div class="adm-card">
+        <div class="adm-ct">Avatars</div>
+        <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${settings.avatars_enabled!==false?' on':''}" id="admin-avatars-enabled" onclick="this.classList.toggle('on');adminSaveAvatars()"></button></div>
+        <div class="adm-hint">Users upload a picture in Settings ▸ Profile; it shows next to their nick to other CryptIRC users of this server on the same IRC server. Off: none are shown or accepted (saved pictures stay until removed). Remove one user's picture from their entry below.</div>
+      </div>
+
       <div style="font-size:11px;font-weight:700;color:var(--text2);text-transform:uppercase;letter-spacing:.1em;margin:18px 0 11px;padding-left:9px;border-left:2px solid var(--accent)">Users <span style="color:var(--text3);font-weight:400;letter-spacing:0;text-transform:none;margin-left:4px">— tap to inspect</span></div>
       <div class="adm-roster" id="admin-roster"></div>
 
@@ -18869,6 +20589,7 @@ function showUserDetail(uname){
         case 'disable': adminDisableUser(un); break;
         case 'enable': adminEnableUser(un); break;
         case 'delete': adminDeleteUser(un); break;
+        case 'rmavatar': adminRemoveAvatar(un); break;
       }
     });
   }
@@ -18876,12 +20597,24 @@ function showUserDetail(uname){
   _overlayOpen('adminUserDetail', closeUserDetail);
   renderUserDetail(u);
 }
+function _admAvatarInto(b,u){
+  const circle=b.querySelector('.adm-av');
+  if(!circle||!(u.avatar&&_avValid(u.avatar)))return;
+  _avLoad(u.avatar,128).then(url=>{
+    if(!url||!document.body.contains(circle)) return;
+    const img=document.createElement('img');
+    img.alt=u.username; img.decoding='async';
+    img.addEventListener('load',()=>{ circle.textContent=''; circle.appendChild(img); circle.classList.add('has-img'); },{once:true});
+    img.src=url;
+  });
+}
 function renderUserDetail(u){
   const b=document.getElementById('admin-detail-body'); if(!b) return;
   b.dataset.username=u.username;
   const fmt=ts=>{ if(!ts) return '—'; try{ return new Date(ts*1000).toLocaleString([],{year:'numeric',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}); }catch(e){ return '—'; } };
   const online=u.sessions>0;
   const uploads=u.admin?'Always (admin)':(u.can_upload?'Allowed':'Not allowed');
+  const hasAv=!!(u.avatar&&_avValid(u.avatar));
   b.innerHTML=`
     <div class="adm-dh">
       <div class="adm-av">${esc((u.username||'?').charAt(0).toUpperCase())}</div>
@@ -18897,14 +20630,17 @@ function renderUserDetail(u){
       <dt>Signed up</dt><dd>${fmt(u.created_at)}</dd>
       <dt>Last login</dt><dd>${u.last_login?fmt(u.last_login):'<span style="color:var(--text3)">never</span>'}</dd>
       <dt>Uploads</dt><dd>${uploads}</dd>
+      <dt>Avatar</dt><dd>${hasAv?(u.avatar.visible===false?'Set (hidden from others)':'Set'):'<span style="color:var(--text3)">none</span>'}</dd>
     </dl>
     <div class="adm-acts">
       ${u.disabled?'<button class="ok" data-act="enable">✓ Enable login</button>':(u.verified?'':'<button class="ok" data-act="approve">✓ Approve account</button>')}
       <button data-act="setemail">✉ ${u.email?'Edit email':'Set email'}</button>
       ${u.admin?'':`<button data-act="upload" data-val="${!u.can_upload}">📎 ${u.can_upload?'Revoke uploads':'Allow uploads'}</button>`}
+      ${hasAv?'<button class="warn" data-act="rmavatar">🖼 Remove avatar</button>':''}
       ${(u.admin||u.disabled)?'':'<button class="warn" data-act="disable">⊘ Disable login</button>'}
       ${u.admin?'':'<button class="bad" data-act="delete">🗑 Delete account</button>'}
     </div>`;
+  _admAvatarInto(b,u);
 }
 
 function closeAdminPanel(){if(window._ssTimer){clearInterval(window._ssTimer);window._ssTimer=null;}closeUserDetail();_overlayClose('adminPanel');document.getElementById('admin-overlay').classList.remove('show');}
@@ -19340,6 +21076,23 @@ async function adminSaveLastfm(){
   }catch(e){ if(msg) msg.textContent='Save failed.'; }
 }
 
+async function adminSaveAvatars(){
+  const on=!!document.getElementById('admin-avatars-enabled')?.classList.contains('on');
+  try{
+    const r=await fetch('/cryptirc/admin/settings',{method:'PUT',headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},body:JSON.stringify({avatars_enabled:on})});
+    showToast(r.ok?(on?'Avatars turned on':'Avatars turned off'):'Avatar setting not saved');
+    if(r.ok){ avatarForgetAll(); avatarRefreshActive(); }
+  }catch(e){ showToast('Avatar setting not saved — network error'); }
+}
+async function adminRemoveAvatar(username){
+  if(!(await customConfirm(`Remove ${username}'s avatar?`,'Remove')))return;
+  try{
+    const r=await fetch(`/cryptirc/admin/user/${encodeURIComponent(username)}/avatar`,{method:'DELETE',headers:{'Authorization':'Bearer '+sessionToken}});
+    const d=await r.json().catch(()=>({}));
+    showToast(d.message||(r.ok?'Avatar removed':'Could not remove the avatar'));
+    if(r.ok){ avatarForgetAll(); showAdminPanel(); }
+  }catch(e){ showToast('Could not remove the avatar — network error'); }
+}
 async function adminSetUserEmail(username){
   const u=(window._adm&&window._adm.users||[]).find(x=>x.username===username);
   const cur=u?(u.email||''):'';

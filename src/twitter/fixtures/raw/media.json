@@ -1,0 +1,98 @@
+{
+  "data": {
+    "tweetResult": {
+      "result": {
+        "__typename": "Tweet",
+        "rest_id": "123",
+        "core": {
+          "user_results": {
+            "result": {
+              "rest_id": "456",
+              "core": {
+                "name": "Core Name",
+                "screen_name": "sample"
+              },
+              "legacy": {
+                "name": "Legacy Name",
+                "screen_name": "old",
+                "verified": false,
+                "profile_image_url_https": "https://pbs.twimg.com/avatar.jpg"
+              },
+              "is_blue_verified": true
+            }
+          }
+        },
+        "legacy": {
+          "full_text": "Hello 🌍 @sample\nRead https://t.co/a #Rust",
+          "truncated": false,
+          "created_at": "Tue Oct 20 12:00:00 +0000 2026",
+          "favorite_count": 0,
+          "retweet_count": "18446744073709551615",
+          "entities": {
+            "user_mentions": [
+              {
+                "screen_name": "sample",
+                "indices": [
+                  9,
+                  16
+                ]
+              }
+            ],
+            "urls": [
+              {
+                "url": "https://t.co/a",
+                "expanded_url": "https://example.org/a",
+                "display_url": "example.org/a"
+              }
+            ],
+            "hashtags": [
+              {
+                "text": "Rust"
+              }
+            ]
+          },
+          "extended_entities": {
+            "media": [
+              {
+                "id_str": "789",
+                "type": "photo",
+                "media_url_https": "https://pbs.twimg.com/media/photo.jpg",
+                "original_info": {
+                  "width": 1600,
+                  "height": 900
+                },
+                "ext_alt_text": "Photo"
+              },
+              {
+                "media_key": "gif",
+                "type": "animated_gif"
+              },
+              {
+                "media_key": "video",
+                "type": "video",
+                "video_info": {
+                  "duration_millis": 12345,
+                  "variants": [
+                    {
+                      "content_type": "video/mp4",
+                      "url": "https://video.twimg.com/a.mp4",
+                      "bitrate": 256000
+                    },
+                    {
+                      "content_type": "application/x-mpegURL",
+                      "url": "https://video.twimg.com/a.m3u8"
+                    },
+                    {
+                      "content_type": "video/mp4",
+                      "url": "https://evil.test/a.mp4"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 mod ai;
 mod auth;
+mod avatar;
 mod bots;
 mod captcha;
 mod certs;
@@ -39,6 +40,7 @@ mod paste;
 mod paste_render;
 mod preview;
 mod sysstatus;
+mod twitter;
 mod upload;
 #[cfg(test)]
 mod version_sync;
@@ -138,6 +140,9 @@ pub struct AppState {
     /// /api/news. (body, fetched_at) — refreshed after NEWS_TTL; stale copy served on
     /// a fetch failure. Fixed URL ⇒ no SSRF.
     pub news_cache:          Arc<tokio::sync::Mutex<Option<(String, std::time::Instant)>>>,
+    /// User avatars (avatar.rs): the per-account index, the admin on/off switch, the
+    /// processing slot and the lookup limiter.
+    pub avatars:             Arc<avatar::AvatarStore>,
 }
 
 /// #33: max simultaneous outbound link-preview fetches, process-wide.
@@ -254,16 +259,8 @@ impl AppState {
     /// over budget. Pruned opportunistically: the entry resets once its window
     /// elapses, so the map self-cleans for active users without a sweeper.
     pub fn preview_rate_ok(&self, username: &str) -> bool {
-        let now = std::time::Instant::now();
-        let window = std::time::Duration::from_secs(PREVIEW_RATE_WINDOW_SECS);
-        let mut e = self.preview_rate.entry(username.to_string()).or_insert((now, 0));
-        let (start, count) = &mut *e;
-        if now.duration_since(*start) > window {
-            *start = now;
-            *count = 0;
-        }
-        *count += 1;
-        *count <= PREVIEW_RATE_MAX
+        // One bucket for generic /preview and every /tweet/* route (see preview_rate_ok).
+        preview_rate_ok(&self.preview_rate, username)
     }
     /// Per-user sliding-window rate gate for the GIF search proxy.
     pub fn gif_rate_ok(&self, username: &str) -> bool {
@@ -385,6 +382,9 @@ impl AppState {
         // Delete account data (networks/e2e/logs/certs/sessions/user dir) — but keep the user
         // record itself until the end, so the name stays taken (see above).
         self.auth.delete_account_data(&uname).await;
+        // The avatar lives in users/<name>/ (removed just above); drop its index entry too,
+        // so its token stops resolving at once.
+        self.avatars.purge_user(&uname).await;
         // Second pass, AFTER the configs are gone: a Connect / vault-unlock reconnect from
         // another tab that read the config before delete_account could have re-inserted
         // conn_owners and sent a fresh Dial between the first pass and the delete. Both of
@@ -481,6 +481,7 @@ impl AppState {
         self.paste_store.delete_by_author(&uname).await;
         self.notifier.purge_user(&uname).await;
         crate::irc::discard_held_logs(&uname, None, None).await;
+        self.avatars.purge_user(&uname).await;
         self.auth.end_account_deletion(&uname);
     }
 
@@ -1236,9 +1237,40 @@ mod security_headers_tests {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+/// RUST_LOG filter for the service. Same behaviour as `tracing_subscriber::fmt::init()`
+/// (default: ERROR), except that the HTML tokenizer crates are always silenced: html5ever
+/// logs input characters / text runs at trace level, and its input is third-party content
+/// (X thread previews) that must never reach the logs, whatever RUST_LOG says. A more
+/// specific user directive (e.g. `html5ever::tokenizer=trace`) would beat an added
+/// `html5ever=off`, so every user directive whose target starts with one of these crates is
+/// dropped first (`env` = the RUST_LOG value; `None` reads the environment).
+const LOG_SILENCED_CRATES: &[&str] = &["html5ever", "markup5ever"];
+
+fn log_filter(env: Option<&str>) -> tracing_subscriber::EnvFilter {
+    let raw = match env {
+        Some(directives) => directives.to_owned(),
+        None => std::env::var("RUST_LOG").unwrap_or_default(),
+    };
+    let kept: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|directive| {
+            let target = directive.split(['=', '[']).next().unwrap_or("").trim();
+            !directive.is_empty() && !LOG_SILENCED_CRATES.iter().any(|c| target.starts_with(c))
+        })
+        .collect();
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::ERROR.into())
+        .parse_lossy(kept.join(","));
+    LOG_SILENCED_CRATES
+        .iter()
+        .filter_map(|c| format!("{c}=off").parse().ok())
+        .fold(filter, |filter, directive| filter.add_directive(directive))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt().with_env_filter(log_filter(None)).init();
     let data_dir   = std::env::var("CRYPTIRC_DATA").unwrap_or_else(|_| "./data".into());
     let upload_dir = format!("{}/uploads", data_dir);
     // trim a trailing slash so every `{base_url}/paste/…`, `{base_url}/s/…` and
@@ -1316,6 +1348,10 @@ async fn main() -> Result<()> {
         let ce = v.and_then(|v| v.get("captcha_enabled")).and_then(|x| x.as_bool()).unwrap_or(true);
         (er, ce)
     };
+    // Avatars (admin switch, default ON). A present-but-unparseable settings file fails
+    // closed (off), like the sign-up policy above.
+    let avatars_enabled = !admin_settings_corrupt && admin_settings_val.as_ref()
+        .and_then(|v| v.get("avatars_enabled")).and_then(|x| x.as_bool()).unwrap_or(true);
     // Last.fm now-playing (admin-controlled). Default OFF; shared API key blank.
     let (lastfm_enabled, lastfm_api_key) = {
         let v = admin_settings_val.as_ref();
@@ -1356,7 +1392,9 @@ async fn main() -> Result<()> {
     let notifier = Arc::new(NotificationManager::new(&data_dir, vapid));
     let e2e_store = Arc::new(E2EStore::new(&data_dir));
     let paste_store = Arc::new(paste::PasteStore::new(&data_dir));
-    let preview_service = Arc::new(preview::PreviewService::new(&data_dir));
+    // #33: one outbound-preview permit pool, shared by generic /preview and the X adapter.
+    let preview_sem = Arc::new(Semaphore::new(PREVIEW_MAX_CONCURRENT));
+    let preview_service = Arc::new(preview::PreviewService::new(&data_dir, preview_sem.clone()));
     // #45: re-harden pre-existing per-user vault/e2e secret dirs+files to 0700/0600
     // (the create path is already secure; this covers dirs from before the hardening
     // or an upgraded install). Best-effort, startup-once.
@@ -1381,6 +1419,7 @@ async fn main() -> Result<()> {
     // message, so it can't be a per-message file read). Server-readable → 24/7.
     let bots = Arc::new(bots::load_all(&data_dir).await);
     info!("Loaded bot config for {} user(s)", bots.len());
+    let avatars = Arc::new(avatar::AvatarStore::load(&data_dir, avatars_enabled).await);
 
     let state = AppState {
         connections:         Arc::new(DashMap::new()),
@@ -1407,7 +1446,7 @@ async fn main() -> Result<()> {
         base_path: bp_trimmed.to_string(),
         static_index, static_manifest, static_sw, static_app_js,
         // #33: bound outbound link-preview fetch concurrency + per-user rate.
-        preview_sem:  Arc::new(Semaphore::new(PREVIEW_MAX_CONCURRENT)),
+        preview_sem,
         preview_rate: Arc::new(DashMap::new()),
         gif_provider:     Arc::new(tokio::sync::RwLock::new(gif_provider)),
         gif_mode:         Arc::new(tokio::sync::RwLock::new(gif_mode)),
@@ -1416,6 +1455,7 @@ async fn main() -> Result<()> {
         gif_rate:         Arc::new(DashMap::new()),
         gif_client,
         news_cache:       Arc::new(tokio::sync::Mutex::new(None)),
+        avatars,
     };
 
     // irc-core daemon split: AppState.connections/conn_owners are pure in-memory
@@ -1459,6 +1499,8 @@ async fn main() -> Result<()> {
             }
         }
         info!("Seeded conn_owners for {} network config(s) from disk", seeded);
+        // Avatars: per-connection records only for networks their owners still have.
+        state.avatars.prune_sessions(&state.conn_owners);
     }
 
     // Connect to the irc-core daemon (a separate always-on process holding the
@@ -1564,6 +1606,14 @@ async fn main() -> Result<()> {
         .route("/auth/set-email",        post(route_set_email).layer(DefaultBodyLimit::max(8_192)))
         .route("/auth/lastfm",           post(route_set_lastfm).layer(DefaultBodyLimit::max(4_096)))
         .route("/api/lastfm/np",         get(route_lastfm_np))
+        // Avatars (avatar.rs): own avatar (body = the raw image, read after the session
+        // check), discovery lookups, the pictures, and the admin remove.
+        .route("/api/avatar/me",         get(avatar::route_me_get).post(avatar::route_me_upload)
+                                         .put(avatar::route_me_settings).delete(avatar::route_me_delete)
+                                         .layer(DefaultBodyLimit::max(avatar::MAX_UPLOAD_BYTES)))
+        .route("/api/avatar/lookup",     post(avatar::route_lookup).layer(DefaultBodyLimit::max(avatar::LOOKUP_BODY_MAX)))
+        .route("/avatar/:token",         get(avatar::route_image))
+        .route("/admin/user/:username/avatar", axum::routing::delete(avatar::route_admin_remove))
         .route("/admin/users",           get(route_admin_users))
         .route("/admin/status",          get(route_admin_status))
         .route("/admin/user/:username",  axum::routing::delete(route_admin_delete_user))
@@ -1607,6 +1657,11 @@ async fn main() -> Result<()> {
         .route("/s",                    post(route_short_create).layer(DefaultBodyLimit::max(4_096)))
         .route("/s/:id",                get(route_short_redirect))
         .route("/preview",              get(route_link_preview))
+        .route("/tweet/config",         get(route_tweet_config))
+        .route("/tweet/preview",        get(route_tweet_preview))
+        .route("/tweet/thread",         get(route_tweet_thread))
+        .route("/tweet/media",          get(route_tweet_media))
+        .route("/tweet/media/sign",     post(route_tweet_media_sign).layer(DefaultBodyLimit::max(8_192)))
         .route("/admin/link-preview",   get(route_admin_get_preview_settings).put(route_admin_put_preview_settings))
         .route("/api/gif/config",       get(route_gif_config))
         .route("/api/news",             get(route_news))
@@ -2505,7 +2560,12 @@ async fn route_admin_users(State(state): State<AppState>, headers: HeaderMap) ->
     if !state.auth.is_admin(&user).await {
         return StatusCode::FORBIDDEN.into_response();
     }
-    Json(state.auth.list_users().await).into_response()
+    let mut users = state.auth.list_users().await;
+    for u in users.iter_mut() {
+        let name = u.get("username").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        u["avatar"] = avatar::admin_roster_info(&state.avatars, &name);
+    }
+    Json(users).into_response()
 }
 
 // Read-only host + process metrics for the admin Server Status panel. Admin-gated
@@ -2637,6 +2697,7 @@ async fn route_admin_get_settings(State(state): State<AppState>, headers: Header
         "lastfm_enabled": *state.lastfm_enabled.read().await,
         "lastfm_key_set": !lastfm_key.is_empty(),
         "lastfm_key_masked": mask_key(&lastfm_key),
+        "avatars_enabled": state.avatars.enabled(),
     })).into_response()
 }
 
@@ -2656,6 +2717,8 @@ struct AdminSettings {
     // Last.fm (optional; omitted = keep current, blank key = keep current).
     lastfm_enabled: Option<bool>,
     lastfm_api_key: Option<String>,
+    // Avatars on/off (optional; omitted = keep current).
+    avatars_enabled: Option<bool>,
 }
 
 /// Mask a secret for display in the admin UI: "abcd…yz", never the full key.
@@ -2763,6 +2826,7 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
         if !k.is_empty() { *state.tenor_server_key.write().await = k.to_string(); }
     }
     if let Some(e) = body.lastfm_enabled { *state.lastfm_enabled.write().await = e; }
+    if let Some(on) = body.avatars_enabled { state.avatars.set_enabled(on); }
     if let Some(k) = body.lastfm_api_key {
         let k = k.trim();
         if !k.is_empty() { *state.lastfm_api_key.write().await = k.to_string(); }
@@ -2799,6 +2863,7 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     existing["tenor_server_key"] = serde_json::json!(*state.tenor_server_key.read().await);
     existing["lastfm_enabled"] = serde_json::json!(*state.lastfm_enabled.read().await);
     existing["lastfm_api_key"] = serde_json::json!(*state.lastfm_api_key.read().await);
+    existing["avatars_enabled"] = serde_json::json!(state.avatars.enabled());
     if let Err(e) = write_secret_json_atomic(&path, &existing).await { // #30/#112
         drop(_guard);
         tracing::error!("failed to persist admin_settings.json: {}", e);
@@ -4282,6 +4347,597 @@ async fn route_short_redirect(
     }
 }
 
+// ─── X previews (rich X/Twitter cards) ──────────────────────────────────────
+// Port of the community rich-X-previews reference. Every provider is OFF unless the
+// operator sets its startup flag (INSTALL.md "X post preview provider"); with no flag
+// set these routes answer locally and nothing contacts X or any third party.
+
+/// The per-user /preview budget, shared by generic link previews and every X route.
+fn preview_rate_ok(rates: &DashMap<String, (std::time::Instant, u32)>, username: &str) -> bool {
+    let now = std::time::Instant::now();
+    let mut bucket = rates.entry(username.to_owned()).or_insert((now, 0));
+    if now.duration_since(bucket.0) > std::time::Duration::from_secs(PREVIEW_RATE_WINDOW_SECS) {
+        *bucket = (now, 1);
+    } else {
+        bucket.1 = bucket.1.saturating_add(1);
+    }
+    bucket.1 <= PREVIEW_RATE_MAX
+}
+
+/// Max simultaneous signed-media fallback streams, process-wide.
+const MEDIA_PROXY_MAX_STREAMS: usize = 16;
+/// Max simultaneous fallback streams per account (signatures are bound to the account).
+const MEDIA_PROXY_MAX_STREAMS_PER_ACCOUNT: usize = 3;
+/// Signed fallback URLs live this long (seconds).
+const MEDIA_SIGN_TTL_SECS: i64 = 900;
+/// Hard byte cap per proxied response.
+const MAX_MEDIA_PROXY_BYTES: u64 = 128 * 1024 * 1024;
+/// DNS resolution, connect and the upstream response headers must all complete within this
+/// (one deadline around the whole fetch, so a stalled resolver can't hold stream slots).
+const MEDIA_PROXY_HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+/// Longest stall (upstream not sending, or the client not reading), and longest stream.
+const MEDIA_PROXY_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const MEDIA_PROXY_MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Per-stream bounds of the media fallback (overridable in tests).
+#[derive(Clone, Copy, Debug)]
+struct MediaLimits {
+    headers: std::time::Duration,
+    max_duration: std::time::Duration,
+    idle: std::time::Duration,
+    per_account: usize,
+}
+impl Default for MediaLimits {
+    fn default() -> Self {
+        Self {
+            headers: MEDIA_PROXY_HEADER_TIMEOUT,
+            max_duration: MEDIA_PROXY_MAX_DURATION,
+            idle: MEDIA_PROXY_IDLE_TIMEOUT,
+            per_account: MEDIA_PROXY_MAX_STREAMS_PER_ACCOUNT,
+        }
+    }
+}
+
+fn media_stream_permits() -> Arc<Semaphore> {
+    static PERMITS: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| Arc::new(Semaphore::new(MEDIA_PROXY_MAX_STREAMS))).clone()
+}
+
+type MediaAccounts = Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>;
+fn media_active_accounts() -> MediaAccounts {
+    static ACTIVE: std::sync::OnceLock<MediaAccounts> = std::sync::OnceLock::new();
+    ACTIVE.get_or_init(Default::default).clone()
+}
+
+fn media_upstream_http() -> Arc<dyn MediaUpstream> {
+    static HTTP: std::sync::OnceLock<Arc<dyn MediaUpstream>> = std::sync::OnceLock::new();
+    HTTP.get_or_init(|| Arc::new(HttpMediaUpstream)).clone()
+}
+
+#[derive(Clone)]
+struct TweetRouteState {
+    auth: Arc<AuthManager>,
+    service: Arc<preview::PreviewService>,
+    rates: Arc<DashMap<String, (std::time::Instant, u32)>>,
+    base_path: String,
+    media_streams: Arc<Semaphore>,
+    media_accounts: MediaAccounts,
+    media_upstream: Arc<dyn MediaUpstream>,
+    media_limits: MediaLimits,
+}
+
+impl axum::extract::FromRef<AppState> for TweetRouteState {
+    fn from_ref(state: &AppState) -> Self {
+        Self {
+            auth: state.auth.clone(),
+            service: state.preview_service.clone(),
+            rates: state.preview_rate.clone(),
+            base_path: state.base_path.clone(),
+            media_streams: media_stream_permits(),
+            media_accounts: media_active_accounts(),
+            media_upstream: media_upstream_http(),
+            media_limits: MediaLimits::default(),
+        }
+    }
+}
+
+type TweetQuery = Result<
+    Query<std::collections::HashMap<String, String>>,
+    axum::extract::rejection::QueryRejection,
+>;
+
+fn tweet_session_user(state: &TweetRouteState, headers: &HeaderMap) -> Option<String> {
+    bearer_token(headers).and_then(|token| state.auth.validate_session(&token))
+}
+
+fn private_tweet_response(mut response: Response) -> Response {
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    response.headers_mut().insert(header::VARY, HeaderValue::from_static("Authorization"));
+    response
+}
+
+fn tweet_error_body(status: StatusCode, code: &str, retryable: bool, delay: Option<u64>) -> Response {
+    let mut response = (
+        status,
+        Json(serde_json::json!({"schema_version":1,"error":{
+            "code":code,"retryable":retryable,"retry_after_seconds":delay}})),
+    )
+        .into_response();
+    if let Some(delay) = delay {
+        if let Ok(value) = HeaderValue::from_str(&delay.max(1).to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    private_tweet_response(response)
+}
+
+fn tweet_unauthorized() -> Response {
+    tweet_error_body(StatusCode::UNAUTHORIZED, "unauthorized", false, None)
+}
+
+fn tweet_error(error: twitter::PreviewError) -> Response {
+    use twitter::PreviewError::*;
+    let (status, code, retryable, delay) = match error {
+        InvalidUrl => (StatusCode::BAD_REQUEST, "invalid_url", false, None),
+        RateLimited(delay) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited", true, Some(delay)),
+        Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy", true, None),
+        Timeout => (StatusCode::SERVICE_UNAVAILABLE, "timeout", true, None),
+        ProviderChanged => (StatusCode::SERVICE_UNAVAILABLE, "provider_changed", true, None),
+        UpstreamFailure => (StatusCode::SERVICE_UNAVAILABLE, "upstream_failure", true, None),
+    };
+    tweet_error_body(status, code, retryable, delay)
+}
+
+/// What this server can offer right now, so a browser on an unconfigured install renders
+/// plain links and makes no preview requests at all. Auth required; no upstream traffic.
+async fn route_tweet_config(State(state): State<TweetRouteState>, headers: HeaderMap) -> Response {
+    if tweet_session_user(&state, &headers).is_none() {
+        return tweet_unauthorized();
+    }
+    let (preview, thread) = state.service.tweet_capabilities().await;
+    private_tweet_response(
+        Json(serde_json::json!({"schema_version":1,"preview":preview,"thread":thread})).into_response(),
+    )
+}
+
+async fn route_tweet_preview(State(state): State<TweetRouteState>, headers: HeaderMap, params: TweetQuery) -> Response {
+    route_x_operation(state, headers, params, false).await
+}
+
+async fn route_tweet_thread(State(state): State<TweetRouteState>, headers: HeaderMap, params: TweetQuery) -> Response {
+    route_x_operation(state, headers, params, true).await
+}
+
+/// `GET /tweet/preview|thread?url=<status URL>[&refresh=1]`. Session and the shared
+/// per-user budget are checked before anything else (including a cached result). Logs
+/// stay coarse: never the URL, ID, token, text or provider body.
+async fn route_x_operation(state: TweetRouteState, headers: HeaderMap, params: TweetQuery, thread: bool) -> Response {
+    let Some(user) = tweet_session_user(&state, &headers) else {
+        return tweet_unauthorized();
+    };
+    if !preview_rate_ok(&state.rates, &user) {
+        return tweet_error(twitter::PreviewError::RateLimited(PREVIEW_RATE_WINDOW_SECS));
+    }
+    let Ok(Query(params)) = params else {
+        return tweet_error(twitter::PreviewError::InvalidUrl);
+    };
+    if params.keys().any(|k| !matches!(k.as_str(), "url" | "refresh"))
+        || params.get("refresh").is_some_and(|v| v != "1")
+    {
+        return tweet_error(twitter::PreviewError::InvalidUrl);
+    }
+    let Some(identity) = params.get("url").and_then(|v| twitter::parse_tweet_url(v)) else {
+        return tweet_error(twitter::PreviewError::InvalidUrl);
+    };
+    let refresh = params.contains_key("refresh");
+    let result = if thread {
+        state.service.fetch_tweet_thread(&user, &identity.id, refresh).await
+    } else {
+        state.service.fetch_tweet_preview(&user, &identity.id, refresh).await
+    };
+    match result {
+        Ok(preview) => private_tweet_response(Json(preview.as_ref()).into_response()),
+        Err(error) => tweet_error(error),
+    }
+}
+
+fn media_sign_key() -> &'static [u8; 32] {
+    // Per-process random key: a restart invalidates every outstanding signed URL.
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    KEY.get_or_init(rand::random)
+}
+
+/// Opaque, per-process subject for an account: binds a signed URL to the account that
+/// asked for it (per-account stream cap) without putting the username in the URL.
+fn media_subject(username: &str) -> String {
+    use base64::Engine as _;
+    use hmac::Mac;
+    let Ok(mut mac) = hmac::Hmac::<sha2::Sha256>::new_from_slice(media_sign_key()) else {
+        return String::new();
+    };
+    mac.update(b"subject\n");
+    mac.update(username.to_lowercase().as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&mac.finalize().into_bytes()[..12])
+}
+
+fn media_mac(expires: i64, subject: &str, normalized: &str) -> Option<hmac::Hmac<sha2::Sha256>> {
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(media_sign_key()).ok()?;
+    mac.update(format!("media\n{expires}\n{subject}\n{normalized}").as_bytes());
+    Some(mac)
+}
+
+#[derive(Deserialize)]
+struct MediaSignRequest {
+    urls: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct MediaSignedUrl {
+    url: String,
+    proxy_url: String,
+}
+
+/// Sign one recognized X CDN asset (twitter::validate_proxy_media_url) for the
+/// same-origin fallback, bound to `subject` (media_subject of the requesting account).
+/// Returns (normalized URL, proxy path+query, expiry).
+fn sign_media_path(base_path: &str, raw: &str, subject: &str) -> Option<(String, String, i64)> {
+    use base64::Engine as _;
+    use hmac::Mac;
+    if subject.is_empty() {
+        return None;
+    }
+    let (normalized, _) = twitter::validate_proxy_media_url(raw)?;
+    let expires = chrono::Utc::now().timestamp() + MEDIA_SIGN_TTL_SECS;
+    let sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(media_mac(expires, subject, &normalized)?.finalize().into_bytes());
+    let mut proxy = reqwest::Url::parse("https://media.invalid/").ok()?;
+    proxy.set_path(&format!("{}/tweet/media", base_path.trim_end_matches('/')));
+    proxy
+        .query_pairs_mut()
+        .append_pair("url", &normalized)
+        .append_pair("exp", &expires.to_string())
+        .append_pair("a", subject)
+        .append_pair("sig", &sig);
+    Some((normalized, format!("{}?{}", proxy.path(), proxy.query().unwrap_or("")), expires))
+}
+
+/// Verify a signed fallback URL (constant-time MAC check, expiry window, recognized
+/// asset). Returns the normalized URL and its media kind.
+fn verify_media_signature(
+    raw: &str,
+    expires: i64,
+    subject: &str,
+    sig: &str,
+) -> Option<(String, twitter::ProxyMediaKind)> {
+    use base64::Engine as _;
+    use hmac::Mac;
+    let now = chrono::Utc::now().timestamp();
+    if expires < now
+        || expires > now + MEDIA_SIGN_TTL_SECS + 60
+        || sig.len() > 64
+        || subject.is_empty()
+        || subject.len() > 32
+    {
+        return None;
+    }
+    let (normalized, kind) = twitter::validate_proxy_media_url(raw)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig).ok()?;
+    media_mac(expires, subject, &normalized)?.verify_slice(&decoded).ok()?;
+    Some((normalized, kind))
+}
+
+/// `POST /tweet/media/sign {urls:[…≤16]}` → short-lived same-origin URLs for assets
+/// whose direct CDN load failed (privacy extensions block third-party twimg requests).
+/// Session, shared budget, current admin policy + configured provider, recognized
+/// asset paths, and "this viewer retrieved these assets" are all required.
+async fn route_tweet_media_sign(
+    State(state): State<TweetRouteState>,
+    headers: HeaderMap,
+    body: Result<Json<MediaSignRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Some(user) = tweet_session_user(&state, &headers) else {
+        return tweet_unauthorized();
+    };
+    if !preview_rate_ok(&state.rates, &user) {
+        return tweet_error(twitter::PreviewError::RateLimited(PREVIEW_RATE_WINDOW_SECS));
+    }
+    let Ok(Json(body)) = body else {
+        return tweet_error(twitter::PreviewError::InvalidUrl);
+    };
+    if body.urls.is_empty() || body.urls.len() > 16 {
+        return tweet_error(twitter::PreviewError::InvalidUrl);
+    }
+    if !state.service.tweet_media_allowed().await {
+        return tweet_error_body(StatusCode::FORBIDDEN, "provider_disabled", false, None);
+    }
+    let subject = media_subject(&user);
+    let mut urls = Vec::with_capacity(body.urls.len());
+    let mut keys = Vec::with_capacity(body.urls.len());
+    for raw in &body.urls {
+        let Some((url, proxy_url, _)) = sign_media_path(&state.base_path, raw, &subject) else {
+            return tweet_error(twitter::PreviewError::InvalidUrl);
+        };
+        let Some(key) = twitter::media_asset_key(&url) else {
+            return tweet_error(twitter::PreviewError::InvalidUrl);
+        };
+        keys.push(key);
+        urls.push(MediaSignedUrl { url, proxy_url });
+    }
+    if !state.service.tweet_media_retrieved(&user, &keys) {
+        return tweet_error_body(StatusCode::FORBIDDEN, "not_retrieved", false, None);
+    }
+    private_tweet_response(
+        Json(serde_json::json!({"urls": urls, "expires_in": MEDIA_SIGN_TTL_SECS})).into_response(),
+    )
+}
+
+type MediaChunk = Result<axum::body::Bytes, std::io::Error>;
+type MediaBodyStream = futures_util::stream::BoxStream<'static, MediaChunk>;
+
+/// One upstream media response: status, the headers the fallback may forward, and the
+/// body as a stream that only the pump task (below) ever polls.
+struct UpstreamMedia {
+    status: u16,
+    content_type: Option<String>,
+    content_length: Option<u64>,
+    content_range: Option<String>,
+    accept_ranges: Option<String>,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    body: MediaBodyStream,
+}
+
+type MediaFetchFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<UpstreamMedia, ()>> + Send>>;
+
+/// Where the fallback gets bytes from. Production: pinned HTTPS to the exact CDN host;
+/// tests substitute a local stream so no test ever resolves or contacts a CDN.
+trait MediaUpstream: Send + Sync {
+    fn fetch(&self, target: String, kind: twitter::ProxyMediaKind, range: Option<String>) -> MediaFetchFuture;
+}
+
+struct HttpMediaUpstream;
+impl MediaUpstream for HttpMediaUpstream {
+    fn fetch(&self, target: String, kind: twitter::ProxyMediaKind, range: Option<String>) -> MediaFetchFuture {
+        Box::pin(async move {
+            let host = reqwest::Url::parse(&target).ok().and_then(|u| u.host_str().map(str::to_owned)).ok_or(())?;
+            let addrs = preview::resolve_and_validate_host(&host, Some(443)).await.map_err(|_| ())?;
+            let client = preview::build_pinned_media_client(&host, &addrs).map_err(|_| ())?;
+            // No cookies, credentials or Referer are ever attached; redirects are refused.
+            let mut request = client.get(&target).header(header::ACCEPT, match kind {
+                twitter::ProxyMediaKind::Image => "image/avif,image/webp,image/png,image/jpeg,image/gif",
+                twitter::ProxyMediaKind::Mp4 => "video/mp4",
+            });
+            if let Some(range) = &range {
+                request = request.header(header::RANGE, range);
+            }
+            // (Bounded, together with DNS and connect, by the caller's MediaLimits::headers.)
+            let response = request.send().await.map_err(|_| ())?;
+            let get = |name: header::HeaderName| {
+                response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_owned)
+            };
+            let (content_type, content_range, accept_ranges, etag, last_modified) = (
+                get(header::CONTENT_TYPE),
+                get(header::CONTENT_RANGE),
+                get(header::ACCEPT_RANGES),
+                get(header::ETAG),
+                get(header::LAST_MODIFIED),
+            );
+            let status = response.status().as_u16();
+            let content_length = response.content_length();
+            let body = futures_util::stream::unfold(Some(response), |slot| async move {
+                let mut response = slot?;
+                match response.chunk().await {
+                    Ok(Some(chunk)) => Some((Ok(chunk), Some(response))),
+                    Ok(None) => None,
+                    Err(_) => Some((Err(std::io::Error::other("media upstream failed")), None)),
+                }
+            });
+            Ok(UpstreamMedia {
+                status,
+                content_type,
+                content_length,
+                content_range,
+                accept_ranges,
+                etag,
+                last_modified,
+                body: Box::pin(body),
+            })
+        })
+    }
+}
+
+/// One slot of the per-account fallback stream cap; released on drop.
+struct MediaAccountSlot {
+    accounts: MediaAccounts,
+    subject: String,
+}
+impl Drop for MediaAccountSlot {
+    fn drop(&mut self) {
+        let mut accounts = self.accounts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = accounts.get_mut(&self.subject) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                accounts.remove(&self.subject);
+            }
+        }
+    }
+}
+fn media_account_slot(accounts: &MediaAccounts, subject: &str, limit: usize) -> Option<MediaAccountSlot> {
+    let mut map = accounts.lock().unwrap_or_else(|e| e.into_inner());
+    let count = map.entry(subject.to_owned()).or_insert(0);
+    if *count >= limit {
+        return None;
+    }
+    *count += 1;
+    Some(MediaAccountSlot { accounts: accounts.clone(), subject: subject.to_owned() })
+}
+
+/// Everything a running fallback stream holds; dropping it frees the global stream
+/// permit and the account slot.
+struct MediaStreamGuards {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    _slot: MediaAccountSlot,
+}
+
+/// Aborts the pump when the response body is dropped (client gone).
+struct AbortPump(tokio::task::JoinHandle<()>);
+impl Drop for AbortPump {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Stream `upstream` to the client through a spawned pump task that owns the upstream
+/// body and the guards. The pump enforces the byte cap, the idle bound (upstream silent
+/// OR the client not reading for `idle`) and the total deadline on its own timers, so a
+/// client that stops reading cannot hold an upstream connection, a global permit or an
+/// account slot past the deadline. The body ends (truncated) when the pump stops.
+fn media_pump_body(upstream: MediaBodyStream, guards: MediaStreamGuards, limits: MediaLimits) -> Body {
+    let (tx, rx) = tokio::sync::mpsc::channel::<MediaChunk>(4);
+    let pump = tokio::spawn(async move {
+        let _guards = guards;
+        let mut upstream = upstream;
+        let deadline = tokio::time::sleep(limits.max_duration);
+        tokio::pin!(deadline);
+        let mut total = 0u64;
+        loop {
+            let next = tokio::select! {
+                _ = &mut deadline => break,
+                next = tokio::time::timeout(limits.idle, upstream.next()) => next,
+            };
+            let chunk = match next {
+                Ok(Some(Ok(chunk))) => chunk,
+                Ok(None) => break,
+                Ok(Some(Err(_))) | Err(_) => break,
+            };
+            total = total.saturating_add(chunk.len() as u64);
+            if total > MAX_MEDIA_PROXY_BYTES {
+                break;
+            }
+            let sent = tokio::select! {
+                _ = &mut deadline => false,
+                sent = tokio::time::timeout(limits.idle, tx.send(Ok(chunk))) => matches!(sent, Ok(Ok(()))),
+            };
+            if !sent {
+                break; // client gone, or not reading for `idle`
+            }
+        }
+        // Dropping `upstream` and `_guards` here closes the CDN connection and frees the
+        // global permit and the account slot; dropping `tx` ends the client body.
+    });
+    let body = futures_util::stream::unfold((rx, AbortPump(pump)), |(mut rx, pump)| async move {
+        let item = rx.recv().await?;
+        Some((item, (rx, pump)))
+    });
+    Body::from_stream(body)
+}
+
+/// `GET /tweet/media?url&exp&a&sig` — stream one signed CDN asset on our origin. No
+/// session token in the URL: the HMAC binds the exact normalized URL, the expiry and the
+/// requesting account's opaque subject (`a`), which the per-account stream cap uses.
+async fn route_tweet_media(State(state): State<TweetRouteState>, headers: HeaderMap, params: TweetQuery) -> Response {
+    let Ok(Query(params)) = params else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if params.keys().any(|k| !matches!(k.as_str(), "url" | "exp" | "a" | "sig")) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let (Some(raw), Some(expires), Some(subject), Some(sig)) = (
+        params.get("url"),
+        params.get("exp").and_then(|v| v.parse::<i64>().ok()),
+        params.get("a"),
+        params.get("sig"),
+    ) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some((target, kind)) = verify_media_signature(raw, expires, subject, sig) else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    let range = match headers.get(header::RANGE) {
+        None => None,
+        Some(value) => match value.to_str() {
+            Ok(v) if twitter::valid_media_range(v) => Some(v.to_owned()),
+            _ => return StatusCode::RANGE_NOT_SATISFIABLE.into_response(),
+        },
+    };
+    // Re-check the admin policy / provider configuration at redemption time.
+    if !state.service.tweet_media_allowed().await {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(slot) = media_account_slot(&state.media_accounts, subject, state.media_limits.per_account) else {
+        let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
+        response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+        return response;
+    };
+    let Ok(permit) = state.media_streams.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let guards = MediaStreamGuards { _permit: permit, _slot: slot };
+    // Audit fix: one deadline around DNS + connect + response headers; the slots held by
+    // `guards` are released when it fires (the fetch future is dropped).
+    let upstream = match tokio::time::timeout(
+        state.media_limits.headers,
+        state.media_upstream.fetch(target, kind, range.clone()),
+    )
+    .await
+    {
+        Ok(Ok(upstream)) => upstream,
+        Ok(Err(())) => return StatusCode::BAD_GATEWAY.into_response(),
+        Err(_) => return StatusCode::GATEWAY_TIMEOUT.into_response(),
+    };
+    if upstream.status == 416 {
+        let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+        if let Some(value) = upstream.content_range.as_deref().and_then(|v| HeaderValue::from_str(v).ok()) {
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
+        }
+        return response;
+    }
+    // A server may ignore Range (200 is fine); a 206 nobody asked for is not.
+    if !matches!(upstream.status, 200 | 206) || (upstream.status == 206 && range.is_none()) {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+    // Explicit MIME allowlist: an image asset must be a raster image, an MP4 asset must
+    // be video/mp4. HTML, SVG, playlists and mismatches never reach the browser.
+    let Some(content_type) = twitter::proxy_content_type(kind, upstream.content_type.as_deref()) else {
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    if upstream.content_length.is_some_and(|n| n > MAX_MEDIA_PROXY_BYTES) {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+    let mut builder = Response::builder()
+        .status(if upstream.status == 206 { StatusCode::PARTIAL_CONTENT } else { StatusCode::OK })
+        .header(header::CONTENT_TYPE, content_type);
+    if let Some(length) = upstream.content_length {
+        builder = builder.header(header::CONTENT_LENGTH, length);
+    }
+    for (name, value) in [
+        (header::CONTENT_RANGE, &upstream.content_range),
+        (header::ETAG, &upstream.etag),
+        (header::LAST_MODIFIED, &upstream.last_modified),
+    ] {
+        if let Some(value) = value.as_deref().and_then(|v| HeaderValue::from_str(v).ok()) {
+            builder = builder.header(name, value);
+        }
+    }
+    if upstream.accept_ranges.as_deref().is_some_and(|v| v.eq_ignore_ascii_case("bytes")) {
+        builder = builder.header(header::ACCEPT_RANGES, "bytes");
+    }
+    builder = builder
+        // Audit fix: never cacheable. A cached copy would outlive an admin revocation (the
+        // redemption checks run per request) and the signature's own expiry.
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header("cross-origin-resource-policy", "same-origin")
+        .header(header::CONTENT_DISPOSITION, "inline")
+        // Ask security_headers_mw for the extra `sandbox` CSP (opaque origin, no script)
+        // in case the asset URL is ever opened as a document.
+        .header(PASTE_SANDBOX_DOC_MARKER, "1");
+    match builder.body(media_pump_body(upstream.body, guards, state.media_limits)) {
+        Ok(response) => response,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 // ─── Link preview routes ─────────────────────────────────────────────────────
 
 async fn route_link_preview(
@@ -4396,6 +5052,8 @@ async fn route_admin_put_preview_settings(
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"message":"Failed to save settings"}))).into_response();
     }
     drop(_guard);
+    // New X policy generation now: drops cached X results the new policy may forbid.
+    state.preview_service.update_tweet_policy().await;
     Json(serde_json::json!({"message":"Settings saved"})).into_response()
 }
 
@@ -5897,6 +6555,8 @@ async fn handle_command(
         }
         ClientMessage::UpdateNetwork { mut network } => {
             if !state.owns_network(username, &network.id).await { return; }
+            // Avatars: an edited network is not trusted from its record after a restart.
+            state.avatars.forget_session(&network.id);
             // #4: serialize the read-existing → save → (cert-gen) → save sequence
             // behind the per-config lock so a concurrent Join/Part/UpdateNetwork
             // can't last-writer-wins clobber it.
@@ -5981,6 +6641,7 @@ async fn handle_command(
         }
         ClientMessage::RemoveNetwork { id } => {
             if !state.owns_network(username, &id).await { return; }
+            state.avatars.forget_session(&id);
             // #20: resolve the reason before any await elsewhere.
             let reason = match state.get_network_config(&id, username).await {
                 Some(cfg) => strip_crlf(quit_reason_for(&cfg)),
@@ -9931,5 +10592,465 @@ mod r8_srv_a_news_rate_tests {
         assert_eq!(ok, 30);
         // A new window starts afresh.
         assert!(news_rate_check(&map, "carol", now + Duration::from_secs(61), w, 30));
+    }
+}
+
+#[cfg(test)]
+mod tweet_route_tests {
+    use super::*;
+
+    struct Server(tokio::task::JoinHandle<()>);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    #[test]
+    fn media_proxy_signature_and_range_validation() {
+        let alice = media_subject("alice");
+        assert_eq!(alice, media_subject("Alice"));
+        assert_ne!(alice, media_subject("bob"));
+        assert!(!alice.contains("alice") && alice.len() == 16);
+        let (url, proxy, expires) =
+            sign_media_path("/cryptirc", "https://pbs.twimg.com/media/example.jpg?name=small", &alice).unwrap();
+        assert!(proxy.starts_with("/cryptirc/tweet/media?"));
+        let parsed = reqwest::Url::parse(&format!("https://local.test{proxy}")).unwrap();
+        let params: std::collections::HashMap<_, _> = parsed.query_pairs().into_owned().collect();
+        assert_eq!(params["url"], url);
+        assert_eq!(params["exp"].parse::<i64>().unwrap(), expires);
+        assert_eq!(params["a"], alice);
+        let verified = verify_media_signature(&url, expires, &alice, &params["sig"]).unwrap();
+        assert_eq!(verified, (url.clone(), twitter::ProxyMediaKind::Image));
+        let mut tampered = params["sig"].clone();
+        let first = tampered.remove(0);
+        tampered.insert(0, if first == 'A' { 'B' } else { 'A' });
+        assert!(verify_media_signature(&url, expires, &alice, &tampered).is_none());
+        assert!(verify_media_signature(&url, chrono::Utc::now().timestamp() - 1, &alice, &params["sig"]).is_none());
+        // A signature binds the exact normalized URL and the account it was issued to.
+        assert!(verify_media_signature("https://pbs.twimg.com/media/other.jpg?name=small", expires, &alice, &params["sig"]).is_none());
+        assert!(verify_media_signature(&url, expires, &media_subject("bob"), &params["sig"]).is_none());
+        assert!(sign_media_path("", "https://pbs.twimg.com/media/example.jpg", "").is_none());
+        assert!(sign_media_path("", "https://evil.test/media/a.jpg", &alice).is_none());
+        // Port hardening: unrecognized paths, SVG, playlists are never signed.
+        for raw in [
+            "https://pbs.twimg.com/avatar.jpg",
+            "https://pbs.twimg.com/media/a.svg",
+            "https://pbs.twimg.com/media/a?format=svg",
+            "https://video.twimg.com/ext_tw_video/1/pu/pl/playlist.m3u8",
+            "https://video.twimg.com/ext_tw_video/1/pu/vid/a.mp4?redirect=https://evil.test",
+        ] {
+            assert!(sign_media_path("", raw, &alice).is_none(), "{raw}");
+        }
+        let (_, video, _) = sign_media_path("", "https://video.twimg.com/ext_tw_video/1/pu/vid/640x360/a.mp4?tag=12", &alice).unwrap();
+        assert!(video.starts_with("/tweet/media?"));
+    }
+
+    fn router(state: TweetRouteState, base: &str) -> Router {
+        let inner = Router::new()
+            .route("/tweet/config", get(route_tweet_config))
+            .route("/tweet/preview", get(route_tweet_preview))
+            .route("/tweet/thread", get(route_tweet_thread))
+            .route("/tweet/media", get(route_tweet_media))
+            .route("/tweet/media/sign", post(route_tweet_media_sign));
+        if base.is_empty() { inner } else { Router::new().nest(base, inner) }
+            .layer(middleware::from_fn(security_headers_mw))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn route_tweet_auth_cache_budget_query_and_base_paths() {
+        for base in ["", "/cryptirc", "/nested/prefix"] {
+            let fixture = preview::tweet_tests::Fixture::new();
+            let auth = Arc::new(AuthManager::new(fixture.path.to_str().unwrap()).unwrap());
+            // v0.5.8 sessions are only valid while the account record exists on disk. A
+            // minimal record is enough (and avoids three debug-build Argon2 hashes, whose CPU
+            // load slows the timing-sensitive auth tests running in parallel).
+            std::fs::create_dir_all(fixture.path.join("users")).unwrap();
+            std::fs::write(fixture.path.join("users/alice.json"), r#"{"username":"alice"}"#).unwrap();
+            let token = auth.issue_session("alice");
+            let rates = Arc::new(DashMap::new());
+            let mut state = test_state(auth, &fixture, base);
+            state.rates = rates.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = router(state, base);
+            let _server = Server(tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            }));
+            let endpoint = format!("http://{address}{base}/tweet/preview");
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let url = "https://x.com/example/status/123";
+            let status = |r: &reqwest::Response| r.status().as_u16();
+
+            let config = format!("http://{address}{base}/tweet/config");
+            assert_eq!(status(&client.get(&config).send().await.unwrap()), 401);
+            let response = client.get(&config).bearer_auth(&token).send().await.unwrap();
+            assert_eq!(status(&response), 200);
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            let body: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(body, serde_json::json!({"schema_version":1,"preview":true,"thread":false}));
+
+            let thread_endpoint = format!("http://{address}{base}/tweet/thread");
+            assert_eq!(status(&client.get(&thread_endpoint).query(&[("url", url)]).send().await.unwrap()), 401);
+            let thread = client.get(&thread_endpoint).bearer_auth(&token).query(&[("url", url)]).send().await.unwrap();
+            assert_eq!(status(&thread), 200);
+            let thread: serde_json::Value = serde_json::from_slice(&thread.bytes().await.unwrap()).unwrap();
+            assert_eq!(thread["availability"]["reason"], "provider_disabled");
+
+            let sign_endpoint = format!("http://{address}{base}/tweet/media/sign");
+            let avatar = "https://pbs.twimg.com/profile_images/1/synthetic_normal.jpg";
+            let sign_body = serde_json::json!({"urls":[avatar]}).to_string();
+            let sign = |token: Option<&str>, body: String| {
+                let mut request = client.post(&sign_endpoint).header("content-type", "application/json").body(body);
+                if let Some(token) = token { request = request.bearer_auth(token); }
+                request.send()
+            };
+            assert_eq!(status(&sign(None, sign_body.clone()).await.unwrap()), 401);
+            // Not yet retrieved by this viewer: the fallback is not an open CDN proxy.
+            let refused = sign(Some(&token), sign_body.clone()).await.unwrap();
+            assert_eq!(status(&refused), 403);
+            assert_eq!(refused.headers()["cache-control"], "private, no-store");
+
+            let response = client.get(&endpoint).query(&[("url", url)]).send().await.unwrap();
+            assert_eq!(status(&response), 401);
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            assert_eq!(response.headers()["vary"], "Authorization");
+            assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+            let response = client.get(&endpoint).bearer_auth(&token).query(&[("url", url)]).send().await.unwrap();
+            assert_eq!(status(&response), 200);
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            let body: serde_json::Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+            assert_eq!(body["id"], "123");
+            let response = client
+                .get(&endpoint)
+                .bearer_auth(&token)
+                .query(&[("url", "https://mobile.twitter.com/other/status/123/photo/2?secret=ignored")])
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(status(&response), 200);
+            assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+            // A warm cache never answers an unauthenticated request.
+            assert_eq!(status(&client.get(&endpoint).query(&[("url", url)]).send().await.unwrap()), 401);
+
+            let signed = sign(Some(&token), sign_body.clone()).await.unwrap();
+            assert_eq!(status(&signed), 200);
+            assert_eq!(signed.headers()["cache-control"], "private, no-store");
+            let signed: serde_json::Value = serde_json::from_slice(&signed.bytes().await.unwrap()).unwrap();
+            let proxy_url = signed["urls"][0]["proxy_url"].as_str().unwrap().to_string();
+            assert!(proxy_url.starts_with(&format!("{base}/tweet/media?")));
+            assert_eq!(status(&sign(Some(&token), serde_json::json!({"urls":["https://evil.test/a.jpg"]}).to_string()).await.unwrap()), 400);
+            assert_eq!(status(&sign(Some(&token), serde_json::json!({"urls":[]}).to_string()).await.unwrap()), 400);
+            assert_eq!(status(&sign(Some(&token), "not json".into()).await.unwrap()), 400);
+
+            // Redemption checks that need no network: bad signature, bad range.
+            let media = format!("http://{address}{proxy_url}");
+            let forged = media.replace("sig=", "sig=AAAA");
+            assert_eq!(status(&client.get(&forged).send().await.unwrap()), 403);
+            for range in ["bytes=abc", "bytes=0-1,3-4", "items=0-1", "bytes=5-1", "bytes=-0"] {
+                assert_eq!(status(&client.get(&media).header("range", range).send().await.unwrap()), 416, "{range}");
+            }
+            assert_eq!(status(&client.get(format!("{media}&extra=1")).send().await.unwrap()), 400);
+
+            for params in [
+                vec![("url", "https://x.com.evil/a/status/123")],
+                vec![("url", url), ("refresh", "0")],
+                vec![("url", url), ("target", "secret")],
+                vec![],
+            ] {
+                let response = client.get(&endpoint).bearer_auth(&token).query(&params).send().await.unwrap();
+                assert_eq!(status(&response), 400);
+                assert_eq!(response.headers()["cache-control"], "private, no-store");
+            }
+            let oversized = format!("{url}?a={}", "x".repeat(2048));
+            assert_eq!(status(&client.get(&endpoint).bearer_auth(&token).query(&[("url", oversized.as_str())]).send().await.unwrap()), 400);
+            let permits = fixture.semaphore().try_acquire_many_owned(8).unwrap();
+            let busy = client.get(&endpoint).bearer_auth(&token).query(&[("url", "https://x.com/a/status/124")]).send().await.unwrap();
+            assert_eq!(status(&busy), 503);
+            drop(permits);
+            // The same function backs AppState.preview_rate_ok for generic previews.
+            rates.clear();
+            for _ in 0..29 {
+                assert!(preview_rate_ok(&rates, "alice"));
+            }
+            assert_eq!(status(&client.get(&endpoint).bearer_auth(&token).query(&[("url", url)]).send().await.unwrap()), 200);
+            let limited = client.get(&endpoint).bearer_auth(&token).query(&[("url", url)]).send().await.unwrap();
+            assert_eq!(status(&limited), 429);
+            assert!(limited.headers().contains_key("retry-after"));
+            assert_eq!(limited.headers()["cache-control"], "private, no-store");
+            // Admin Off: signing and redeeming both refuse (still no network).
+            rates.clear();
+            std::fs::write(fixture.path.join("admin_settings.json"), r#"{"link_preview_mode":"off"}"#).unwrap();
+            assert_eq!(status(&sign(Some(&token), sign_body.clone()).await.unwrap()), 403);
+            assert_eq!(status(&client.get(&media).send().await.unwrap()), 403);
+            let body: serde_json::Value = serde_json::from_slice(
+                &client.get(&config).bearer_auth(&token).send().await.unwrap().bytes().await.unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["preview"], false);
+        }
+    }
+
+    /// Route state for tests: an upstream that NEVER touches the network (it panics), so a
+    /// test that reaches the CDN fetch by mistake fails loudly instead of resolving twimg.
+    fn test_state(auth: Arc<AuthManager>, fixture: &preview::tweet_tests::Fixture, base: &str) -> TweetRouteState {
+        struct NoNetwork;
+        impl MediaUpstream for NoNetwork {
+            fn fetch(&self, _: String, _: twitter::ProxyMediaKind, _: Option<String>) -> MediaFetchFuture {
+                panic!("test reached the CDN fetch");
+            }
+        }
+        TweetRouteState {
+            auth,
+            service: fixture.service.clone(),
+            rates: Arc::new(DashMap::new()),
+            base_path: base.to_string(),
+            media_streams: Arc::new(Semaphore::new(MEDIA_PROXY_MAX_STREAMS)),
+            media_accounts: Default::default(),
+            media_upstream: Arc::new(NoNetwork),
+            media_limits: MediaLimits::default(),
+        }
+    }
+
+    /// A local, endless JPEG "CDN": counts fetches, never resolves or connects anywhere.
+    struct EndlessUpstream(Arc<AtomicUsize>);
+    impl MediaUpstream for EndlessUpstream {
+        fn fetch(&self, _: String, _: twitter::ProxyMediaKind, _: Option<String>) -> MediaFetchFuture {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let body = futures_util::stream::repeat_with(|| Ok(axum::body::Bytes::from(vec![0u8; 16 * 1024])));
+            Box::pin(async move {
+                Ok(UpstreamMedia {
+                    status: 200,
+                    content_type: Some("image/jpeg".into()),
+                    content_length: None,
+                    content_range: None,
+                    accept_ranges: Some("bytes".into()),
+                    etag: None,
+                    last_modified: None,
+                    body: Box::pin(body),
+                })
+            })
+        }
+    }
+
+    async fn media_server(
+        limits: MediaLimits,
+        streams: usize,
+    ) -> (Server, SocketAddr, TweetRouteState, preview::tweet_tests::Fixture) {
+        let fixture = preview::tweet_tests::Fixture::new();
+        let auth = Arc::new(AuthManager::new(fixture.path.to_str().unwrap()).unwrap());
+        let mut state = test_state(auth, &fixture, "");
+        state.media_upstream = Arc::new(EndlessUpstream(Arc::new(AtomicUsize::new(0))));
+        state.media_limits = limits;
+        state.media_streams = Arc::new(Semaphore::new(streams));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = router(state.clone(), "");
+        let server = Server(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        (server, address, state, fixture)
+    }
+
+    fn signed_media(address: SocketAddr, user: &str) -> String {
+        let (_, path, _) = sign_media_path("", "https://pbs.twimg.com/media/synthetic.jpg?name=orig", &media_subject(user)).unwrap();
+        format!("http://{address}{path}")
+    }
+
+    fn active_streams(state: &TweetRouteState) -> usize {
+        state.media_accounts.lock().unwrap().values().sum()
+    }
+
+    /// Self-review fix (red before: the deadline/idle checks ran only when the client
+    /// polled the body, so a client that stopped reading held the CDN connection, the
+    /// global permit and its slot forever). The pump now owns them on its own timers.
+    #[tokio::test]
+    async fn media_stream_non_reading_client_releases_permit_at_deadline() {
+        let limits = MediaLimits {
+            headers: MEDIA_PROXY_HEADER_TIMEOUT,
+            max_duration: std::time::Duration::from_millis(400),
+            idle: std::time::Duration::from_secs(30), // only the deadline can end it
+            per_account: 3,
+        };
+        let (_server, address, state, _fixture) = media_server(limits, 2).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        // Headers arrive, then the client never reads the body (the response is held).
+        let held = client.get(signed_media(address, "alice")).send().await.unwrap();
+        assert_eq!(held.status().as_u16(), 200);
+        assert_eq!(held.headers()["content-type"], "image/jpeg");
+        assert_eq!(held.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(held.headers()["cache-control"], "private, no-store", "audit fix: never cacheable");
+        assert_eq!(state.media_streams.available_permits(), 1, "stream holds a global permit");
+        assert_eq!(active_streams(&state), 1, "stream holds an account slot");
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+        assert_eq!(state.media_streams.available_permits(), 2, "permit released at the deadline");
+        assert_eq!(active_streams(&state), 0, "account slot released at the deadline");
+        drop(held);
+        // A client that stops reading is also cut off after `idle`, long before the deadline.
+        let limits = MediaLimits {
+            headers: MEDIA_PROXY_HEADER_TIMEOUT,
+            max_duration: std::time::Duration::from_secs(600),
+            idle: std::time::Duration::from_millis(300),
+            per_account: 3,
+        };
+        let (_server, address, state, _fixture) = media_server(limits, 2).await;
+        let held = client.get(signed_media(address, "alice")).send().await.unwrap();
+        assert_eq!(held.status().as_u16(), 200);
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert_eq!(state.media_streams.available_permits(), 2, "stalled reader released after idle");
+        drop(held);
+    }
+
+    /// Self-review fix (red before: no per-account bound — one account could take every
+    /// global stream permit). Signatures are bound to the account; at most N streams each.
+    #[tokio::test]
+    async fn media_stream_per_account_cap_leaves_other_accounts_working() {
+        let limits = MediaLimits {
+            headers: MEDIA_PROXY_HEADER_TIMEOUT,
+            max_duration: std::time::Duration::from_secs(600),
+            idle: std::time::Duration::from_secs(600),
+            per_account: 2,
+        };
+        let (_server, address, state, _fixture) = media_server(limits, 16).await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let alice = signed_media(address, "alice");
+        let mut held = Vec::new();
+        for _ in 0..2 {
+            let response = client.get(&alice).send().await.unwrap();
+            assert_eq!(response.status().as_u16(), 200);
+            held.push(response);
+        }
+        let third = client.get(&alice).send().await.unwrap();
+        assert_eq!(third.status().as_u16(), 429, "N+1th concurrent stream for one account");
+        assert!(third.headers().contains_key("retry-after"));
+        let bob = client.get(signed_media(address, "bob")).send().await.unwrap();
+        assert_eq!(bob.status().as_u16(), 200, "another account still streams");
+        assert_eq!(active_streams(&state), 3);
+        // Closing alice's streams (client gone) aborts their pumps and frees the slots.
+        drop(held);
+        drop(bob);
+        for _ in 0..50 {
+            if active_streams(&state) == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(active_streams(&state), 0);
+        assert_eq!(state.media_streams.available_permits(), 16);
+        let again = client.get(&alice).send().await.unwrap();
+        assert_eq!(again.status().as_u16(), 200);
+    }
+
+    /// Audit fix (MEDIUM): a stalled resolver / connect / header phase is bounded by one
+    /// deadline and releases the account slot and the global permit. Red before: DNS ran
+    /// outside every timeout while both were held.
+    #[tokio::test]
+    async fn media_fetch_stall_is_bounded_and_releases_slots() {
+        struct Stalled;
+        impl MediaUpstream for Stalled {
+            fn fetch(&self, _: String, _: twitter::ProxyMediaKind, _: Option<String>) -> MediaFetchFuture {
+                Box::pin(std::future::pending())
+            }
+        }
+        let limits = MediaLimits {
+            headers: std::time::Duration::from_millis(300),
+            max_duration: std::time::Duration::from_secs(600),
+            idle: std::time::Duration::from_secs(600),
+            per_account: 3,
+        };
+        let (_server, address, mut state, _fixture) = media_server(limits, 2).await;
+        state.media_upstream = Arc::new(Stalled);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_address = listener.local_addr().unwrap();
+        let app = router(state.clone(), "");
+        let _stalled = Server(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+        let _ = address;
+        let client = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(5)).build().unwrap();
+        let started = std::time::Instant::now();
+        let response = client.get(signed_media(stalled_address, "alice")).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 504);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert_eq!(state.media_streams.available_permits(), 2);
+        assert_eq!(active_streams(&state), 0);
+    }
+
+    /// Re-check fix (LOW): html5ever's trace output (thread content) never reaches the logs,
+    /// even with RUST_LOG=trace; the service's own events still do. Red before: fmt::init().
+    #[test]
+    fn log_filter_silences_tokenizer_content() {
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Buffer(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buffer {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        // Re-check 2: specific user directives must not win over the exclusion either.
+        for env in [
+            "trace",
+            "html5ever::tokenizer=trace,markup5ever=trace,trace",
+            "warn,html5ever::tokenizer=trace,markup5ever::interface[span]=trace,cryptirc=trace",
+            "html5ever=trace , markup5ever=trace, cryptirc::preview=trace",
+        ] {
+            let buffer = Buffer::default();
+            let writer = buffer.clone();
+            let subscriber = tracing_subscriber::registry()
+                .with(log_filter(Some(env)))
+                .with(tracing_subscriber::fmt::layer().with_writer(move || writer.clone()).with_ansi(false));
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::trace!(target: "html5ever::tokenizer", "processing in state Data: secret-thread-text");
+                tracing::trace!(target: "markup5ever::interface", "secret-markup");
+                tracing::trace!(target: "cryptirc::preview", "visible-service-event");
+            });
+            let logged = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+            assert!(logged.contains("visible-service-event"), "{env}: {logged}");
+            assert!(!logged.contains("secret-thread-text") && !logged.contains("secret-markup"), "{env}: {logged}");
+        }
+        // Unset/empty RUST_LOG keeps fmt::init()'s default (ERROR only).
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(log_filter(Some("")))
+            .with(tracing_subscriber::fmt::layer().with_writer(move || writer.clone()).with_ansi(false));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "cryptirc", "a-warning");
+            tracing::error!(target: "cryptirc", "an-error");
+        });
+        let logged = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("an-error") && !logged.contains("a-warning"), "{logged}");
+    }
+
+    #[test]
+    fn route_tweet_error_contract_and_generic_compatibility() {
+        for error in [
+            twitter::PreviewError::InvalidUrl,
+            twitter::PreviewError::Busy,
+            twitter::PreviewError::Timeout,
+            twitter::PreviewError::ProviderChanged,
+            twitter::PreviewError::UpstreamFailure,
+            twitter::PreviewError::RateLimited(30),
+        ] {
+            let response = tweet_error(error);
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            assert_eq!(response.headers()["vary"], "Authorization");
+        }
+        assert_eq!(tweet_error(twitter::PreviewError::RateLimited(30)).headers()["retry-after"], "30");
+        let preview = preview::LinkPreview {
+            url: "https://example.org".into(),
+            domain: "example.org".into(),
+            title: None,
+            description: None,
+            image: None,
+            site_name: None,
+        };
+        assert_eq!(serde_json::to_value(preview).unwrap().as_object().unwrap().len(), 6);
     }
 }

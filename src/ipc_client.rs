@@ -96,6 +96,13 @@ static CURRENT_OUT: std::sync::Mutex<Option<mpsc::UnboundedSender<IpcMessage>>> 
 /// The live IPC link's generation (0 = no link up).
 pub(crate) fn current_link() -> u64 { CURRENT_LINK.load(std::sync::atomic::Ordering::Acquire) }
 
+/// The link whose AttachComplete has been handled (its replay is over).
+static ATTACHED_LINK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Avatars: the live link once its Attach replay is complete, else 0 — no avatar matching
+/// while replayed lines may still be arriving (codex re-check H avatar.rs:1005).
+pub(crate) fn attached_link() -> u64 { attached_link_of(current_link(), ATTACHED_LINK.load(std::sync::atomic::Ordering::Acquire)) }
+pub(crate) fn attached_link_of(current: u64, attached: u64) -> u64 { if current != 0 && attached == current { current } else { 0 } }
+
 /// r8 (codex P2 ipc_client.rs:339): tell a `hold_ack` daemon that this numbered line is held
 /// (not durable yet) — sent by irc::log_line the moment the line is queued, so it always
 /// precedes the Released a flush may send, and the reader's Processed (which parks it).
@@ -312,6 +319,7 @@ async fn handle_connection(stream: UnixStream, state: &AppState, colocated: bool
     daemon_stopped().retain(|_, t| now.duration_since(*t) < DAEMON_STOP_REDIAL_TTL);
     expected.extend(daemon_stopped().iter().map(|e| e.key().clone()));
     let mut seen: HashSet<String> = HashSet::new();
+    crate::avatar::replay_cycle_start();
     // Re-cased (non-canonical id) sessions reported in this Attach cycle (see SessionSync).
     let mut noncanonical_seen: HashSet<String> = HashSet::new();
 
@@ -390,6 +398,7 @@ async fn handle_message(
         IpcMessage::ConnStatus { conn_id, state: ConnLifecycle::Disconnected { mut reason } } => {
             // The daemon ended this session: nothing to identify any more (r4 C2-6).
             forget_dialed_endpoint(&conn_id);
+            state.avatars.forget_session(&conn_id);
             let Some(username) = state.conn_owners.get(&conn_id).map(|r| r.clone()) else { return };
             // r4 R1: a Drop this web did not send, on a session it had — irc-core's own
             // graceful shutdown. Expected back on the next Attach (see daemon_stopped).
@@ -441,6 +450,8 @@ async fn handle_message(
             // brand-new Dial's very first message — always this one — has
             // somewhere to read `cfg.server` from for display.
             if let Some((username, conn)) = ensure_connection_entry(state, &conn_id).await {
+                // A new IRC session starts: the old one's avatar classification no longer applies.
+                state.avatars.forget_session(&conn_id);
                 let evt = match lifecycle {
                     ConnLifecycle::Connecting => {
                         let mut c = conn.lock().await;
@@ -454,6 +465,11 @@ async fn handle_message(
                         c.connected = false;
                         c.registered = false;
                         c.who_pending.clear();
+                        c.whois_seen.clear();
+                        c.seen_userhosts.clear();
+                        // A new session negotiates again (avatar classification).
+                        c.cap_ls_done = false;
+                        c.behind_bouncer = false;
                         c.resync_gen = c.resync_gen.wrapping_add(1);
                         c.resync_busy = false;
                         let server = c.dial_endpoint.as_ref().map_or_else(|| c.cfg.server.clone(), |(s, _)| s.clone());
@@ -469,6 +485,11 @@ async fn handle_message(
                         // outstanding WHOs will never be answered, so clear the pending
                         // set rather than let stale keys block future auto-WHOs.
                         c.who_pending.clear();
+                        c.whois_seen.clear();
+                        c.seen_userhosts.clear();
+                        // A new session negotiates again (avatar classification).
+                        c.cap_ls_done = false;
+                        c.behind_bouncer = false;
                         c.resync_gen = c.resync_gen.wrapping_add(1);
                         c.resync_busy = false;
                         ServerEvent::Reconnecting { conn_id: conn_id.clone(), attempt, delay_secs, reason }
@@ -558,6 +579,8 @@ async fn handle_message(
                     }
                     c.registered = registered;
                     c.connected = connected;
+                    // Avatars: this connection's state is fresh on the current link.
+                    c.synced_link = current_link();
                     if lag_ms.is_some() { c.lag_ms = lag_ms; }
                     // Restores self-echo suppression / TAGMSG support after a
                     // re-Attach (fresh IrcConnection defaults both false) —
@@ -579,6 +602,13 @@ async fn handle_message(
                     // adopts under its own guard.
                     if !self_userhost.is_empty() && adopt_identity {
                         c.self_userhost = self_userhost.clone();
+                    }
+                    // The Attach replay's own nick view starts at the snapshot (IrcConnection::
+                    // replay_view; recognises our own replayed lines only) and ends at AttachComplete. Starting
+                    // at the CURRENT nick is a known, accepted residual inherited from 069f376
+                    // (see the field's doc).
+                    if first_in_cycle {
+                        c.replay_view = Some((c.nick.clone(), c.self_userhost.clone()));
                     }
                     // Rebuild any channel the daemon says we're in but this
                     // (freshly (re)hydrated) web process doesn't have yet —
@@ -712,6 +742,10 @@ async fn handle_message(
         }
 
         IpcMessage::AttachComplete {} => {
+            // Avatars: sessions irc-core kept get their recorded classification back when the
+            // replay proves it is the same session (avatar::restore_after_attach).
+            crate::avatar::restore_after_attach(state, seen).await;
+            ATTACHED_LINK.store(current_link(), std::sync::atomic::Ordering::Release);
             // r4 R1: this cycle handles them (re-dial below, or the daemon kept them).
             for id in expected { daemon_stopped().remove(id); }
             // Reconciliation: anything we expected before this Attach cycle
@@ -1116,6 +1150,7 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
         daemon_channels: Vec::new(),
         user_joins: std::collections::HashSet::new(),
         chanmodes: cryptirc::ircproto::ChanModes::default(),
+        whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, replay_view: None,
         cfg,
     }));
     state.connections.insert(conn_id.to_string(), conn.clone());
@@ -1128,6 +1163,8 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
 /// a stored config into what the daemon needs to actually open a socket.
 pub async fn dial(state: &AppState, username: &str, cfg: NetworkConfig, out_tx: &mpsc::UnboundedSender<IpcMessage>) {
     let conn_id = cfg.id.clone();
+    // Avatars: a Dial starts a new session; its classification comes from its own negotiation.
+    state.avatars.forget_session(&conn_id);
     // v-irc I1: the re-cased session that kept this network online goes now.
     if let Some((_, alias)) = noncanon_alias().remove(&conn_id) {
         info!("[{}] dropping the re-cased session {} it replaces", conn_id, alias);

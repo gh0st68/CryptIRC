@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<!-- X previews: <video> has no referrerpolicy attribute, so the document policy keeps CDN
+     media requests Referer-free even where a proxy strips the server's Referrer-Policy header. -->
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#000004">
 <meta name="mobile-web-app-capable" content="yes">
@@ -1057,6 +1060,92 @@ body.ts-custom .msg-ts { width:auto; min-width:72px; white-space:nowrap; }
 .msg-link-preview-title { font-size:12px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .msg-link-preview-desc { font-size:10px; color:var(--text3); margin-top:3px; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .msg-link-preview-img { display:block; width:100%; max-height:160px; object-fit:cover; border-radius:var(--media-radius-sm, 6px); margin-top:6px; }
+/* X post preview cards (static/app.js "X previews" section) */
+.msg-tweet { box-sizing:border-box; width:100%; max-width:360px; min-width:0; margin:8px 0; padding:10px; border:1px solid var(--border); border-radius:var(--media-radius-sm,8px); background:var(--bg2); color:var(--text); font:inherit; line-height:1.45; overflow-wrap:anywhere; overflow-anchor:none; }
+.msg-tweet-expanded { max-width:520px; }
+.msg-tweet *, .msg-tweet *::before, .msg-tweet *::after { box-sizing:border-box; min-width:0; }
+.msg-tweet [hidden] { display:none!important; }
+.msg-tweet-button { display:inline-flex; align-items:center; justify-content:center; min-width:44px; min-height:44px; padding:8px; border:1px solid var(--border); border-radius:6px; background:var(--bg3); color:var(--text); font:inherit; line-height:1.3; cursor:pointer; text-align:left; }
+.msg-tweet-button:hover { border-color:var(--accent); }
+.msg-tweet-button:disabled { cursor:default; opacity:.7; }
+.msg-tweet :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.msg-tweet-disclosure { display:block; margin-top:4px; color:var(--text2); }
+.msg-tweet-header { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+.msg-tweet-avatar { width:36px; height:36px; flex:0 0 36px; display:flex; align-items:center; justify-content:center; overflow:hidden; border-radius:50%; background:var(--bg4); color:var(--text2); font-size:14px; font-weight:650; text-transform:uppercase; }
+.msg-tweet-avatar img { width:100%; height:100%; object-fit:cover; }
+.msg-tweet-author { flex:1; display:flex; flex-wrap:wrap; align-items:center; gap:2px 6px; min-width:0; line-height:1.3; }
+.msg-tweet-name { max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; unicode-bidi:isolate; font-size:.95em; }
+.msg-tweet-author a, .msg-tweet-metric, .msg-tweet-time { unicode-bidi:isolate; }
+.msg-tweet-author a { color:var(--text2); text-decoration:none; }
+.msg-tweet-author a:hover { color:var(--text); text-decoration:underline; }
+.msg-tweet-time { color:var(--text3); font-size:.85em; white-space:nowrap; }
+.msg-tweet-verified { display:inline-flex; align-items:center; color:var(--accent); flex:0 0 auto; }
+.msg-tweet-verified svg { width:14px; height:14px; }
+.msg-tweet-mode { width:44px; height:44px; min-width:44px; min-height:44px; margin:-4px -6px -4px 0; padding:0; border:0; border-radius:50%; background:transparent; color:var(--text3); display:inline-flex; align-items:center; justify-content:center; cursor:pointer; flex:0 0 auto; }
+.msg-tweet-mode:hover { background:var(--bg3); color:var(--text); }
+.msg-tweet-text { white-space:pre-wrap; overflow-wrap:anywhere; unicode-bidi:plaintext; user-select:text; display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; line-height:1.5; }
+.msg-tweet-expanded .msg-tweet-text { -webkit-line-clamp:12; }
+.msg-tweet-expanded .msg-tweet-text-open { display:block; }
+.msg-tweet-more-text { display:inline-flex; align-items:center; align-self:flex-start; min-height:44px; margin:2px 0 0; padding:0; border:0; background:none; color:var(--text2); font:inherit; font-size:.9em; cursor:pointer; }
+.msg-tweet-more-text:hover { color:var(--text); text-decoration:underline; }
+.msg-tweet-note { display:block; margin-top:4px; color:var(--text3); font-size:.85em; }
+.msg-tweet-note a { color:var(--text2); }
+.msg-tweet-metrics { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; margin-top:8px; color:var(--text3); font-size:.85em; font-variant-numeric:tabular-nums; }
+.msg-tweet-expanded > .msg-tweet-metrics { display:none; }
+.msg-tweet-metric { display:inline-flex; align-items:center; gap:4px; color:var(--text2); white-space:nowrap; }
+.msg-tweet-metric svg { width:14px; height:14px; opacity:.9; }
+.msg-tweet-metric-value { color:var(--text); }
+.msg-tweet-sr { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; }
+.msg-tweet-footer { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; margin-top:6px; }
+.msg-tweet-footer .msg-tweet-metrics { margin-top:0; }
+.msg-tweet-actions { display:flex; align-items:center; gap:0; margin-left:auto; }
+.msg-tweet-icon-button, .msg-tweet-icon-link, .msg-tweet-info summary { display:inline-flex; align-items:center; justify-content:center; width:44px; height:44px; min-width:44px; min-height:44px; padding:0; border:0; border-radius:50%; background:transparent; color:var(--text3); cursor:pointer; text-decoration:none; }
+.msg-tweet-icon-button:hover, .msg-tweet-icon-link:hover, .msg-tweet-info summary:hover { background:var(--bg3); color:var(--text); }
+.msg-tweet-action-text { display:inline-flex; align-items:center; gap:5px; min-height:44px; padding:0 6px; border:0; background:transparent; color:var(--text2); font:inherit; font-size:.85em; cursor:pointer; }
+.msg-tweet-action-text:hover { color:var(--text); }
+.msg-tweet-info { position:relative; }
+.msg-tweet-info summary { list-style:none; }
+.msg-tweet-info summary::-webkit-details-marker { display:none; }
+.msg-tweet-info-body { position:absolute; right:0; bottom:calc(100% + 6px); z-index:10; min-width:190px; max-width:min(280px,70vw); padding:8px 10px; border:1px solid var(--border); border-radius:8px; background:var(--bg3); color:var(--text2); font-size:.8em; box-shadow:0 10px 24px rgba(0,0,0,.3); }
+.msg-tweet-info-body div { display:flex; justify-content:space-between; gap:16px; padding:2px 0; }
+.msg-tweet-partial, .msg-tweet-status { display:block; color:var(--text2); margin:4px 0; }
+.msg-tweet-quote { border-inline-start:1px solid var(--border); padding-inline-start:10px; margin:10px 0; }
+.msg-tweet-quote .msg-tweet-header { margin-bottom:6px; }
+.msg-tweet-thread { margin-top:4px; }
+.msg-tweet-thread-consent { padding:6px 0; }
+.msg-tweet-thread-consent p { margin:4px 0 8px; color:var(--text2); font-size:.9em; }
+.msg-tweet-thread-content { margin-top:6px; }
+.msg-tweet-thread-entry { border-top:1px solid var(--border); margin-top:8px; padding-top:8px; }
+.msg-tweet-thread-entry .msg-tweet-text { display:block; }
+.msg-tweet-loading { min-height:96px; }
+.msg-tweet-media { margin-top:8px; }
+.msg-tweet-media:empty { display:none; }
+.msg-tweet-media-load { display:inline-flex; align-items:center; min-height:44px; margin-top:4px; padding:0; border:0; background:none; color:var(--text2); font:inherit; font-size:.85em; text-decoration:underline; cursor:pointer; }
+.msg-tweet-media-compact { position:relative; }
+.msg-tweet-media-compact > button { position:relative; display:flex; width:100%; min-height:44px; max-height:180px; overflow:hidden; }
+.msg-tweet-media-compact img { width:100%; max-height:160px; object-fit:cover; }
+.msg-tweet-media-count { display:block; color:var(--text2); margin-top:4px; }
+.msg-tweet-gallery { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:2px; border-radius:8px; overflow:hidden; background:var(--bg3); }
+.msg-tweet-gallery[data-count="1"] { grid-template-columns:minmax(0,1fr); }
+.msg-tweet-cell { position:relative; aspect-ratio:4/3; padding:0; overflow:hidden; display:flex; flex-direction:column; justify-content:center; background:var(--bg3); border-radius:0; }
+.msg-tweet-gallery[data-count="1"] .msg-tweet-cell { aspect-ratio:var(--tweet-ratio,1.7778); max-height:520px; border-radius:8px; }
+.msg-tweet-gallery .msg-tweet-cell:focus-visible { outline-offset:-2px; }
+.msg-tweet-gallery[data-count="3"] .msg-tweet-cell:first-child { grid-row:span 2; aspect-ratio:auto; }
+.msg-tweet-cell img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+.msg-tweet-cell > button, .msg-tweet-cell > a, .msg-tweet-cell > span, .msg-tweet-duration { position:relative; z-index:1; }
+.msg-tweet-photo { color:var(--text); }
+.msg-tweet-photo img + * { position:relative; }
+.msg-tweet-video > button { background:var(--bg2); align-self:center; }
+.msg-tweet-player { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+.msg-tweet-duration { background:var(--bg2); padding:2px 6px; align-self:flex-end; font-variant-numeric:tabular-nums; }
+.msg-tweet-extra-media { margin-top:4px; }
+.msg-tweet-more { position:absolute!important; right:4px; bottom:4px; z-index:2; padding:4px 8px; border-radius:4px; background:var(--bg2); color:var(--text); }
+.x-preview-setting { min-width:0; min-height:44px; max-width:100%; padding:8px; background:var(--bg3); border:1px solid var(--border); border-radius:4px; color:var(--text); font:inherit; }
+.x-disclosure-settings { display:flex; flex-direction:column; gap:6px; margin:10px 0; padding:10px 0; border-block:1px solid var(--border); }
+.x-disclosure-settings p { color:var(--text2); margin:4px 0; }
+.x-preview-setting:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.msg-tweet:not(.msg-tweet-expanded) .msg-tweet-extra-media { display:none; }
+@media(prefers-reduced-motion:reduce) { .msg-tweet, .msg-tweet * { animation:none!important; transition:none!important; } }
 .row-action .msg-body { color:var(--action); font-style:italic; }
 .row-action .msg-nick { color:var(--action); }
 .row-notice .msg-body { color:var(--notice); }
@@ -1400,6 +1489,17 @@ html[data-theme='irssi'] ::-webkit-scrollbar-thumb{background:#333333}
 .nick-pfx { color:var(--warn); pointer-events:none; user-select:none; -webkit-user-select:none; }
 .nick-pfx.op { color:var(--accent); }
 .nick-away { opacity:0.5; }
+/* Avatars (app.js "Avatars"): only on nicks the server vouched for; a row without one keeps
+   the plain look. Fixed boxes, so a picture arriving never moves anything vertically.
+   pointer-events:none for the same iOS first-tap reason as .nick-pfx above. */
+.nick-av { width:1.3em; height:1.3em; border-radius:50%; object-fit:cover; vertical-align:middle; margin:-0.15em 0.45em 0 0; background:var(--bg3); pointer-events:none; user-select:none; -webkit-user-select:none; flex-shrink:0; }
+.whois-av { width:44px; height:44px; border-radius:50%; object-fit:cover; vertical-align:middle; margin:2px 10px 2px 0; background:var(--bg3); box-shadow:0 0 0 1px var(--border); }
+.nick-ctx-head { display:flex; align-items:center; gap:10px; padding:10px 12px 8px; border-bottom:1px solid var(--border); margin-bottom:4px; font-weight:700; color:var(--text); min-width:0; }
+.nick-ctx-head > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.nick-ctx-av { width:56px; height:56px; border-radius:50%; object-fit:cover; background:var(--bg3); flex-shrink:0; box-shadow:0 0 0 1px var(--border); }
+.profile-av-preview { width:64px; height:64px; border-radius:50%; background:linear-gradient(135deg,#00d4aa,#0099ff); display:flex; align-items:center; justify-content:center; color:#04212a; font-weight:800; font-size:24px; flex:0 0 auto; overflow:hidden; }
+.profile-av-preview img, .adm-av img { width:100%; height:100%; object-fit:cover; display:block; }
+.adm-av.has-img { background:var(--bg3); overflow:hidden; }
 .nick-group-hdr { padding:8px 10px 3px; font-size:11px; font-weight:600; color:var(--text3); text-transform:capitalize; letter-spacing:.03em; }
 .away-dot { font-size:10px; margin-right:2px; }
 #typing-indicator { font-size:10px; color:var(--text3); padding:0 10px; height:0; overflow:hidden; transition:height .12s; white-space:nowrap; text-overflow:ellipsis; background:var(--bg1); border-top:1px solid transparent; pointer-events:none; text-align:left; flex-shrink:0; }
@@ -1541,6 +1641,12 @@ html[data-theme='irssi'] ::-webkit-scrollbar-thumb{background:#333333}
   flex-direction:column; gap:12px;
 }
 #lightbox.show { display:flex; }
+.lightbox-gallery-controls { position:absolute; bottom:12px; left:0; right:0; display:flex; align-items:center; justify-content:center; gap:12px; color:#fff; }
+.lightbox-gallery-controls button { min-width:44px; min-height:44px; padding:8px 12px; border:1px solid #888; border-radius:6px; background:#222; color:#fff; cursor:pointer; }
+.lightbox-gallery-controls button:focus-visible, #lightbox-close:focus-visible { outline:2px solid #fff; outline-offset:3px; }
+.lightbox-gallery-controls [hidden] { display:none; }
+#lightbox-status { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); max-width:80vw; padding:8px 12px; border-radius:8px; background:rgba(0,0,0,.72); color:#fff; font-size:13px; text-align:center; pointer-events:none; }
+#lightbox-status:empty { display:none; }
 /* M11: visible close button */
 #lightbox-close {
   position:fixed; top:max(16px,var(--sat)); right:16px;
@@ -1921,6 +2027,7 @@ html[data-theme='irssi'] ::-webkit-scrollbar-thumb{background:#333333}
   #mentions-panel { left:0; right:0; width:auto; max-width:92vw; }
   #scroll-bottom-btn { right:12px; }
   .nick-entry { min-height:36px; padding:6px 10px; line-height:1.3; -webkit-tap-highlight-color:rgba(0,212,170,.15); touch-action:manipulation; display:flex; align-items:center; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+  .nick-av { width:24px; height:24px; margin:0 8px 0 0; }
   .chan-kebab { display:inline-flex !important; align-items:center; opacity:.5; }
   .net-kebab { opacity:.6; }
 }
@@ -2533,9 +2640,15 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </div>
 
 <!-- ── LIGHTBOX ──────────────── -->
-<div id="lightbox" onclick="if(event.target===this)closeLightbox()">
+<div id="lightbox" role="dialog" aria-modal="true" aria-label="Image viewer" onclick="if(event.target===this)closeLightbox()">
   <button id="lightbox-close" onclick="closeLightbox();event.stopPropagation()" title="Close" aria-label="Close image viewer">✕</button>
   <img id="lightbox-img" src="" alt="Enlarged image preview" ondblclick="toggleLightboxZoom(event)">
+  <div id="lightbox-status" role="status" aria-live="polite"></div>
+  <div class="lightbox-gallery-controls">
+    <button id="lightbox-prev" type="button" aria-label="Previous image" hidden>Previous</button>
+    <span id="lightbox-count" role="status" aria-live="polite"></span>
+    <button id="lightbox-next" type="button" aria-label="Next image" hidden>Next</button>
+  </div>
 </div>
 
 <!-- ── DROP OVERLAY ──────────── -->
@@ -2980,6 +3093,12 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <select id="a-yt-preview" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
             <option value="auto">Show automatically (default)</option>
             <option value="click">Click to load</option>
+          </select>
+        </div>
+        <div class="appear-row">
+          <label class="appear-label" for="a-x-preview-mode">X preview layout</label>
+          <select id="a-x-preview-mode" onchange="setTweetPreviewMode(this.value)" class="x-preview-setting">
+            <option value="expanded">Expanded (default)</option><option value="compact">Compact</option>
           </select>
         </div>
         <div class="appear-row">
@@ -4029,6 +4148,20 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <span class="appear-label">Link previews</span>
           <button class="appear-toggle" id="sec-linkpreviews" onclick="this.classList.toggle('on');secSaveToggle('linkPreviews',this.classList.contains('on'))"></button>
+        </div>
+        <div class="x-disclosure-settings">
+          <label for="sec-x-mode">X preview loading on this device</label>
+          <select id="sec-x-mode" class="x-preview-setting" onchange="setXDisclosure(this.value)">
+            <option value="auto_public">Auto in public, unencrypted messages (default)</option><option value="manual">Click to load</option><option value="hidden">Hide X previews</option>
+          </select>
+          <label id="sec-x-conversation-label" for="sec-x-conversation">This conversation</label>
+          <select id="sec-x-conversation" class="x-preview-setting" onchange="setXConversationDisclosure(this.value)">
+            <option value="inherit">Use global rule</option><option value="manual">Click to load</option><option value="auto">Auto, including encrypted and private messages</option><option value="hidden">Hide previews here</option>
+          </select>
+          <p>Loading reveals the post ID to your CryptIRC server and may contact X. A conversation auto setting includes future encrypted messages and DMs. External media and published threads require their own permissions.</p>
+          <p>These disclosure settings stay on this device for this account.</p>
+          <p id="sec-x-unavailable" hidden>X previews are not configured on this server, so X links stay plain links.</p>
+          <button type="button" class="msg-tweet-button" onclick="resetXDisclosure()">Reset X disclosure settings</button>
         </div>
         <div class="appear-row">
           <span class="appear-label">Spellcheck</span>

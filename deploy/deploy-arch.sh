@@ -858,8 +858,27 @@ id "$SERVICE_USER" &>/dev/null || useradd --system --no-create-home --shell /usr
 mkdir -p "$INSTALL_DIR" "$DATA_DIR_REAL" "$LOG_DIR" /var/log/caddy
 chown "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR_REAL" "$LOG_DIR"
 chmod 750 "$DATA_DIR_REAL" "$LOG_DIR"
-# The services run from here (WorkingDirectory, ExecStart): an earlier run under a umask of 077
-# left it root-only 0700.
+# The services run from here (WorkingDirectory, ExecStart) and never write here (ProtectSystem=strict):
+# root:root 0755 — an earlier run under a umask of 077 left it root-only 0700, and an install made by an
+# older procedure may have given it to the service account, which could then swap the binaries root
+# starts. deploy/unit-env.sh's _secure_install_dir makes the directory, the binaries, the markers and
+# .rollback root's — nothing else, never recursively, never through a link; the data and socket
+# directories stay the service's wherever they are. The binaries themselves are installed root:root
+# 0755 (stage_bin).
+_sid_dirs=("$DATA_DIR_REAL"); _sid_warns=(); _sid_svc_refuse=""
+while IFS= read -r _sid_l; do
+    case "$_sid_l" in
+        "DIR "*) _sid_dirs+=("${_sid_l#DIR }") ;; "WARN "*) _sid_warns+=("${_sid_l#WARN }") ;;
+        "REFUSE "*) _sid_svc_refuse="${_sid_l#REFUSE }" ;;
+    esac
+done < <(_sid_service_dirs "$INSTALL_DIR" "$DATA_DIR" "$WEB_IPC_SOCK")
+if (( ${#_sid_warns[@]} )); then for _sid_l in "${_sid_warns[@]}"; do warn "$_sid_l"; done; fi
+[[ -z "$_sid_svc_refuse" ]] || die "$_sid_svc_refuse"
+_sid_rc=0; _sid_out=$(_secure_install_dir "$INSTALL_DIR" "$SERVICE_USER" "${_sid_dirs[@]}") || _sid_rc=$?
+_sid_summary "$_sid_out"
+[[ -n "$SID_FIXED" ]] && warn "${INSTALL_DIR}: ${SID_FIXED}"
+[[ -n "$SID_OTHER" ]] && warn "${INSTALL_DIR}: ${SID_OTHER}"
+(( _sid_rc == 0 )) || die "${SID_REFUSE:-the install directory could not be handed to root.}"
 chmod go+rx "$INSTALL_DIR"
 
 # Seed admin_settings.json — the authoritative config the Admin panel also edits.
@@ -981,6 +1000,9 @@ daemon_runs_ondisk() {
     disk_id="$(stat -L -c '%d:%i' "$INSTALL_DIR/irc_core" 2>/dev/null || true)"
     if [[ -z "$run_id" || -z "$disk_id" ]]; then echo unknown
     elif [[ "$run_id" == "$disk_id" ]]; then echo yes
+    # Another inode with the same bytes is the same daemon: the install-dir hand-back
+    # (_secure_install_dir) replaces a binary that wasn't root's by a root-owned copy.
+    elif cmp -s "/proc/$pid/exe" "$INSTALL_DIR/irc_core" 2>/dev/null; then echo yes
     else echo no
     fi
 }

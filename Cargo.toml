@@ -1,6 +1,6 @@
 [package]
 name = "cryptirc"
-version = "0.5.8"
+version = "0.5.9"
 edition = "2021"
 
 [dependencies]
@@ -40,6 +40,18 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 socket2 = { version = "0.5", features = ["all"] }
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 ammonia = "4.2.3"
+# X previews: HMAC for the signed media-fallback URLs and the inert ThreadReaderApp
+# tokenizer. Both are already in the dependency tree at these exact versions (hmac via
+# hkdf/web-push, html5ever via ammonia), so no new crate is compiled.
+hmac = "0.12"
+html5ever = "=0.40.1"
+# Avatars (src/avatar.rs): decode PNG / JPEG / WebP uploads under strict limits and re-encode
+# them as PNG. Pure Rust; only these three codecs, no rayon / default formats.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[dev-dependencies]
+# Paused-clock tests for the X provider deadlines (#[tokio::test(start_paused = true)]).
+tokio = { version = "=1.38.2", features = ["test-util"] }
 
 # ── Build profile — pinned deliberately for the never-restart irc_core daemon ──
 # (applies to the web binary too; both are fine with these). Explicit so a future

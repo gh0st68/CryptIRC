@@ -1,0 +1,346 @@
+# CryptIRC changelog
+
+## v0.5.9 (November 2026)
+
+New
+- User avatars: upload a picture in Settings ▸ Profile ▸ Avatar (PNG/JPEG/WebP, max 2 MB; re-encoded server-side to 128/48 px PNG with all metadata removed, original never stored). Other CryptIRC users of the same instance see it in the nick list, WHOIS and the nick menu — only when the server can confirm the nick's current holder is that account on the same IRC server (never by network name; never through a detected bouncer). Owner opt-out, viewer "hide others' avatars", admin on/off switch and per-user removal. See INSTALL.md.
+- Rich X/Twitter link previews (off by default; nothing changes until an operator enables a provider): author, text, counts, photos, video/GIF, quotes, optional ThreadReaderApp threads, signed same-origin media fallback. Providers: X guest API (operator-supplied bearer) or the secret-free FixTweet API. Encrypted, DM and unknown conversations never auto-load. Requested and specified by hallucinate. See INSTALL.md and docs/x-preview-verification.md.
+
+Fixes
+- Your own "has changed hostname" line is no longer shown in every channel on every reconnect (networks whose services re-apply a vhost); other users' host changes are skipped when the host did not change.
+- Replies and reload drafts can no longer land in a different conversation (exact-name rule; replies use the message's own conversation); drafts from the previous build are discarded.
+- Pop-out windows stay pop-outs after F5 or a sign-out reload.
+- After a web restart, replayed history no longer changes which nick/host the server believes is yours (this also feeds E2E routing, echo suppression and bots); replayed echoes, notices and joins/parts are judged by the nick you had at the time.
+- Installers and update.sh hand /opt/cryptirc back to root safely (non-recursive, no symlink following, binaries replaced not chowned, rollback folder kept private) and refuse unsafe layouts with nothing changed; an identical irc_core copy no longer triggers a needless daemon restart.
+
+## v0.5.8 (November 2026) — every fix since the 2026-11-01 audit
+
+- Uploads: move per-user index out of /pub, stream /pub and /files
+- Upload chunks: per-user slot cap and body read timeouts
+- Pastes: iframe unlock, raw password off the URL, sandbox Markdown, O(1) lookup
+- AI bot: ground non-owner channel actions; preview: block NAT64 local-use
+- Deps: reqwest 0.12 (rustls 0.23, no h2 0.3), tokio 1.38.2, patch bumps
+- auth: fix reset-token takeover, login path traversal, unverified squatting, set_email validation; give admin Disable its own flag
+- resetpass.sh/makeadmin.sh: recognise admin-disabled accounts instead of un-banning them
+- admin panel: show disabled accounts as Disabled with an Enable login button
+- TUI: sanitise all server text before it reaches the terminal; fix vault-prompt paste and the stall detector
+- logs: fix load-older paging holes, NAME_MAX targets, removed-network history
+- ws: bound WS frames, canonical network ids, atomic saves, log hygiene
+- Electron: Electron 44.10.1 (GHSA-jr5w-w6x2-84p9), lock setup/retry IPC to our own pages, fix nav state, redirects, crash loop, LAN cert check
+- purge_account: Drop the deleted user's irc-core sessions and remove bot residue
+- admin delete: canonicalise the target before the "Cannot delete yourself" check
+- admin settings: honour CRYPTIRC_REGISTRATION / CRYPTIRC_REG_CODE unless the admin set them
+- reset / verify pages: use the configured base path instead of a hard-coded /cryptirc
+- auth routes: run Argon2 off the async workers behind a process-wide cap
+- client IP: trust forwarding headers only from a trusted proxy, key IPv6 per /64
+- E2E server: client-held keyring, passphrase-proven pepper, legacy-write refusal after migration
+- E2E client: client-held key, C2/H5/H6 fixes, reload restore, PSK/glare/case fixes
+- index.html: allow pinch-zoom; docs gallery: fix stale 171 theme count
+- adduser.sh: no password in sudo's argv, app-equal account rules, symlink-safe create
+- resetpass.sh: --, app password policy, clean -g capture, readback guard, --password-stdin
+- TUI: reqwest 0.11 -> 0.12 without http2, tokio 1.53.1 -> 1.54.1
+- Pets: prune fired timer ids, stop particle leak on disable, click/right-click through pets
+- docs: manual install gets irc-core, safe adduser forms, real Rust minimum, port 9001
+- Push: honour /ignore and PM Protection server-side; partial settings PUT
+- sw.js v12: one cache key for the app shell, tagged click intents, skip pop-outs
+- Markdown pastes: point this server's /files/ images at /pub/
+- purge_account: never touch a conn_id owned by another account
+- client IP: restore X-Real-IP-first precedence, warn when the headers disagree
+- Keep TLS certificate verification on for network presets; surface and fix networks that have it off (H2), connect the network Add & Connect created (#7)
+- Vault: clear the passphrase field, make auto-lock actually lock, report change-passphrase result (#2 #3 #8)
+- Password Safe: honest encryption wording, per-entry merge instead of last-writer-wins (#4 #5)
+- Send /np and canned-text commands through E2E like typed messages (#6)
+- Fix base-path URLs, firefly resize leak, UTF-8 appearance size, upload-status hide, expiry wording, proto-key maps (#9-#12 #15 #16)
+- Split view: follow new messages, adopt the shown channel, allow '/' in names (#14)
+- Smart paste: linear-time Markdown classification (#13)
+- irc_core: cancel-safe IRC line reader and daemon IRC-side hardening
+- irc_core IPC: replay-safe forwarding, byte-capped rings, close deaf clients
+- Upload chunks: O(1) in-progress pre-check instead of a records read
+- Push settings GET: leave out the client-owned ignore/PM Protection mirror
+- app.js (12001-end + small cross-range hooks): prefs budget, ignore everywhere, UI fixes
+- client IP: auto mode sends disagreeing X-Real-IP / XFF to one shared bucket
+- update.sh: verified swap with automatic rollback, uninterruptible apply window, lock
+- Keep chat lines typed during a WebSocket outage and send them once on reconnect
+- Upload pump: stop on rejected chunks, back off on transient errors
+- Sign-out and account switch: next account inherits no local state
+- Notices: show the sender, keep them in open conversations, apply PM protection
+- Fix mode-setter parsing, link-preview image, /links swallow, /query echo, pop-out path, dead /seen /note
+- E2E server: strict per-network nick resolution, no legacy key after migration
+- E2E client: refuse legacy blobs after migration, atomic establish+first decrypt; honest vault caption
+- ws: deliver the over-size error before closing; roomier reply queue
+- ws: run the DeleteAccount Argon2 check off the async workers, capped
+- Notices: services replies keep showing in the active window
+- deploy units: drop per-UID LimitNPROC, cap tasks per unit; reference web unit parity
+- deploy/Caddyfile: note that admin off breaks reload; redact secrets in the access log
+- deploy.sh: NAT-safe bare-IP TLS, verified Caddy apply, safe re-runs, no secret leaks
+- deploy-arch.sh: port every deploy.sh fix, plus the Arch-specific ones
+- auth: delete_account must not delete another account's logs/certs via a colliding conn_id
+- E2E client: fix global-name collisions with app.js, pace E2E WS bursts
+- installers: refuse up front on a box not booted with systemd
+- irc_core: rejoin keyed channels with keys learned during the session
+- web: recover daemon-ended connections, drop ghost sessions, fold-safe keys, quiet NOTICE log
+- integration: WS DeleteAccount uses the shared capped run_auth_kdf helper
+- integration: surface save/oversize server errors; remove-network confirm mentions history
+- Auto-lock locks only this device: no LockVault, no IRC disconnect; server-verified unlock (#3 follow-up)
+- integration: drop duplicate _utf8Len (app2 and app3 both added one; identical result)
+- E2E client: retry/verify migration, gentler pacing, robust IndexedDB open
+- logs: merge same-date case-variant files by id before the limit; optional id paging cursor
+- irc_core: CASEMAPPING-aware folding, ordered Attach replay, FIFO emit queue, delivery tracking
+- web: IRC state bounds and casing, IPC recovery locking, WS memory/time bounds, credential encryption
+- auth: bind reset links to credentials, single-use under the lock, re-check login hash, tighter legacy-ban migration
+- uploads/preview: no re-init of completed ids, clear drops staged chunks, legacy-id remove, ASCII-safe tag search
+- ai: SSRF-guard custom endpoints (admin opt-in for private), cap bodies, overall deadline, global call cap
+- bots: key notes/tells/seen/quotes/AI history by network, safe saves, tell overflow, explicit AI grounding
+- http: email change needs the current password, capped paste unlock, host-only preview log, legacy upload budget, CDN warning
+- TUI: handle irc_join_ex, honour server routing, buffer-less commands, no empty-target IRC, paging dedup
+- Electron: one notification-click path, exact local-page checks, same-server redirects, setup errors, crash-reload vs Change Server
+- app.js: keep E2E plaintext out of synced prefs; prefs budget/cadence; push-filter privacy; bot scope; surfaced refusals
+- TUI: a user called "status" is a query, never the status buffer
+- E2E server: keyring CAS, atomic per-file writes, tiered nick scoping, outdated-client guard
+- E2E client: fail closed on unknown state, per-recipient sends, merged state, tab-safe ratchet
+- index.html: vault caption no longer claims E2E keys are never readable by the server
+- admin scripts: fd-relative record writes, keep concurrent changes, kill old reset links
+- update.sh: real data dir, symlink-safe backups, stock-unit check, owner-run git
+- installers: keep registration policy, safe Caddy merge, staged binaries with rollback
+- docs: secrets in an EnvironmentFile, log redaction, first account, proxy headers
+- ipc_client: re-validate re-cased alias sessions; logs: id-less order, status_view; join log gate
+- bots: AI channel actions are structurally read-only; state changes only via owner /aido
+- ws: cap the size-scaled send timeout at 300 s
+- irc: adopt a 005 CASEMAPPING only from a daemon that folds the same way
+- E2E: review fixes — strict session-moved adoption, late plaintext as encrypted rows, NETWORK= only via registrable domain
+- ws: no 'not sent' status notice for typing-indicator TAGMSGs
+- app.js: a user whose nick is "status" gets a query window, not the status window
+- installers/update.sh: take unit settings only from root-owned sources, validate them
+- E2E nick scoping: fail closed on public suffixes the list does not know
+- docs: CRYPTIRC_AI_ALLOW_PRIVATE (AI custom-endpoint SSRF opt-in)
+- E2E nick scoping: drop DNS-suffix inference; exact host or allowlisted network domain
+- app.js: the "status" query alias is a display key only; E2E and the wire use the real nick
+- integration: unlock keeps connecting Auto-Reconnect=No networks (setting governs reconnect-after-drop); explicit Disconnect still respected
+- tui: keep the key across /cycle, send status_view/before_id with GetLogs, no empty /mode target
+- certs: regenerate the client certificate atomically and report its real fingerprint
+- logs: byte budgets for history reads and replies; paging stays complete
+- ws: vault lock is not an explicit Disconnect; locked-vault dials, KDF permits, network cap, legacy id collisions, Send classification
+- e2e: status-nick shims forward every argument to e2e.js
+- crypto: bound the Argon2 cost read back from vault.mkey
+- e2e server: fail-closed outdated-tab guard, atomic legacy-write rule, identity create-if-absent, safe slot names
+- e2e client: resolve other spellings of E2E targets, one identity per account, newer session after reload
+- app: input history typed in an E2E conversation stays local after E2E is turned off
+- app: send before_id when paging and status_view for the user "status"'s window
+- app: search an end-to-end encrypted conversation on this device only
+- app: mark a refused /msg to more than 20 recipients "not sent" again
+- app: surface the remaining console-only server refusals; quiet lock-race refusals
+- auth: bind email change to the verified credential, hold deleted names until purge ends, share the admin-script account lock, fail-safe legacy-ban rule
+- uploads: index writes are fallible and never a silent commit; chunked uploads record /pub/ links; file serving admits before opening
+- bots: owner keeps read-only channel AI lookups, /aido replies are echoed+logged, capped bot fetches, private lookup admission, safe AI key saves, owner-note migration covers fallback nicks
+- paste: hash a protected paste's password on the blocking pool behind the auth-KDF admission
+- push/preview/ai: trailing-dot hosts; ignore masks with ?
+- e2e client: ISUPPORT may only tighten target resolution; non-blocking identity questions
+- ws: re-check a shared legacy network id against the disk before refusing
+- e2e client: use an e2e_bundle only as the answer to this page's own recent /encrypt on
+- app: the status window no longer sends typed text to the IRC nick "status"
+- electron: trust-on-first-use pinning for LAN server certificates, scoped to the configured server
+- ws: shared-id destructive ops require a fresh sole-owner check under the config lock
+- installers: isolated Python, no symlink-following settings seed, honest exit status
+- update.sh: migrate old installs' secrets, parse systemd quoting, safer env files
+- admin scripts: script half of the account-lock contract
+- sync-version.sh: portable README badge rewrite (no GNU sed 0,/re/ or bare -i)
+- docs: nginx log without query strings, private backups, rollback floor, env file, IPv6 Postfix
+- electron: close the silent first-pin window after the first load; sanitize certificate text in the trust dialog
+- irc_core: bound RawSend and snapshot memory, mark lines delivered only once written, fix SASL/CAP fallback, guard self-NICK/CHGHOST, report the dialed endpoint
+- web: casemapping-aware channel-key slots, authoritative membership, enc: secrets, live UpdateNetwork, dialed E2E identity, locked-vault log hold
+- auth: account-lock open follows the integrator contract; unusable lock file is a warned degraded mode, never replaced
+- admin scripts: never chown a lock file this run did not create
+- update.sh: refuse a multi-line or non-path value; check the pre-split path rule before the backup
+- deploy/README: rolling the web back below 0.5.8 hides owners' bot notes until rolled forward
+- ipc_client: keep ownerless sessions of shared legacy ids alive at attach (reverted an earlier ghost-drop change)
+- irc_core: SASL fails closed — stop after 3 failures instead of registering without authentication
+- e2e client: key-change warning — no new alert while that peer's is open, at most 5 per peer per 10 min
+- web: one 'unlock the vault to reconnect' message after a daemon restart with a locked vault
+- tui: test that the network buffer never sends text or actions to a nick called status
+- e2e client: a vault lock during an E2E boot is an expected cancel, not an error
+- admin: DELETE /admin/user/<name> answers 404 for a name with no account
+- ws: never adopt the live session of a shared legacy network id; claim it with a fresh dial
+- web: rate-limit the held-log budget warning (one a minute while the process-wide hold is full)
+- app: /cycle keeps a +k channel's key
+- integration: purge-release socket count reads the server's split bulk rings
+- docs: manual bare-IP Caddy (tls internal) vs desktop-app certificate pinning
+- web: STATUSMSG lines go to the channel; outgoing chat is split/refused so log+echo equal the wire; strict-rfc1459 key lookup; IRCv3-size inbound lines
+- auth: account generations; sessions bound to them; account lock never awaited under a user/email mutex
+- bots/push/paste/uploads: deleted accounts' work is dropped, no plaintext bot output to E2E targets, purge-safe push writes, pastes purged, retryable finalize, APNG kept
+- bots: fail-closed E2E rule for every AI-written IRC command; tells checked only when pending
+- update.sh: no automatic rollback below 0.5.8 once users' data changed; probe any base path
+- installers: umask, certificate rollback, full web/daemon rollback, apt argon2, socket parsing
+- resetpass.sh: keep legacy bans, drop push subscriptions on reset, no-op exits 0
+- INSTALL.md: HSTS line in the unit template; desktop-app certificate note; update exit 4
+- irc-core + web: user PARTs stop auto-join rejoins, processed-acks (proc_ack), SendDropped, SASL 001-without-SASL fails closed, deferred membership reconciliation, out-queue byte cap; TUI casemapping-aware /cycle and safe State prune
+- bots: refusal notice wording (article carried by the caller)
+- server: serialize network-id claims across accounts, vault lock wins over in-flight unlock, bounded log reads, send/join fixes
+- sw: activate deletes only CryptIRC's own caches
+- web: fail closed without the E2E engine; E2E target resolution everywhere; lock and 005 fixes
+- web: persist dialed endpoints (old irc_core + web restart keeps the real E2E network identity); SendDropped only for chat lines, with target
+- bots: MODE into an E2E channel only when text-free; NICK/unclassified verbs fail closed for E2E accounts
+- server: pass &str to the quarantine owner lookup
+- bots: status-mode arguments on an E2E channel must be current members of it
+- web: receive-side E2E resolution by the real casemapping; split long plaintext like the server; history id stamping
+- auth tests: degraded-mode lock test times only the lock-taking record writes (load flake)
+- server: doc comment inside thread_local (test-build warning); reader test at 200 regenerations
+- web: hold every line that arrives while the vault is locked, also when a session is attached
+- INSTALL.md: desktop-app note split — public IP needs a publicly trusted certificate; pinning advice for LAN addresses only
+- auth tests: V3S-1 verifier sequence (session minted after the final delete) as a permanent test
+- server: cert reader race test covers every reader path (load_identity, dial-path read_pair, load_info) over 400 regenerations
+- bots: legacy owner-note claims only under the owner's configured nicks / account name (V3S-2 (a): no collision-fallback inference)
+- web: re-dial networks after a graceful irc-core restart; TUI test for daemon status notices
+- web: graceful-restart re-dial also for an old irc_core (its 'connection task ended' notice can overtake 'User requested'); honoured only when the IPC link drops right after
+- bots: restore the owner-note collision-fallback rule (integrator decision), keep the V3S-2 (b)/(c) guards
+- bots: owner-note fallback rule matches only the daemon's exact nick-retry chain
+- web: receive rule honours UTF8MAPPING=rfc8265 (Ergo precis advertises CASEMAPPING=ascii)
+- web: after an irc-core crash the re-dialed network is reported connected again
+- deploy/cryptirc.service: carry CRYPTIRC_HSTS with the bare-IP/self-signed warning
+- update.sh: data floor moved to deploy/data-floor.sh; RuntimeDirectory for a /run socket dir; probes bypass proxies
+- installers: honour the 0.5.8 data floor, back up before crossing it; keep a Caddyfile's owner/mode
+- deploy/README.md: the installers follow the 0.5.8 data floor too (backup first, exit 4)
+- irc: untracked-channel events not logged + per-connection log-target cap; TUI passphrase prompt never yields to chat; SASL never skips CAP; Send decides by the reported state; backoff PART/JOIN applied; ended connections keep undelivered history; socket dir created
+- server: handshake re-validation after subscribing, canonical ids before the E2E guard, per-requester OTPK budget, quarantine redial at AttachComplete, paced trust load, network-casemapping E2E nick fold
+- e2e: block sends until the keyring reply even before the first boot
+- e2e: a lock during an unlock in progress wins
+- e2e: do not silently adopt an identity that differs from the state's
+- web: send typing notices through wsend
+- web: search stays on the device when the E2E engine failed to load
+- web/e2e: a refused multi-recipient send sends nothing
+- web/e2e: encryption panel and /encrypt resolve names like the send path
+- web: network unmute sticks (muted_networks import once per device)
+- electron: hand only the address of a mailto: link to the OS
+- held logs: account deletion discards them; held lines are bound to the account generation
+- bots: linear AI-reply formatting; bot replies fitted to one wire line; E2E re-checked at transmit time
+- push: subscribe admission before the endpoint DNS lookup; bounded, deadline-limited resolution
+- paste: per-account quota (count + bytes) and the uploads' free-space floor
+- auth: persisted session revocation stamp (sessions_valid_after) honoured on every validate path
+- irc: hold-aware acknowledgements; log-target budget overflows into *overflow* instead of dropping
+- web/e2e: key commands resolve names under the network's real case rules
+- resetpass.sh: a reset signs out every existing session (sessions_valid_after)
+- irc: log-target budget is keyed by the case-preserving directory name
+- resetpass.sh: say "signed out" only when the running server honours the stamp
+- installers: name an unknown previous version readably in the data-floor messages
+- e2e: a lock while a key command waits cancels it
+- irc_core: a /join or /part made while reconnecting or registering takes effect when registered
+- auth: a zero session revocation stamp is not written (records without one stay byte-identical)
+- web: the user's own sent lines take the hold path
+- TUI: /topic, /ban, /unban, /op and a bare /part need a channel buffer
+- bots: bot replies are logged through the hold path (held while the vault is locked, written in order at unlock)
+- Clear All Data deletes pastes through the store, so the paste quota is freed at once
+- deploy/unit-env.sh: update.sh's unit-settings readers, shared with the installers
+- installers: symlink-safe staged config writes with restore on failure; deploy lock; real data dir; honest .version
+- docs: client IP behind a CDN, nginx certificate bootstrap, honest rollback notes
+- server: purge-visible handshake with per-snapshot re-validation, one trust load per socket + trust field limits, X3DH relay only from a registered nick, legacy log dirs never read/deleted through another target's current dir
+- bots: a bot reply is logged as the owner's own line (log_own_line)
+- irc: held lines survive an explicit Disconnect and a re-lock during the flush
+- irc: a channel the server joined us to is not exempt from the log-target budget
+- irc_core: PART/JOIN intent is kept for every channel name the web accepts
+- TUI: bounded windows and event queue
+- e2e: re-sync with the server after every reconnect
+- e2e: keep /encrypt on blocking until its setup finished
+- e2e: a channel-key reply in flight does not undo a lock
+- web: re-check a queued plaintext line's target when the queue drains
+- web: a reply quote stays in the conversation it was picked in
+- irc: test hook CRYPTIRC_TEST_SLOW_FLUSH_MS for held-line flush races
+- installers: drop two variables the rollback no longer reads (ENV_BAK, WEB_UNIT_BAK)
+- irc: a held-line flush never outlives a deletion or a clear
+- bots: a bot reply to a remote-chosen nick is budgeted like any new conversation
+- INSTALL.md: the account scripts run from the checkout (no stray copy of adduser.sh to /opt/cryptirc)
+- server: join_channel on an offline network is saved to auto-join (user told); canonical conn_id for E2E fetch/relay + a test over every conn_id variant
+- e2e: flag cleartext CTCP-framed text in an E2E DM
+- web: each recipient of a multi-target E2E send keeps its own tail pieces
+- electron: context-menu and notification clicks check the window still exists
+- sw: handle only GETs of the app's page, scripts and static files
+- irc: a held line that cannot be written now stays held; one that never can is released
+- irc_core: an ended connection is replayed to every web until it expires
+- web: no NAMES/WHO/MODE/TOPIC resync for a snapshot of a session that is not up
+- ircproto: runs of spaces between the parts of a line are one separator
+- TUI: Ctrl+N/P and Alt+Left/Right follow the window list on screen
+- auth: revocation cache bound to the account generation; a missing record is never cached
+- server: X3DH relay without conn_id resolves sender and recipient on the same network; legacy cutover only from real YYYY-MM-DD day files
+- irc: held lines — a re-lock after the flush wait holds the line; held only when queued; shared seqs refcounted
+- irc: one log directory per chosen channel; server-time is believed only near the receive time
+- irc: a recipient list that leaves no room for the text is refused
+- ircproto/irc/irc_core: channel-mode parameters are walked per the server's CHANMODES
+- irc_core: every channel name the web accepts is in the SessionSync
+- TUI: JOIN, KICK, TOPIC, NAMES, MODE and echo windows go through the window cap
+- web: one tracked send path; a reply quote goes out only with its body
+- e2e: a DM session bound to a replaced peer identity is not used
+- web/e2e: re-check queued ciphertext before it leaves
+- web: queued lines held for E2E status say so
+- web: a Reply in the split pane is bound to that pane's conversation
+- web: decrypt a private notice by its sender before choosing where to show it
+- web: cap conversations opened by new nicks; save the query list on change
+- e2e: a legacy dh-only pin of the same identity is not a replacement
+- web: held-row title also fits a hold during the reconnect re-sync
+- deploy/unit-env.sh: wildcard EnvironmentFile=, a live data-dir cross-check, unit quoting
+- installers: the installed service's real data dir everywhere; keep a customized irc-core.service; restart a cryptirc an interrupted run stopped
+- installers + INSTALL.md: behind a CDN, never a client-written address as the client IP
+- deploy/README.md: the daily backup recipe archives the real data directory
+- e2e: queued ciphertext is compared by key generation, not key object
+- news: one upstream refresh at a time, backoff after a failure, per-account limit
+- bots: bounded enforcement queue, generation-bound bot data, scoped public !seen, output bound to its connection
+- unit-env.sh: wildcards in an EnvironmentFile= file name only, symlinks resolved; anything else stops the run
+- installers: the irc-core unit check no longer ends the run under errexit
+- bots: read a bot config and its generation together; bump it when the config is installed
+- installers: a web/irc-core socket mismatch says so in the summary and exits 1
+- installers: the previous-environment reader follows wildcard EnvironmentFile= entries too
+- data-floor.sh: the floor snapshot follows symlinked user directories
+- update.sh: hand off to the pulled copy when data-floor.sh or unit-env.sh changed too
+- installers: hand the data dir to the service account only where nobody else can swap it
+- installers: commit a new self-signed pair together with the config files that use it
+- irc: one spelling per chosen channel for good; failed writes held; oversized ciphertext refused
+- irc/irc_core: mode parameters per the server's PREFIX and CHANMODES, carried in the SessionSync
+- irc: Held is announced when the line is queued, never after a flush may have released it
+- web: Clear history of a conversation keeps its held lines when the vault is locked
+- TUI: a window's member list grown by live JOINs is bounded
+- irc_core/web: tagged JOINs teach their keys; a size-cut snapshot is no proof of a PART
+- server: one-time prekeys handed out without a handshake can no longer fill the session quota; a prekey is published only with its private half stored
+- e2e: an incoming DM never authenticates with a replaced identity's session
+- e2e: /encrypt reset-identity closes the sessions bound to the old identity
+- web/e2e: queued ciphertext is held, not dropped, while locked or waiting
+- web: a reply that belongs to another conversation sends nothing
+- web: PM protection's auto-reply opens no conversation for over-cap nicks
+- web: *overflow* takes no conversation slot and is read-only
+- e2e: bound the per-nick state unauthenticated senders can create
+- web: the server's too-many-recipients refusal marks the row not sent
+- e2e: the session-moved take-over accepts a legacy DH-only pin
+- bots: bound the quote DB, key AI history by server, report failed sends as not sent
+- news: drop expired per-account rate entries once the map is large
+- unit-env.sh: read an EnvironmentFile only from a directory only root can change
+- installers: check the directory that will hold a missing data dir as it really resolves
+- backups: archive what symlinked user directories hold, refuse an archive of links
+- web: close and empty the secret panels on every vault lock, not only the device lock
+- e2e: bound the X3DH headers held for an expected message
+- web: keep the timestamp of an adopted PM allow list / per-network PM settings
+- web: queue /msg and /notice lines like typed lines, tied to their rows
+- irc_core: a superseded connection task never forwards again
+- irc: a chosen channel keeps its log spelling across PART/JOIN
+- TUI: renames obey the member-entry bound
+- e2e: a stranger flood never evicts a contact's held key-change header
+- web: finishing a send clears only the text that was sent
+- web: keep PM-protection cooldown marks for the longest cooldown in use
+- web: show the server's 'Encrypted message too long for this target' refusal
+- backups: follow links only as the service account, never into devices, FIFOs or /proc
+- server: a legacy /upload whose body stalls or trickles is cancelled and releases its upload budget
+- server: push failures log only the endpoint's origin and a hash; notification writes cannot outlive a resetpass.sh purge
+- backups: clean data-dir names in messages; tar writes only into a pipe; root checks the members
+- data-floor.sh: names in backup messages keep printable ASCII only
+- web: closing the notepad does its pending autosave at once
+- bots: auto op/voice queued and bound to its recipient, tells stay in their channel, notes keyed by server and bounded
+- irc: tell the bots when a member leaves or changes nick
+- bots: key tells and seen records by the dial server too
+- update.sh: --prebuilt DIR installs binaries built elsewhere (no git pull, no cargo)
+- web+server: offer a reload when the server was redeployed while the page stayed open
+- web: the update banner's Reload keeps a detached window detached
+- web: the update banner is not squeezed on narrow screens
+- build+server: the frontend id covers every embedded static file
+- web: the update banner's Reload never drops unsent work silently
+- web: a detached window reloading for an update does not say bye
+- build+server: hash exactly the static files the server embeds
+- web: the update reload keeps Password Safe/notepad changes and the draft
+- web: the update reload never brings a split-pane reply back in the wrong conversation
+- web: the update reload never loses a notepad change or a draft silently
+- web: the update reload never sends an untouched notepad; each question is fresh
+- web: notepad text typed before its notes loaded counts as unsaved for the reload

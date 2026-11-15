@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "id": "1800000000000000008",
+  "url": "https://x.com/i/status/1800000000000000008",
+  "availability": {
+    "state": "unavailable",
+    "reason": "restricted"
+  },
+  "author": null,
+  "created_at": null,
+  "text": "",
+  "text_source": "unavailable",
+  "text_complete": false,
+  "entities": [],
+  "metrics": {
+    "likes": {
+      "state": "unavailable",
+      "value": null
+    },
+    "reposts": {
+      "state": "unavailable",
+      "value": null
+    },
+    "replies": {
+      "state": "unavailable",
+      "value": null
+    },
+    "quotes": {
+      "state": "unavailable",
+      "value": null
+    },
+    "bookmarks": {
+      "state": "unavailable",
+      "value": null
+    },
+    "views": {
+      "state": "unavailable",
+      "value": null
+    }
+  },
+  "media": [],
+  "quote": {
+    "state": "none",
+    "id": null,
+    "url": null,
+    "post": null,
+    "reason": null
+  },
+  "reply": null,
+  "thread": {
+    "state": "disabled",
+    "provider": null,
+    "count": null
+  },
+  "fetched_at": "2026-10-20T12:01:00Z",
+  "expires_at": "2026-10-20T12:02:00Z",
+  "media_complete": false
+}

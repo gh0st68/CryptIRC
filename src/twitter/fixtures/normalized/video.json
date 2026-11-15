@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "id": "1800000000000000003",
+  "url": "https://x.com/i/status/1800000000000000003",
+  "availability": {
+    "state": "available",
+    "reason": null
+  },
+  "author": {
+    "id": "1700000000000000001",
+    "name": "Example Author 🌿",
+    "handle": "example_author",
+    "avatar_url": "https://pbs.twimg.com/profile_images/synthetic/avatar.jpg",
+    "verification": {
+      "legacy_verified": null,
+      "blue_verified": false
+    }
+  },
+  "created_at": "2026-10-20T12:00:00Z",
+  "text": "A synthetic video with multiple playback choices.",
+  "text_source": "legacy",
+  "text_complete": true,
+  "entities": [],
+  "metrics": {
+    "likes": {
+      "state": "available",
+      "value": "1200"
+    },
+    "reposts": {
+      "state": "available",
+      "value": "24"
+    },
+    "replies": {
+      "state": "available",
+      "value": "0"
+    },
+    "quotes": {
+      "state": "available",
+      "value": "3"
+    },
+    "bookmarks": {
+      "state": "available",
+      "value": "8"
+    },
+    "views": {
+      "state": "available",
+      "value": "45000"
+    }
+  },
+  "media": [
+    {
+      "id": "synthetic-media-5",
+      "kind": "video",
+      "thumbnail_url": "https://pbs.twimg.com/media/synthetic_5.jpg?name=medium",
+      "original_url": "https://pbs.twimg.com/media/synthetic_5.jpg?name=orig",
+      "alt_text": "Synthetic attachment 5",
+      "width": 1920,
+      "height": 1080,
+      "duration_ms": 42500,
+      "mp4": [
+        {
+          "url": "https://video.twimg.com/synthetic/video/1920x1080.mp4",
+          "content_type": "video/mp4",
+          "bitrate": 5000000,
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "url": "https://video.twimg.com/synthetic/video/1280x720.mp4",
+          "content_type": "video/mp4",
+          "bitrate": 2176000,
+          "width": 1280,
+          "height": 720
+        },
+        {
+          "url": "https://video.twimg.com/synthetic/video/640x360.mp4",
+          "content_type": "video/mp4",
+          "bitrate": 600000,
+          "width": 640,
+          "height": 360
+        }
+      ],
+      "hls_url": "https://video.twimg.com/synthetic/video/playlist.m3u8"
+    }
+  ],
+  "quote": {
+    "state": "none",
+    "id": null,
+    "url": null,
+    "post": null,
+    "reason": null
+  },
+  "reply": null,
+  "thread": {
+    "state": "disabled",
+    "provider": null,
+    "count": null
+  },
+  "fetched_at": "2026-10-20T12:01:00Z",
+  "expires_at": "2026-10-20T12:11:00Z",
+  "media_complete": true
+}

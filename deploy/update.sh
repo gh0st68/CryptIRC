@@ -772,6 +772,41 @@ if [[ "$HAVE_IRC_CORE" == "true" && "$HAVE_IRC_CORE_UNIT" == "false" ]] \
     _refuse_env "This install predates the irc-core daemon, and moving it over writes its data directory ($(printf '%q' "$DATA_DIR"))${WEB_IPC_SOCK0:+ and socket path} into a new irc-core.service — that needs a plain absolute path (only letters, digits and . _ / -; no spaces, % or ..). Move the data to such a path (and point CRYPTIRC_DATA at it), then re-run."
 fi
 
+# ── The install directory belongs to root ────────────────────────────────────
+# Before anything below writes into it (markers, the staged binaries, the rollback copies): the
+# directory, the two binaries, the markers and .rollback are made root's, and only they (deploy/
+# unit-env.sh's _secure_install_dir: never recursive, never through a link; a binary or marker that
+# isn't root's is replaced by a root-owned copy, not chowned in place). The data and socket
+# directories are left alone wherever they are. The services never write there (ProtectSystem=strict;
+# their ReadWritePaths are the data and log dirs).
+# The service account (the web unit's User=) may own what gets replaced; anyone else's file is refused.
+# The services' data and socket directories (web's and irc-core's, from their root-owned settings) are excluded.
+_sid_user=$(systemctl show -p User --value cryptirc 2>/dev/null || true); [[ -n "$_sid_user" ]] || _sid_user=cryptirc
+# (DATA_DIR as written; _sid_service_dirs adds it fully resolved too, and irc-core's own data/socket dirs.)
+_sid_dirs=(); _sid_warns=(); _sid_svc_refuse=""
+while IFS= read -r _sid_l; do
+    case "$_sid_l" in
+        "DIR "*) _sid_dirs+=("${_sid_l#DIR }") ;; "WARN "*) _sid_warns+=("${_sid_l#WARN }") ;;
+        "REFUSE "*) _sid_svc_refuse="${_sid_l#REFUSE }" ;;
+    esac
+done < <(_sid_service_dirs "$INSTALL_DIR" "$DATA_DIR" "$WEB_IPC_SOCK0")
+if (( ${#_sid_warns[@]} )); then for _sid_l in "${_sid_warns[@]}"; do echo -e "  ${YELLOW}⚠ ${_sid_l}${NC}"; done; fi
+if [[ -n "$_sid_svc_refuse" ]]; then
+    echo -e "  ${RED}✗ ${_sid_svc_refuse}${NC}" >&2
+    echo -e "  ${DIM}The update stopped here: no binary, unit or service was touched.${NC}" >&2
+    exit 1
+fi
+_sid_rc=0; _sid_out=$(_secure_install_dir "$INSTALL_DIR" "$_sid_user" "${_sid_dirs[@]}") || _sid_rc=$?
+_sid_summary "$_sid_out"
+[[ -n "$SID_FIXED" ]] && echo -e "  ${YELLOW}⚠ ${INSTALL_DIR}: ${SID_FIXED}${NC}"
+[[ -n "$SID_OTHER" ]] && echo -e "  ${YELLOW}⚠ ${INSTALL_DIR}: ${SID_OTHER}${NC}"
+if (( _sid_rc != 0 )); then
+    [[ -n "$SID_REFUSE" ]] || SID_REFUSE="${INSTALL_DIR} could not be handed to root."
+    echo -e "  ${RED}✗ ${SID_REFUSE}${NC}" >&2
+    echo -e "  ${DIM}The update stopped here: no binary, unit or service was touched.${NC}" >&2
+    exit 1
+fi
+
 # ── Smart change detection ───────────────────────────────────────────────────
 # Hash the freshly-built binaries against what's currently DEPLOYED (compared BEFORE
 # the swap below overwrites them) and auto-decide the restart actions, instead of
@@ -820,6 +855,9 @@ _daemon_runs_ondisk() {
     disk_id=$(stat -L -c '%d:%i' "$INSTALL_DIR/irc_core" 2>/dev/null || true)
     if [[ -z "$run_id" || -z "$disk_id" ]]; then echo unknown
     elif [[ "$run_id" == "$disk_id" ]]; then echo yes
+    # Another inode with the same bytes is the same daemon: the install-dir hand-back
+    # (_secure_install_dir) replaces a binary that wasn't root's by a root-owned copy.
+    elif cmp -s "/proc/$pid/exe" "$INSTALL_DIR/irc_core" 2>/dev/null; then echo yes
     else echo no
     fi
 }

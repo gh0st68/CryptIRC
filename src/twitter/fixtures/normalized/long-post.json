@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "1800000000000000006",
+  "url": "https://x.com/i/status/1800000000000000006",
+  "availability": {
+    "state": "available",
+    "reason": null
+  },
+  "author": {
+    "id": "1700000000000000001",
+    "name": "Example Author 🌿",
+    "handle": "example_author",
+    "avatar_url": "https://pbs.twimg.com/profile_images/synthetic/avatar.jpg",
+    "verification": {
+      "legacy_verified": null,
+      "blue_verified": false
+    }
+  },
+  "created_at": "2026-10-20T12:00:00Z",
+  "text": "Paragraph 1: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 2: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 3: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 4: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 5: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 6: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 7: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 8: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 9: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 10: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 11: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 12: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 13: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 14: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 15: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.\n\nParagraph 16: synthetic long-post content with Unicode 日本語, العربية, emoji 🧭, and selectable text. This paragraph demonstrates preserved formatting rather than a fetched article body.",
+  "text_source": "note",
+  "text_complete": true,
+  "entities": [],
+  "metrics": {
+    "likes": {
+      "state": "available",
+      "value": "1200"
+    },
+    "reposts": {
+      "state": "available",
+      "value": "24"
+    },
+    "replies": {
+      "state": "available",
+      "value": "0"
+    },
+    "quotes": {
+      "state": "available",
+      "value": "3"
+    },
+    "bookmarks": {
+      "state": "available",
+      "value": "8"
+    },
+    "views": {
+      "state": "available",
+      "value": "45000"
+    }
+  },
+  "media": [],
+  "quote": {
+    "state": "none",
+    "id": null,
+    "url": null,
+    "post": null,
+    "reason": null
+  },
+  "reply": null,
+  "thread": {
+    "state": "unknown",
+    "provider": "threadreader",
+    "count": null
+  },
+  "fetched_at": "2026-10-20T12:01:00Z",
+  "expires_at": "2026-10-20T12:11:00Z",
+  "media_complete": true
+}

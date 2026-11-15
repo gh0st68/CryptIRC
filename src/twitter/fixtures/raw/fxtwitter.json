@@ -1,0 +1,50 @@
+{
+  "code": 200,
+  "message": "OK",
+  "tweet": {
+    "url": "https://x.com/example_author/status/123",
+    "id": "123",
+    "text": "Synthetic FixTweet post with <b>literal</b> markup and https://example.org/fx",
+    "author": {
+      "id": "42",
+      "name": "Example Author",
+      "screen_name": "example_author",
+      "avatar_url": "https://pbs.twimg.com/profile_images/1/synthetic_normal.jpg",
+      "banner_url": "https://evil.test/banner.jpg"
+    },
+    "replies": 7,
+    "retweets": 18446744073709551615,
+    "likes": 0,
+    "bookmarks": 3,
+    "views": null,
+    "created_at": "Tue Oct 20 12:00:00 +0000 2026",
+    "created_timestamp": 1792497600,
+    "is_note_tweet": false,
+    "lang": "en",
+    "replying_to": "example_friend",
+    "replying_to_status": "122",
+    "media": {
+      "all": [
+        {"type": "photo", "url": "https://pbs.twimg.com/media/synthetic_fx.jpg?name=orig", "width": 1600, "height": 900, "altText": "A synthetic photo"},
+        {"type": "video", "url": "https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/fx.mp4", "thumbnail_url": "https://pbs.twimg.com/ext_tw_video_thumb/1/pu/img/fx.jpg", "width": 1280, "height": 720, "duration": 12.5, "format": "video/mp4",
+         "variants": [
+           {"content_type": "application/x-mpegURL", "url": "https://video.twimg.com/ext_tw_video/1/pu/pl/fx.m3u8"},
+           {"content_type": "video/mp4", "url": "https://video.twimg.com/ext_tw_video/1/pu/vid/640x360/fx.mp4", "bitrate": 832000},
+           {"content_type": "video/mp4", "url": "https://evil.test/fx.mp4", "bitrate": 1},
+           {"content_type": "video/mp4", "url": "https://video.twimg.com/ext_tw_video/1/pu/vid/1280x720/fx.mp4", "bitrate": 2176000}
+         ]},
+        {"type": "gif", "url": "https://video.twimg.com/tweet_video/fx.mp4", "thumbnail_url": "https://pbs.twimg.com/tweet_video_thumb/fx.jpg", "width": 480, "height": 270, "format": "video/mp4"},
+        {"type": "photo", "url": "https://evil.test/not-twimg.jpg"}
+      ]
+    },
+    "quote": {
+      "url": "https://x.com/quoted/status/124",
+      "id": "124",
+      "text": "The quoted synthetic post",
+      "author": {"id": "43", "name": "Quoted Person", "screen_name": "quoted", "avatar_url": "https://pbs.twimg.com/profile_images/2/q_normal.jpg"},
+      "replies": 1, "retweets": 2, "likes": 3, "views": 4,
+      "created_timestamp": 1792494000,
+      "quote": {"id": "125", "text": "too deep", "author": {"name": "Deep", "screen_name": "deep"}}
+    }
+  }
+}

@@ -5,9 +5,14 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
+
+use crate::twitter::{PreviewError, TweetPreview, TwitterClient, UnavailableReason, X_HOSTS};
 
 const MAX_BODY: usize = 51_200; // 50KB max fetch
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -65,16 +70,26 @@ impl Default for PreviewSettings {
 
 pub struct PreviewService {
     data_dir: String,
+    /// X providers (all off unless their startup flags are set) — see twitter.rs.
+    twitter: Arc<TwitterClient>,
+    /// The process-wide outbound preview permits (#33), shared with generic /preview.
+    preview_sem: Arc<Semaphore>,
+    tweets: Arc<Mutex<TweetCache>>,
 }
 
 impl PreviewService {
-    pub fn new(data_dir: &str) -> Self {
+    pub fn new(data_dir: &str, preview_sem: Arc<Semaphore>) -> Self {
         // #17/#18: we no longer keep a shared, redirect-following client. Each hop
         // is fetched with a freshly-built client that (a) disables automatic
         // redirects (Policy::none) and (b) pins DNS to the already-validated public
         // IPs via resolve_to_addrs, so reqwest cannot re-resolve to a private IP
         // (DNS-rebinding / TOCTOU). See build_pinned_client / fetch_preview.
-        Self { data_dir: data_dir.to_string() }
+        Self {
+            data_dir: data_dir.to_string(),
+            twitter: Arc::new(TwitterClient::from_environment()),
+            preview_sem,
+            tweets: Default::default(),
+        }
     }
 
     pub async fn load_settings(&self) -> PreviewSettings {
@@ -256,6 +271,416 @@ impl PreviewService {
     }
 }
 
+// ─── X previews: per-viewer cache, single-flight and policy generation ────────
+// Ported from the rich-X-previews reference. Keys are (viewer, policy epoch,
+// "preview:<id>" | "thread:<id>"), so one account never reads another's result and a
+// policy change (admin Off/Whitelist/All) invalidates everything at once. Nothing here is
+// persisted: restart clears tokens and results.
+
+type TweetResult = Result<Arc<serde_json::Value>, PreviewError>;
+type TweetKey = (String, u64, String);
+
+const TWEET_MAX_ENTRIES: usize = 1000;
+const TWEET_MAX_ENTRIES_PER_USER: usize = 100;
+const TWEET_MAX_BYTES: usize = 32 * 1024 * 1024;
+const TWEET_MAX_ENTRY_BYTES: usize = 256 * 1024;
+const TWEET_MAX_WAITERS: usize = 128;
+const TWEET_MAX_WAITERS_PER_KEY: usize = 16;
+const TWEET_REFRESH_COOLDOWN_SECS: u64 = 30;
+const TWEET_LOGICAL_DEADLINE: Duration = Duration::from_secs(12);
+
+struct TweetEntry {
+    result: TweetResult,
+    expires: Duration,
+    bytes: usize,
+    recent: u64,
+    /// CDN assets referenced by this result (twitter::media_asset_key), so the signed
+    /// media fallback only covers what this viewer actually retrieved.
+    media: HashSet<String>,
+}
+struct TweetFlight {
+    sender: watch::Sender<Option<TweetResult>>,
+    waiters: usize,
+}
+#[derive(Default)]
+struct TweetCache {
+    allowed: Option<bool>,
+    epoch: u64,
+    entries: HashMap<TweetKey, TweetEntry>,
+    flights: HashMap<TweetKey, TweetFlight>,
+    refresh: HashMap<(String, String), Duration>,
+    waiters: usize,
+    bytes: usize,
+    recent: u64,
+}
+
+impl TweetCache {
+    fn remove(&mut self, key: &TweetKey) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.bytes = self.bytes.saturating_sub(entry.bytes);
+        }
+    }
+
+    fn expire(&mut self, now: Duration) {
+        let expired: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.expires <= now)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in expired {
+            self.remove(&key);
+        }
+        self.refresh.retain(|_, until| *until > now);
+    }
+
+    fn insert(&mut self, key: TweetKey, result: TweetResult, now: Duration) {
+        self.expire(now);
+        self.remove(&key);
+        let mut media = HashSet::new();
+        let (bytes, ttl) = match &result {
+            Ok(value) => {
+                crate::twitter::collect_media_keys(value, &mut media);
+                let bytes = serde_json::to_vec(value.as_ref())
+                    .map(|v| v.len())
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(media.iter().map(|k| k.len() + 32).sum::<usize>());
+                let ttl = match value
+                    .pointer("/availability/reason")
+                    .and_then(|v| v.as_str())
+                {
+                    Some("provider_disabled") => 30,
+                    Some(_) => 60,
+                    None if key.2.starts_with("thread:") => 300,
+                    None => 600,
+                };
+                (bytes, ttl)
+            }
+            Err(PreviewError::RateLimited(delay)) => (128, *delay),
+            Err(_) => (128, 15),
+        };
+        if bytes > TWEET_MAX_ENTRY_BYTES {
+            return;
+        }
+        loop {
+            let per_user = self.entries.keys().filter(|k| k.0 == key.0).count() >= TWEET_MAX_ENTRIES_PER_USER;
+            if !(per_user
+                || self.entries.len() >= TWEET_MAX_ENTRIES
+                || self.bytes + bytes > TWEET_MAX_BYTES)
+            {
+                break;
+            }
+            let oldest = self
+                .entries
+                .iter()
+                .filter(|(k, _)| !per_user || k.0 == key.0)
+                .min_by_key(|(_, e)| e.recent)
+                .map(|(k, _)| k.clone());
+            match oldest {
+                Some(oldest) => self.remove(&oldest),
+                None => return,
+            }
+        }
+        self.recent = self.recent.wrapping_add(1);
+        self.bytes += bytes;
+        self.entries.insert(
+            key,
+            TweetEntry {
+                result,
+                expires: now + Duration::from_secs(ttl),
+                bytes,
+                recent: self.recent,
+                media,
+            },
+        );
+    }
+}
+
+struct TweetSubscriber {
+    cache: Arc<Mutex<TweetCache>>,
+    key: TweetKey,
+}
+impl Drop for TweetSubscriber {
+    fn drop(&mut self) {
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.waiters = cache.waiters.saturating_sub(1);
+        if let Some(flight) = cache.flights.get_mut(&self.key) {
+            flight.waiters = flight.waiters.saturating_sub(1);
+        }
+    }
+}
+
+// Owns registry cleanup and the shared permit across success, panic, cancellation and
+// every error. A disconnected leader can run only until the logical deadline.
+struct TweetLeader {
+    cache: Arc<Mutex<TweetCache>>,
+    key: TweetKey,
+    _permit: OwnedSemaphorePermit,
+}
+impl Drop for TweetLeader {
+    fn drop(&mut self) {
+        let flight = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .flights
+            .remove(&self.key);
+        if let Some(flight) = flight {
+            if flight.sender.borrow().is_none() {
+                flight
+                    .sender
+                    .send_replace(Some(Err(PreviewError::UpstreamFailure)));
+            }
+        }
+    }
+}
+
+impl PreviewService {
+    /// Re-read the admin link-preview policy. Off disables X; Whitelist requires an exact
+    /// supported X/Twitter alias; All allows it (provider flags still apply). A change of
+    /// the effective answer starts a new cache generation and drops every cached result.
+    pub async fn update_tweet_policy(&self) -> (bool, u64) {
+        let settings = self.load_settings().await;
+        let allowed = settings.mode == "all"
+            || settings.mode == "whitelist"
+                && settings
+                    .whitelist
+                    .iter()
+                    .any(|host| X_HOSTS.iter().any(|alias| host.eq_ignore_ascii_case(alias)));
+        let mut cache = self.tweets.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.allowed != Some(allowed) {
+            cache.allowed = Some(allowed);
+            cache.epoch = cache.epoch.wrapping_add(1);
+            cache.entries.clear();
+            cache.bytes = 0;
+        }
+        (allowed, cache.epoch)
+    }
+
+    /// (post previews available, published threads available) for this server right now:
+    /// provider flag set at startup AND the admin policy permits X. Lets the browser skip
+    /// X placeholders and requests entirely on a server where nothing is configured.
+    pub async fn tweet_capabilities(&self) -> (bool, bool) {
+        if !self.twitter.enabled() && !self.twitter.thread_enabled() {
+            return (false, false); // no flag set: no policy read, nothing to offer
+        }
+        let (allowed, _) = self.update_tweet_policy().await;
+        (allowed && self.twitter.enabled(), allowed && self.twitter.thread_enabled())
+    }
+
+    /// May the signed media fallback serve assets right now? (A provider is configured and
+    /// the admin policy permits X — checked before signing AND again before redeeming.)
+    pub async fn tweet_media_allowed(&self) -> bool {
+        let (preview, thread) = self.tweet_capabilities().await;
+        preview || thread
+    }
+
+    /// Did `username` retrieve (in a live, current-generation cached result) every asset in
+    /// `keys`? The fallback is a fallback for previews this viewer loaded, not an open proxy.
+    pub fn tweet_media_retrieved(&self, username: &str, keys: &[String]) -> bool {
+        let mut cache = self.tweets.lock().unwrap_or_else(|e| e.into_inner());
+        cache.expire(self.twitter.clock.ticks());
+        let epoch = cache.epoch;
+        keys.iter().all(|key| {
+            cache.entries.iter().any(|(k, entry)| {
+                k.0 == username && k.1 == epoch && entry.result.is_ok() && entry.media.contains(key)
+            })
+        })
+    }
+
+    fn disabled_tweet(&self, id: &str, thread: bool) -> TweetResult {
+        let now = self.twitter.clock.now();
+        let value = if thread {
+            serde_json::to_value(crate::twitter::ThreadPreview::unavailable(
+                id,
+                UnavailableReason::ProviderDisabled,
+                now,
+            ))
+        } else {
+            serde_json::to_value(TweetPreview::unavailable(
+                id,
+                UnavailableReason::ProviderDisabled,
+                now,
+            ))
+        };
+        value
+            .map(Arc::new)
+            .map_err(|_| PreviewError::UpstreamFailure)
+    }
+
+    pub async fn fetch_tweet_preview(
+        self: &Arc<Self>,
+        username: &str,
+        id: &str,
+        refresh: bool,
+    ) -> TweetResult {
+        self.fetch_x_operation(username, id, refresh, false).await
+    }
+
+    pub async fn fetch_tweet_thread(
+        self: &Arc<Self>,
+        username: &str,
+        id: &str,
+        refresh: bool,
+    ) -> TweetResult {
+        self.fetch_x_operation(username, id, refresh, true).await
+    }
+
+    async fn fetch_x_operation(
+        self: &Arc<Self>,
+        username: &str,
+        id: &str,
+        refresh: bool,
+        thread: bool,
+    ) -> TweetResult {
+        if !crate::twitter::valid_id(id) {
+            return Err(PreviewError::InvalidUrl);
+        }
+        let configured = if thread {
+            self.twitter.thread_enabled()
+        } else {
+            self.twitter.enabled()
+        };
+        if !configured {
+            // Unconfigured provider: answered locally, no policy file read, no network.
+            return self.disabled_tweet(id, thread);
+        }
+        // Policy before cache, and again before publishing (below).
+        let (allowed, epoch) = self.update_tweet_policy().await;
+        if !allowed {
+            return self.disabled_tweet(id, thread);
+        }
+        let key = (
+            username.to_string(),
+            epoch,
+            format!("{}:{id}", if thread { "thread" } else { "preview" }),
+        );
+        let mut receiver;
+        let mut leader = None;
+        {
+            let mut cache = self.tweets.lock().unwrap_or_else(|e| e.into_inner());
+            let now = self.twitter.clock.ticks();
+            cache.expire(now);
+            if !refresh {
+                cache.recent = cache.recent.wrapping_add(1);
+                let recent = cache.recent;
+                if let Some(entry) = cache.entries.get_mut(&key) {
+                    entry.recent = recent;
+                    return entry.result.clone();
+                }
+            }
+            if cache.waiters >= TWEET_MAX_WAITERS {
+                return Err(PreviewError::Busy);
+            }
+            if let Some(flight) = cache.flights.get_mut(&key) {
+                if flight.waiters >= TWEET_MAX_WAITERS_PER_KEY {
+                    return Err(PreviewError::Busy);
+                }
+                flight.waiters += 1;
+                receiver = flight.sender.subscribe();
+            } else {
+                let refresh_key = (username.to_string(), id.to_string());
+                if refresh {
+                    if let Some(until) = cache.refresh.get(&refresh_key) {
+                        return Err(PreviewError::RateLimited(
+                            until.saturating_sub(now).as_secs().max(1),
+                        ));
+                    }
+                    if cache.refresh.len() >= TWEET_MAX_ENTRIES {
+                        return Err(PreviewError::Busy);
+                    }
+                }
+                // Only a miss leader takes one of the shared outbound permits; never wait.
+                let permit = self
+                    .preview_sem
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| PreviewError::Busy)?;
+                let (sender, rx) = watch::channel(None);
+                receiver = rx;
+                cache
+                    .flights
+                    .insert(key.clone(), TweetFlight { sender, waiters: 1 });
+                if refresh {
+                    cache.refresh.insert(
+                        refresh_key,
+                        now + Duration::from_secs(TWEET_REFRESH_COOLDOWN_SECS),
+                    );
+                }
+                leader = Some(TweetLeader {
+                    cache: self.tweets.clone(),
+                    key: key.clone(),
+                    _permit: permit,
+                });
+            }
+            cache.waiters += 1;
+        }
+        let _subscriber = TweetSubscriber {
+            cache: self.tweets.clone(),
+            key: key.clone(),
+        };
+        if let Some(guard) = leader {
+            let service = self.clone();
+            let id = id.to_string();
+            let key = key.clone();
+            tokio::spawn(async move {
+                let _guard = guard;
+                let work = async {
+                    let value = if thread {
+                        service.twitter.fetch_thread(&id).await.and_then(|post| {
+                            serde_json::to_value(post).map_err(|_| PreviewError::UpstreamFailure)
+                        })
+                    } else {
+                        service.twitter.fetch_tweet(&id).await.and_then(|post| {
+                            serde_json::to_value(post).map_err(|_| PreviewError::UpstreamFailure)
+                        })
+                    };
+                    let mut result = value.map(Arc::new);
+                    let (allowed, current) = service.update_tweet_policy().await;
+                    if !allowed || current != epoch {
+                        result = service.disabled_tweet(&id, thread);
+                    } else {
+                        service
+                            .tweets
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key.clone(), result.clone(), service.twitter.clock.ticks());
+                    }
+                    result
+                };
+                let result = tokio::time::timeout(TWEET_LOGICAL_DEADLINE, work)
+                    .await
+                    .unwrap_or(Err(PreviewError::Timeout));
+                let mut cache = service.tweets.lock().unwrap_or_else(|e| e.into_inner());
+                if matches!(result, Err(PreviewError::Timeout))
+                    && cache.epoch == epoch
+                    && cache.allowed == Some(true)
+                {
+                    let now = service.twitter.clock.ticks();
+                    cache.insert(key.clone(), result.clone(), now);
+                }
+                if let Some(flight) = cache.flights.get(&key) {
+                    flight.sender.send_replace(Some(result));
+                }
+            });
+        }
+        let result = loop {
+            if let Some(result) = receiver.borrow_and_update().clone() {
+                break result;
+            }
+            receiver
+                .changed()
+                .await
+                .map_err(|_| PreviewError::UpstreamFailure)?;
+        };
+        let (allowed, current) = self.update_tweet_policy().await;
+        if !allowed || current != epoch {
+            return self.disabled_tweet(id, thread);
+        }
+        result
+    }
+}
+
 /// Build a reqwest client pinned to the already-validated public IPs for `host`.
 ///
 /// #17: resolve_to_addrs() forces reqwest to connect to exactly these addresses
@@ -272,7 +697,7 @@ pub(crate) fn canonicalize_url_host(u: &mut reqwest::Url) -> Result<()> {
     u.set_host(Some(trimmed)).map_err(|_| anyhow::anyhow!("Invalid URL"))
 }
 
-fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client> {
+pub(crate) fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -282,6 +707,21 @@ fn build_pinned_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Clie
         // proxy — which re-resolves the hostname itself — completely bypassing the
         // resolve_to_addrs IP pin and is_private_ip validation (SSRF). A pinned anti-SSRF
         // client must always connect directly to the validated addresses.
+        .no_proxy()
+        .resolve_to_addrs(host, addrs)
+        .build()
+        .map_err(|e| anyhow::anyhow!("client build failed: {}", e))
+}
+
+/// Same SSRF-safe pinning as `build_pinned_client` (validated public IPs only, no system
+/// proxy, no redirects) for the signed X media fallback. No whole-request timeout: a media
+/// stream may outlive the 5-second preview budget, so the caller bounds the response
+/// headers, the idle gap between chunks, the total stream duration and the byte count.
+pub(crate) fn build_pinned_media_client(host: &str, addrs: &[SocketAddr]) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("CryptIRC/1.0 (Media Fallback)")
         .no_proxy()
         .resolve_to_addrs(host, addrs)
         .build()
@@ -323,7 +763,7 @@ pub(crate) async fn read_capped_body(mut resp: reqwest::Response, max: usize) ->
 /// Returns the validated SocketAddrs (to be pinned by the caller). Rejects when
 /// resolution yields zero addresses or when ANY address is private/internal.
 /// (#17: validate all A/AAAA records and pin the exact set we validated.)
-async fn resolve_and_validate_host(host: &str, port: Option<u16>) -> Result<Vec<SocketAddr>> {
+pub(crate) async fn resolve_and_validate_host(host: &str, port: Option<u16>) -> Result<Vec<SocketAddr>> {
     // #119: strip the trailing '.'(s) (fully-qualified form, e.g. "localhost." — Argon P1:
     // all of them, "localhost.." too) and also reject ".localhost" so the name-prefilter
     // matches the IP-check backstop below.
@@ -668,5 +1108,308 @@ mod r3_trailing_dot_tests {
             let e = resolve_and_validate_host(h, Some(443)).await.unwrap_err().to_string();
             assert!(e.contains("Private/internal"), "{h}: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tweet_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    pub(crate) struct Fixture {
+        pub(crate) service: Arc<PreviewService>,
+        pub(crate) path: PathBuf,
+        pub(crate) calls: Arc<AtomicUsize>,
+        clock: Arc<crate::twitter::tests::FakeClock>,
+    }
+    impl Fixture {
+        pub(crate) fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("cryptirc-preview-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let clock = Arc::new(crate::twitter::tests::FakeClock::default());
+            let service = Arc::new(PreviewService {
+                data_dir: path.to_str().unwrap().into(),
+                twitter: Arc::new(crate::twitter::tests::fixture_client(
+                    calls.clone(),
+                    clock.clone(),
+                )),
+                preview_sem: Arc::new(Semaphore::new(8)),
+                tweets: Default::default(),
+            });
+            Self {
+                service,
+                path,
+                calls,
+                clock,
+            }
+        }
+        pub(crate) fn semaphore(&self) -> Arc<Semaphore> {
+            self.service.preview_sem.clone()
+        }
+        pub(crate) fn with_thread() -> Self {
+            let mut fixture = Self::new();
+            Arc::get_mut(&mut fixture.service).unwrap().twitter =
+                Arc::new(crate::twitter::tests::fixture_thread_client(
+                    fixture.calls.clone(),
+                    fixture.clock.clone(),
+                ));
+            fixture
+        }
+        async fn policy(&self, mode: &str) {
+            std::fs::write(
+                self.path.join("admin_settings.json"),
+                serde_json::json!({"link_preview_mode":mode}).to_string(),
+            )
+            .unwrap();
+            self.service.update_tweet_policy().await;
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_singleflight_account_cache_expiry_refresh() {
+        let fixture = Fixture::new();
+        let requests = (0..10).map(|_| fixture.service.fetch_tweet_preview("alice", "123", false));
+        let results = futures_util::future::join_all(requests).await;
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.service.preview_sem.available_permits(), 8);
+        assert!(fixture.service.tweets.lock().unwrap().flights.is_empty());
+        assert_eq!(fixture.service.tweets.lock().unwrap().waiters, 0);
+        fixture
+            .service
+            .fetch_tweet_preview("alice", "123", false)
+            .await
+            .unwrap();
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        fixture
+            .service
+            .fetch_tweet_preview("bob", "123", false)
+            .await
+            .unwrap();
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        fixture
+            .service
+            .fetch_tweet_preview("alice", "123", true)
+            .await
+            .unwrap();
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 3);
+        assert!(matches!(
+            fixture
+                .service
+                .fetch_tweet_preview("alice", "123", true)
+                .await,
+            Err(PreviewError::RateLimited(_))
+        ));
+        fixture.clock.advance(601);
+        fixture
+            .service
+            .fetch_tweet_preview("alice", "123", false)
+            .await
+            .unwrap();
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn preview_policy_invalidation_saturation_and_disconnect_cleanup() {
+        let fixture = Fixture::new();
+        let permits = fixture
+            .service
+            .preview_sem
+            .clone()
+            .try_acquire_many_owned(8)
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .service
+                .fetch_tweet_preview("alice", "123", false)
+                .await,
+            Err(PreviewError::Busy)
+        ));
+        assert!(fixture.service.tweets.lock().unwrap().flights.is_empty());
+        drop(permits);
+        fixture
+            .service
+            .fetch_tweet_preview("alice", "123", false)
+            .await
+            .unwrap();
+        fixture.policy("off").await;
+        let disabled = fixture
+            .service
+            .fetch_tweet_preview("alice", "123", false)
+            .await
+            .unwrap();
+        assert_eq!(disabled["availability"]["reason"], "provider_disabled");
+        assert!(fixture.service.tweets.lock().unwrap().entries.is_empty());
+        fixture.policy("all").await;
+        let service = fixture.service.clone();
+        let pending =
+            tokio::spawn(async move { service.fetch_tweet_preview("alice", "124", false).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        fixture.policy("off").await;
+        let disabled = pending.await.unwrap().unwrap();
+        assert_eq!(disabled["availability"]["reason"], "provider_disabled");
+        assert!(fixture.service.tweets.lock().unwrap().entries.is_empty());
+        fixture.policy("all").await;
+        let service = fixture.service.clone();
+        let pending =
+            tokio::spawn(async move { service.fetch_tweet_preview("alice", "125", false).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        pending.abort();
+        let _ = pending.await;
+        assert_eq!(fixture.service.tweets.lock().unwrap().waiters, 0);
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(fixture.service.tweets.lock().unwrap().flights.is_empty());
+        assert_eq!(fixture.service.preview_sem.available_permits(), 8);
+    }
+
+    #[test]
+    fn preview_cache_count_bytes_lru_and_failure_ttls() {
+        let mut cache = TweetCache::default();
+        let now = Duration::ZERO;
+        for index in 0..1001 {
+            cache.insert(
+                (format!("user{}", index / 100), 1, index.to_string()),
+                Ok(Arc::new(serde_json::json!({}))),
+                now,
+            );
+        }
+        assert_eq!(cache.entries.len(), 1000);
+        assert!(!cache.entries.contains_key(&("user0".into(), 1, "0".into())));
+        for index in 0..101 {
+            cache.insert(
+                ("alice".into(), 1, index.to_string()),
+                Ok(Arc::new(serde_json::json!({}))),
+                now,
+            );
+        }
+        assert_eq!(cache.entries.keys().filter(|k| k.0 == "alice").count(), 100);
+        assert!(!cache.entries.contains_key(&("alice".into(), 1, "0".into())));
+        let large = Arc::new(serde_json::json!({"text":"x".repeat(240 * 1024)}));
+        for index in 0..150 {
+            cache.insert(
+                (format!("large{}", index / 100), 1, index.to_string()),
+                Ok(large.clone()),
+                now,
+            );
+        }
+        assert!(cache.bytes <= 32 * 1024 * 1024 && cache.entries.len() <= 1000);
+        cache.insert(
+            ("err".into(), 1, "1".into()),
+            Err(PreviewError::UpstreamFailure),
+            now,
+        );
+        cache.expire(Duration::from_secs(16));
+        assert!(!cache.entries.contains_key(&("err".into(), 1, "1".into())));
+    }
+
+    #[tokio::test]
+    async fn preview_waiter_bound() {
+        let fixture = Fixture::new();
+        let requests = (0..24).map(|_| fixture.service.fetch_tweet_preview("alice", "123", false));
+        let results = futures_util::future::join_all(requests).await;
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| matches!(r, Err(PreviewError::Busy)))
+                .count(),
+            8
+        );
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.service.tweets.lock().unwrap().waiters, 0);
+    }
+
+    #[tokio::test]
+    async fn preview_thread_coalescing_shared_refresh_and_ttl() {
+        let fixture = Fixture::with_thread();
+        let results = futures_util::future::join_all(
+            (0..10).map(|_| fixture.service.fetch_tweet_thread("alice", "123", false)),
+        )
+        .await;
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            results[0].as_ref().unwrap()["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+        fixture
+            .service
+            .fetch_tweet_preview("alice", "123", true)
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .service
+                .fetch_tweet_thread("alice", "123", true)
+                .await,
+            Err(PreviewError::RateLimited(_))
+        ));
+        fixture.clock.advance(301);
+        fixture
+            .service
+            .fetch_tweet_thread("alice", "123", false)
+            .await
+            .unwrap();
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(fixture.service.preview_sem.available_permits(), 8);
+    }
+
+    #[tokio::test]
+    async fn media_fallback_bound_to_retrieved_assets_and_policy() {
+        let fixture = Fixture::new();
+        let key = crate::twitter::media_asset_key("https://pbs.twimg.com/profile_images/1/synthetic_normal.jpg?name=x").unwrap();
+        assert!(!fixture.service.tweet_media_retrieved("alice", &[key.clone()]));
+        fixture.service.fetch_tweet_preview("alice", "123", false).await.unwrap();
+        assert!(fixture.service.tweet_media_retrieved("alice", &[key.clone()]));
+        assert!(!fixture.service.tweet_media_retrieved("bob", &[key.clone()]));
+        let other = crate::twitter::media_asset_key("https://pbs.twimg.com/media/never.jpg").unwrap();
+        assert!(!fixture.service.tweet_media_retrieved("alice", &[key.clone(), other]));
+        assert!(fixture.service.tweet_media_allowed().await);
+        assert_eq!(fixture.service.tweet_capabilities().await, (true, false));
+        fixture.policy("off").await;
+        assert!(!fixture.service.tweet_media_allowed().await);
+        assert!(!fixture.service.tweet_media_retrieved("alice", &[key]));
+        fixture.clock.advance(1);
+    }
+
+    #[tokio::test]
+    async fn unconfigured_providers_answer_locally_without_policy_or_permits() {
+        let path = std::env::temp_dir().join(format!("cryptirc-preview-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        // Even an "all" policy cannot enable a provider whose startup flag is unset.
+        std::fs::write(path.join("admin_settings.json"), r#"{"link_preview_mode":"all"}"#).unwrap();
+        let sem = Arc::new(Semaphore::new(8));
+        let service = Arc::new(PreviewService::new(path.to_str().unwrap(), sem.clone()));
+        if service.twitter.enabled() || service.twitter.thread_enabled() {
+            // The test environment set a provider flag; the default-off contract is
+            // covered by twitter::tests::transport_disabled_invalid_and_coalesced_activation.
+            let _ = std::fs::remove_dir_all(&path);
+            return;
+        }
+        let permits = sem.clone().try_acquire_many_owned(8).unwrap();
+        for thread in [false, true] {
+            let value = if thread {
+                service.fetch_tweet_thread("alice", "123", false).await
+            } else {
+                service.fetch_tweet_preview("alice", "123", true).await
+            }
+            .unwrap();
+            assert_eq!(value["availability"]["reason"], "provider_disabled");
+        }
+        drop(permits);
+        assert_eq!(service.tweet_capabilities().await, (false, false));
+        assert!(!service.tweet_media_allowed().await);
+        assert!(service.tweets.lock().unwrap().entries.is_empty());
+        assert!(service.tweets.lock().unwrap().allowed.is_none(), "policy never consulted");
+        let _ = std::fs::remove_dir_all(&path);
     }
 }
