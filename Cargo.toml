@@ -1,6 +1,6 @@
 [package]
 name = "cryptirc"
-version = "0.5.11"
+version = "0.5.12"
 edition = "2021"
 
 [dependencies]
@@ -14,7 +14,7 @@ rand = "0.8"
 subtle = "2"
 zeroize = "1"
 base64 = "0.22"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -48,6 +48,8 @@ html5ever = "=0.40.1"
 # Avatars (src/avatar.rs): decode PNG / JPEG / WebP uploads under strict limits and re-encode
 # them as PNG. Pure Rust; only these three codecs, no rayon / default formats.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+
+webauthn-rs = { version = "=0.5.4", features = ["conditional-ui"] }
 
 [dev-dependencies]
 # Paused-clock tests for the X provider deadlines (#[tokio::test(start_paused = true)]).

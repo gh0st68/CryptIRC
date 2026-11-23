@@ -35,6 +35,8 @@ mod ipc_client;
 mod irc;
 mod lastfm;
 mod logs;
+mod mcp;
+mod passkeys;
 mod notifications;
 mod paste;
 mod paste_render;
@@ -84,6 +86,7 @@ pub struct AppState {
     pub certs:               Arc<CertStore>,
     pub logger:              Arc<EncryptedLogger>,
     pub auth:                Arc<AuthManager>,
+    passkeys:                Arc<passkeys::Service>,
     pub notifier:            Arc<NotificationManager>,
     pub e2e_store:           Arc<E2EStore>,
     pub paste_store:         Arc<paste::PasteStore>,
@@ -1447,6 +1450,7 @@ async fn main() -> Result<()> {
         crypto, certs, logger, auth, notifier, e2e_store, paste_store, preview_service,
         user_events,
         active_sessions:     Arc::new(DashMap::new()),
+        passkeys: Arc::new(passkeys::Service::new(&base_url)),
         upload_dir, base_url, from_email,
         data_dir: data_dir.clone(),
         registration_open: Arc::new(tokio::sync::RwLock::new(registration_open)),
@@ -1644,6 +1648,8 @@ async fn main() -> Result<()> {
         .route("/admin/settings",        get(route_admin_get_settings).put(route_admin_put_settings))
         .route("/admin/adduser",         post(route_admin_add_user).layer(DefaultBodyLimit::max(4_096)))
         .route("/auth/login",            post(route_login).layer(DefaultBodyLimit::max(8_192)))
+        .merge(passkeys::routes())
+        .merge(mcp::routes())
         .route("/auth/logout",           post(route_logout))
         .route("/auth/verify",           get(route_verify))
         .route("/auth/forgot",           post(route_forgot).layer(DefaultBodyLimit::max(8_192)))
@@ -6025,7 +6031,7 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
                             // r2: cleartext from an outdated cached app.js to a target this
                             // account encrypts — refused, the tab was told (E2E region).
                         } else {
-                            handle_command(cmd, &user2, &state2, &socket_tx2).await;
+                            handle_command(cmd, &user2, &state2, &socket_tx2, false).await;
                         }
                         // F14: a full reply queue means this client is not reading its
                         // socket at all — close it rather than queue without bound.
@@ -6347,32 +6353,41 @@ async fn e2e_legacy_send_blocked(
     if !state.e2e_store.has_upgraded_e2e(username).await { return false; }
     // r3 (codex-p1 HIGH main.rs:5178): names compared under the widest case-fold
     // (`#a[b]` and `#a{b}` are one channel on RFC1459 networks), not plain lowercase.
-    let channels: std::collections::HashSet<String> = state.e2e_store.list_channel_keys(username).await
-        .into_iter().map(|c| e2e_fold_all(&c)).collect();
-    let peers: std::collections::HashSet<String> = state.e2e_store.list_sessions(username).await
-        .into_iter().filter(|p| !p.starts_with("__")).map(|p| e2e_fold_all(&p)).collect();
-    for t in targets.split(',') {
-        let hit = e2e_target_names(t).into_iter().find(|(_, k)| channels.contains(k) || peers.contains(k));
-        if let Some((bare, _)) = hit {
-            let bare = bare.as_str();
-            let shown = if is_plausible_target(bare) { bare.to_string() } else { "status".to_string() };
-            let _ = socket_tx.try_send(ServerEvent::IrcMessage {
-                replayed: false,
-                conn_id: conn_id.clone(),
-                from: "*".into(),
-                target: shown.clone(),
-                text: format!("⛔ NOT SENT: this browser tab is running an outdated version of CryptIRC that can no \
-                    longer encrypt messages for {} (end-to-end encryption is on for it). Nothing was sent. Reload the \
-                    page (Ctrl+Shift+R, or close and reopen the app) to update.", shown),
-                ts: chrono::Utc::now().timestamp(),
-                kind: MessageKind::Notice,
-                msg_id: 0,
-                prefix: None,
-            });
-            return true;
-        }
+    if let Some(bare) = e2e_protected_target(state, username, &targets).await {
+        let bare = bare.as_str();
+        let shown = if is_plausible_target(bare) { bare.to_string() } else { "status".to_string() };
+        let _ = socket_tx.try_send(ServerEvent::IrcMessage {
+            replayed: false,
+            conn_id: conn_id.clone(),
+            from: "*".into(),
+            target: shown.clone(),
+            text: format!("⛔ NOT SENT: this browser tab is running an outdated version of CryptIRC that can no \
+                longer encrypt messages for {} (end-to-end encryption is on for it). Nothing was sent. Reload the \
+                page (Ctrl+Shift+R, or close and reopen the app) to update.", shown),
+            ts: chrono::Utc::now().timestamp(),
+            kind: MessageKind::Notice,
+            msg_id: 0,
+            prefix: None,
+        });
+        return true;
     }
     false
+}
+
+async fn e2e_protected_target(state: &AppState, username: &str, targets: &str) -> Option<String> {
+    let channels = state.e2e_store.list_channel_keys(username).await;
+    let peers = state.e2e_store.list_sessions(username).await;
+    match_e2e_target(targets, channels, peers)
+}
+
+fn match_e2e_target(targets: &str, channels: Vec<String>, peers: Vec<String>) -> Option<String> {
+    let channels: std::collections::HashSet<String> = channels.into_iter()
+        .map(|c| e2e_fold_all(&c)).collect();
+    let peers: std::collections::HashSet<String> = peers.into_iter()
+        .filter(|p| !p.starts_with("__")).map(|p| e2e_fold_all(&p)).collect();
+    targets.split(',').flat_map(e2e_target_names)
+        .find(|(_, key)| channels.contains(key) || peers.contains(key))
+        .map(|(name, _)| name)
 }
 
 // ─── Command handler ──────────────────────────────────────────────────────────
@@ -6382,8 +6397,14 @@ async fn handle_command(
     username: &str,
     state: &AppState,
     socket_tx: &tokio::sync::mpsc::Sender<ServerEvent>,
+    report_command_errors: bool,
 ) {
-    let send = |evt: ServerEvent| state.send_to_user(username, evt);
+    let send = |evt: ServerEvent| {
+        if report_command_errors && matches!(evt, ServerEvent::Error { .. }) {
+            let _ = socket_tx.try_send(evt.clone());
+        }
+        state.send_to_user(username, evt);
+    };
     // #60: send an event to ONLY the originating socket (used for vault-unlock key
     // material so it isn't broadcast to other, possibly-stale, sessions).
     // F14: bounded queue — a full queue means the client isn't reading; the recv
@@ -6826,7 +6847,12 @@ async fn handle_command(
             ipc_client::send_drop(&state, &id, reason).await;
         }
         ClientMessage::Send { conn_id, raw } => {
-            if !state.owns_conn(username, &conn_id) { return; }
+            if !state.owns_conn(username, &conn_id) {
+                if report_command_errors {
+                    send_self(ServerEvent::Error { message: "This network is offline.".into() });
+                }
+                return;
+            }
             // #20: clone the Arc out and DROP the DashMap Ref immediately so we never
             // hold a shard read-guard across send_raw / logger.append / save_network
             // awaits (which would block synchronous insert/remove on the same shard).
@@ -6929,6 +6955,9 @@ async fn handle_command(
                 // (Not for TAGMSG typing indicators: one per keystroke burst would flood
                 // the status buffer while the link is down.)
                 if !connected && !is_tagmsg {
+                    if report_command_errors {
+                        send_self(ServerEvent::Error { message: "Connection lost during send. Check history before retrying.".into() });
+                    }
                     // Tell the user (once, to status) instead of silently pretending it sent.
                     let text = if deferred_join_part && handed_off {
                         "⚠ Not connected (reconnecting…) — this /join or /part takes effect when the network is back"
@@ -7059,6 +7088,9 @@ async fn handle_command(
                     }
                 }
             } else {
+                if report_command_errors {
+                    send_self(ServerEvent::Error { message: "This network is offline.".into() });
+                }
                 info!("[{}] SEND failed: no connection found", conn_id);
             }
         }

@@ -290,11 +290,14 @@ impl IrcConnection {
     pub(crate) fn adopt_self_join_userhost(&mut self, nick: &str, userhost: &str, replayed: bool) {
         if !replayed && same_nick(nick, &self.nick) && !userhost.is_empty() { self.self_userhost = userhost.to_string(); }
     }
-    /// Our own user@host from a live, guarded CHGHOST (see adopt_self_nick).
-    pub(crate) fn adopt_self_chghost(&mut self, nick: &str, src_userhost: &str, user: &str, host: &str, replayed: bool) {
-        if replayed || !same_nick(nick, &self.nick) { return; }
-        if !(self.self_userhost.is_empty() || cryptirc::irc_daemon::same_ident(src_userhost, &self.self_userhost)) { return; }
-        if !user.is_empty() && !host.is_empty() { self.self_userhost = format!("{}@{}", user, host); }
+    /// Update our own user@host from a live, guarded CHGHOST (see adopt_self_nick).
+    pub(crate) fn adopt_self_chghost(&mut self, nick: &str, src_userhost: &str, user: &str, host: &str, replayed: bool) -> bool {
+        if replayed || !same_nick(nick, &self.nick) { return false; }
+        if !(self.self_userhost.is_empty() || cryptirc::irc_daemon::same_ident(src_userhost, &self.self_userhost)) { return false; }
+        let Some(userhost) = cryptirc::irc_daemon::clean_userhost(&format!("{}@{}", user, host)) else { return false };
+        if self.self_userhost == userhost { return false; }
+        self.self_userhost = userhost;
+        true
     }
 
     /// r6: remember the channels of an outgoing `JOIN` (see `user_joins`).
@@ -1865,18 +1868,31 @@ pub async fn dispatch_line(
             // guarded like NICK — only a CHGHOST whose source is us as we know us (or
             // before our user@host is known) may rewrite it; a forged `:<ournick> CHGHOST`
             // could otherwise re-arm the NICK guard with an attacker-chosen user@host.
-            {
-                let nu = p.params.get(0).cloned().unwrap_or_default();
-                let nh = p.params.get(1).cloned().unwrap_or_default();
-                c.adopt_self_chghost(&nick, &src_userhost, &nu, &nh, replayed);
-                if replayed && !nu.is_empty() && !nh.is_empty() { c.replay_follow_userhost(&nick, &src_userhost, &format!("{}@{}", nu, nh), true); }
+            let nu = p.params.first().map(String::as_str).unwrap_or_default();
+            let nh = p.params.get(1).map(String::as_str).unwrap_or_default();
+            let own_host_changed = c.adopt_self_chghost(&nick, &src_userhost, nu, nh, replayed);
+            if replayed && !nu.is_empty() && !nh.is_empty() {
+                c.replay_follow_userhost(&nick, &src_userhost, &format!("{}@{}", nu, nh), true);
             }
-            // Remote avatars: an announce is bound to the sender's user@host — a host change
-            // drops it (the user announces again); after our own, other servers forgot ours.
-            if c.avx.forget(&nick) { send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: vec![nick.clone()] }); }
+            // Drop the previous remote binding and refresh local lookups for
+            // nicks this connection can currently see.
+            let forgot_remote = c.avx.forget(&nick);
+            let live_change = !replayed && !arrival.restricted && !src_userhost.is_empty()
+                && !nu.is_empty() && !nh.is_empty() && src_userhost != format!("{}@{}", nu, nh)
+                && crate::avatar::remote::sees(&c, &nick);
+            if forgot_remote || (state.avatars.enabled() && live_change) {
+                send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: vec![nick.clone()] });
+            }
             if !replayed && same_nick(&nick, &c.nick) {
+                let refresh = own_host_changed && !arrival.restricted
+                    && state.avatars.meta(username).is_some_and(|meta| meta.visible)
+                    && c.connected && c.registered && c.synced_link == crate::ipc_client::attached_link();
+                let identity = refresh.then(|| (crate::avatar::conn_host(&c), c.self_userhost.clone()));
                 state.avatar_remote.forget_conn(conn_id);
                 drop(c);
+                if let Some((host, userhost)) = identity {
+                    crate::avatar::hint_local_host_change(state, conn_id, &host, &nick, &userhost).await;
+                }
                 crate::avatar::remote::reannounce(state, username, conn, conn_id).await;
                 return Ok(());   // our own host change is never shown (see below)
             }

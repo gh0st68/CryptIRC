@@ -929,6 +929,35 @@ async fn the_viewers_user_at_host_must_match_the_holder() {
 }
 
 #[tokio::test]
+async fn own_avatar_survives_a_stale_host_after_a_colored_vhost_change() {
+    let f = fixture();
+    let alice_avatar = f.give_avatar("alice", [255, 0, 0]).await;
+    let bob_avatar = f.give_avatar("bob", [0, 0, 255]).await;
+    let alice = f.add_conn("alice", "alice", "irc.test", 6667, &[("#room", ROOM)]);
+    let bob = f.add_conn("bob", "bob", "irc.test", 6667, &[("#room", ROOM)]);
+    let colored_host = "\x0304colored\x1f.host";
+    let change = ["~alice".to_string(), colored_host.to_string()];
+    f.edit(&alice, |c| {
+        observe_line(c, Some("alice!~alice@old.host"), "CHGHOST", &change);
+        c.adopt_self_chghost("alice", "~alice@old.host", "~alice", colored_host, false);
+        assert_eq!(c.self_userhost, format!("~alice@{colored_host}"));
+        // Simulate an out-of-date snapshot from an older irc-core.
+        c.self_userhost = "~alice@old.host".into();
+        c.seen_userhosts.note("bob", "~bob@bob.host");
+    }).await;
+    f.edit(&bob, |c| {
+        observe_line(c, Some("alice!~alice@old.host"), "CHGHOST", &change);
+        c.self_userhost = "~bob@bob.host".into();
+    }).await;
+
+    let own_view = f.lookup("alice", &alice, &["alice", "bob"]).await.unwrap();
+    assert_eq!(own_view.get("alice"), Some(&alice_avatar));
+    assert_eq!(own_view.get("bob"), Some(&bob_avatar));
+    let other_view = f.lookup("bob", &bob, &["alice"]).await.unwrap();
+    assert!(other_view.is_empty(), "other viewers still need a matching host");
+}
+
+#[tokio::test]
 async fn accounts_without_an_avatar_count_for_ambiguity() {
     let f = fixture();
     f.give_avatar("bob", [0, 0, 255]).await;

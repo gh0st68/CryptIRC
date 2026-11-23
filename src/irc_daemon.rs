@@ -79,9 +79,9 @@ const MAX_TRACKED_CHANNELS: usize = 512;
 /// SessionSync, JSON-serialized (quotes + comma each; a `"` or `\` escapes to 2 bytes; control
 /// bytes are never tracked). It replaces the old per-name filter (≤ 100 bytes, no `"`/`\`),
 /// which left channels the web accepts out of every SessionSync — after a web restart they
-/// vanished from the web and the TUI. 52 KiB ≥ the old worst case (512 × 100-byte names), so
-/// every SessionSync still fits MAX_FRAME_LEN (64 KiB) however a hostile server spells them.
-const TRACKED_NAMES_JSON_BUDGET: usize = 52 * 1024;
+/// vanished from the web and the TUI. Reserve room for registration and the
+/// worst-case JSON escaping of a colored userhost within MAX_FRAME_LEN (64 KiB).
+const TRACKED_NAMES_JSON_BUDGET: usize = 50 * 1024;
 
 /// JSON size of one channel name in the SessionSync list (see TRACKED_NAMES_JSON_BUDGET).
 fn tracked_json_len(name: &str) -> usize { name.len() + name.bytes().filter(|b| *b == b'"' || *b == b'\\').count() + 3 }
@@ -106,9 +106,9 @@ fn admit_tracked(channels: &HashMap<String, String>, lc: &str, name: &str) -> bo
     channels.len() < MAX_TRACKED_CHANNELS
         && channels.values().map(|v| tracked_json_len(v)).sum::<usize>() + tracked_json_len(name) <= TRACKED_NAMES_JSON_BUDGET
 }
-/// Cap on a learned `self_userhost` (also serialized in every SessionSync — same frame-
-/// bloat concern). A real user@host is well under this.
-const MAX_USERHOST_LEN: usize = 128;
+/// Covers TwistedNET's 300-byte colored host plus the ident and separator.
+/// SessionSync also has room for the JSON escapes of its formatting bytes.
+pub const MAX_USERHOST_LEN: usize = 320;
 /// Cap on a server-assigned nick we adopt (001 / self-NICK). Also serialized in every
 /// SessionSync, so it needs the same bound as channel names and the userhost: real
 /// NICKLEN is 9-50.
@@ -139,16 +139,18 @@ pub fn is_intent_channel(name: &str) -> bool {
 /// The web's channel-name length bound (main.rs is_valid_channel).
 const MAX_INTENT_CHANNEL_LEN: usize = 200;
 
-/// Bound + sanitize a learned `self_userhost` before storing it. Returns None if it's
-/// implausible (empty, too long, or contains JSON-escaping/control bytes) so the caller
-/// keeps the previous value rather than poisoning every SessionSync.
-fn clean_userhost(uh: &str) -> Option<String> {
-    let uh = strip_crlf(uh);
-    if uh.is_empty() || uh.len() > MAX_USERHOST_LEN { return None; }
-    // > 0x20 (not >=): reject control bytes AND space AND DEL uniformly, matching
-    // is_trackable_channel. A real user@host never contains any of those.
-    if !uh.bytes().all(|b| b > 0x20 && b != b'"' && b != b'\\') { return None; }
-    Some(uh)
+/// Preserve the exact user@host for identity checks. Only the host may carry
+/// the formatting bytes supported by TwistedNET.
+pub fn clean_userhost(uh: &str) -> Option<String> {
+    let (ident, host) = uh.split_once('@')?;
+    let plain = |b| b > 0x20 && !matches!(b, b'"' | b'\\' | b'\x7f');
+    if uh.len() > MAX_USERHOST_LEN || ident.is_empty() || host.is_empty()
+        || !ident.bytes().all(plain)
+        || !host.bytes().all(|b| b != b'@' && (plain(b) || matches!(b, 2 | 3 | 15 | 22 | 29 | 31)))
+    {
+        return None;
+    }
+    Some(uh.to_string())
 }
 
 /// Bound + sanitize a server-assigned nick (001 param / self-NICK) before adopting it.
@@ -2186,6 +2188,12 @@ mod tests {
         assert!(clean_userhost(&format!("u@{}", "h".repeat(MAX_USERHOST_LEN))).is_none());
         assert!(clean_userhost("u@ho\"st").is_none());
         assert!(clean_userhost("u@ho\u{01}st").is_none());
+        assert!(clean_userhost("u@host\r\n").is_none());
+        assert!(clean_userhost("u@host\x7f").is_none());
+        assert!(clean_userhost("\x0304u@host").is_none());
+        let colored = format!("user@{}host.example", "\x0304\x1f".repeat(66));
+        assert_eq!(clean_userhost(&colored), Some(colored.clone()));
+        assert!(colored.len() > 256);
     }
 
     // A fresh daemon (no web has Attached yet) must fall back to its own compiled
@@ -2214,8 +2222,7 @@ mod tests {
     /// The whole point of Byzantine-1: a WORST-CASE SessionSync — MAX_TRACKED_CHANNELS
     /// names admit_tracked lets in, plus a max-length userhost/nick — must still
     /// serialize UNDER MAX_FRAME_LEN, so no hostile server can spoof self-JOINs to silence
-    /// the state channel. All fields here pass the is_trackable_channel/clean_userhost
-    /// filters, so they serialize 1:1 (no JSON escaping bloat).
+    /// the state channel. Use names and userhosts that expand under JSON escaping.
     #[test]
     fn worst_case_sessionsync_fits_frame() {
         // r7: as many worst-case names as admit_tracked lets in — 200 bytes, all but the
@@ -2247,7 +2254,7 @@ mod tests {
             lag_ms: Some(u64::MAX),
             message_tags: true,
             echo_message_enabled: true,
-            self_userhost: clean_userhost(&format!("user@{}", "h".repeat(MAX_USERHOST_LEN - 5))).unwrap(),
+            self_userhost: clean_userhost(&format!("u@{}h", "\x1f".repeat(MAX_USERHOST_LEN - 3))).unwrap(),
             casemapping: CaseMapping::StrictRfc1459.token().to_string(),
             registration: Some(worst_registration_facts()),
             dial_server: clean_dial_server(&"s".repeat(255)),

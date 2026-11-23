@@ -114,6 +114,10 @@ pub struct User {
     /// (a record that never had a stamp stays byte-identical across the server's rewrites).
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub sessions_valid_after: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) passkeys: Option<crate::passkeys::Passkeys>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) mcp_token_hash: Option<String>,
 }
 
 fn is_zero_i64(v: &i64) -> bool { *v == 0 }
@@ -593,7 +597,7 @@ impl AuthManager {
     }
 
     /// #22: get (creating if needed) the per-username serialization lock.
-    fn user_lock(&self, uname: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub(crate) fn user_lock(&self, uname: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.user_locks
             .entry(uname.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -612,7 +616,7 @@ impl AuthManager {
     /// cannot truncate the JSON. Callers must hold the per-user lock around
     /// the read→mutate→write to avoid lost updates, AND the cross-process account lock
     /// (the `_held` guard: codex P4 resetpass.sh:487) taken BEFORE the read.
-    async fn write_user_atomic(&self, _held: &AdminFileLock, uname: &str, user: &User) -> Result<()> {
+    pub(crate) async fn write_user_atomic(&self, _held: &AdminFileLock, uname: &str, user: &User) -> Result<()> {
         let dir = PathBuf::from(&self.data_dir).join("users");
         let final_path = dir.join(format!("{}.json", uname));
         let tmp_path   = dir.join(format!("{}.json.tmp.{}", uname, Uuid::new_v4()));
@@ -633,6 +637,10 @@ impl AuthManager {
     // ── Rate limiting ─────────────────────────────────────────────────────────
 
     fn check_rate_limit(&self, key: &str) -> Result<()> {
+        self.check_rate_limit_with_max(key, RATE_LIMIT_MAX_ATTEMPTS)
+    }
+
+    fn check_rate_limit_with_max(&self, key: &str, max_attempts: u32) -> Result<()> {
         // S5: if at cap, sweep expired buckets first.
         if self.rate_limits.len() >= RATE_LIMIT_MAX_BUCKETS {
             self.sweep_rate_buckets();
@@ -663,7 +671,7 @@ impl AuthManager {
             entry.window_start = now;
         }
         entry.attempts = entry.attempts.saturating_add(1); // #142: no wrap
-        if entry.attempts > RATE_LIMIT_MAX_ATTEMPTS {
+        if entry.attempts > max_attempts {
             bail!("Too many attempts — try again later");
         }
         Ok(())
@@ -685,6 +693,10 @@ impl AuthManager {
         // values; an IP is short, so 64 chars is generous.
         let ip: String = ip.chars().take(64).collect();
         self.check_rate_limit(&format!("ip:{}:{}", action, ip))
+    }
+
+    pub(crate) fn check_mcp_rate_limit(&self, username: &str) -> Result<()> {
+        self.check_rate_limit_with_max(&format!("mcp:{username}"), 120)
     }
 
     /// #13: WS-path rate limit for vault unlock / passphrase change. These trigger a
@@ -863,6 +875,8 @@ impl AuthManager {
             lastfm_key:    String::new(),
             disabled:      false,
             sessions_valid_after: 0,
+            passkeys: None,
+            mcp_token_hash: None,
         };
         let json = serde_json::to_string_pretty(&user)?;
 
@@ -1381,6 +1395,8 @@ impl AuthManager {
         // in-memory purge below covers this process, the stamp every validate path).
         user.sessions_valid_after = user.sessions_valid_after.max(Utc::now().timestamp());
 
+        user.passkeys = None;
+        user.mcp_token_hash = None;
         self.write_user_atomic(&held, &reset.username, &user).await?;
         let _ = tokio::fs::remove_file(&reset_path).await;
         // Purge all existing sessions for this user
@@ -2382,6 +2398,7 @@ impl AuthManager {
         // r5: other sessions minted before this change are revoked durably too (the route
         // re-issues the caller's session afterwards; its created_at is not before the stamp).
         user.sessions_valid_after = user.sessions_valid_after.max(Utc::now().timestamp());
+        user.mcp_token_hash = None;
 
         self.write_user_atomic(&held, &uname, &user).await?;
         // #62: invalidate ALL of this user's sessions after a password change so an
@@ -2418,6 +2435,7 @@ impl AuthManager {
         // binary or script that predates `disabled` (a rollback) still refuses this login.
         user.disabled = true;
         user.verified = false;
+        user.mcp_token_hash = None;
         self.write_user_atomic(&held, &uname, &user).await?;
         self.disabled_users.insert(uname.clone(), ());
         // Purge their sessions
@@ -2766,6 +2784,7 @@ mod coreauth_fix_tests {
             password_hash: tuned_argon2().hash_password(b"Secret9!pw", &SaltString::generate(&mut OsRng)).unwrap().to_string(),
             verified: true, created_at: 0, admin: true, can_upload: true, last_login: 0,
             lastfm_user: String::new(), lastfm_key: String::new(), disabled: false, sessions_valid_after: 0,
+            passkeys: None, mcp_token_hash: None,
         };
         std::fs::write(format!("{}/planted.json", d), serde_json::to_string(&planted).unwrap()).unwrap();
         let a = AuthManager::new(&d).unwrap();

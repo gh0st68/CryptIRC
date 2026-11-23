@@ -7,7 +7,7 @@
 <p align="center"><strong>IRC that stays connected.</strong><br>Self-hosted. Encrypted history. All your devices.</p>
 
 <p align="center">
-  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.11-00b894?style=flat-square" alt="Version 0.5.8"></a>
+  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.12-00b894?style=flat-square" alt="Version 0.5.12"></a>
   <img src="https://img.shields.io/badge/server-Linux-5a7085?style=flat-square" alt="Linux server">
   <img src="https://img.shields.io/badge/client-desktop%20%C2%B7%20mobile%20%C2%B7%20terminal-5a7085?style=flat-square" alt="Desktop, mobile, and terminal clients">
 </p>
@@ -27,7 +27,54 @@ CryptIRC keeps your IRC networks connected on your server while you move between
 
 The web server and IRC daemon run separately, so routine web updates can leave your IRC connections running.
 
-**[Get started](#get-started)** · **[Clients](#clients)** · **[Features](#features)** · **[Privacy](#privacy-and-encryption)** · **[Commands](#commands-and-shortcuts)** · **[Configuration](#configuration)**
+**[CryptIRC MCP](#cryptirc-mcp)** · **[Passkeys](#passkey-sign-in)** · **[Get started](#get-started)** · **[Clients](#clients)** · **[Features](#features)** · **[Privacy](#privacy-and-encryption)** · **[Commands](#commands-and-shortcuts)** · **[Configuration](#configuration)**
+
+## CryptIRC MCP
+
+**Give your AI client real IRC tools.** CryptIRC ships a built-in Model Context Protocol (MCP) server that connects your AI client to the IRC account you already use. Ask it to find an old message, join a channel, or run a moderation command without leaving your AI session. Its actions appear in your regular CryptIRC client, and your existing IRC permissions apply.
+
+| Ask your AI client to… | What CryptIRC can do |
+| --- | --- |
+| “Show my connected networks and who's in `#dev`.” | List connections, channels, topics, and members. |
+| “Find the messages in `#support` that mention the upgrade.” | Read and search IRC history while your vault is unlocked. |
+| “Join `#dev` and send a message that I'm here.” | Join and leave channels. Send channel messages, DMs, notices, and IRC actions. |
+| “Set the topic in `#dev` to today's release.” | Run supported IRC commands such as `WHOIS`, `TOPIC`, `MODE`, `KICK`, and `INVITE`. Channel bans and unbans use your existing operator permissions. |
+| “Show what's in my CryptIRC notepad.” | Read and update your notepad while the vault is unlocked, and manage appearance settings and IRC connections. |
+
+### Connect your AI client
+
+1. In CryptIRC, open **Settings → Profile → MCP access**. Confirm your current login password and create a token.
+2. Add a **Streamable HTTP** MCP server in your AI client. Use the URL from Profile, such as `https://irc.example.com/cryptirc/mcp`, and set the `Authorization` header to `Bearer <token>`.
+3. Start with **“Use CryptIRC to list my networks and joined channels.”**
+
+<details>
+<summary>Connect from the Codex CLI</summary>
+
+Set the token as the environment variable `CRYPTIRC_MCP_TOKEN` before starting Codex. Run this with your server URL, restart your Codex session, and type `/mcp` to check the connection.
+
+```bash
+codex mcp add cryptirc --url https://irc.example.com/cryptirc/mcp \
+  --bearer-token-env-var CRYPTIRC_MCP_TOKEN
+```
+
+</details>
+
+The ten tools operate within the account that issued the token. Each account has one active token, managed from Profile. Replacing or revoking it takes effect immediately. Web sign-out leaves the integration available. End-to-end encrypted conversations, vault unlocking, password-safe contents, and server administration stay in CryptIRC. Removing a network through MCP also removes its saved history.
+
+## Passkey sign-in
+
+Use your device or a compatible security key to sign in. In **Settings → Profile → Passkeys**, name the passkey, confirm your login password, and follow your authenticator's prompt. Next time, choose **Sign In with a Passkey**. You can add or remove passkeys in Profile, and your login password remains available. Your IRC vault keeps its separate passphrase. Account recovery via password reset removes enrolled passkeys.
+
+For self-hosters, MCP token setup and passkeys use the canonical HTTPS URL configured in `CRYPTIRC_BASE_URL`. Local development can use `http://localhost` with the configured port.
+
+## New in 0.5.12
+
+- **Find the setting you want.** Search for MCP, Passkeys, themes, notifications, network options, and more. Results handle common typos, support arrow keys and mobile taps, and open the matching control.
+- **Pick up where you were reading.** Switch between channels and DMs and come back to the same message. Scrolling to the bottom resumes following the live conversation.
+- **Keep the composer steady.** The chat field keeps its size when focused and is marked separately from sign-in fields to reduce password-manager popups.
+- **Keep your avatar visible.** CryptIRC handles long, colored vhosts and refreshes avatars for other eligible viewers when a verified hostmask changes.
+
+[Full v0.5.12 changelog](docs/CHANGES.md#v0512-november-2026)
 
 <a id="quick-start"></a>
 <a id="deployment"></a>

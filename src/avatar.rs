@@ -1078,7 +1078,9 @@ pub struct SeenHosts {
 impl SeenHosts {
     pub fn note(&mut self, nick: &str, userhost: &str) {
         let nick = cryptirc::ircproto::strip_pfx(nick);
-        if !plausible_nick(nick) || userhost.len() > 256 || !userhost.contains('@') || userhost.contains(' ') {
+        if !plausible_nick(nick) || userhost.len() > cryptirc::irc_daemon::MAX_USERHOST_LEN
+            || !userhost.contains('@') || userhost.contains(' ')
+        {
             return;
         }
         self.seq += 1;
@@ -1179,8 +1181,10 @@ pub enum LookupError {
 ///    server tracks it) equals the nick under the viewer's network casemapping (unknown →
 ///    ASCII only, never wider). A network NAME never links two hosts; two connections whose
 ///    ISUPPORT NETWORK names are both known and differ never match.
-/// 5. If the viewer's server has shown a user@host for the nick, it equals the candidate
-///    connection's own user@host (unknown own user@host → no match).
+/// 5. For a connection other than the viewer's, an observed user@host must match the
+///    candidate's own user@host (unknown → no match). For the viewer's exact connection,
+///    its authenticated ownership and current nick already identify it, even if irc-core
+///    has an outdated user@host after an IRC host change.
 /// 6. Exactly one ACCOUNT holds the nick that way — counting every account, with or without
 ///    an avatar; two accounts match neither.
 /// 7. That account has an avatar, has not opted out (the viewer always sees their own),
@@ -1278,8 +1282,9 @@ pub async fn discover(
         if !wanted.contains_key(&k) {
             continue;
         }
+        let is_viewer_connection = cid == viewer_conn && owner == viewer;
         if let Some(observed) = seen_hosts.get(&k) {
-            if !same_userhost(observed, &own_userhost) {
+            if !is_viewer_connection && !same_userhost(observed, &own_userhost) {
                 continue;
             }
         }
@@ -1302,6 +1307,37 @@ pub async fn discover(
         }
     }
     Ok(out)
+}
+
+/// The observer's CHGHOST may arrive first. Once the owner's live identity is
+/// updated, retry observers who have independently seen that same new identity.
+pub(crate) async fn hint_local_host_change(
+    state: &crate::AppState, source_id: &str, host: &str, nick: &str, userhost: &str,
+) {
+    let link = crate::ipc_client::attached_link();
+    if link == 0 || host.is_empty() || !state.avatars.enabled() {
+        return;
+    }
+    let source_network = crate::e2e::network_name(source_id);
+    let connections: Vec<_> = state.connections.iter()
+        .filter(|entry| entry.key() != source_id)
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect();
+    for (conn_id, conn) in connections {
+        if let (Some(source), Some(viewer)) = (&source_network, crate::e2e::network_name(&conn_id)) {
+            if source != &viewer { continue; }
+        }
+        let Some(owner) = state.conn_owners.get(&conn_id).map(|entry| entry.value().clone()) else { continue };
+        let Some(tx) = state.user_events.get(&owner).map(|entry| entry.value().clone()) else { continue };
+        if tx.receiver_count() == 0 { continue; }
+        let c = conn.lock().await;
+        if c.connected && c.registered && c.synced_link == link && !remote::restricted(&c)
+            && conn_host(&c) == host && remote::sees(&c, nick)
+            && c.seen_userhosts.get(nick).is_some_and(|seen| same_userhost(seen, userhost))
+        {
+            let _ = tx.send(crate::ServerEvent::AvatarHint { conn_id, nicks: vec![nick.to_string()] });
+        }
+    }
 }
 
 /// The owner's account may have its avatar shown: it exists, is not being deleted and is not

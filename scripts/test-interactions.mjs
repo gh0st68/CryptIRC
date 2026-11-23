@@ -125,6 +125,106 @@ await ev('closeSettingsMenu();showAddNetwork()');ok('desktop modal fields receiv
 await ev('closeModal();openFloatDdAt(500,300,[{text:"Synthetic action",action:()=>window.__menuPicked=true}])');await sleep(100);await tap('#float-dropdown button',false);
 ok('body-level dropdown remains reachable above app',await ev(`window.__menuPicked===true`));
 
+// Exercise the actual message composer rather than a generic settings input.
+await load(1440,900,false);
+const composerBox=()=>ev(`['input-wrap','input-inner','msg-input','send-btn','chat-area'].map(id=>{
+ const {x,y,width,height}=document.getElementById(id).getBoundingClientRect();
+ return [x,y,width,height];
+})`);
+for(const theme of ['arctic','light','mirc','hexchat','xchat','irssi']){
+ await ev(`document.getElementById('msg-input').blur();applyThemeCSS({...loadAppearance(),theme:${JSON.stringify(theme)},mobileTheme:''});`);
+ await sleep(250);
+ const before=await composerBox();
+ await tap('#msg-input',false);
+ await sleep(1050);
+ const after=await composerBox();
+ ok(theme+': desktop click keeps composer and viewport geometry unchanged',JSON.stringify(before)===JSON.stringify(after));
+ ok(theme+': desktop composer keeps focus',await ev("document.activeElement.id==='msg-input'"));
+}
+
+for(const mobile of [false,true]){
+ await load(mobile?390:1440,mobile?844:900,mobile);
+ await tap('#msg-input',mobile);
+ const platform=mobile?'mobile':'desktop';
+ ok(platform+': composer has no credential form or field name',await ev(`(()=>{
+  const e=document.getElementById('msg-input');
+  return e.tagName==='TEXTAREA' && !e.form && !e.name && e.rows===1 &&
+   e.autocomplete==='off' && e.hasAttribute('data-1p-ignore') &&
+   e.getAttribute('data-lpignore')==='true' && e.hasAttribute('data-bwignore') &&
+   e.getAttribute('data-protonpass-ignore')==='true' && e.getAttribute('inputmode')==='text' &&
+   e.getAttribute('enterkeyhint')==='send' &&
+   document.getElementById('l-user').autocomplete==='username' &&
+   document.getElementById('l-pass').autocomplete==='current-password';
+ })()`));
+ await ev(`window.composerSent=[];window.originalHandleInput=handleInput;handleInput=async text=>{composerSent.push(text);};`);
+ await send('Input.insertText',{text:'Typed message 😺'});
+ await ev(`document.getElementById('msg-input').dispatchEvent(new KeyboardEvent('keydown',{
+  key:'Enter',bubbles:true,cancelable:true,isComposing:true
+ }))`);
+ ok(platform+': IME commit does not send a chat message',await ev("composerSent.length===0 && document.getElementById('msg-input').value==='Typed message 😺'"));
+ if(mobile){
+  await ev(`document.getElementById('msg-input').dispatchEvent(new InputEvent('beforeinput',{
+   inputType:'insertLineBreak',bubbles:true,cancelable:true
+  }))`);
+ } else {
+  await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});
+  await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+ }
+ ok(platform+': sends exactly once and clears the line',await ev("composerSent.length===1 && composerSent[0]==='Typed message 😺' && !document.getElementById('msg-input').value"));
+ await send('Input.insertText',{text:'one\ntwo'});
+ ok(platform+': multi-line input stays a single chat line',await ev("document.getElementById('msg-input').value==='onetwo'"));
+ await ev("handleInput=originalHandleInput;document.getElementById('msg-input').value='';");
+}
+
+await load(1440,900,false);
+await ev(`(()=>{
+ const time=Date.now()/1000-1000;
+ for(const [target,base] of [['#dev',1000],['#lounge',2000],['Maya',3000]]){
+  buffers[bk('preview',target)]=Array.from({length:180},(_,i)=>({
+   id:base+i,ts:time+i,from:'Alex',text:target+' message '+i,kind:'privmsg'
+  }));
+ }
+ setActive('preview','#dev');scrollForce();
+})()`);
+await sleep(220);
+const scrollUp=async(deltaY)=>{
+ const {chat}=await geometry();
+ await send('Input.dispatchMouseEvent',{type:'mouseWheel',x:chat.x+chat.w/2,y:chat.y+chat.h/2,deltaX:0,deltaY});
+ await sleep(240);
+};
+const snapshot=()=>ev("captureChatPosition(document.getElementById('chat-area'))");
+const sameRow=(a,b)=>a&&b&&a.id===b.id&&Math.abs(a.offset-b.offset)<=2;
+await scrollUp(-80);
+const dev=await snapshot();
+ok('short desktop scroll detaches from the live tail',dev&&await ev('_userScrolledAway'));
+await ev("setActive('preview','Maya')");
+await sleep(220);
+await scrollUp(-510);
+const dm=await snapshot();
+await ev("setActive('preview','#lounge')");
+await sleep(220);
+await scrollUp(-280);
+const lounge=await snapshot();
+await ev(`addMessage('preview','#dev',{id:1400,ts:Date.now()/1000,from:'Sam',text:'new while away',kind:'privmsg'});
+ setActive('preview','#dev');`);
+ok('channel restores the same message and offset after new traffic',sameRow(dev,await snapshot()));
+await ev("renderChat()");
+ok('background re-render preserves the restored message and offset',sameRow(dev,await snapshot()));
+await ev("setActive('preview','Maya')");
+ok('DM restores its own position independently',sameRow(dm,await snapshot()));
+await ev("setActive('preview','#lounge')");
+ok('another channel retains a third position',sameRow(lounge,await snapshot()));
+await ev(`(async()=>{
+ const current=getBuf('preview','#lounge')[0].ts;
+ await prependLogs('preview','#lounge',Array.from({length:30},(_,i)=>({
+  id:600+i,ts:current-100+i,from:'Alex',text:'past '+i,kind:'privmsg'
+ })));
+})()`);
+ok('loading older messages preserves the content in view',sameRow(lounge,await snapshot()));
+await ev("_enterHistoryView('preview','#lounge');setActive('preview','#dev');setActive('preview','#lounge');");
+ok('a historical window survives switching away and back',await ev("_historyView?.target==='#lounge'")&&sameRow(lounge,await snapshot()));
+await ev("_historyView=null;scrollForce();setActive('preview','Maya');setActive('preview','#lounge');");
+ok('returning to the bottom restores ordinary live following',await ev("!_userScrolledAway&&_isNearBottom(document.getElementById('chat-area'),8)"));
 ok('no runtime exceptions',errors.length===0);
 const result={passed:checks.filter(x=>x.pass).length,total:checks.length,failed:checks.filter(x=>!x.pass),errors};console.log(JSON.stringify(result));socket.close();if(result.failed.length)process.exitCode=1;
 }finally{chrome.kill();await new Promise(resolve=>server.close(resolve));await fs.rm(temp,{recursive:true,force:true,maxRetries:5,retryDelay:100});}

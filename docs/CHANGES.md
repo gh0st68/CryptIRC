@@ -1,5 +1,21 @@
 # CryptIRC changelog
 
+## v0.5.12 (November 2026)
+
+New
+- **CryptIRC MCP.** Connect an external AI client over Streamable HTTP with a revocable token from **Settings → Profile → MCP access**. The ten tools can list IRC networks and channel members, read and search history, send channel messages and DMs, join and part, manage connections, run IRC commands with your regular permissions, and work with appearance settings and your notepad. History and notes require an unlocked vault. End-to-end encrypted conversations stay in CryptIRC.
+- **Passkey sign-in.** Add a named passkey under **Settings → Profile → Passkeys**, then use the passkey picker to sign in with your device or a compatible security key. Enrollment confirms your current password. Password sign-in is still available, and the IRC vault uses its own passphrase.
+- **Settings search.** Find controls across Profile, Security, Notifications, Networks, Themes, and Bots, plus the admin controls you have access to. Search accepts common typos and aliases. Use the arrow keys and Enter or tap a result to jump to the matching control.
+
+Fixes
+- The message composer keeps its size when focused on desktop. Its single-line chat field is marked separately from sign-in fields to reduce password-manager prompts. Desktop Enter, mobile Send, and IME composition keep working.
+- Channels and DMs restore the message and scroll position you were reading when you switch back, even after new messages arrive or you load older history. Scrolling to the live tail resumes auto-follow.
+- Your avatar stays visible on your own nick with long or colored vhosts. When a verified hostmask changes, other eligible CryptIRC viewers refresh the avatar for the new identity.
+
+Upgrade notes
+- The colored-vhost fix includes changes to the IRC core. Installing and starting the updated IRC core reconnects IRC networks once. Subsequent web-only updates can retain those connections.
+- Configure the canonical HTTPS URL in `CRYPTIRC_BASE_URL` to enable passkeys and MCP token setup.
+
 ## v0.5.11 (November 2026)
 
 Fixes

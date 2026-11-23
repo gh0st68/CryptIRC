@@ -779,6 +779,14 @@ impl E2EStore {
         list_slots(&self.user_dir(username).join("channels"), channel_is_safe, MAX_CHANNEL_KEY_FILES).await
     }
 
+    pub(crate) async fn protected_names(&self, username: &str) -> Result<(Vec<String>, Vec<String>)> {
+        let dir = self.user_dir(username);
+        Ok((
+            list_slots_checked(&dir.join("channels"), channel_is_safe, MAX_CHANNEL_KEY_FILES, true).await?,
+            list_slots_checked(&dir.join("sessions"), partner_is_safe, MAX_SESSION_FILES, true).await?,
+        ))
+    }
+
     // ── TOFU trust ────────────────────────────────────────────────────────────
 
     pub async fn load_trust(&self, username: &str) -> Vec<TrustRecord> {
@@ -1237,23 +1245,51 @@ async fn delete_slot(dir: &std::path::Path, sn: &SlotName) {
 /// its sidecar name (only when the sidecar really maps to that stem); one without a
 /// valid sidecar is skipped.
 async fn list_slots(dir: &std::path::Path, is_safe: fn(u8) -> bool, cap: usize) -> Vec<String> {
+    list_slots_checked(dir, is_safe, cap, false).await.unwrap_or_default()
+}
+
+async fn list_slots_checked(dir: &std::path::Path, is_safe: fn(u8) -> bool, cap: usize, strict: bool) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    let Ok(mut rd) = tokio::fs::read_dir(dir).await else { return out; };
-    while let Ok(Some(e)) = rd.next_entry().await {
+    let mut rd = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(e) if !strict || e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e.into()),
+    };
+    loop {
+        let e = match rd.next_entry().await {
+            Ok(Some(e)) => e,
+            Ok(None) => break,
+            Err(_) if !strict => break,
+            Err(e) => return Err(e.into()),
+        };
         let path = e.path();
         if path.extension().and_then(|x| x.to_str()) != Some("enc") { continue; }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            if strict { anyhow::bail!("Unreadable E2E slot name"); }
+            continue;
+        };
         if stem.contains('~') {
-            let Ok(n) = tokio::fs::read_to_string(dir.join(format!("{}.name", stem))).await else { continue };
-            let sn = slot_name(&n, is_safe);
-            if !sn.hashed || sn.stem != stem { continue; }
-            out.push(n);
+            let name = match tokio::fs::read_to_string(dir.join(format!("{}.name", stem))).await {
+                Ok(name) => name,
+                Err(_) if !strict => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let sn = slot_name(&name, is_safe);
+            if !sn.hashed || sn.stem != stem {
+                if strict { anyhow::bail!("Invalid E2E slot name"); }
+                continue;
+            }
+            out.push(name);
         } else {
             out.push(fs_decode(stem));
         }
-        if out.len() >= cap { break; }
+        if strict {
+            if out.len() > cap { anyhow::bail!("Too many E2E slots"); }
+        } else if out.len() >= cap {
+            break;
+        }
     }
-    out
+    Ok(out)
 }
 
 /// #88: validate a client-supplied base64 public-key / signature field before it is

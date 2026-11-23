@@ -563,6 +563,10 @@ function initViewportFix() {
     if (e.cancelable) e.preventDefault();
   }, { passive: false });
 
+  // The keyboard viewport and safe-area adjustments are for touch devices.
+  // Desktop focus must not resize the application or move the composer.
+  if(!_IS_IOS && !window.matchMedia('(pointer: coarse)').matches)return;
+
   // Use visualViewport to resize app when keyboard opens (critical for iOS PWA)
   const iw = document.getElementById('input-wrap');
   if (window.visualViewport) {
@@ -692,6 +696,7 @@ async function doLogin() {
   const capAns=document.getElementById('l-captcha')?.value?.trim()||'';
   const btn=document.getElementById('login-btn');
   const lights=document.getElementById('login-lights');
+  if(btn.disabled) return;
   btn.disabled=true; btn.textContent='Signing in…';
   lights.classList.add('active');
   try {
@@ -709,16 +714,92 @@ async function doLogin() {
       }
       return;
     }
-    { const f=document.getElementById('login-captcha-field'); if(f) f.style.display='none'; }
-    sessionToken=d.token; currentUser=d.username;
-    localStorage.setItem('cryptirc_token',sessionToken);
-    localStorage.setItem('cryptirc_user',currentUser);
-    document.cookie=`cryptirc_token=${sessionToken};path=/cryptirc;max-age=31536000;SameSite=Strict${location.protocol==='https:'?';Secure':''}`;
-    await new Promise(r=>setTimeout(r,1500));
-    lights.classList.remove('active');
-    showApp();
+    await completeLogin(d,lights);
   } catch(e){setErr('login-err','Network error');lights.classList.remove('active');}
   finally{btn.disabled=false;btn.textContent='Sign In';}
+}
+async function completeLogin(data,lights) {
+  const captcha=document.getElementById('login-captcha-field');
+  if(captcha) captcha.style.display='none';
+  document.getElementById('l-pass').value='';
+  sessionToken=data.token;
+  currentUser=data.username;
+  localStorage.setItem('cryptirc_token',sessionToken);
+  localStorage.setItem('cryptirc_user',currentUser);
+  document.cookie=`cryptirc_token=${sessionToken};path=/cryptirc;max-age=31536000;SameSite=Strict${location.protocol==='https:'?';Secure':''}`;
+  await new Promise(r=>setTimeout(r,1500));
+  lights.classList.remove('active');
+  showApp();
+}
+function passkeysSupported() {
+  return !!(window.isSecureContext && window.PublicKeyCredential && navigator.credentials);
+}
+function passkeyDecode(value) {
+  const standard=value.replace(/-/g,'+').replace(/_/g,'/');
+  return Uint8Array.from(atob(standard),byte=>byte.charCodeAt(0));
+}
+function passkeyEncode(buffer) {
+  if(!buffer) return null;
+  let bytes='';
+  for(const byte of new Uint8Array(buffer)) bytes+=String.fromCharCode(byte);
+  return btoa(bytes).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function passkeyOptions(options) {
+  const key={...options.publicKey,challenge:passkeyDecode(options.publicKey.challenge)};
+  if(key.user) key.user={...key.user,id:passkeyDecode(key.user.id)};
+  for(const name of ['allowCredentials','excludeCredentials']){
+    if(key[name]) key[name]=key[name].map(item=>({...item,id:passkeyDecode(item.id)}));
+  }
+  return {publicKey:key};
+}
+function passkeyResponse(credential) {
+  if(typeof credential.toJSON==='function') return credential.toJSON();
+  const r=credential.response;
+  const response={clientDataJSON:passkeyEncode(r.clientDataJSON)};
+  if(r.attestationObject) {
+    response.attestationObject=passkeyEncode(r.attestationObject);
+    if(r.getTransports) response.transports=r.getTransports();
+  } else {
+    response.authenticatorData=passkeyEncode(r.authenticatorData);
+    response.signature=passkeyEncode(r.signature);
+    response.userHandle=passkeyEncode(r.userHandle);
+  }
+  return {id:credential.id,rawId:passkeyEncode(credential.rawId),type:credential.type,
+    response,clientExtensionResults:credential.getClientExtensionResults()};
+}
+async function accountIntegrationApi(path,method,body,authenticated=true) {
+  const headers={};
+  if(authenticated) headers.Authorization='Bearer '+sessionToken;
+  if(body!==undefined) headers['Content-Type']='application/json';
+  const res=await fetch(path,{method,headers,body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});
+  if(res.status===204) return {};
+  const data=await res.json().catch(()=>({}));
+  if(!res.ok) throw new Error(data.message||'Request failed. Try again.');
+  return data;
+}
+async function doPasskeyLogin() {
+  const username=document.getElementById('l-user').value.trim();
+  const btn=document.getElementById('passkey-login-btn');
+  const passwordBtn=document.getElementById('login-btn');
+  if(!passkeysSupported() || btn.disabled || passwordBtn.disabled) return;
+  const lights=document.getElementById('login-lights');
+  btn.disabled=true;
+  passwordBtn.disabled=true;
+  lights.classList.add('active');
+  setErr('login-err','');
+  try {
+    const {id,options}=await accountIntegrationApi('/cryptirc/auth/passkeys/login/start','POST',{},false);
+    const credential=await navigator.credentials.get(passkeyOptions(options));
+    if(!credential) throw new Error('No passkey was selected.');
+    const data=await accountIntegrationApi('/cryptirc/auth/passkeys/login/finish','POST',{id,username,credential:passkeyResponse(credential)},false);
+    await completeLogin(data,lights);
+  } catch(e) {
+    setErr('login-err',e.name==='NotAllowedError'?'Passkey sign-in was canceled or no matching passkey was found.':e.message);
+  } finally {
+    lights.classList.remove('active');
+    btn.disabled=false;
+    passwordBtn.disabled=false;
+  }
 }
 async function doForgot() {
   const email=document.getElementById('f-email').value.trim();
@@ -2850,7 +2931,7 @@ function handleEvent(ev) {
       break;
     }
     case 'data_cleared':
-      buffers={}; _historyView=null;
+      buffers={}; _historyView=null; conversationScroll.clear(); conversationHistory.clear();
       unread.clear();
       mentionUnread.clear();
       for(const k of Object.keys(_lastMsgId)) delete _lastMsgId[k];
@@ -2866,6 +2947,8 @@ function handleEvent(ev) {
       // the conversation back.
       const k=bk(ev.conn_id,ev.target);
       buffers[k]=[];
+      conversationScroll.delete(k);
+      conversationHistory.delete(k);
       if(_historyView && _historyView.bk===k) _historyView=null;
       delete _lastMsgId[k];
       unreadClear(k);
@@ -3591,41 +3674,18 @@ async function prependLogs(conn_id,target,lines){
   }
   if(isActive(conn_id,target)){
     const area=document.getElementById('chat-area');
-    const oldHeight=area?.scrollHeight||0;
-    // "Load older" (!wasEmpty) keeps the user's off-bottom position below, so this
-    // render must NOT advance the read horizon to the newest (off-screen) message
-    // (F30-followup). The initial load (wasEmpty) scrollForce()s to the bottom, so
-    // advancing there is correct.
-    _suppressLastReadAdvance = !wasEmpty;
-    renderChat();
-    _suppressLastReadAdvance = false;
-    if(wasEmpty){
-      // Initial load — scroll to bottom to show latest messages
-      scrollForce();
-    } else if(area&&unique.length>0){
-      // Loading older messages — preserve scroll position. iOS momentum-
-      // scroll can swallow a bare scrollTop assignment here; briefly set
-      // overflowY to hidden to flush momentum, then restore.
-      const newHeight=area.scrollHeight;
-      area.style.overflowY='hidden';
-      void area.offsetHeight;
-      area.scrollTop=newHeight-oldHeight;
-      area.style.overflowY='';
-      // renderChat() above went through scrollForce(), which cleared
-      // _userScrolledAway and armed re-anchor timers at 50-2000ms. Restoring the
-      // position is a scrollTop INCREASE, so the direction rule in _onChatScroll
-      // correctly declines to read it as the user stepping away — which means
-      // nothing would set the flag and those timers would snap the reader to the
-      // bottom about 50ms after their "load older" finished. Say what is true
-      // instead of hoping it gets inferred: the user IS reading history here.
-      _cancelScrollForce();
-      _userScrolledAway=true;
-      _lastScrollTop=area.scrollTop;
-      requestAnimationFrame(()=>{
-        if(_jumpAnchor && _jumpAnchorBk===bk(conn_id,target)){_restoreMessageJump();return;}
-        area.scrollTop=newHeight-oldHeight;
-        _lastScrollTop=area.scrollTop;
-      });
+    const key=bk(conn_id,target);
+    const position=wasEmpty?conversationScroll.get(key):captureChatPosition(area,unique.length>0);
+    // Paging can render off the bottom, so a background history response must
+    // preserve the current read marker.
+    _suppressLastReadAdvance=!wasEmpty;
+    try {
+      // Let iOS finish momentum before applying the anchor to the new rows.
+      if(position&&area){area.style.overflowY='hidden';void area.offsetHeight;}
+      renderChat(position);
+    } finally {
+      if(position&&area)area.style.overflowY='';
+      _suppressLastReadAdvance=false;
     }
     _restoreMessageJump();
   } else if(unique.length>0 && isMessagesActive() && _isDMTarget(target)){
@@ -3641,8 +3701,8 @@ async function prependLogs(conn_id,target,lines){
 async function appendSyncLines(conn_id,target,lines){
   // Don't graft live tail lines into a HISTORY WINDOW for this target: the
   // buffer is a frozen window from the past and the merge would corrupt it.
-  // Dropping is safe ONLY here, because _exitHistoryView / setActive-away both
-  // zero _lastMsgId and reload fresh, so the dropped ids are re-fetched.
+  // Jumping to present resets _lastMsgId and reloads fresh, so lines
+  // skipped while reading a historical window are re-fetched.
   // The _jumpAnchor-only case (jump target was already in the LIVE buffer, no
   // history window) must NOT drop: it has no reload-on-release path, so dropped
   // lines would either leave a permanent hole (a live message advances
@@ -3938,7 +3998,58 @@ function updateLagDisplay(){
     }
   }
 }
+const conversationScroll = new Map();
+const conversationHistory = new Map();
+let renderedChatKey = null;
+
+function captureChatPosition(area,includeBottom=false){
+  if(!area||(!includeBottom&&_isNearBottom(area,8)))return null;
+  const top=area.getBoundingClientRect().top;
+  const row=Array.from(area.querySelectorAll('.msg-row[data-msg-id]')).find(el=>el.getBoundingClientRect().bottom>top);
+  return {top:area.scrollTop,id:row?.dataset.msgId,fp:row?.dataset.fp,offset:row?row.getBoundingClientRect().top-top:0};
+}
+
+function rememberChatPosition(){
+  if(!active||isUploadsActive()||isMessagesActive())return;
+  const key=bk(active.conn_id,active.target);
+  if(renderedChatKey!==key)return;
+  const historical=_historyView?.bk===key;
+  const position=captureChatPosition(document.getElementById('chat-area'),historical);
+  if(historical){
+    // Save the historical window separately, so inactive conversations return
+    // to their ordinary live message handling until the reader comes back.
+    conversationHistory.delete(key);
+    conversationHistory.set(key,{view:_historyView,rows:buffers[key]});
+    if(conversationHistory.size>5)conversationHistory.delete(conversationHistory.keys().next().value);
+    buffers[key]=[];
+    _lastMsgId[key]=0;
+    _historyView=null;
+  }
+  conversationScroll.delete(key);
+  if(position)conversationScroll.set(key,position);
+  if(conversationScroll.size>100)conversationScroll.delete(conversationScroll.keys().next().value);
+}
+
+function restoreChatPosition(area,position){
+  const rows=Array.from(area.querySelectorAll('.msg-row[data-msg-id]'));
+  const row=(Number(position.id)>0&&rows.find(el=>el.dataset.msgId===position.id))
+    ||(position.fp&&rows.find(el=>el.dataset.fp===position.fp));
+  const top=row?area.scrollTop+row.getBoundingClientRect().top-area.getBoundingClientRect().top-position.offset:position.top;
+  _cancelScrollForce();
+  area.scrollTop=top;
+  _userScrolledAway=!_isNearBottom(area,8);
+  _lastScrollTop=area.scrollTop;
+  _upTravel=0;
+  _markProgrammaticScroll(area);
+  updateScrollBtn();
+}
+
 function setActive(conn_id,target,options){
+  const key=bk(conn_id,target);
+  if(active&&bk(active.conn_id,active.target)!==key){
+    rememberChatPosition();
+    _jumpAnchor=false;
+  }
   disposeTweetPreviews(document.getElementById('chat-area'));
   ++_messageJumpSerial;
   try{ _replyOnSwitch(conn_id,target); }catch(_){}   // r6: a reply quote stays with its conversation
@@ -3963,12 +4074,11 @@ function setActive(conn_id,target,options){
   // Track the last real IRC view so files dropped/picked while on the Uploads
   // channel still associate with a sensible source for "Insert into chat".
   _lastIrcActive={conn_id,target};
-  // Leaving a history-view target for a DIFFERENT target → drop the stale
-  // historical window so reopening that channel loads present fresh.
-  if(_historyView && _historyView.bk!==bk(conn_id,target)){
-    getBuf(_historyView.conn_id,_historyView.target).length=0;
-    _lastMsgId[_historyView.bk]=0;
-    _historyView=null;
+  const savedHistory=conversationHistory.get(key);
+  if(savedHistory){
+    buffers[key]=savedHistory.rows;
+    _historyView=savedHistory.view;
+    conversationHistory.delete(key);
   }
   adoptUnreadAsOf(bk(conn_id,target));   // kill immortal wall-clock-stamped badges (see helper)
   unreadClear(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
@@ -3982,14 +4092,14 @@ function setActive(conn_id,target,options){
   // Fire get_logs/sync BEFORE renderChat so _pendingLogs is set when renderChat
   // decides whether to show the "Loading messages…" placeholder for an empty buffer
   // (these are fire-and-forget WS sends with no render dependency).
-  if(getBuf(conn_id,target).length===0){
+  if(_historyView?.bk!==key && getBuf(conn_id,target).length===0){
     wsend({type:'get_logs',conn_id,target,limit:200});
-  } else {
+  } else if(_historyView?.bk!==key) {
     // Sync missed messages for channels we already have history for
     const _sk=bk(conn_id,target),_lid=_lastMsgId[_sk];
     if(_lid>0) wsend({type:'sync',conn_id,target,after_id:_lid});
   }
-  renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay(); scrollForce();
+  renderSidebar(); renderChat(renderedChatKey===key?null:conversationScroll.get(key)); updateTopbar(); updateLagDisplay();
   if(typeof updateE2EIndicator==='function') updateE2EIndicator(target);
   updateInputPlaceholder();
   const net=networks.find(n=>n.config.id===conn_id);
@@ -3998,15 +4108,15 @@ function setActive(conn_id,target,options){
   try{ if(typeof _restoreReloadDraft==='function') _restoreReloadDraft(conn_id,target); }catch(_){}   // r10
 }
 
-function renderChat(){
+function renderChat(position){
   const area=document.getElementById('chat-area');
   ++_tweetViewGeneration;
   const welcome=document.getElementById('welcome');
-  if(!active){area.style.display='none';welcome.style.display='flex';return;}
+  if(!active){renderedChatKey=null;area.style.display='none';welcome.style.display='flex';return;}
   // Uploads pseudo-channel uses its own renderer; bail before IRC paths run.
-  if(isUploadsActive()){ welcome.style.display='none'; renderUploadsView(); updateTopbar(); updateInputPlaceholder(); return; }
+  if(isUploadsActive()){ renderedChatKey=null; welcome.style.display='none'; renderUploadsView(); updateTopbar(); updateInputPlaceholder(); return; }
   // Messages inbox pseudo-view — its own renderer.
-  if(isMessagesActive()){ welcome.style.display='none'; renderMessagesView(); updateTopbar(); updateInputPlaceholder(); return; }
+  if(isMessagesActive()){ renderedChatKey=null; welcome.style.display='none'; renderMessagesView(); updateTopbar(); updateInputPlaceholder(); return; }
   // Background re-render of the buffer the user is anchored on (a jumped-to
   // message): E2E key arrival → redecryptChannelHistory, a sync merge, prefs —
   // none of these are user navigation, so they must NOT scrollForce (which
@@ -4019,8 +4129,13 @@ function renderChat(){
   // rebuilds an empty buffer, where holding scrollTop would strand the anchor
   // with no release path; fall through to scrollForce (which releases) instead.
   const _anchorKeepPos=(_jumpAnchor && _jumpAnchorBk===bk(active.conn_id,active.target) && getBuf(active.conn_id,active.target).length>0)?area.scrollTop:null;
-  disposeTweetPreviews(area); area.style.display='block'; welcome.style.display='none'; area.innerHTML='';
+  const key=bk(active.conn_id,active.target);
   const buf=getBuf(active.conn_id,active.target);
+  const wasRenderedHere=renderedChatKey===key;
+  const keepPosition=buf.length>0
+    ?(position||(wasRenderedHere&&_userScrolledAway&&captureChatPosition(area))):null;
+  renderedChatKey=key;
+  disposeTweetPreviews(area); area.style.display='block'; welcome.style.display='none'; area.innerHTML='';
   const _tweetConv=tweetConversation(active.conn_id,active.target);   // X previews: evidence from THIS buffer
   // History-view banner — buffer is a window from the past; tap to return to live.
   if(_historyView && _historyView.bk===bk(active.conn_id,active.target)){
@@ -4091,7 +4206,7 @@ function renderChat(){
   // render that likewise keeps an off-bottom position (it prepends history above the
   // current view), so advancing to the newest (off-screen) ts there would bury a
   // live message that arrived while scrolled up AND clear its badge on other devices.
-  if(_anchorKeepPos==null && !_suppressLastReadAdvance && buf.length>0) localStorage.setItem('cryptirc_lastread_'+rmKey,String(buf[buf.length-1].ts));
+  if(_anchorKeepPos==null && !keepPosition && !_suppressLastReadAdvance && buf.length>0) localStorage.setItem('cryptirc_lastread_'+rmKey,String(buf[buf.length-1].ts));
   if(_anchorKeepPos!=null){
     // Anchored background re-render: hold the user's place (approximate if
     // lines merged above the viewport — acceptable; never a bottom-yank).
@@ -4102,6 +4217,8 @@ function renderChat(){
     _jumpAnchorTs=Date.now();
     area.scrollTop=_anchorKeepPos;
     updateScrollBtn();
+  } else if(keepPosition) {
+    restoreChatPosition(area,keepPosition);
   } else {
     scrollForce();
   }
@@ -6714,8 +6831,24 @@ document.addEventListener('DOMContentLoaded',()=>{
   }
 
   const inp=document.getElementById('msg-input');
+  inp.addEventListener('beforeinput',e=>{
+    if(e.isComposing||!e.cancelable||!['insertLineBreak','insertParagraph'].includes(e.inputType))return;
+    e.preventDefault();
+    // Some mobile keyboards deliver the Send action only as a beforeinput event.
+    inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
+  });
+  inp.addEventListener('input',e=>{
+    if(e.isComposing||!/[\r\n]/.test(inp.value))return;
+    // Match a single-line field when short multiline text is pasted or dictated.
+    const {value,selectionStart,selectionEnd}=inp;
+    inp.value=value.replace(/[\r\n]/g,'');
+    inp.setSelectionRange(value.slice(0,selectionStart).replace(/[\r\n]/g,'').length,
+      value.slice(0,selectionEnd).replace(/[\r\n]/g,'').length);
+  });
   inp.addEventListener('keydown', async e=>{
-    if(e.key==='Enter')          {
+    if(e.isComposing||e.keyCode===229)return;
+    if(e.key==='Enter'){
+      e.preventDefault();
       // Defer to any open autocomplete picker (slash, nick, emoji, chan).
       // Those pickers register their own keydown handlers AFTER this one,
       // so they run later in dispatch order — without this early return,
@@ -6743,6 +6876,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     else if(e.ctrlKey&&e.key==='k'){e.preventDefault();showMircColorPicker(inp);}         // Color
     else { sendTypingActive(); }
   });
+  document.getElementById('passkey-login-btn').hidden=!passkeysSupported();
   ['l-user','l-pass'].forEach(id=>document.getElementById(id)?.addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();}));
   // Scroll auth inputs into view on iOS when keyboard opens
   document.querySelectorAll('.auth-input').forEach(inp=>{
@@ -7538,7 +7672,7 @@ async function handleInput(raw){
         // which wipes the local buffer + msg_id sync state.
         {wsend({type:'clear_target_logs',conn_id,target}); break;}
       case 'CLEARALL':
-        {buffers={}; _historyView=null; renderChat(); break;}
+        {buffers={}; _historyView=null; conversationScroll.clear(); conversationHistory.clear(); renderChat(); break;}
       case 'UPLOAD':
       case 'UPLOADS':
         // Reopen the Uploads channel even after it's been hidden from the
@@ -9468,113 +9602,324 @@ function closeSettingsMenu(){
   const m=document.getElementById('settings-menu'); if(m) m.classList.remove('open','searching','search-focus');
   // Reset any in-progress settings search so the menu reopens clean.
   const i=document.getElementById('settings-search'); if(i) i.value='';
-  const r=document.getElementById('settings-search-results'); if(r) r.innerHTML='';
+  settingsSearch('');
 }
-// ── Settings search ──────────────────────────────────────────────────────────
-// Searches across the gear-menu entries PLUS the individual setting rows inside
-// the static Theme (#appearance-overlay) and Notifications (#notif-modal)
-// overlays. Index is built from the live DOM on each keystroke (~100 nodes —
-// cheap), so it self-maintains as settings are added. Picking a row result
-// opens its panel, scrolls the row into view and flashes it.
+// Settings search indexes visible navigation and setting labels, never control
+// values. Dynamic panels declare their destinations before their markup exists.
+const SETTINGS_PROFILE_ITEMS=[
+  ['Email address','profile-email','email address recovery password reset'],
+  ['Avatar','profile-avatar-card','profile picture photo pfp icon upload avatar share avatars show other people'],
+  ['Last.fm','profile-lfm-user','lastfm now playing music scrobble np'],
+  ['Change login password','profile-login-password','account sign in credentials'],
+  ['Change vault passphrase','profile-vault-passphrase','encryption vault password'],
+  ['Passkeys','profile-passkeys-card','pass key webauthn security key face id touch id biometric passwordless login sign in'],
+  ['MCP access','profile-mcp-card','model context protocol ai integration AI agent codex claude add connect setup config create replace revoke bearer token server url'],
+  ['Delete account','profile-delete-account','remove account close account danger zone'],
+];
+
+const SETTINGS_SEARCH_ALIASES={
+  'a-bg-mode':'wallpaper background image picture animation',
+  'a-bg-url':'wallpaper background image url custom upload',
+  'a-input-h':'composer chat input bar message field size height',
+  'a-ts-format':'timestamp time date clock format',
+  'a-desktop-notif':'desktop browser notifications popup alerts',
+  'a-sound-pm':'direct messages DMs private message alert',
+  'a-sound-mention':'ping mention notification alert',
+  'sec-vault-autolock':'auto lock timer timeout inactivity idle device screen vault',
+  'sec-msg-expiry':'hide old messages expire history retention',
+  'sec-ratelimit':'slow mode anti flood delay throttle',
+  'sec-block-pms':'block dm direct messages private message allow list whitelist',
+  'sec-autorejoin':'auto rejoin channel after kick',
+  'sec-linkpreviews':'url previews rich links unfurl thumbnails',
+  'sec-spellcheck':'spell check spelling autocorrect message composer',
+  'f-tls':'ssl secure connection encryption certificate',
+  'f-tls-invalid':'self signed accept invalid certificate tls verification',
+  'f-sasl-method':'sasl auth authentication plain external client certificate',
+  'f-perform':'perform startup on connect commands auto run',
+  'f-auto-identify':'nickserv identify automatically on connect',
+  'f-nick':'IRC nickname screen name',
+};
+
+function _settingsWords(text){
+  return String(text||'').normalize('NFKD').replace(/\p{M}/gu,'').toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+}
 function _settingsSearchIndex(){
-  const idx=[];
-  document.querySelectorAll('#settings-menu .settings-menu-item').forEach(btn=>{
-    if(btn.style.display==='none') return; // hidden entries (e.g. Admin for non-admins)
-    const label=(btn.textContent||'').trim();
-    if(!label) return;
-    // Attribute the item to its group header (the nearest preceding
-    // .settings-menu-sect sibling) so hits read "Settings ▸ Account" etc.
-    let sec='Settings menu';
-    for(let p=btn.previousElementSibling;p;p=p.previousElementSibling){
-      if(p.classList&&p.classList.contains('settings-menu-sect')){
-        const t=(p.textContent||'').trim(); if(t) sec='Settings › '+t; break;
-      }
-    }
-    idx.push({label, section:sec, run:()=>btn.click()});
-  });
-  // `sec` is captured alongside `row` because some rows are DYNAMIC (e.g. the
-  // notif Per-Network list is innerHTML-rebuilt on every showNotifModal): by
-  // the time the jump runs, the indexed row node can be detached — closest()
-  // on a detached node finds nothing, so keep the static section as fallback.
-  document.querySelectorAll('#appearance-overlay .appear-section').forEach(sec=>{
-    const st=(sec.querySelector('.appear-section-title')?.textContent||'').trim();
-    if(st) idx.push({label:st, section:'Theme', row:sec, sec, open:'appearance'});
-    sec.querySelectorAll('.appear-row').forEach(row=>{
-      const l=(row.querySelector('.appear-label')?.textContent||'').trim();
-      if(l) idx.push({label:l, section:st?('Theme › '+st):'Theme', row, sec, open:'appearance'});
-    });
-  });
-  document.querySelectorAll('#notif-modal .notif-section').forEach(sec=>{
-    const st=(sec.querySelector('.notif-section-title')?.textContent||'').trim();
-    const rows=sec.querySelectorAll('.notif-row');
-    if(!rows.length){ if(st) idx.push({label:st, section:'Notifications', row:sec, sec, open:'notif'}); return; }
-    rows.forEach(row=>{
-      const l=(row.querySelector('.notif-label')?.textContent||'').trim();
-      const kw=(row.querySelector('.notif-sublabel')?.textContent||'').trim();
-      if(l) idx.push({label:l, keywords:kw, section:st?('Notifications › '+st):'Notifications', row, sec, open:'notif'});
-    });
-  });
-  return idx;
-}
-function _settingsJump(entry){
-  closeSettingsMenu();
-  if(!entry.open){ if(entry.run) entry.run(); return; }
-  const doJump=()=>{
-    let t=entry.row;
-    if(!t) return;
-    // Row rebuilt/detached since indexing (dynamic lists) → jump to its
-    // still-attached section card instead.
-    if(!t.isConnected){ if(entry.sec && entry.sec.isConnected) t=entry.sec; else return; }
-    // A row inside a collapsed/conditional block (display:none) can't be
-    // scrolled to — fall back to its parent section card.
-    if(t.offsetParent===null){ const sec=t.closest('.appear-section,.notif-section')||entry.sec; if(sec && sec.isConnected) t=sec; }
-    try{t.scrollIntoView({block:'center',behavior:'smooth'});}catch(_){try{t.scrollIntoView();}catch(__){}}
-    t.classList.remove('settings-hit-flash'); void t.offsetWidth; t.classList.add('settings-hit-flash');
-    setTimeout(()=>{try{t.classList.remove('settings-hit-flash');}catch(_){}} ,2000);
+  const entries=[];
+  const add=(label,section,open,target,keywords='',fallback=null)=>{
+    if(typeof label==='string' && label.trim()) entries.push({label:label.trim(),section,open,target,keywords,fallback});
   };
-  if(entry.open==='appearance'){ showAppearanceModal(); setTimeout(doJump,150); }
-  else if(entry.open==='notif'){ Promise.resolve().then(()=>showNotifModal()).then(()=>setTimeout(doJump,150)).catch(()=>{}); }
-}
-function settingsSearch(q){
-  const menu=document.getElementById('settings-menu');
-  const res=document.getElementById('settings-search-results');
-  if(!menu||!res) return;
-  q=(q||'').trim().toLowerCase();
-  if(!q){ menu.classList.remove('searching'); res.innerHTML=''; return; }
-  menu.classList.add('searching');
-  const hits=[];
-  for(const e of _settingsSearchIndex()){
-    const ll=e.label.toLowerCase();
-    const hay=ll+' '+(e.keywords||'').toLowerCase()+' '+e.section.toLowerCase();
-    if(hay.indexOf(q)<0) continue;
-    // Rank: label prefix > label substring > section/keyword-only match.
-    hits.push([ll.startsWith(q)?0:(ll.indexOf(q)>=0?1:2), e]);
+  let section='Settings';
+  document.querySelectorAll('#settings-menu > .settings-menu-item, #settings-menu > .settings-menu-sect').forEach(el=>{
+    if(el.classList.contains('settings-menu-sect')){
+      section='Settings › '+el.textContent.trim();
+    } else if(!el.hidden && el.style.display!=='none'){
+      const aliases={Profile:'account email avatar passkeys',Sessions:'active devices signed in logged in sessions',
+        'Password Safe':'password manager saved credentials','IRC Oper':'operator commands moderation',
+        'Ignored Users':'ignore block mute users',Theme:'appearance look colors layout',
+        'IRCv3 Caps':'capabilities cap protocol',Certs:'certificate fingerprint TLS SSL SASL external','My Uploads':'files attachments shared media'};
+      const label=el.textContent.trim();
+      add(label,section,()=>el.click(),null,aliases[label]);
+    }
+  });
+
+  // Row labels and descriptions come from the shipped markup. Known controls
+  // contribute aliases by id without indexing saved values, tokens or API keys.
+  const panels=[
+    ['#appearance-overlay','Theme',showAppearanceModal,'.appear-section','.appear-section-title','.appear-row','.appear-label',null],
+    ['#notif-modal','Notifications',showNotifModal,'.notif-section','.notif-section-title','.notif-row','.notif-label','.notif-sublabel'],
+    ['#security-overlay','Security',showSecurityPanel,'.appear-section','.appear-section-title','.appear-row','.appear-label',null],
+  ];
+  for(const [root,title,open,sectionClass,heading,rowClass,labelClass,description] of panels){
+    document.querySelectorAll(root+' '+sectionClass).forEach(card=>{
+      const name=card.querySelector(heading)?.textContent.trim()||'';
+      const section=name?title+' › '+name:title;
+      if(name&&_settingsWords(name)!==_settingsWords(title)) add(name,title,open,card);
+      card.querySelectorAll(rowClass).forEach(row=>{
+        // Network rows are rebuilt asynchronously. Add them separately by id.
+        if(row.closest('#notif-network-list'))return;
+        const label=row.querySelector(labelClass);
+        if(!label)return;
+        const id=row.querySelector('input[id],button[id],select[id],textarea[id]')?.id;
+        const detail=description?row.querySelector(description):label.nextElementSibling;
+        add(label.textContent,section,open,row,[SETTINGS_SEARCH_ALIASES[id],detail?.textContent].filter(Boolean).join(' '),card);
+      });
+    });
   }
-  hits.sort((a,b)=>a[0]-b[0]);
-  res.innerHTML='';
-  if(!hits.length){
-    const d=document.createElement('div'); d.className='settings-search-empty'; d.textContent='No settings match'; res.appendChild(d);
+  add('Custom notification sound','Notifications › Sounds',showNotifModal,'#a-sound-custom-row','upload audio mp3 sound url','#a-sound-style');
+  add('Send a push test','Notifications',showNotifModal,'#notif-test-btn','test push notifications diagnostic');
+  add('X preview loading','Security › Behavior',showSecurityPanel,'.x-disclosure-settings','twitter x links disclosure media');
+  add('Private message protection','Security › Privacy',showPmProtectionPanel,null,'pm dm allow list whitelist notice cooldown');
+  add('Reset appearance','Theme',showAppearanceModal,'.appear-reset','restore defaults colors reset theme');
+  add('Create a custom theme','Theme',showAppearanceModal,'.theme-card-create','theme editor clone customize colors');
+  for(const [key,theme] of Object.entries(THEMES)){
+    add(theme.label,'Theme › Gallery',showAppearanceModal,'#theme-grid [data-theme="'+CSS.escape(key)+'"]');
+  }
+  for(const [key,theme] of Object.entries(loadAppearance().customThemes||{})){
+    if(theme?.label)add(theme.label,'Theme › Your themes',showAppearanceModal,'#theme-grid [data-theme="'+CSS.escape('custom:'+key)+'"]');
+  }
+  add('End-to-end encryption','Security',showEncryptPanel,null,'e2e e2ee encrypt key fingerprint DM encrypted channel');
+
+  for(const [label,id,keywords] of SETTINGS_PROFILE_ITEMS){
+    if(label==='Last.fm' && _settingsProfileHasLastfm===false) continue;
+    add(label,'Profile',showProfilePanel,'#'+id,keywords);
+  }
+  const adminButton=document.getElementById('admin-menu-btn');
+  if(adminButton && !adminButton.hidden && adminButton.style.display!=='none'){
+    const admin=[
+      ['Open registration','admin-reg-open','signup sign up allow account creation'],
+      ['Require email','admin-email-required','signup verify email address'],
+      ['Sign-up captcha','admin-captcha-enabled','registration bot protection'],
+      ['Invite code','admin-reg-code','signup registration code'],
+      ['Max upload size','admin-upload-mb','file uploads attachment size limit'],
+      ['Server link preview policy','admin-lp-mode','approved domains whitelist urls'],
+      ['Approved preview domains','admin-lp-whitelist','whitelist urls link preview'],
+      ['GIF picker provider','admin-gif-provider','giphy tenor gifs'],
+      ['Shared GIF API keys','admin-gif-mode','giphy tenor key GIF restrictions'],
+      ['Server Last.fm settings','admin-lfm-enabled','now playing music lastfm'],
+      ['Server avatars','admin-avatars-enabled','enable disable avatar pictures'],
+    ];
+    for(const [label,id,keywords] of admin) add(label,'Admin',showAdminPanel,'#'+id,keywords,'#admin-body');
+  }
+
+  add('Bot settings','Bots',showBotPanel,'#bot-master','enable master switch server side bot configuration','#bot-body');
+  add('AI chatbot','Bots',showBotPanel,'[data-ai="enabled"]','ai assistant openai claude api key provider model trigger','#bot-body');
+  for(const [id,label,,trigger] of BOT_PANEL_DEFS){
+    add(label,'Bots',showBotPanel,'[data-bot-enable="'+id+'"]',trigger,'#bot-body');
+  }
+  add('IP / Host logger','Bots',showBotPanel,'[data-ip="enabled"]','ip address hostname userhost join log','#bot-body');
+  add('Flood protection','Bots › Enforcement',showBotPanel,'[data-en="flood_enabled"]','flood spam auto kick moderation','#bot-body');
+  add('Bad-word filter','Bots › Enforcement',showBotPanel,'[data-en="badword_enabled"]','banned words block filter moderation','#bot-body');
+  add('Auto-op and auto-voice','Bots › Enforcement',showBotPanel,'[data-en="autoop"]','channel roles operator op voice','#bot-body');
+
+  add('Add network','Networks',()=>showAddNetwork(),'#modal-title','add server connect IRC new network');
+  for(const net of networks){
+    const name=net.config.label||net.config.server||'IRC network';
+    add('Edit '+name,'Networks',()=>editNetwork(net.config.id),null,'network edit server '+net.config.server);
+    add('Notifications for '+name,'Notifications › Per Network',showNotifModal,
+      '#notif-network-list [data-notif-network="'+CSS.escape(net.config.id)+'"]','mute unmute network alerts','#notif-network-list');
+  }
+  const network=networks.find(n=>n.config.id===active?.conn_id)||networks[0];
+  const networkName=network&&(network.config.label||network.config.server);
+  const openNetwork=()=>network?editNetwork(network.config.id,false):showAddNetwork(false);
+  const networkSection=networkName?'Networks › '+networkName:'Networks › Add network';
+  const staticLabels={'f-server':'IRC server','f-nick':'Nickname','f-sasl-method':'SASL authentication',
+    'f-perform':'Perform / On-connect commands','f-preset':'Network preset'};
+  document.querySelectorAll('#modal-overlay .form-field').forEach(field=>{
+    const control=field.querySelector('input[id],select[id],textarea[id]');
+    if(!control)return;
+    const label=staticLabels[control.id]||field.querySelector('.form-label')?.textContent;
+    if(!label)return;
+    const fallback=field.closest('#znc-fields')?'#f-mode':field.closest('#sasl-plain-fields')?'#f-sasl-method':
+      control.id==='f-pass'?'#f-mode':control.id==='f-preset'&&network?'#f-server':null;
+    add(label,networkSection,openNetwork,field,SETTINGS_SEARCH_ALIASES[control.id],fallback);
+  });
+  add(staticLabels['f-perform'],networkSection,openNetwork,'#f-perform',SETTINGS_SEARCH_ALIASES['f-perform']);
+  add('Network capabilities',networkSection,openNetwork,'#f-caps-grid','IRCv3 caps disable capability protocol');
+  return entries;
+}
+
+function _settingsOneEdit(a,b){
+  if(Math.abs(a.length-b.length)>1)return false;
+  if(a.length>b.length)[a,b]=[b,a];
+  let i=0;
+  while(i<a.length&&a[i]===b[i])i++;
+  if(a.length!==b.length)return a.slice(i)===b.slice(i+1);
+  if(a.slice(i+1)===b.slice(i+1))return true;
+  return a[i]===b[i+1]&&a[i+1]===b[i]&&a.slice(i+2)===b.slice(i+2);
+}
+
+const SETTINGS_SEARCH_STOP_WORDS=new Set(['a','an','and','are','can','do','for','how','i','in','is','my','of','setting','settings','the','to','turn','what','where']);
+function _settingsSearchRank(entry,query,terms,fuzzy){
+  const label=_settingsWords(entry.label);
+  if(label===query||label.replaceAll(' ','')===query.replaceAll(' ',''))return 0;
+  if(label.startsWith(query))return 1;
+  if(label.includes(query))return 2;
+  const fields=[label,_settingsWords(entry.keywords),_settingsWords(entry.section)].map(s=>s.split(' '));
+  let total=3;
+  for(const term of terms){
+    let best=Infinity;
+    fields.forEach((words,index)=>{
+      for(const word of words){
+        const weight=index*4;
+        if(word===term) best=Math.min(best,weight);
+        else if(word.startsWith(term)) best=Math.min(best,weight+1);
+        else if(term.length>=2&&word.includes(term)) best=Math.min(best,weight+2);
+        else if(fuzzy&&term.length>=4&&_settingsOneEdit(term,word)) best=Math.min(best,weight+16);
+      }
+    });
+    if(!Number.isFinite(best))return Infinity;
+    total+=best;
+  }
+  return total;
+}
+
+let _settingsSelected=-1;
+let _settingsJumpSerial=0;
+let _settingsProfileHasLastfm=null;
+function _settingsTargets(entry){
+  const resolve=target=>typeof target==='string'?document.querySelector(target):target;
+  const target=resolve(entry.target);
+  if(target){
+    for(let details=target.parentElement?.closest('details');details;details=details.parentElement?.closest('details')){
+      details.open=true;
+    }
+  }
+  const visible=el=>el?.isConnected&&el.getClientRects().length>0;
+  if(visible(target))return target;
+  const fallback=resolve(entry.fallback);
+  return visible(fallback)?fallback:null;
+}
+function _scrollToSetting(target){
+  const behavior=window.matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth';
+  // Scroll the panel itself. ScrollIntoView can move the page as well as the
+  // panel when a newly mounted modal is still laying out its scroll body.
+  for(let panel=target.parentElement;panel;panel=panel.parentElement){
+    if(panel.scrollHeight<=panel.clientHeight || !/^(auto|scroll|overlay)$/.test(getComputedStyle(panel).overflowY))continue;
+    const row=target.getBoundingClientRect();
+    const box=panel.getBoundingClientRect();
+    const top=panel.scrollTop+row.top+row.height/2-box.top-panel.clientTop-panel.clientHeight/2;
+    panel.scrollTo({top,behavior});
     return;
   }
-  for(const [,e] of hits.slice(0,12)){
-    const b=document.createElement('button');
-    b.type='button'; b.className='settings-search-hit';
-    const l=document.createElement('span'); l.className='ssh-label'; l.textContent=e.label;
-    const s=document.createElement('span'); s.className='ssh-sec'; s.textContent=e.section;
-    b.appendChild(l); b.appendChild(s);
-    b.onclick=()=>_settingsJump(e);
-    res.appendChild(b);
-  }
+  target.scrollIntoView({block:'center',behavior});
 }
-function settingsSearchKey(ev){
-  if(ev.key==='Enter'){
-    ev.preventDefault();
-    const first=document.querySelector('#settings-search-results .settings-search-hit');
-    if(first) first.click();
-  } else if(ev.key==='Escape'){
-    ev.preventDefault(); ev.stopPropagation();
-    if(ev.target.value){ ev.target.value=''; settingsSearch(''); }
-    else closeSettingsMenu();
+async function _settingsJump(entry){
+  const serial=++_settingsJumpSerial;
+  closeSettingsMenu();
+  try{await entry.open();}catch(_){return;}
+  if(!entry.target)return;
+  await new Promise(resolve=>requestAnimationFrame(resolve));
+  if(serial!==_settingsJumpSerial)return;
+  if(entry.open===showBotPanel && typeof entry.target==='string' && !document.querySelector(entry.target)){
+    const body=document.getElementById('bot-body');
+    if(body)await new Promise(resolve=>{
+      const done=()=>{clearTimeout(timer);observer.disconnect();resolve();};
+      const observer=new MutationObserver(()=>{if(document.querySelector(entry.target))done();});
+      const timer=setTimeout(done,2500);
+      observer.observe(body,{childList:true});
+    });
+  }
+  if(serial!==_settingsJumpSerial)return;
+  const target=_settingsTargets(entry);
+  if(!target)return;
+  _scrollToSetting(target);
+  target.classList.remove('settings-hit-flash');
+  void target.offsetWidth;
+  target.classList.add('settings-hit-flash');
+  setTimeout(()=>target.classList.remove('settings-hit-flash'),1900);
+}
+function settingsSearch(value){
+  const menu=document.getElementById('settings-menu');
+  const input=document.getElementById('settings-search');
+  const results=document.getElementById('settings-search-results');
+  const status=document.getElementById('settings-search-status');
+  if(!menu||!input||!results||!status)return;
+  const query=_settingsWords(value);
+  _settingsSelected=-1;
+  input.removeAttribute('aria-activedescendant');
+  input.setAttribute('aria-expanded',String(!!query));
+  menu.classList.toggle('searching',!!query);
+  results.replaceChildren();
+  status.textContent='';
+  if(!query)return;
+  const words=query.split(' ');
+  const useful=words.filter(word=>!SETTINGS_SEARCH_STOP_WORDS.has(word));
+  const terms=[...new Set(useful.length?useful:words)].slice(0,10);
+  const index=_settingsSearchIndex();
+  const rank=fuzzy=>index.map(entry=>({entry,score:_settingsSearchRank(entry,query,terms,fuzzy)}))
+    .filter(hit=>Number.isFinite(hit.score)).sort((a,b)=>a.score-b.score);
+  const exact=rank(false);
+  const hits=exact.length?exact:rank(true);
+  status.textContent=hits.length===0?'No settings match.':hits.length+' '+(hits.length===1?'setting':'settings')+' found.';
+  if(!hits.length){
+    const empty=document.createElement('div');
+    empty.className='settings-search-empty';
+    empty.textContent='No settings match. Try “passkeys”, “font size”, or “notifications”.';
+    results.appendChild(empty);
+    return;
+  }
+  const list=document.createDocumentFragment();
+  hits.forEach(({entry},idx)=>{
+    const button=document.createElement('button');
+    button.type='button';
+    button.id='settings-hit-'+idx;
+    button.className='settings-search-hit';
+    button.tabIndex=-1;
+    button.setAttribute('role','option');
+    button.setAttribute('aria-selected','false');
+    for(const [className,text] of [['ssh-label',entry.label],['ssh-sec',entry.section]]){
+      const span=document.createElement('span');
+      span.className=className; span.textContent=text;
+      button.appendChild(span);
+    }
+    button.onclick=()=>_settingsJump(entry);
+    list.appendChild(button);
+  });
+  results.appendChild(list);
+  results.scrollTop=0;
+}
+function settingsSearchKey(event){
+  if(event.isComposing||event.keyCode===229)return;
+  const input=event.currentTarget;
+  const items=[...document.querySelectorAll('#settings-search-results [role="option"]')];
+  if((event.key==='ArrowDown'||event.key==='ArrowUp')&&items.length){
+    event.preventDefault();
+    if(_settingsSelected>=0)items[_settingsSelected]?.setAttribute('aria-selected','false');
+    const next=_settingsSelected+(event.key==='ArrowDown'?1:-1);
+    _settingsSelected=next<0?items.length-1:next%items.length;
+    const selected=items[_settingsSelected];
+    selected.setAttribute('aria-selected','true');
+    input.setAttribute('aria-activedescendant',selected.id);
+    selected.scrollIntoView({block:'nearest'});
+  } else if(event.key==='Enter'&&items.length){
+    event.preventDefault();
+    items[Math.max(0,_settingsSelected)].click();
+  } else if(event.key==='Escape'){
+    event.preventDefault();
+    event.stopPropagation();
+    if(input.value){input.value='';settingsSearch('');}
+    else{closeSettingsMenu();document.getElementById('settings-gear-btn')?.focus();}
   }
 }
 document.addEventListener('click',e=>{const m=document.getElementById('settings-menu');if(m&&m.classList.contains('open')&&!e.target.closest('#settings-menu')&&!e.target.closest('#settings-gear-btn'))closeSettingsMenu();});
@@ -9690,7 +10035,8 @@ function _closeSecretPanels(){
   try{ if(document.getElementById('custom-prompt-overlay')?.classList.contains('open')){ const c=document.getElementById('custom-prompt-cancel'); if(c&&typeof c.onclick==='function') c.onclick(); } const ci=document.getElementById('custom-prompt-input'); if(ci) ci.value=''; }catch(_){}
   // Panels that hold decrypted secrets
   try{ if(document.getElementById('notepad-overlay')) closeNotepad(); }catch(_){}
-  for(const id of ['pwsafe-overlay','profile-overlay','tls-verify-popup','cert-warn-popup']){ const o=document.getElementById(id); if(o){ o.classList.remove('show'); o.style.display='none'; } }
+  closeProfilePanel();
+  for(const id of ['pwsafe-overlay','tls-verify-popup','cert-warn-popup']){ const o=document.getElementById(id); if(o){ o.classList.remove('show'); o.style.display='none'; } }
   try{ if(document.getElementById('modal-overlay')?.classList.contains('open')) closeModal(); }catch(_){}
   const pb=document.getElementById('pwsafe-body'); if(pb) pb.innerHTML='';
   // A change still waiting for its merge-then-save (one server round trip) cannot be saved
@@ -9823,7 +10169,7 @@ async function showChangePass(){
   showToast('Changing vault passphrase…');
 }
 // ─── User Profile window (account + email + security + danger zone) ──────────
-function closeProfilePanel(){ const o=document.getElementById('profile-overlay'); if(o){o.classList.remove('show');o.style.display='none';} }
+function closeProfilePanel(){ const o=document.getElementById('profile-overlay'); if(o){o.classList.remove('show');o.style.display='none';o.querySelector('#profile-body')?.replaceChildren();} }
 async function showProfilePanel(){
   let ov=document.getElementById('profile-overlay');
   if(!ov){
@@ -9840,13 +10186,17 @@ async function showProfilePanel(){
     document.body.appendChild(ov);
   }
   ov.style.display='flex'; ov.classList.add('show');
-  renderProfilePanel();
+  return renderProfilePanel();
 }
 async function renderProfilePanel(){
   const body=document.getElementById('profile-body'); if(!body) return;
   body.innerHTML='<div style="color:var(--text3);font-size:12px;text-align:center;padding:24px">Loading…</div>';
   let me={username:currentUser||'',email:'',admin:false};
-  try{ const r=await fetch('/cryptirc/auth/me',{headers:{'Authorization':'Bearer '+sessionToken}}); if(r.ok) me=await r.json(); }catch(e){}
+  try{
+    const r=await fetch('/cryptirc/auth/me',{headers:{'Authorization':'Bearer '+sessionToken}});
+    if(r.ok){me=await r.json();_settingsProfileHasLastfm=!!me.lastfm_enabled;}
+  }catch(e){}
+  if(!body.closest('#profile-overlay')?.classList.contains('show'))return;
   const lbl='font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin:0 0 10px';
   const card='background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:14px';
   const hasEmail=!!(me.email&&me.email.trim());
@@ -9890,17 +10240,124 @@ async function renderProfilePanel(){
     </div>`:''}
     <div style="${card}">
       <div style="${lbl}">Security</div>
-      <button onclick="closeProfilePanel();showChangeClientPassword()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">🔑 <span>Change login password</span></button>
-      <button onclick="closeProfilePanel();showChangePass()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px;margin-top:8px">🔐 <span>Change vault passphrase</span></button>
+      <button id="profile-login-password" onclick="closeProfilePanel();showChangeClientPassword()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">🔑 <span>Change login password</span></button>
+      <button id="profile-vault-passphrase" onclick="closeProfilePanel();showChangePass()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px;margin-top:8px">🔐 <span>Change vault passphrase</span></button>
       <button onclick="closeProfilePanel();showSessionManager()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px;margin-top:8px">💻 <span>Active sessions</span></button>
+    </div>
+    <div style="${card}" id="profile-passkeys-card">
+      <div style="${lbl}">Passkeys</div>
+      <div id="profile-passkeys" style="font-size:12px;color:var(--text3)">Loading…</div>
+    </div>
+    <div style="${card}" id="profile-mcp-card">
+      <div style="${lbl}">MCP access</div>
+      <div id="profile-mcp" style="font-size:12px;color:var(--text3)">Loading…</div>
     </div>
     <div style="background:rgba(255,68,102,.06);border:1px solid rgba(255,68,102,.3);border-radius:10px;padding:16px">
       <div style="${lbl};color:var(--error)">Danger zone</div>
-      <button onclick="closeProfilePanel();showDeleteAccount()" style="width:100%;text-align:left;background:none;border:1px solid var(--error);border-radius:8px;color:var(--error);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">⚠ <span>Delete account</span></button>
+      <button id="profile-delete-account" onclick="closeProfilePanel();showDeleteAccount()" style="width:100%;text-align:left;background:none;border:1px solid var(--error);border-radius:8px;color:var(--error);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">⚠ <span>Delete account</span></button>
     </div>`;
   const inp=document.getElementById('profile-email');
   if(inp) inp.addEventListener('keydown',e=>{ if(e.key==='Enter') saveProfileEmail(); });
-  renderProfileAvatar(me.username||currentUser||'');
+  // Settings search waits for these cards to reach their final heights
+  // before it scrolls to a profile setting.
+  await Promise.allSettled([
+    renderProfileAvatar(me.username||currentUser||''),
+    renderProfilePasskeys(),
+    renderProfileMcp(),
+  ]);
+}
+async function renderProfilePasskeys(note='') {
+  const box=document.getElementById('profile-passkeys');
+  if(!box) return;
+  try {
+    const {available,passkeys}=await accountIntegrationApi('/cryptirc/auth/passkeys','GET');
+    if(!box.isConnected) return;
+    box.innerHTML=`
+      <div>${available?'Sign in with a passkey from your device or a compatible security key.':'Passkeys require a configured HTTPS origin.'}</div>
+      ${passkeys.length?'<ul style="padding-left:18px">'+passkeys.map(k=>`<li style="margin:8px 0">${esc(k.name)} <button class="btn-sm" type="button" data-passkey-id="${esc(k.id)}">Remove</button></li>`).join('')+'</ul>':'<p>No passkeys added.</p>'}
+      ${available&&passkeysSupported()?`<div style="display:grid;gap:6px">
+        <input class="form-input" id="profile-passkey-name" type="text" maxlength="64" aria-label="Passkey name" placeholder="Passkey name" autocomplete="off">
+        <input class="form-input" id="profile-passkey-password" type="password" aria-label="Current login password" placeholder="Current login password" autocomplete="current-password">
+        <button class="btn-sm" id="profile-passkey-add" type="button">Add passkey</button>
+      </div>`:''}
+      <div id="profile-passkey-status" role="status" style="margin-top:6px">${esc(note)}</div>`;
+    box.querySelector('#profile-passkey-add')?.addEventListener('click',async e=>{
+      const button=e.currentTarget;
+      const status=box.querySelector('#profile-passkey-status');
+      const name=box.querySelector('#profile-passkey-name').value.trim();
+      const passwordInput=box.querySelector('#profile-passkey-password');
+      const password=passwordInput.value;
+      if(!name||!password){status.textContent='Enter a passkey name and your current password.';return;}
+      passwordInput.value='';
+      button.disabled=true;
+      status.textContent='Waiting for your authenticator…';
+      try {
+        const {id,options}=await accountIntegrationApi('/cryptirc/auth/passkeys/register/start','POST',{name,password});
+        const credential=await navigator.credentials.create(passkeyOptions(options));
+        if(!credential) throw new Error('The passkey was not added.');
+        await accountIntegrationApi('/cryptirc/auth/passkeys/register/finish','POST',{id,credential:passkeyResponse(credential)});
+        await renderProfilePasskeys('Passkey added.');
+      } catch(err) {
+        status.textContent=err.name==='NotAllowedError'?'Passkey setup was canceled or timed out.':err.message;
+      } finally {button.disabled=false;}
+    });
+    for(const button of box.querySelectorAll('[data-passkey-id]')){
+      button.addEventListener('click',async ()=>{
+        if(!window.confirm('Remove this passkey from your CryptIRC account?')) return;
+        button.disabled=true;
+        try {
+          await accountIntegrationApi('/cryptirc/auth/passkeys','DELETE',{id:button.dataset.passkeyId});
+          await renderProfilePasskeys('Passkey removed.');
+        } catch(e) {
+          box.querySelector('#profile-passkey-status').textContent=e.message;
+          button.disabled=false;
+        }
+      });
+    }
+  } catch(e) { box.textContent=e.message; }
+}
+async function renderProfileMcp(issued=null,note='') {
+  const box=document.getElementById('profile-mcp');
+  if(!box) return;
+  try {
+    const {available,active,endpoint}=await accountIntegrationApi('/cryptirc/api/mcp/token','GET');
+    if(!box.isConnected) return;
+    if(!available){box.textContent='MCP access requires a configured HTTPS origin.';return;}
+    box.innerHTML=`
+      <div>Allow an AI client to read and act on your IRC account using a revocable token.</div>
+      <label style="display:block;margin-top:8px">Server URL<input class="form-input" type="text" readonly value="${esc(endpoint)}"></label>
+      ${issued?`<label style="display:block;margin-top:6px">Bearer token · copy now<input class="form-input" type="text" readonly value="${esc(issued.token)}" autocomplete="off" spellcheck="false"></label>`:''}
+      <div style="display:grid;gap:6px;margin-top:8px">
+        <input class="form-input" id="profile-mcp-password" type="password" aria-label="Current login password" placeholder="Current login password" autocomplete="current-password">
+        <button class="btn-sm" id="profile-mcp-create" type="button">${active?'Replace token':'Create token'}</button>
+        ${active?'<button class="btn-sm" id="profile-mcp-revoke" type="button">Revoke token</button>':''}
+      </div>
+      <div id="profile-mcp-status" role="status" style="margin-top:6px">${esc(note)}</div>`;
+    const status=box.querySelector('#profile-mcp-status');
+    box.querySelector('#profile-mcp-create').addEventListener('click',async e=>{
+      const button=e.currentTarget;
+      const input=box.querySelector('#profile-mcp-password');
+      const password=input.value;
+      if(!password){status.textContent='Enter your current login password.';return;}
+      if(active&&!window.confirm('Replace this token and disconnect clients using it?')) return;
+      input.value='';
+      button.disabled=true;
+      try {
+        const data=await accountIntegrationApi('/cryptirc/api/mcp/token','POST',{password});
+        await renderProfileMcp(data,'Token created.');
+      } catch(e) { status.textContent=e.message; }
+      finally { button.disabled=false; }
+    });
+    box.querySelector('#profile-mcp-revoke')?.addEventListener('click',async e=>{
+      if(!window.confirm('Revoke this token and disconnect clients using it?')) return;
+      const button=e.currentTarget;
+      button.disabled=true;
+      try {
+        await accountIntegrationApi('/cryptirc/api/mcp/token','DELETE');
+        await renderProfileMcp(null,'Token revoked.');
+      } catch(e) { status.textContent=e.message;button.disabled=false; }
+    });
+  } catch(e) { box.textContent=e.message; }
 }
 // Settings ▸ Profile ▸ Avatar: upload / replace / remove your picture, "Show my avatar to
 // other CryptIRC users" (server-side) and "Show other people's avatars" (this app).
@@ -10513,7 +10970,7 @@ async function pwSafeDelete(idx){
 async function clearAllLogs(){
   if(!(await customConfirm('Clear ALL data? This will delete:\n• Chat history & logs (server + local)\n• Your notepad\n• Your paste posts\n\nKept: your account, networks, Password Safe, uploads, settings, channel stats, AI keys and bot data.\n\nThis cannot be undone.','Clear all')))return;
   // Clear local buffers
-  buffers={}; _historyView=null;
+  buffers={}; _historyView=null; conversationScroll.clear(); conversationHistory.clear();
   unread.clear();
   renderChat();
   renderSidebar();
@@ -10598,7 +11055,7 @@ function renderCapsGrid(disabledCaps){
     grid.appendChild(el);
   }
 }
-function showAddNetwork(){
+function showAddNetwork(focusLabel=true){
   resetNetworkForm();
   document.getElementById('modal-title').textContent='Add Network';
   document.getElementById('modal-save-btn').textContent='Add & Connect';
@@ -10608,9 +11065,9 @@ function showAddNetwork(){
   // user can type immediately (especially important on Electron where focus-on-open
   // isn't automatic).
   document.body.classList.remove('force-no-select');
-  setTimeout(()=>{document.getElementById('f-label')?.focus();},50);
+  if(focusLabel)setTimeout(()=>{document.getElementById('f-label')?.focus();},50);
 }
-function editNetwork(id){
+function editNetwork(id,focusLabel=true){
   const net=networks.find(n=>n.config.id===id);
   if(!net)return;
   const c=net.config;
@@ -10676,7 +11133,7 @@ function editNetwork(id){
   document.getElementById('modal-overlay').classList.add('open');
   _overlayOpen('networkModal', closeModal);
   document.body.classList.remove('force-no-select');
-  setTimeout(()=>{document.getElementById('f-label')?.focus();},50);
+  if(focusLabel)setTimeout(()=>{document.getElementById('f-label')?.focus();},50);
 }
 function closeModal(){
   _overlayClose('networkModal');
@@ -13747,6 +14204,7 @@ document.addEventListener('click',e=>{
     acEl.style.display='none';acIdx=-1;
   }
   inp.addEventListener('keydown',e=>{
+    if(e.isComposing||e.keyCode===229)return;
     if(acEl.style.display==='none')return;
     const items=acEl.querySelectorAll('.emoji-ac-item');
     if(!items.length)return;
@@ -13851,6 +14309,7 @@ document.addEventListener('click',e=>{
     if(active) _lastMentioned[bk(active.conn_id,active.target)]=nick;
   }
   inp.addEventListener('keydown',e=>{
+    if(e.isComposing||e.keyCode===229)return;
     if(nacEl.style.display==='none')return;
     const items=nacEl.querySelectorAll('.emoji-ac-item');
     if(!items.length)return;
@@ -14031,6 +14490,7 @@ document.addEventListener('click',e=>{
   }
   inp.addEventListener('input',updateSlash);
   inp.addEventListener('keydown',e=>{
+    if(e.isComposing||e.keyCode===229)return;
     if(slashEl.style.display==='none'||slashEl.style.display==='')return;
     const items=slashEl.querySelectorAll('.slash-ac-item');
     if(!items.length)return;
@@ -14411,7 +14871,7 @@ async function giphyFetchTop(query){
   // Capture phase so we intercept Enter/Arrows BEFORE msg-input's own bubble
   // handler (which would send "/giphy query" as a literal command).
   document.addEventListener('keydown',e=>{
-    if(!isOpen())return;
+    if(!isOpen()||e.isComposing||e.keyCode===229)return;
     if(document.activeElement!==inp)return;
     if(!items.length){
       // Tray open but nothing to pick yet (loading skeletons / no results / no key):
@@ -15427,6 +15887,7 @@ function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFi
     chEl.style.display='none';chIdx=-1;
   }
   inp.addEventListener('keydown',e=>{
+    if(e.isComposing||e.keyCode===229)return;
     if(chEl.style.display==='none')return;
     const items=chEl.querySelectorAll('.emoji-ac-item');if(!items.length)return;
     // stopImmediatePropagation — see slash-picker comment for the why.
@@ -16774,6 +17235,8 @@ function closeAllPMs(conn_id){
   if(!queryBufs[conn_id])return;
   for(const [lc] of queryBufs[conn_id]){
     delete buffers[bk(conn_id,lc)];
+    conversationScroll.delete(bk(conn_id,lc));
+    conversationHistory.delete(bk(conn_id,lc));
     adoptUnreadAsOf(bk(conn_id,lc));   // closing = dismissed → horizon must pass the stamp
     unreadClear(bk(conn_id,lc));
     // Removals propagate ONLY via closedQueries under the union queries-sync —
@@ -17734,6 +18197,9 @@ async function removeNetwork(id,label){
   delete queryBufs[id];
   // Clean up buffers for this network
   for(const k of Object.keys(buffers)){if(k.startsWith(id+'/'))delete buffers[k];}
+  for(const positions of [conversationScroll,conversationHistory]){
+    for(const k of positions.keys()){if(k.startsWith(id+'/'))positions.delete(k);}
+  }
   // Clean up unread counts
   for(const k of [...unread.keys()]){if(k.startsWith(id+'/'))unreadClear(k);}
   // Clean up stale network order entry
@@ -18366,7 +18832,7 @@ function renderNotifNetworkList() {
     // Network mute is now backed by the shared sidebar mute store (cryptirc_muted)
     // so it stays in sync with the sidebar 🔇 and suppresses push + in-browser alike.
     const muted = isMuted('net:'+net.config.id);
-    const row = document.createElement('div'); row.className = 'notif-row';
+    const row = document.createElement('div'); row.className = 'notif-row'; row.dataset.notifNetwork=net.config.id;
     row.innerHTML = `
       <div style="flex:1">
         <div class="notif-label">${esc(net.config.label||net.config.server)}</div>
@@ -18901,6 +19367,7 @@ function _exitHistoryView(){
                                              // the fresh present load scrolls to the
                                              // bottom (and a mid-decrypt sync merge
                                              // can't strand us near the top).
+  conversationScroll.delete(bk(conn_id,target));
   getBuf(conn_id, target).length = 0;       // drop the historical window
   _lastMsgId[bk(conn_id, target)] = 0;      // force a fresh present load, not a sync
   if(isActive(conn_id, target)){
@@ -20426,11 +20893,10 @@ async function checkAdmin(){
     const r=await fetch('/cryptirc/auth/me',{headers:{'Authorization':'Bearer '+sessionToken}});
     if(r.ok){
       const me=await r.json().catch(()=>({}));
-      if(me&&me.admin){
-        _isAdmin=true;
-        const btn=document.getElementById('admin-menu-btn');
-        if(btn) btn.style.display='';
-      }
+      _settingsProfileHasLastfm=!!me?.lastfm_enabled;
+      _isAdmin=!!me?.admin;
+      const btn=document.getElementById('admin-menu-btn');
+      if(btn) btn.style.display=_isAdmin?'':'none';
     }
   }catch(e){}
 }
@@ -20733,6 +21199,26 @@ function showBotPanel(){
 function closeBotPanel(){ _overlayClose('botPanel'); document.getElementById('bot-overlay').classList.remove('show'); }
 // Each bot's private owner slash command(s), shown on its card so you know how to
 // use it yourself (the public trigger is configurable above).
+const BOT_PANEL_DEFS=[
+  ['weather','Weather','🌦','!w','90210'],
+  ['ud','Urban Dictionary','📖','!ud','yeet'],
+  ['wiki','Wikipedia','📚','!wiki','black holes'],
+  ['define','Dictionary','📗','!define','serendipity'],
+  ['crypto','Crypto Price','🪙','!crypto','btc'],
+  ['time','World Time','🕐','!time','tokyo'],
+  ['cc','Currency','💱','!cc','100 usd eur'],
+  ['joke','Dad Joke','😂','!joke',''],
+  ['quote','Quote','💬','!quote',''],
+  ['fact','Random Fact','🧠','!fact',''],
+  ['eightball','Magic 8-Ball','🎱','!8ball','will it rain?'],
+  ['roll','Dice Roll','🎲','!roll','2d6'],
+  ['coin','Coin Flip','🪙','!coin',''],
+  ['quotedb','Quote DB','🗒','!q','add <text>'],
+  ['seen','Seen','👀','!seen','nick'],
+  ['tell','Tell (leave a message)','✉️','!tell','nick message'],
+  ['note','Notes','📝','!note','buy milk'],
+  ['help','Help / Bot list','❓','!help',''],
+];
 const _BOT_CMDS={weather:'/w',ud:'/ud',wiki:'/wiki',define:'/define or /dict',crypto:'/crypto or /price',time:'/wtime',cc:'/cc or /currency',joke:'/joke',quote:'/qotd',fact:'/fact',eightball:'/8ball',roll:'/roll',coin:'/coin or /flip',quotedb:'/q',seen:'/seen',tell:'/tell',note:'/note',help:'/bots'};
 // Interactive network→channel scope picker for a bot. Scope is a list of entries:
 // "netid␟#chan" (one channel), "netid" (all channels on a network), or empty = all
@@ -20809,24 +21295,7 @@ function _renderBotPanel(cfg){
       <div class="adm-hint">Bots run on the server 24/7 — replies come from your nick even when your app is closed. Everything stays off until you turn it on. Your own private commands (<b>/w</b>, <b>/ud</b>) always work for you regardless of these settings.</div>
     </div>
     ${_aiCard(cfg.ai||{})}
-    ${_botDefCard('weather','Weather','🌦',cfg.weather,'!w','90210')}
-    ${_botDefCard('ud','Urban Dictionary','📖',cfg.ud,'!ud','yeet')}
-    ${_botDefCard('wiki','Wikipedia','📚',cfg.wiki,'!wiki','black holes')}
-    ${_botDefCard('define','Dictionary','📗',cfg.define,'!define','serendipity')}
-    ${_botDefCard('crypto','Crypto Price','🪙',cfg.crypto,'!crypto','btc')}
-    ${_botDefCard('time','World Time','🕐',cfg.time,'!time','tokyo')}
-    ${_botDefCard('cc','Currency','💱',cfg.cc,'!cc','100 usd eur')}
-    ${_botDefCard('joke','Dad Joke','😂',cfg.joke,'!joke','')}
-    ${_botDefCard('quote','Quote','💬',cfg.quote,'!quote','')}
-    ${_botDefCard('fact','Random Fact','🧠',cfg.fact,'!fact','')}
-    ${_botDefCard('eightball','Magic 8-Ball','🎱',cfg.eightball,'!8ball','will it rain?')}
-    ${_botDefCard('roll','Dice Roll','🎲',cfg.roll,'!roll','2d6')}
-    ${_botDefCard('coin','Coin Flip','🪙',cfg.coin,'!coin','')}
-    ${_botDefCard('quotedb','Quote DB','🗒',cfg.quotedb,'!q','add <text>')}
-    ${_botDefCard('seen','Seen','👀',cfg.seen,'!seen','nick')}
-    ${_botDefCard('tell','Tell (leave a message)','✉️',cfg.tell,'!tell','nick message')}
-    ${_botDefCard('note','Notes','📝',cfg.note,'!note','buy milk')}
-    ${_botDefCard('help','Help / Bot list','❓',cfg.help,'!help','')}
+    ${BOT_PANEL_DEFS.map(([id,label,icon,trigger,example])=>_botDefCard(id,label,icon,cfg[id],trigger,example)).join('')}
     ${_iplogCard(cfg.iplog||{})}
     ${_enforceCard(cfg.enforce||{})}
     <button class="adm-save" style="width:100%;margin-top:4px" onclick="saveBotConfig()">Save bots</button>`;
@@ -21554,7 +22023,7 @@ function _onChatScroll(){
   // pass exactly once so a later real scroll from the same spot still counts.
   const ours=(_progScrollTop>=0 && Math.abs(top-_progScrollTop)<=1);
   if(ours) _progScrollTop=-1;
-  if(_isNearBottom(a,200)){
+  if(_isNearBottom(a,8)){
     _userScrolledAway=false;                 // at the bottom is always "following"
     _upTravel=0;
   }else if(!ours){

@@ -647,6 +647,8 @@ def apply(raw, st):
             if not pw_hash.startswith('$argon2id$v=19$m=65536,t=3,p=1$'):
                 sys.exit(f"refusing to write hash with unexpected params: {pw_hash[:32]}...")
         user['password_hash'] = pw_hash
+        user.pop('passkeys', None)
+        user.pop('mcp_token_hash', None)
     elif is_disabled:
         sys.exit("Refusing: this account was DISABLED by an admin (banned) — it is not merely "
                  "unverified, and --verify does not lift a ban."
