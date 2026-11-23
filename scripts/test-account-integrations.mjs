@@ -208,17 +208,18 @@ try {
     });
     try {
       await client.connect(transport);
-      check('official MCP SDK discovers tools',(await client.listTools()).tools.length===10);
+      check('official MCP SDK discovers tools',(await client.listTools()).tools.length===11);
       check('official MCP SDK calls a tool',(await client.callTool({name:'irc_state',arguments:{}})).structuredContent.account===owner);
     } finally {
       await client.close();
     }
   }
   const available=(await rpc(token,'tools/list')).data.result.tools;
-  check('MCP advertises all ten tools with schemas',available.length===10&&available.every(t=>t.inputSchema.type==='object'));
+  check('MCP advertises all eleven tools with schemas',available.length===11&&available.every(t=>t.inputSchema.type==='object'));
   check('MCP rejects unknown method',(await rpc(token,'not_a_method')).data.error.code===-32601);
   check('MCP exposes a locked vault as locked',(await tool(token,'irc_state')).vault_unlocked===false);
   check('MCP encrypted note does not unlock the vault',/unlock/i.test(await tool(token,'cryptirc_notepad',{},true)));
+  check('MCP preferences follow the vault lock',/unlock/i.test(await tool(token,'cryptirc_settings',{section:'preferences'},true)));
 
   // Return the actual browser to the login screen and select the resident passkey
   // with the username field blank. Keep the CDP WebAuthn authenticator attached.
@@ -260,11 +261,20 @@ try {
   };
   const networkA=await network(token,owner,IRC_PORT,'Hub');
   const networkB=await network(otherKey,other,IRC_LEAF_PORT||IRC_PORT,'Peer');
-  await tool(token,'irc_network',{action:'update',network:networkA,settings:{label:'Renamed hub'}});
+  const testPassword='dummy-network-secret-'+stamp;
+  await tool(token,'irc_network',{action:'update',network:networkA,settings:{
+    label:'Renamed hub',server:'localhost',realname:'MCP network settings test',
+    password:testPassword,quit_message:'Testnet disconnect'
+  }});
   check('MCP network edits appear in state',(await tool(token,'irc_state')).networks[0].label==='Renamed hub');
-  check('MCP cannot redirect saved network credentials',/update accepts/i.test(await tool(token,'irc_network',{
-    action:'update',network:networkA,settings:{server:'unrelated.example'}
+  const {settings:savedNetwork}=await tool(token,'irc_network',{action:'get',network:networkA});
+  check('MCP reads edited network settings with credentials omitted',
+    savedNetwork.server==='localhost'&&savedNetwork.realname==='MCP network settings test'&&
+    savedNetwork.quit_message==='Testnet disconnect'&&!Object.hasOwn(savedNetwork,'password'));
+  check('MCP cannot redirect inherited network credentials',/clear saved credentials/i.test(await tool(token,'irc_network',{
+    action:'update',network:networkA,settings:{server:'127.0.0.1'}
   },true)));
+  await tool(token,'irc_network',{action:'update',network:networkA,settings:{server:'127.0.0.1',password:null}});
   check('MCP cannot see a second account’s network',(await tool(token,'irc_state')).networks.every(n=>n.id!==networkB));
   check('MCP cannot read a second account’s history',/unknown network/i.test(await tool(token,'irc_history',{network:networkB,target:channel},true)));
   check('MCP cannot disconnect a second account',/unknown network/i.test(await tool(token,'irc_network',{action:'disconnect',network:networkB},true)));
@@ -323,13 +333,26 @@ try {
   check('MCP rejects multi-command injection',/invalid text/i.test(await tool(token,'irc_send',{
     network:networkA,target:channel,text:'hello\r\nJOIN #unexpected'
   },true)));
-  check('MCP raw command cannot bypass typed sends',/unsupported/i.test(await tool(token,'irc_command',{
-    network:networkA,line:'PRIVMSG '+channel+' :ignored'
+  const rawText='raw IRC '+stamp;
+  await tool(token,'irc_command',{network:networkA,line:'@+test=1 PRIVMSG '+channel+' :'+rawText});
+  check('MCP IRCv3 raw message reached the peer',!!await otherWs.wait(e=>
+    e.type==='irc_message'&&e.text===rawText,'tagged raw IRC message'));
+  check('MCP raw IRC rejects multiple commands',/invalid line/i.test(await tool(token,'irc_command',{
+    network:networkA,line:'PING test\nQUIT'
   },true)));
+  const beforeMotd=ownerWs.events.length;
+  await tool(token,'irc_command',{network:networkA,line:'/MOTD'});
+  await waitFor(()=>ownerWs.events.slice(beforeMotd).some(e=>
+    e.type==='irc_message'&&e.target==='status'&&/motd|Message of the Day/i.test(e.text)
+  ),'raw MOTD response');
+  check('MCP runs an IRC verb outside the old allowlist',true);
   ownerWs.send({type:'e2e_store_channel_key',channel,blob:'e2e2.test-only opaque key'});
   await ownerWs.wait(e=>e.type==='e2e_channel_key'&&e.channel===channel,'E2E-protected channel fixture');
   check('MCP refuses plaintext to an E2E channel',/end-to-end/i.test(await tool(token,'irc_send',{
     network:networkA,target:channel,text:'this must never appear'
+  },true)));
+  check('MCP raw IRC honors E2E protection for tagged multi-target sends',/end-to-end/i.test(await tool(token,'irc_command',{
+    network:networkA,line:'@+test=1 NOTICE '+other+','+channel+' :this must never appear'
   },true)));
   check('E2E refusal produced no IRC message',!otherWs.events.some(e=>e.text?.includes('this must never appear')));
   const brokenSlot=path.join(tmp,'e2e',owner,'channels','broken~fixture.enc');
@@ -340,6 +363,46 @@ try {
   await fs.rm(brokenSlot);
   await tool(token,'cryptirc_appearance',{settings:{theme:'arctic'}});
   check('MCP appearance can be updated and read',(await tool(token,'cryptirc_appearance')).settings.theme==='arctic');
+  const browserPrefCount=ownerWs.events.length;
+  await tool(token,'cryptirc_settings',{section:'preferences',settings:{
+    mcpTest:stamp,giphyKey:'test-only-gif-key'
+  }});
+  const browserSaveTs=await ev("localStorage.setItem('cryptirc_highlight_words_ts',String(Date.now()-1000));_lastFlushTs='mcp-test-browser-save';_lastFlushTs");
+  await tool(token,'cryptirc_settings',{section:'preferences',settings:{
+    autoRejoin:false,highlightWords:[stamp],_saveTs:browserSaveTs
+  }});
+  await waitFor(()=>ev("JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]').includes("+JSON.stringify(stamp)+")"),
+    'browser applied an MCP preference with an existing local timestamp');
+  check('MCP preference updates are applied by the browser',true);
+  const {settings:mcpPrefs}=await tool(token,'cryptirc_settings',{section:'preferences'});
+  check('MCP patches encrypted preferences without returning saved keys',
+    mcpPrefs.mcpTest===stamp&&mcpPrefs.autoRejoin===false&&!Object.hasOwn(mcpPrefs,'giphyKey'));
+  await waitFor(()=>ownerWs.events.slice(browserPrefCount).some(e=>{
+    if(e.type!=='preferences'||!e.prefs)return false;
+    const prefs=JSON.parse(e.prefs);
+    return prefs.mcpTest===stamp&&prefs.autoRejoin===false&&prefs.giphyKey==='test-only-gif-key';
+  }),'browser received synced preferences with stored credentials');
+  const notifications=await tool(token,'cryptirc_settings',{section:'notifications',settings:{enabled:true,dnd:true}});
+  check('MCP writes notifications through the normal API',notifications.settings.enabled&&
+    (await request('/push/settings',{token:ownerSession})).data.dnd===true);
+  const {settings:savedBots}=await tool(token,'cryptirc_settings',{section:'bots'});
+  await tool(token,'cryptirc_settings',{section:'bots',settings:{...savedBots,enabled:false}});
+  check('MCP reads saved bot settings',(await tool(token,'cryptirc_settings',{section:'bots'})).settings.enabled===false);
+  check('MCP requires the admin role for server settings',/administrator/i.test(await tool(otherKey,'cryptirc_settings',{
+    section:'admin',settings:{max_upload_mb:17}
+  },true)));
+  const ownerRecord=path.join(tmp,'users',owner+'.json');
+  const ownerData=JSON.parse(await fs.readFile(ownerRecord,'utf8'));
+  const stagedOwner=ownerRecord+'.mcp-admin-test';
+  await fs.writeFile(stagedOwner,JSON.stringify({...ownerData,admin:true}),{mode:0o600});
+  await fs.rename(stagedOwner,ownerRecord);
+  await tool(token,'cryptirc_settings',{section:'admin',settings:{max_upload_mb:17}});
+  check('MCP admin changes are visible to the normal admin API',
+    (await request('/admin/settings',{token:ownerSession})).data.max_upload_mb===17);
+  const {settings:previewPolicy}=await tool(token,'cryptirc_settings',{section:'link_previews'});
+  await tool(token,'cryptirc_settings',{section:'link_previews',settings:{...previewPolicy,mode:'off'}});
+  check('MCP link-preview updates share the admin policy',
+    (await request('/admin/link-preview',{token:ownerSession})).data.mode==='off');
   await tool(token,'cryptirc_notepad',{text:'Arch isolated note'});
   check('MCP reads and writes encrypted notepad data',(await tool(token,'cryptirc_notepad')).text==='Arch isolated note');
   check('MCP notepad is isolated by account',(await tool(otherKey,'cryptirc_notepad')).text==='');

@@ -941,6 +941,13 @@ pub fn quit_reason_for(cfg: &NetworkConfig) -> &str {
     }
 }
 
+impl NetworkConfig {
+    fn has_saved_network_secrets(&self) -> bool {
+        self.password.is_some() || self.sasl_plain.is_some() || self.oper_pass.is_some()
+            || self.nickserv_pass.is_some() || !self.channel_keys.is_empty() || !self.perform_commands.is_empty()
+    }
+}
+
 impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
@@ -2705,13 +2712,17 @@ async fn route_admin_get_settings(State(state): State<AppState>, headers: Header
     if !state.auth.is_admin(&user).await {
         return StatusCode::FORBIDDEN.into_response();
     }
+    Json(admin_settings(&state).await).into_response()
+}
+
+async fn admin_settings(state: &AppState) -> serde_json::Value {
     let open = *state.registration_open.read().await;
     let code = state.registration_code.read().await.clone();
     let upload_mb = *state.max_upload_mb.read().await;
     let giphy_key = state.giphy_server_key.read().await.clone();
     let tenor_key = state.tenor_server_key.read().await.clone();
     let lastfm_key = state.lastfm_api_key.read().await.clone();
-    Json(serde_json::json!({
+    serde_json::json!({
         "registration_open": open,
         "registration_code": code,
         "max_upload_mb": upload_mb,
@@ -2728,7 +2739,7 @@ async fn route_admin_get_settings(State(state): State<AppState>, headers: Header
         "lastfm_key_set": !lastfm_key.is_empty(),
         "lastfm_key_masked": mask_key(&lastfm_key),
         "avatars_enabled": state.avatars.enabled(),
-    })).into_response()
+    })
 }
 
 #[derive(Deserialize)]
@@ -2813,6 +2824,11 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     if !state.auth.is_admin(&user).await {
         return StatusCode::FORBIDDEN.into_response();
     }
+    save_admin_settings(&state, body).await
+}
+
+async fn save_admin_settings(state: &AppState, body: AdminSettings) -> axum::response::Response {
+    let _guard = state.admin_settings_lock.lock().await;
     // #5: remember whether THIS save explicitly set the registration fields. Only then
     // (or if the file already holds them) are they persisted — a GIF / Last.fm save must
     // not freeze the env-derived CRYPTIRC_REGISTRATION / CRYPTIRC_REG_CODE into the file.
@@ -2858,15 +2874,10 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
     if let Some(e) = body.lastfm_enabled { *state.lastfm_enabled.write().await = e; }
     let avatars_switched = body.avatars_enabled.map_or(false, |on| on != state.avatars.enabled());
     if let Some(on) = body.avatars_enabled { state.avatars.set_enabled(on); }
-    if avatars_switched {
-        avatar::remote::republish_all(&state.auth, &state.avatars, &state.connections, &state.conn_owners).await;
-    }
     if let Some(k) = body.lastfm_api_key {
         let k = k.trim();
         if !k.is_empty() { *state.lastfm_api_key.write().await = k.to_string(); }
     }
-    // Persist admin settings to disk under lock to prevent concurrent read-modify-write races
-    let _guard = state.admin_settings_lock.lock().await;
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
     let mut existing: serde_json::Value = match tokio::fs::read_to_string(&path).await {
         Ok(json) => match serde_json::from_str(&json) {
@@ -2904,6 +2915,9 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(Msg { message: "Failed to save settings.".into() })).into_response();
     }
     drop(_guard);
+    if avatars_switched {
+        avatar::remote::republish_all(&state.auth, &state.avatars, &state.connections, &state.conn_owners).await;
+    }
     (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
 }
 
@@ -5062,6 +5076,10 @@ async fn route_admin_put_preview_settings(
     if !state.auth.is_admin(&user).await {
         return StatusCode::FORBIDDEN.into_response();
     }
+    save_preview_settings(&state, body).await
+}
+
+async fn save_preview_settings(state: &AppState, body: preview::PreviewSettings) -> axum::response::Response {
     // Load existing admin settings and merge preview settings — under lock
     let _guard = state.admin_settings_lock.lock().await;
     let path = std::path::PathBuf::from(&state.data_dir).join("admin_settings.json");
@@ -6392,6 +6410,108 @@ fn match_e2e_target(targets: &str, channels: Vec<String>, peers: Vec<String>) ->
         .map(|(name, _)| name)
 }
 
+// Apply edits under the same lock as joins, parts, connects, and network removal.
+async fn edit_network(
+    state: &AppState,
+    username: &str,
+    id: &str,
+    require_vault: bool,
+    edit: impl FnOnce(&NetworkConfig) -> Result<NetworkConfig, String>,
+    send: impl Fn(ServerEvent),
+) -> Result<(), String> {
+    let lock = network_config_lock(username, id);
+    let _guard = lock.lock().await;
+    if !state.owns_network(username, id).await {
+        return Err("Unknown network.".into());
+    }
+    let existing = state.get_network_config(id, username).await.ok_or("Unknown network.")?;
+    let network = edit(&existing)?;
+    let dial_changed = ipc_client::dial_settings_differ(&existing, &network);
+    state.save_network_with_vault_policy(&network, username, require_vault).await.map_err(|e| e.to_string())?;
+    state.avatars.forget_session(id);
+    // Auto-generate client cert if SASL EXTERNAL is enabled and no cert exists
+    if network.sasl_external && state.crypto.is_unlocked(username).await {
+        let has_cert = state.certs.load_info(&network.id).await.is_ok();
+        if !has_cert {
+            let nick = network.nick.clone();
+            if let Ok(info) = state.certs.generate(username, &network.id, &nick).await {
+                let mut cfg = network.clone();
+                cfg.client_cert_id = Some(network.id.clone());
+                let _ = state.save_network_with_vault_policy(&cfg, username, require_vault).await;
+                send(ServerEvent::CertInfo {
+                    conn_id: network.id.clone(),
+                    fingerprint: info.fingerprint,
+                    cert_pem: info.cert_pem,
+                });
+            }
+        }
+    }
+    // codex P2 / agy P2 (UpdateNetwork never reached the live connection): refresh
+    // the running connection's cached config (push label, SASL display flags, join
+    // key seeds read it). Settings that only matter when dialling — server, port,
+    // TLS, nick, login, perform… — are what irc-core was given at Dial time and
+    // keeps across its own reconnects, so: a connection that is not registered yet
+    // (connecting, or retrying a typo'd host) is re-dialled with them right away;
+    // a registered one keeps running and the user is told the change applies on the
+    // next Connect. (Its E2E network identity stays the endpoint it really dials —
+    // IrcConnection::dial_endpoint — whatever the config now says.)
+    let live = state.connections.get(&network.id).map(|c| c.clone());
+    if let Some(conn) = live {
+        if let Some(fresh) = state.get_network_config(&network.id, username).await {
+            let registered = { let mut c = conn.lock().await; c.cfg = fresh.clone(); c.registered };
+            if dial_changed {
+                let redial = !registered
+                    && state.crypto.is_unlocked(username).await
+                    && !state.disconnect_requested(&network.id)
+                    && !user_disconnected(&network.id);
+                if redial {
+                    info!("[{}] connection settings changed before it registered — re-dialing with them", network.id);
+                    ipc_client::dial_current(state, username, fresh).await;
+                } else {
+                    send(ServerEvent::IrcMessage {
+                        conn_id: network.id.clone(), from: "*".into(), target: "status".into(),
+                        text: "Network settings saved. The new connection settings (server, port, TLS, nick, login, perform) take effect the next time this network connects: use Disconnect, then Connect, to apply them now.".into(),
+                        ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, msg_id: 0, prefix: None, replayed: false,
+                    });
+                }
+            }
+        }
+    }
+    send(ServerEvent::State {
+        networks: state.user_network_states(username).await,
+        vault_unlocked: state.crypto.is_unlocked(username).await,
+    });
+    Ok(())
+}
+
+fn preferences_lock(username: &str) -> Arc<tokio::sync::Mutex<()>> {
+    network_config_lock(username, "\u{1}preferences")
+}
+
+const PREFERENCES_VAULT_LOCKED: &str = "Unlock the vault in CryptIRC first.";
+
+async fn save_preferences(state: &AppState, username: &str, prefs: String) -> Result<(), String> {
+    if prefs.len() > 1_000_000 {
+        return Err("Preferences too large (max 1MB) — not saved".into());
+    }
+    serde_json::from_str::<serde_json::Value>(&prefs)
+        .map_err(|_| "Preferences not valid JSON")?;
+    if !state.crypto.is_unlocked(username).await {
+        return Err(PREFERENCES_VAULT_LOCKED.into());
+    }
+    let encrypted = state.crypto.encrypt(username, prefs.as_bytes()).await
+        .map_err(|e| format!("Prefs encrypt failed: {e}"))?;
+    let dir = std::path::PathBuf::from(&state.data_dir)
+        .join("users").join(safe_username(username));
+    tokio::fs::create_dir_all(&dir).await
+        .map_err(|e| format!("Prefs save failed: {e}"))?;
+    write_user_file_atomic(&dir.join("preferences.enc"), encrypted.as_bytes()).await
+        .map_err(|e| format!("Prefs save failed: {e}"))?;
+    let _ = tokio::fs::remove_file(dir.join("preferences.json")).await;
+    send_bulk_to_user(username, ServerEvent::Preferences { prefs });
+    Ok(())
+}
+
 // ─── Command handler ──────────────────────────────────────────────────────────
 
 async fn handle_command(
@@ -6575,7 +6695,8 @@ async fn handle_command(
                     break candidate;
                 }
             };
-            if let Err(e) = state.save_network(&network, username).await {
+            let require_vault = report_command_errors && network.has_saved_network_secrets();
+            if let Err(e) = state.save_network_with_vault_policy(&network, username, require_vault).await {
                 send(ServerEvent::Error { message: e.to_string() }); return;
             }
             // The new config is on disk, so the next AddNetwork's count includes it.
@@ -6588,7 +6709,7 @@ async fn handle_command(
                     if let Ok(info) = state.certs.generate(username, &network.id, &nick).await {
                         let mut cfg = network.clone();
                         cfg.client_cert_id = Some(network.id.clone());
-                        let _ = state.save_network(&cfg, username).await;
+                        let _ = state.save_network_with_vault_policy(&cfg, username, require_vault).await;
                         send(ServerEvent::CertInfo {
                             conn_id: network.id.clone(),
                             fingerprint: info.fingerprint,
@@ -6602,91 +6723,21 @@ async fn handle_command(
                 vault_unlocked: state.crypto.is_unlocked(username).await,
             });
         }
-        ClientMessage::UpdateNetwork { mut network } => {
+        ClientMessage::UpdateNetwork { network } => {
             if !state.owns_network(username, &network.id).await { return; }
-            // Avatars: an edited network is not trusted from its record after a restart.
-            state.avatars.forget_session(&network.id);
-            // #4: serialize the read-existing → save → (cert-gen) → save sequence
-            // behind the per-config lock so a concurrent Join/Part/UpdateNetwork
-            // can't last-writer-wins clobber it.
-            let cfg_lock = network_config_lock(username, &network.id);
-            let _cfg_guard = cfg_lock.lock().await;
-            // Preserve client_cert_id from existing config (UI doesn't send it).
-            // F13: re-check INSIDE the lock that the config still exists, like every
-            // other config writer — a RemoveNetwork from another tab that won the lock
-            // first deleted it, and saving now would bring the removed network back.
-            let dial_changed;
-            match state.get_network_config(&network.id, username).await {
-                Some(existing) => {
-                    if network.client_cert_id.is_none() {
-                        network.client_cert_id = existing.client_cert_id.clone();
-                    }
-                    dial_changed = ipc_client::dial_settings_differ(&existing, &network);
-                    // The network edit dialog builds its config from the form fields and
-                    // never sends channel_keys / channel_order, so serde's empty default
-                    // used to wipe every saved channel key (and the sidebar order) on each
-                    // edit. Keep the stored ones when the update carries none; clients that
-                    // send the full config (TLS toggle, caps) send them unchanged anyway.
-                    if network.channel_keys.is_empty() { network.channel_keys = existing.channel_keys; }
-                    if network.channel_order.is_empty() { network.channel_order = existing.channel_order; }
+            let id = network.id.clone();
+            if let Err(message) = edit_network(state, username, &id, false, |existing| {
+                let mut network = network;
+                if network.client_cert_id.is_none() {
+                    network.client_cert_id = existing.client_cert_id.clone();
                 }
-                None => return,
+                // Older clients omit these fields when editing a network.
+                if network.channel_keys.is_empty() { network.channel_keys.clone_from(&existing.channel_keys); }
+                if network.channel_order.is_empty() { network.channel_order.clone_from(&existing.channel_order); }
+                Ok(network)
+            }, &send).await {
+                send(ServerEvent::Error { message });
             }
-            if let Err(e) = state.save_network(&network, username).await {
-                send(ServerEvent::Error { message: e.to_string() }); return;
-            }
-            // Auto-generate client cert if SASL EXTERNAL is enabled and no cert exists
-            if network.sasl_external && state.crypto.is_unlocked(username).await {
-                let has_cert = state.certs.load_info(&network.id).await.is_ok();
-                if !has_cert {
-                    let nick = network.nick.clone();
-                    if let Ok(info) = state.certs.generate(username, &network.id, &nick).await {
-                        let mut cfg = network.clone();
-                        cfg.client_cert_id = Some(network.id.clone());
-                        let _ = state.save_network(&cfg, username).await;
-                        send(ServerEvent::CertInfo {
-                            conn_id: network.id.clone(),
-                            fingerprint: info.fingerprint,
-                            cert_pem: info.cert_pem,
-                        });
-                    }
-                }
-            }
-            // codex P2 / agy P2 (UpdateNetwork never reached the live connection): refresh
-            // the running connection's cached config (push label, SASL display flags, join
-            // key seeds read it). Settings that only matter when dialling — server, port,
-            // TLS, nick, login, perform… — are what irc-core was given at Dial time and
-            // keeps across its own reconnects, so: a connection that is not registered yet
-            // (connecting, or retrying a typo'd host) is re-dialled with them right away;
-            // a registered one keeps running and the user is told the change applies on the
-            // next Connect. (Its E2E network identity stays the endpoint it really dials —
-            // IrcConnection::dial_endpoint — whatever the config now says.)
-            let live = state.connections.get(&network.id).map(|c| c.clone());
-            if let Some(conn) = live {
-                if let Some(fresh) = state.get_network_config(&network.id, username).await {
-                    let registered = { let mut c = conn.lock().await; c.cfg = fresh.clone(); c.registered };
-                    if dial_changed {
-                        let redial = !registered
-                            && state.crypto.is_unlocked(username).await
-                            && !state.disconnect_requested(&network.id)
-                            && !user_disconnected(&network.id);
-                        if redial {
-                            info!("[{}] connection settings changed before it registered — re-dialing with them", network.id);
-                            ipc_client::dial_current(&state, username, fresh).await;
-                        } else {
-                            send(ServerEvent::IrcMessage {
-                                conn_id: network.id.clone(), from: "*".into(), target: "status".into(),
-                                text: "Network settings saved. The new connection settings (server, port, TLS, nick, login, perform) take effect the next time this network connects: use Disconnect, then Connect, to apply them now.".into(),
-                                ts: chrono::Utc::now().timestamp(), kind: MessageKind::Notice, msg_id: 0, prefix: None, replayed: false,
-                            });
-                        }
-                    }
-                }
-            }
-            send(ServerEvent::State {
-                networks: state.user_network_states(username).await,
-                vault_unlocked: state.crypto.is_unlocked(username).await,
-            });
         }
         ClientMessage::RemoveNetwork { id } => {
             if !state.owns_network(username, &id).await { return; }
@@ -7843,43 +7894,15 @@ async fn handle_command(
             }
         }
         ClientMessage::SavePreferences { prefs } => {
-            // Encrypt at rest using the user's vault key — matches notepad.enc,
-            // stats.enc, passwords.enc, and the E2E keys. Requires the vault
-            // to be unlocked (same UX gate as other sensitive prefs).
-            // js-app-3 MEDIUM #1 / F4: the blob is sent double-JSON-encoded, so the
-            // FRAME was hitting the old 64 KiB transport cap (silent drop) well before
-            // this check; organic growth already reaches ~62 KB. The transport now
-            // carries large saves, and this cap is raised to match the other per-user
-            // encrypted saves (notepad / password safe) with an explicit error.
-            if prefs.len() > 1_000_000 {
-                send(ServerEvent::Error { message: "Preferences too large (max 1MB) — not saved".into() });
-            } else if serde_json::from_str::<serde_json::Value>(&prefs).is_err() {
-                send(ServerEvent::Error { message: "Preferences not valid JSON".into() });
-            } else if state.crypto.is_unlocked(username).await {
-                match state.crypto.encrypt(username, prefs.as_bytes()).await {
-                    Ok(enc) => {
-                        let dir = std::path::PathBuf::from(&state.data_dir)
-                            .join("users").join(&safe_username(username));
-                        let _ = tokio::fs::create_dir_all(&dir).await;
-                        // Only delete the legacy plaintext file AFTER the encrypted
-                        // write succeeds, so a failed write (disk full, etc.) can't
-                        // orphan the user's data.
-                        // F8: crash-safe tmp+fsync+rename instead of truncate-in-place.
-                        match write_user_file_atomic(&dir.join("preferences.enc"), enc.as_bytes()).await {
-                            Ok(_) => {
-                                let _ = tokio::fs::remove_file(dir.join("preferences.json")).await;
-                                // Broadcast to all sessions so other devices update instantly
-                                send_bulk_to_user(username, ServerEvent::Preferences { prefs });
-                            }
-                            Err(e) => send(ServerEvent::Error { message: format!("Prefs save failed: {}", e) }),
-                        }
-                    }
-                    Err(e) => send(ServerEvent::Error { message: format!("Prefs encrypt failed: {}", e) }),
-                }
+            let lock = preferences_lock(username);
+            let _guard = lock.lock().await;
+            if let Err(message) = save_preferences(state, username, prefs).await {
+                if message != PREFERENCES_VAULT_LOCKED { send(ServerEvent::Error { message }); }
             }
-            // Vault locked → drop silently (same policy as other encrypted prefs).
         }
         ClientMessage::LoadPreferences {} => {
+            let lock = preferences_lock(username);
+            let _guard = lock.lock().await;
             if state.crypto.is_unlocked(username).await {
                 let dir = std::path::PathBuf::from(&state.data_dir)
                     .join("users").join(&safe_username(username));
@@ -8650,6 +8673,10 @@ impl AppState {
     }
 
     pub async fn save_network(&self, cfg: &NetworkConfig, username: &str) -> anyhow::Result<()> {
+        self.save_network_with_vault_policy(cfg, username, false).await
+    }
+
+    async fn save_network_with_vault_policy(&self, cfg: &NetworkConfig, username: &str, require_vault: bool) -> anyhow::Result<()> {
         let safe_id = validate_uuid(&cfg.id).ok_or_else(|| anyhow::anyhow!("Invalid network id"))?;
         let dir     = format!("{}/networks/{}", self.data_dir, username);
         tokio::fs::create_dir_all(&dir).await?;
@@ -8685,6 +8712,9 @@ impl AppState {
         // credentials. encrypt_cred_field never double-encrypts an already-"enc:" blob and never
         // overwrites an on-disk "enc:" value with plaintext while the vault is locked.
         let unlocked  = self.crypto.is_unlocked(username).await;
+        if require_vault && !unlocked {
+            anyhow::bail!("Unlock the vault in CryptIRC first.");
+        }
         let existing: Option<NetworkConfig> = tokio::fs::read_to_string(format!("{}/{}.json", dir, safe_id))
             .await.ok()
             .and_then(|j| serde_json::from_str(&j).ok());

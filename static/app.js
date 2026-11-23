@@ -10345,7 +10345,7 @@ async function renderProfileMcp(issued=null,note='') {
     if(!box.isConnected) return;
     if(!available){box.textContent='MCP access requires a configured HTTPS origin.';return;}
     box.innerHTML=`
-      <div>Allow an AI client to read and act on your IRC account using a revocable token.</div>
+      <div>A revocable token lets an AI client run IRC commands and change settings with your CryptIRC permissions.</div>
       <label style="display:block;margin-top:8px">Server URL<input class="form-input" type="text" readonly value="${esc(endpoint)}"></label>
       ${issued?`<label style="display:block;margin-top:6px">Bearer token · copy now<input class="form-input" type="text" readonly value="${esc(issued.token)}" autocomplete="off" spellcheck="false"></label>`:''}
       <div style="display:grid;gap:6px;margin-top:8px">

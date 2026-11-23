@@ -38,8 +38,11 @@ The web server and IRC daemon run separately, so routine web updates can leave y
 | “Show my connected networks and who's in `#dev`.” | List connections, channels, topics, and members. |
 | “Find the messages in `#support` that mention the upgrade.” | Read and search IRC history while your vault is unlocked. |
 | “Join `#dev` and send a message that I'm here.” | Join and leave channels. Send channel messages, DMs, notices, and IRC actions. |
-| “Set the topic in `#dev` to today's release.” | Run supported IRC commands such as `WHOIS`, `TOPIC`, `MODE`, `KICK`, and `INVITE`. Channel bans and unbans use your existing operator permissions. |
-| “Show what's in my CryptIRC notepad.” | Read and update your notepad while the vault is unlocked, and manage appearance settings and IRC connections. |
+| “Set the topic in `#dev` to today's release.” | Run raw IRC commands, including network-specific verbs and IRCv3 message tags. The IRC server applies your existing permissions. |
+| “Show what's in my CryptIRC notepad.” | Read and update your notepad while the vault is unlocked. |
+| “Change this network’s quit message and turn on Do Not Disturb.” | Edit connection settings and manage appearance, synced preferences, notifications, and bots. CryptIRC administrators can also manage server and link-preview settings. |
+
+Network credentials are write-only. Supply replacements or clear saved credentials when switching the server, port, or TLS policy. Use the CryptIRC app for messages in end-to-end encrypted conversations. Keep your MCP token private and revoke it in Profile when you stop using it.
 
 ### Connect your AI client
 
