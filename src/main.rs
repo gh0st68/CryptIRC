@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 mod ai;
+mod translation;
 mod auth;
 mod avatar;
 mod bots;
@@ -1682,6 +1683,7 @@ async fn main() -> Result<()> {
         .route("/paste/:id/app",        get(route_paste_app).post(route_paste_app_post))
         .route("/s",                    post(route_short_create).layer(DefaultBodyLimit::max(4_096)))
         .route("/s/:id",                get(route_short_redirect))
+        .route("/api/translation",      post(translation::translate).layer(DefaultBodyLimit::max(16_384)))
         .route("/preview",              get(route_link_preview))
         .route("/tweet/config",         get(route_tweet_config))
         .route("/tweet/preview",        get(route_tweet_preview))

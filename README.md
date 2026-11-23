@@ -7,7 +7,7 @@
 <p align="center"><strong>IRC that stays connected.</strong><br>Self-hosted. Encrypted history. All your devices.</p>
 
 <p align="center">
-  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.12-00b894?style=flat-square" alt="Version 0.5.12"></a>
+  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.13-00b894?style=flat-square" alt="Version 0.5.13"></a>
   <img src="https://img.shields.io/badge/server-Linux-5a7085?style=flat-square" alt="Linux server">
   <img src="https://img.shields.io/badge/client-desktop%20%C2%B7%20mobile%20%C2%B7%20terminal-5a7085?style=flat-square" alt="Desktop, mobile, and terminal clients">
 </p>
@@ -27,7 +27,19 @@ CryptIRC keeps your IRC networks connected on your server while you move between
 
 The web server and IRC daemon run separately, so routine web updates can leave your IRC connections running.
 
-**[CryptIRC MCP](#cryptirc-mcp)** · **[Passkeys](#passkey-sign-in)** · **[Get started](#get-started)** · **[Clients](#clients)** · **[Features](#features)** · **[Privacy](#privacy-and-encryption)** · **[Commands](#commands-and-shortcuts)** · **[Configuration](#configuration)**
+**[Translation](#translation)** · **[CryptIRC MCP](#cryptirc-mcp)** · **[Passkeys](#passkey-sign-in)** · **[Get started](#get-started)** · **[Clients](#clients)** · **[Features](#features)** · **[Privacy](#privacy-and-encryption)** · **[Commands](#commands-and-shortcuts)** · **[Configuration](#configuration)**
+
+## Translation
+
+Read IRC in your preferred language. Translate a message, website preview title and description, or X/Twitter post in place. The original text and links are still available. Enable automatic translation for new incoming content, or choose **Translate** when you need it.
+
+1. Open **Settings → Translation**. Select your reading language and choose **Google Cloud Translation** or a provider from the **Bots** lineup.
+2. Save your provider credential, check the setup with **Test provider**, and enable translation. Google Cloud Translation Basic uses its own API key. LLM credentials are shared with Bots and encrypted in your vault. Translation works with the chatbot disabled.
+3. Use a channel or DM's **Translation…** menu to override incoming behavior or translate outgoing chat as you send. Pick a language for either type of conversation, or let a DM match the language of the other person's latest message. If the provider fails, the draft stays in the composer.
+
+Your provider receives the text selected for translation. Automatic translation is disabled in end-to-end encrypted conversations. To translate encrypted text manually, confirm before sharing it with the provider. Reading and chat preferences are saved on the device. Translated text is kept in the open tab.
+
+[Full v0.5.13 changelog](docs/CHANGES.md#v0513-november-2026)
 
 ## CryptIRC MCP
 

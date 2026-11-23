@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {checkSettingsSearch} from './settings-search-checks.mjs';
+import {checkTranslation, startTranslator} from './translation-checks.mjs';
 
 const {CRYPTIRC_BIN, CRYPTIRC_CORE_BIN, IRC_PORT, IRC_LEAF_PORT, CHROMIUM} = process.env;
 assert(CRYPTIRC_BIN && CRYPTIRC_CORE_BIN && Number(IRC_PORT), 'Set the test binaries and local IRC testnet port');
@@ -23,6 +24,8 @@ const other='pkb'+stamp;
 const password='TestOnly-Password-91!';
 const vault='TestOnly-Vault-92!';
 const channel='#mcp-'+stamp;
+const translationEnabled=process.env.CRYPTIRC_TEST_TRANSLATION==='1';
+let translator;
 
 async function waitFor(checkFn, name, timeout=20000) {
   const stop=Date.now()+timeout;
@@ -54,6 +57,7 @@ const origin='http://localhost:'+port;
 const base=origin+'/cryptirc';
 const env={...process.env,CRYPTIRC_DATA:tmp,CRYPTIRC_BASE_PATH:'/cryptirc',
   CRYPTIRC_BASE_URL:base,CRYPTIRC_PORT:String(port),CRYPTIRC_HSTS:'off',RUST_LOG:'warn'};
+if(translationEnabled)env.CRYPTIRC_AI_ALLOW_PRIVATE='1';
 
 async function request(route,{method='GET',body,token,headers={}}={}) {
   const res=await fetch(base+route,{method,body:body===undefined?undefined:JSON.stringify(body),headers:{
@@ -140,6 +144,7 @@ async function tool(token,name,args={},wantError=false) {
 }
 
 try {
+  if(translationEnabled)translator=await startTranslator();
   await fs.writeFile(path.join(tmp,'admin_settings.json'),JSON.stringify({registration_open:true,captcha_enabled:false}));
   start(CRYPTIRC_CORE_BIN,[],env);
   await waitFor(()=>fs.stat(path.join(tmp,'irc-core.sock')).catch(()=>null),'isolated IRC core');
@@ -307,6 +312,9 @@ try {
    }));`);
   check('mobile Send action reached the IRC peer',!!await otherWs.wait(e=>
     e.type==='irc_message'&&e.text.includes(mobileText),'mobile composer send'));
+  if(translator)await checkTranslation({
+    ev,cdp,check,waitFor,pause,request,tmp,owner,other,ownerSession,otherSession,ownerWs,otherWs,networkA,networkB,channel,translator,
+  });
   await tool(token,'irc_command',{network:networkA,line:'TOPIC '+channel+' :test topic'});
   check('MCP standard IRC command reached the peer',!!await otherWs.wait(e=>e.type==='irc_topic'&&e.topic==='test topic','topic update'));
   const history=await tool(token,'irc_history',{network:networkA,target:channel});
@@ -361,6 +369,7 @@ try {
   for(const child of children.slice(0,2))if(child.logs)console.error(child.logs);
   throw error;
 } finally {
+  translator?.close();
   for(const socket of sockets)socket.close();
   for(const child of children)try{ process.kill(-child.pid,'SIGTERM'); }catch {}
   await pause(500);

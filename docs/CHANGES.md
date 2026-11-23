@@ -1,5 +1,16 @@
 # CryptIRC changelog
 
+## v0.5.13 (November 2026)
+
+- **Chat translation.** Pick a reading language in **Settings → Translation**, then translate messages on demand or automatically as new messages arrive. Each conversation can override the incoming setting. Translations appear alongside the original text.
+- **Website and X/Twitter previews.** Translate link-preview titles and descriptions, X post text, quotes and loaded thread entries. The preview links and media still work.
+- **Outgoing translation.** Choose a target language per conversation or match a DM peer's latest detected language. Normal composer messages are translated when sent. Failed translations keep the original draft available for retry.
+- **Google Cloud and LLM providers.** Enter a Google Cloud Translation Basic key, or use any of the LLM providers listed in Bots, including Perplexity and custom OpenAI-compatible endpoints. LLM credentials are encrypted in the vault and shared between Translation and Bots. The settings panel can test your provider with a sample phrase.
+- **Encrypted conversations.** Automatic translation skips protected chats. Manual translation asks before sending encrypted chat or preview text to a provider.
+
+Upgrade notes
+- A web update enables translation support. An IRC core or IRC server restart is unnecessary. Users enable the feature and supply their own credentials.
+
 ## v0.5.12 (November 2026)
 
 New

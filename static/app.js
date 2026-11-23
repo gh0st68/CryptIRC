@@ -865,6 +865,7 @@ async function loadLoginCaptcha(){
 }
 async function doLogout() {
   if(!(await customConfirm('Sign out?','Sign out'))) return;
+  clearTranslationData();
   clearTweetData();
   try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){}
   // #6/F25: unsubscribe push BEFORE the logout POST (and before dropping the token).
@@ -1844,6 +1845,7 @@ function handleEvent(ev) {
     case 'ai_keys_set':
       window._aiKeysSet=ev.providers||[];
       if(document.getElementById('bot-overlay')?.classList.contains('show')) _aiProviderChange();
+      refreshTranslationCredential();
       break;
     case 'auth_ok':
       // Avatars: NICK/QUIT/JOIN missed while the socket was down are not replayed.
@@ -1886,7 +1888,7 @@ function handleEvent(ev) {
     // mark them "not sent"; hide the previous account's UI behind the login screen;
     // and only drop the stored token if it is the one that failed (another tab may
     // already hold a newer one, e.g. after a password change).
-    case 'auth_failed': { clearTweetData(); hideBootSplash(); try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){} const _ft=sessionToken; sessionToken=null; _wsAuthed=false; _failRateQueue(); try{ if(localStorage.getItem('cryptirc_token')===_ft){ localStorage.removeItem('cryptirc_token'); document.cookie='cryptirc_token=;max-age=0;path=/cryptirc'; } }catch(_){} document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break; }
+    case 'auth_failed': { clearTranslationData(); clearTweetData(); hideBootSplash(); try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){} const _ft=sessionToken; sessionToken=null; _wsAuthed=false; _failRateQueue(); try{ if(localStorage.getItem('cryptirc_token')===_ft){ localStorage.removeItem('cryptirc_token'); document.cookie='cryptirc_token=;max-age=0;path=/cryptirc'; } }catch(_){} document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break; }
     case 'vault_unlocked': {
       // Locked→unlocked transition (overlay still up ⇒ we were locked): Messages
       // preview get_logs sent while locked got EMPTY log_lines replies (read_logs
@@ -2355,7 +2357,7 @@ function handleEvent(ev) {
           }
           return;
         }
-        addMessage(ev.conn_id, ev.target, {
+        const liveMessage={
           id:        ev.msg_id||0,
           ts:        ev.ts,
           from:      ev.from,
@@ -2364,7 +2366,9 @@ function handleEvent(ev) {
           encrypted: encrypted,
           mentioned: mentioned,
           prefix: ev.prefix||null,
-        });
+        };
+        markLiveTranslation(ev.conn_id,ev.target,liveMessage);
+        addMessage(ev.conn_id,ev.target,liveMessage);
         // Auto-open query for pending WHOIS
         if(window._pendingWhois&&window._pendingWhois[ev.conn_id]){
           const pnick=window._pendingWhois[ev.conn_id].toLowerCase();
@@ -4702,7 +4706,11 @@ function buildRow(msg,conv,tweetConv){
     lock.style.cssText = 'opacity:.5;margin-left:4px;flex-shrink:0;color:var(--accent);';
     msgBody.appendChild(lock);
   }
-  if(msgBody)mountMessageMedia(msg,tweetConv,msgBody);
+  if(msgBody){
+    const context=translationRowContext(msg,tweetConv||conv||active);
+    if(isChat&&context) mountTranslation(msgBody,translationPlainText(msg.text),context,'message');
+    mountMessageMedia(msg,tweetConv,msgBody,context);
+  }
   // Reply button on chat messages
   if(isChat&&msg.from!=='*'){
     const replyBtn=document.createElement('span');
@@ -6026,12 +6034,12 @@ function releaseTweetResources(state){
   for(const image of state.root.querySelectorAll('img')){image.onerror=null;image.removeAttribute('src');}
   for(const clean of state.cleanup)clean();state.cleanup.length=0;state.mediaUpdate=null;state.applyMode=null;state.loaded=null;state.quoteMounted=false;state.assetUpdates=[];
 }
-function buildTweetPlaceholder(identity,context){
+function buildTweetPlaceholder(identity,context,translationContext=null){
   if(tweetLoadPolicy(context)==='hidden')return null;
   ensureTweetAccount();
   ensureTweetRemovalObserver();
   const root=tweetNode('article','msg-tweet msg-tweet-dormant');
-  const state={root,id:identity.id,context:Object.freeze({...context}),account:currentUser,generation:_tweetGeneration,
+  const state={root,id:identity.id,context:Object.freeze({...context}),translationContext,account:currentUser,generation:_tweetGeneration,
     granted:false,assetsGranted:false,disposed:false,lease:null,loaded:null,expanded:loadAppearance().xPreviewMode==='expanded',textExpanded:false,
     observers:[],cleanup:[],assetUpdates:[],alive(){return !this.disposed&&this.root.isConnected&&this.account===currentUser
       &&this.generation===_tweetGeneration&&tweetLoadPolicy(this.context)!=='hidden';},
@@ -6204,6 +6212,7 @@ function buildTweetCard(data,state,refresh){
   mode.setAttribute('aria-controls',details.id);header.appendChild(mode);
   state.applyMode=applyMode;
   root.append(header,text,more);
+  if(state.translationContext) mountTranslation(root,data.text,state.translationContext,'X post');
   if(data.text_complete!==true){
     const note=tweetNode('small','msg-tweet-note','Partial text · ');note.appendChild(tweetLink(data.url,'Continue on X'));root.appendChild(note);
   }
@@ -6243,6 +6252,7 @@ function buildTweetQuote(quote,parent){
   const header=tweetNode('div','msg-tweet-header'),avatar=buildTweetAvatar(author);
   header.append(avatar.node,buildTweetIdentity(post));
   wrap.append(header,buildTweetText(post));wrap.querySelector('.msg-tweet-text').classList.add('msg-tweet-text-open');
+  if(parent.translationContext) mountTranslation(wrap,post.text,parent.translationContext,'quoted X post');
   const media=tweetNode('div','msg-tweet-media');wrap.appendChild(media);
   const populate=()=>{
     loadTweetAvatar(avatar,child);
@@ -6288,6 +6298,7 @@ function buildTweetThreadControls(data,state){
       item.appendChild(buildTweetIdentity(entry));
       if(!validTweetId(entry.id))item.appendChild(tweetNode('small','msg-tweet-status','Post identity unavailable'));
       item.appendChild(buildTweetText(entry));
+      if(state.translationContext) mountTranslation(item,entry.text,state.translationContext,'X thread post');
       const media=tweetNode('div','msg-tweet-media');item.appendChild(media);content.insertBefore(item,more);
       const child={...state,root:item,expanded:true,cleanup:[],alive(){return state.alive()&&item.isConnected;}};children.push(child);
       buildTweetMedia(entry.media||[],media,child,validTweetId(entry.id)?'https://x.com/i/status/'+entry.id:data.url);
@@ -6458,15 +6469,16 @@ function buildTweetMedia(items,container,state,postUrl){
 // recognized X link gets an invisible slot marker at its position; what fills the slot is
 // decided by renderTweetSlots from the server's capabilities, and re-decided when they
 // (or the disclosure policy) change.
-function mountMessageMedia(msg,tweetConv,msgBody){
+function mountMessageMedia(msg,tweetConv,msgBody,translationContext){
   const fromEncrypted=!!msg.encrypted;
   msgBody._tweetContext=tweetRowContext(tweetConv||null,msg.encrypted);
   msgBody._tweetEncrypted=fromEncrypted;
   msgBody._tweetChat=msg.kind==='privmsg'||msg.kind==='action';
+  msgBody._translationContext=translationContext;
   const slots=[];
   for(const url of extractMediaUrls(msg.text)){
     const identity=parseTweetUrl(url,true);
-    if(!identity){const node=buildMediaEl(url,fromEncrypted);if(node)msgBody.appendChild(node);continue;}
+    if(!identity){const node=buildMediaEl(url,fromEncrypted,false,translationContext);if(node)msgBody.appendChild(node);continue;}
     const marker=document.createComment('x-link');msgBody.appendChild(marker);
     slots.push({url,identity,marker,nodes:[]});
   }
@@ -6491,7 +6503,7 @@ function buildTweetGenericSlot(slot,msgBody,mode){
   const generation=_tweetGeneration;
   const permitted=()=>generation===_tweetGeneration&&!tweetVaultLocked()&&!_tweetCaps.preview
     &&loadAppearance().linkPreviews!==false&&(!_tweetCaps.failed||tweetDisclosure(msgBody._tweetContext)!=='hidden');
-  const card=()=>{const node=buildLinkPreviewEl(slot.url,false,()=>permitted()&&node.isConnected);return node;};
+  const card=()=>{const node=buildLinkPreviewEl(slot.url,false,()=>permitted()&&node.isConnected,msgBody._translationContext);return node;};
   if(mode==='auto')return registerTweetGeneric(card());
   const wrap=document.createElement('div');wrap.className='msg-media';
   const btn=document.createElement('button');btn.type='button';btn.className='msg-media-load';
@@ -6550,11 +6562,11 @@ function renderTweetSlots(msgBody){
   for(const slot of slots){
     if(seen.has(slot.identity.id))continue;
     seen.add(slot.identity.id);if(count++>=3){extra.push(slot);continue;}
-    place(slot,buildTweetPlaceholder(slot.identity,context));
+    place(slot,buildTweetPlaceholder(slot.identity,context,msgBody._translationContext));
   }
   if(extra.length){
     const more=tweetButton('Load more X previews',()=>{
-      for(const slot of extra.splice(0,3))place(slot,buildTweetPlaceholder(slot.identity,context));
+      for(const slot of extra.splice(0,3))place(slot,buildTweetPlaceholder(slot.identity,context,msgBody._translationContext));
       if(!extra.length)more.remove();
     });more.classList.add('msg-tweet-more-links');msgBody.appendChild(more);
   }
@@ -6569,7 +6581,7 @@ if(typeof window!=='undefined')window.addEventListener('storage',event=>{
 });
 // ─── End X previews ──────────────────────────────────────────────────────────
 
-function buildMediaEl(url,fromEncrypted,genericOnly=false){
+function buildMediaEl(url,fromEncrypted,genericOnly=false,translationContext=null){
   // Where X previews are offered, a recognized X status link never takes the generic path
   // (and so never reaches the generic /preview fetcher). Callers here carry no conversation
   // evidence: unknown context ⇒ click-to-load at most. buildRow routes X links via
@@ -6582,7 +6594,7 @@ function buildMediaEl(url,fromEncrypted,genericOnly=false){
   }
   // Re-check 2: a recognized X status URL is never a media file, whatever it ends with
   // (`…/status/1?x=.jpg`): only the generic link-preview path, encrypted gate first.
-  if(tweet)return buildLinkPreviewEl(url,fromEncrypted);
+  if(tweet)return buildLinkPreviewEl(url,fromEncrypted,null,translationContext);
   const authedUrl=appendFileToken(url);
   // Images
   if(IMG_EXTS.test(url)||url.includes('/files/')){
@@ -6715,12 +6727,12 @@ function buildMediaEl(url,fromEncrypted,genericOnly=false){
     if((loadAppearance().ytPreview||'auto')!=='click' && _mediaAutoLoad(url)) setTimeout(_ytReveal,0);
     return wrap;
   }
-  return buildLinkPreviewEl(url,fromEncrypted);
+  return buildLinkPreviewEl(url,fromEncrypted,null,translationContext);
 }
 // Link preview — fetch metadata from server for non-media HTTPS links. (Split out of
 // buildMediaEl unchanged; `guard` — used only for X links — is re-checked before the
 // asynchronous card renders and before its image loads, and must stay true.)
-function buildLinkPreviewEl(url,fromEncrypted,guard=null){
+function buildLinkPreviewEl(url,fromEncrypted,guard=null,translationContext=null){
   // r2 (codex-p3 MED app.js:4503): a link that arrived inside an END-TO-END ENCRYPTED
   // message is not sent to the CryptIRC server for a preview automatically (that would
   // disclose it to the server the encryption is meant to keep out). The user can still
@@ -6732,7 +6744,7 @@ function buildLinkPreviewEl(url,fromEncrypted,guard=null){
     btn.textContent=`🔒 Load link preview — ${host}`;
     btn.title='This link came in an end-to-end encrypted message. Loading a preview sends the link to your CryptIRC server, which fetches the page.';
     btn.style.cssText='max-width:100%;padding:6px 10px;border:1px dashed var(--border,#555);border-radius:8px;background:var(--surface2,rgba(127,127,127,.12));color:var(--text2,inherit);font-size:12px;cursor:pointer;text-align:left;white-space:normal;word-break:break-all;';
-    btn.onclick=e=>{e.stopPropagation();const real=buildMediaEl(url,false);if(real) wrap.replaceWith(real); else wrap.remove();};
+    btn.onclick=e=>{e.stopPropagation();const real=buildMediaEl(url,false,false,translationContext);if(real) wrap.replaceWith(real); else wrap.remove();};
     wrap.appendChild(btn);
     return wrap;
   }
@@ -6742,8 +6754,10 @@ function buildLinkPreviewEl(url,fromEncrypted,guard=null){
     card.href=url;card.target='_blank';card.rel='noopener noreferrer';
     card.className='msg-link-preview';card.id=previewId;
     card.style.display='none'; // Hidden until metadata loads
+    const container=translationContext?document.createElement('div'):card;
+    if(translationContext){container.className='link-preview-container';container.appendChild(card);}
     // A card registered for an X slot must leave the registry on every removal path.
-    const dropCard=()=>{if(card._disposeTweet)card._disposeTweet();else card.remove();};
+    const dropCard=()=>{if(container._disposeTweet)container._disposeTweet();else container.remove();};
     // Fetch preview asynchronously
     fetch(`/cryptirc/preview?url=${encodeURIComponent(url)}`,{headers:{'Authorization':'Bearer '+sessionToken}})
       .then(r=>r.ok?r.json():null).then(d=>{
@@ -6780,13 +6794,14 @@ function buildLinkPreviewEl(url,fromEncrypted,guard=null){
           }
         }
         el.style.display='';
+        if(translationContext) mountTranslation(container,[d.title,d.description].filter(Boolean).join('\n'),translationContext,'link preview');
         // Card just materialized — may have added meaningful height. If the
         // user is near the bottom, re-anchor to the latest message. 500px
         // threshold covers a revealed preview + small image without
         // snapping users who deliberately scrolled up.
         if(!_userScrolledAway) scrollBottom();
       }).catch(dropCard);
-    return card;
+    return container;
   }
   return null;
 }
@@ -8023,9 +8038,11 @@ async function handleInput(raw){
         wsend({type:'send',conn_id,raw:raw.slice(1)});
     }
   } else {
+    const outgoing=await translateOutgoing(raw,conn_id,target);
+    if(outgoing===null) return 'keep';
     // Translate visible caret-notation formatting tokens (^B/^I/^U/^O/^R/^Cnn[,nn]) to real mIRC control chars,
     // then apply the persistent "My Messages" color (no-op when off / when the user already added codes).
-    const raw2=_styleOutgoing(toMircChars(raw));
+    const raw2=_styleOutgoing(toMircChars(outgoing));
     // Attempt E2E encryption for outgoing plaintext
     // Handle reply — send quote line first, then the actual message
     // r7 (agy-flash app.js:6305): the reply quote and the reply itself are prepared (and
@@ -8040,7 +8057,7 @@ async function handleInput(raw){
       parts.push(q);
     }
     const body=await _prepChatPart(conn_id,target,raw2,'PRIVMSG');
-    if(!body) return;             // body refused → its quote is not sent either
+    if(!body) return outgoing!==raw?'keep':undefined;
     parts.push(body);
     _queueChatParts(conn_id,target,parts,'privmsg');
   }
@@ -9724,6 +9741,9 @@ function _settingsSearchIndex(){
 
   add('Bot settings','Bots',showBotPanel,'#bot-master','enable master switch server side bot configuration','#bot-body');
   add('AI chatbot','Bots',showBotPanel,'[data-ai="enabled"]','ai assistant openai claude api key provider model trigger','#bot-body');
+  add('Translation','Translation',showTranslation,'#translation-provider','translate languages automatic incoming outgoing chat messages x twitter website link preview Google Cloud Gemini LLM','#translation-panel');
+  add('Translation API key','Translation',showTranslation,'#translation-credential','credential token password Perplexity Claude Anthropic ChatGPT OpenAI Codex Groq OpenRouter Mistral xAI custom Gemini','#translation-panel');
+  add('Default reading language','Translation',showTranslation,'#translation-language','translate to English German Spanish French Portuguese Chinese Arabic Japanese language code','#translation-panel');
   for(const [id,label,,trigger] of BOT_PANEL_DEFS){
     add(label,'Bots',showBotPanel,'[data-bot-enable="'+id+'"]',trigger,'#bot-body');
   }
@@ -10028,6 +10048,7 @@ function _wipeE2EMemory(){
 // after the unlock), the profile and certificate popups and any open modal.
 function _closeSecretPanels(){
   // r4 (C3-3)
+  clearTranslationData();
   try{ clearTweetData(); }catch(_){}   // X previews: drop cards, pending work and cached results on every lock
   try{ const mv=document.getElementById('monitor-msg-overlay'); if(mv) mv.remove(); }catch(_){}
   try{ if(document.getElementById('monitor-overlay')?.classList.contains('show')) closeMonitorPanel(); const ml=document.getElementById('monitor-list'); if(ml) ml.innerHTML=''; }catch(_){}
@@ -17431,6 +17452,7 @@ function _favMenuItems(connId,target,isChannel){
   const muted=isMuted(muteKey);
   const items=[
     {text:'★ Unfavorite',action:()=>toggleFavorite(connId,target)},
+    {text:'Translation…',action:()=>showTranslationChat(connId,target)},
     {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>toggleMute(muteKey)},
     {text:'🗑 Clear History',action:()=>clearBufHistory(connId,target)},
   ];
@@ -17849,6 +17871,7 @@ function _chanMenuItems(connId,target,kind){
   const muted=isMuted(muteKey);
   const items=[
     {text:fav?'★ Unfavorite':'☆ Favorite',action:()=>toggleFavorite(connId,target)},
+    {text:'Translation…',action:()=>showTranslationChat(connId,target)},
     {text:muted?'🔔 Unmute':'🔇 Mute',action:()=>toggleMute(muteKey)},
     {text:'🗑 Clear History',action:()=>clearBufHistory(connId,target)},
   ];
@@ -21302,10 +21325,420 @@ function _renderBotPanel(cfg){
   setTimeout(_aiProviderChange,0);   // sync custom-URL row + key status to the selected provider
 }
 function _aiModelHint(p){return ({openai:'gpt-4o-mini',anthropic:'claude-sonnet-4-5',xai:'grok-2-latest',google:'gemini-2.0-flash',perplexity:'sonar',openrouter:'openai/gpt-4o-mini',groq:'llama-3.3-70b-versatile',mistral:'mistral-small-latest','openai-codex':'gpt-5',custom:'model-name'})[p]||'model-name';}
+const AI_PROVIDER_OPTIONS=[['openai','OpenAI (ChatGPT)'],['anthropic','Anthropic (Claude)'],['xai','xAI (Grok)'],['google','Google (Gemini)'],['perplexity','Perplexity'],['openrouter','OpenRouter'],['groq','Groq'],['mistral','Mistral'],['openai-codex','ChatGPT — Sign in (OAuth / Codex)'],['custom','Custom (OpenAI-compatible)']];
+// ─── Translation ────────────────────────────────────────────────────────────
+const TRANSLATION_CLOUD='google-translate';
+const TRANSLATION_SERVICE_ALIASES=new Set(['ns','userserv','us','cs','ms','os','hs','bs']);
+const TRANSLATION_LANGUAGES=[
+  ['en','English'],['es','Spanish'],['fr','French'],['de','German'],['pt','Portuguese'],
+  ['it','Italian'],['nl','Dutch'],['pl','Polish'],['uk','Ukrainian'],['ru','Russian'],
+  ['ar','Arabic'],['hi','Hindi'],['id','Indonesian'],['ja','Japanese'],['ko','Korean'],
+  ['tr','Turkish'],['vi','Vietnamese'],['zh-CN','Chinese (Simplified)'],['zh-TW','Chinese (Traditional)'],
+];
+const translationCache=new Map();
+const translationPending=new Map();
+const translationLive=new WeakSet();
+let translationChat=null;
+let translationGeneration=0;
+let translationCredentialUpdate=null;
+
+function translationLanguage(tag){
+  if(!/^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/i.test(tag)||tag.length>35||tag.toLowerCase()==='und')return '';
+  const [language,...parts]=tag.split('-');
+  return [language.toLowerCase(),...parts.map(part=>{
+    if(/^[a-z]{2}$/i.test(part))return part.toUpperCase();
+    if(/^[a-z]{4}$/i.test(part))return part[0].toUpperCase()+part.slice(1).toLowerCase();
+    return part.toLowerCase();
+  })].join('-');
+}
+function translationKey(){return 'cryptirc_translation_v1:'+currentUser;}
+function translationSettings(){
+  let saved={};
+  try{if(currentUser)saved=JSON.parse(localStorage.getItem(translationKey())||'{}')||{};}catch(_){}
+  const provider=[TRANSLATION_CLOUD,...AI_PROVIDER_OPTIONS.map(([id])=>id)].includes(saved.provider)?saved.provider:TRANSLATION_CLOUD;
+  const providers=saved.providers&&typeof saved.providers==='object'?saved.providers:{};
+  return {
+    enabled:saved.enabled===true,language:translationLanguage(String(saved.language||''))||'en',
+    auto:saved.auto===true,provider,providers,chats:saved.chats&&typeof saved.chats==='object'?saved.chats:{},
+  };
+}
+function storeTranslationSettings(settings){
+  if(!currentUser||tweetVaultLocked())return false;
+  try{localStorage.setItem(translationKey(),JSON.stringify(settings));return true;}
+  catch(_){showToast('Translation settings could not be saved on this device.');return false;}
+}
+function translationChatKey(connId,target){
+  return connId+'/'+_chanKeyFold(connId)(target);
+}
+function translationChatPrefs(settings,ctx){
+  return settings.chats[translationChatKey(ctx.connId,ctx.target)]||{};
+}
+function translationEligible(connId,target){
+  const nick=stripPfx(String(target||'')).split('@')[0].toLowerCase();
+  return !!connId&&!!target&&target!=='status'&&target!==OVERFLOW_Q&&!isUploadsConn(connId)
+    &&!isMessagesConn(connId)&&!_isServiceNick(nick)&&!TRANSLATION_SERVICE_ALIASES.has(nick);
+}
+function translationRowContext(msg,conversation){
+  const connId=conversation?.connId||conversation?.conn_id;
+  const target=msg._tgt||conversation?.target;
+  if(!translationEligible(connId,target)||msg.from==='*'||_isServiceNick(msg.from))return null;
+  return {
+    connId,target,protected:msg.encrypted===true,live:translationLive.has(msg)&&!_isOwnMsg(connId,msg),
+  };
+}
+function markLiveTranslation(connId,target,msg){
+  if(!translationEligible(connId,target)||!['privmsg','action'].includes(msg.kind)
+    ||msg.encrypted||_isOwnMsg(connId,msg)||_isServiceNick(msg.from)||tweetVaultLocked())return;
+  const settings=translationSettings();
+  const ctx={connId,target};
+  const incoming=translationChatPrefs(settings,ctx).incoming;
+  if(settings.enabled&&(incoming==='on'||(incoming!=='off'&&settings.auto))&&!translationProtected(ctx)){
+    translationLive.add(msg);
+  }
+}
+function translationProtected(ctx){
+  return ctx.protected||!_e2eKnown()||_isE2eConversation(ctx.target,ctx.connId);
+}
+function translationPlainText(text){
+  return String(text||'').replace(/\x03\d{0,2}(?:,\d{1,2})?|\x04(?:[\da-f]{6}(?:,[\da-f]{6})?)?/gi,'')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g,'').trim();
+}
+function translationHasWords(text){
+  return /\p{L}/u.test(text.replace(/(?:https?:\/\/|www\.)[^\s]+/gi,''));
+}
+function translationModel(provider){
+  const models={
+    anthropic:'claude-haiku-4-5-20251001',google:'gemini-3.1-flash-lite',groq:'openai/gpt-oss-120b',
+    perplexity:'openai/gpt-6-luna',xai:'grok-4.3',
+  };
+  return models[provider]||_aiModelHint(provider);
+}
+function translationProviderConfig(settings){
+  const selected=settings.providers[settings.provider]||{};
+  return {
+    provider:settings.provider,model:selected.model||translationModel(settings.provider),
+    custom_base:settings.provider==='custom'?selected.custom_base||'':'',
+  };
+}
+function clearTranslationData(){
+  ++translationGeneration;
+  for(const {controller} of translationPending.values())controller.abort();
+  translationPending.clear();
+  translationCache.clear();
+  translationCredentialUpdate=null;
+  for(const node of document.querySelectorAll('.translation-action'))node._resetTranslation?.();
+  closeTranslationPanel();
+}
+function requestTranslation(text,target,settings,{fresh=false}={}){
+  if(!sessionToken||!currentUser||tweetVaultLocked())return Promise.reject(new Error('Unlock your vault to translate.'));
+  if(new TextEncoder().encode(text).length>4096)return Promise.reject(new Error('This text is too long to translate.'));
+  const config=translationProviderConfig(settings);
+  const key=JSON.stringify([currentUser,config,target,text]);
+  if(!fresh&&translationCache.has(key))return Promise.resolve(translationCache.get(key));
+  if(translationPending.has(key))return translationPending.get(key).job;
+  if(translationPending.size>=6)return Promise.reject(new Error('Several translations are in progress. Try again shortly.'));
+  const user=currentUser, token=sessionToken, generation=translationGeneration;
+  const controller=new AbortController();
+  const job=(async()=>{
+    const response=await fetch('/cryptirc/api/translation',{
+      method:'POST',signal:controller.signal,cache:'no-store',
+      headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify({...config,target,text}),
+    });
+    const data=await response.json().catch(()=>null);
+    if(!response.ok||typeof data?.text!=='string'||typeof data.source!=='string'){
+      throw new Error(data?.error||'Translation is unavailable. Try again.');
+    }
+    if(generation!==translationGeneration||user!==currentUser||token!==sessionToken||tweetVaultLocked()){
+      throw new Error('Translation canceled.');
+    }
+    translationCache.set(key,data);
+    if(translationCache.size>500)translationCache.delete(translationCache.keys().next().value);
+    return data;
+  })().finally(()=>{if(translationPending.get(key)?.controller===controller)translationPending.delete(key);});
+  translationPending.set(key,{controller,job});
+  return job;
+}
+function mountTranslation(root,text,ctx,label){
+  text=String(text||'').trim();
+  const settings=translationSettings();
+  if(!settings.enabled||!translationHasWords(text))return;
+  const action=document.createElement('span');
+  action.className='translation-action';
+  const button=document.createElement('button');
+  button.type='button';
+  button.className='translation-button';
+  const result=document.createElement('span');
+  result.className='translation-result';
+  result.hidden=true;
+  result.setAttribute('aria-live','polite');
+  const busy=()=>button.disabled;
+  const reset=()=>{
+    button.disabled=false;
+    button.textContent='Translate'+(label==='message'?'':' '+label);
+    button.setAttribute('aria-label','Translate '+label);
+    button.setAttribute('aria-expanded','false');
+    result.hidden=true;
+    result.textContent='';
+  };
+  action._resetTranslation=reset;
+  reset();
+  action.append(button,result);
+  root.appendChild(action);
+  async function run(manual){
+    if(busy()||!action.isConnected)return;
+    if(!result.hidden){
+      result.hidden=true;
+      button.textContent='Show translation';
+      button.setAttribute('aria-label','Show translation of '+label);
+      button.setAttribute('aria-expanded','false');
+      return;
+    }
+    if(result.textContent){
+      result.hidden=false;
+      button.textContent='Hide translation';
+      button.setAttribute('aria-label','Hide translation of '+label);
+      button.setAttribute('aria-expanded','true');
+      return;
+    }
+    const generation=translationGeneration;
+    const current=translationSettings();
+    if(!current.enabled||tweetVaultLocked())return;
+    if(translationProtected(ctx)){
+      if(!manual)return;
+      if(!ctx.protected&&!_e2eKnown()){showToast('Wait for encryption settings to load.');return;}
+      const accepted=await customConfirm('Send this text from an encrypted conversation to your translation provider?','Translate','Cancel');
+      if(!accepted||generation!==translationGeneration||tweetVaultLocked()||!action.isConnected)return;
+    }
+    button.disabled=true;
+    button.textContent='Translating…';
+    try{
+      const value=await requestTranslation(text,current.language,current);
+      if(generation!==translationGeneration||!action.isConnected||tweetVaultLocked())return;
+      if(!manual&&(value.text.trim()===text||value.source.toLowerCase()===current.language.toLowerCase())){reset();return;}
+      result.lang=current.language;
+      result.dir='auto';
+      withTweetLayoutChange(()=>{
+        result.textContent=value.text.trim()===text?'Already in your reading language.':value.text;
+        result.hidden=false;
+      });
+      button.textContent='Hide translation';
+      button.setAttribute('aria-label','Hide translation of '+label);
+      button.setAttribute('aria-expanded','true');
+    }catch(error){
+      if(generation!==translationGeneration||!action.isConnected)return;
+      reset();
+      if(manual)showToast(error.message);
+    }finally{
+      if(generation===translationGeneration)button.disabled=false;
+    }
+  }
+  button.addEventListener('click',event=>{event.stopPropagation();void run(true);});
+  const chat=translationChatPrefs(settings,ctx);
+  if(ctx.live&&(chat.incoming==='on'||(chat.incoming!=='off'&&settings.auto))){
+    queueMicrotask(()=>{
+      if(action.isConnected&&!translationProtected(ctx))void run(false);
+    });
+  }
+}
+async function translateOutgoing(raw,connId,target){
+  const settings=translationSettings();
+  if(!settings.enabled||!translationEligible(connId,target))return raw;
+  const ctx={connId,target};
+  const outgoing=translationChatPrefs(settings,ctx).outgoing;
+  if(!outgoing||outgoing==='off'||!translationHasWords(raw))return raw;
+  if(!_e2eKnown()){showToast('Wait for encryption settings to load. Draft kept.');return null;}
+  if(translationProtected(ctx))return raw;
+  const generation=translationGeneration, conversation=active, token=sessionToken, reply=_replyTo;
+  if(reply&&!_sameConvAt(reply.conn_id,reply.target,connId,target)){
+    getReplyPrefix(connId,target);
+    return null;
+  }
+  const valid=()=>generation===translationGeneration&&!tweetVaultLocked()
+    &&token===sessionToken&&active===conversation&&_replyTo===reply;
+  try{
+    if(!valid())return null;
+    let language=outgoing;
+    if(outgoing==='peer'){
+      const recent=getBuf(connId,target).findLast(msg=>!_isOwnMsg(connId,msg)
+        &&(msg.kind==='privmsg'||msg.kind==='action')&&!msg.encrypted&&translationHasWords(translationPlainText(msg.text)));
+      if(!recent)throw new Error('Choose an outgoing language or wait for a message from this person.');
+      const detected=await requestTranslation(translationPlainText(recent.text),settings.language,settings);
+      language=translationLanguage(detected.source);
+      if(!language)throw new Error('Could not detect the other person’s language. Choose it in the chat’s Translation menu.');
+      if(!valid()||translationProtected(ctx))return null;
+    }
+    const value=await requestTranslation(raw,language,settings);
+    if(!valid()||translationProtected(ctx))return null;
+    const translated=value.text.replace(/\s*[\r\n]+\s*/g,' ').trim();
+    if(!translated||/[\x00-\x08\x0b-\x1f\x7f]/.test(translated))throw new Error('The provider returned invalid chat text.');
+    const links=text=>JSON.stringify(text.match(/(?:https?:\/\/|www\.)[^\s]+/gi)||[]);
+    if(links(raw)!==links(translated))throw new Error('Translation changed a link.');
+    return translated;
+  }catch(error){
+    if(valid())showToast(error.message+' Draft kept.');
+    return null;
+  }
+}
+function translationFields(){
+  return Object.fromEntries([...document.querySelectorAll('#translation-panel [data-translation]')].map(el=>[el.dataset.translation,el]));
+}
+function closeTranslationPanel(){
+  const panel=document.getElementById('translation-panel');
+  if(panel?.open)panel.close();
+  const credential=document.getElementById('translation-credential');
+  if(credential)credential.value='';
+  translationChat=null;
+}
+window.addEventListener('storage',event=>{
+  if(!currentUser||event.key!==translationKey())return;
+  clearTranslationData();
+  renderChat();
+  renderSplitChat();
+});
+function showTranslation(){openTranslationPanel(null);}
+function showTranslationChat(connId,target){
+  if(translationEligible(connId,target))openTranslationPanel({connId,target});
+}
+function openTranslationPanel(chat){
+  if(!currentUser||tweetVaultLocked()){showToast('Unlock your vault to open Translation.');return;}
+  const panel=document.getElementById('translation-panel');
+  const settings=translationSettings();
+  const fields=translationFields();
+  translationChat=chat;
+  panel.querySelector('h2').textContent=chat?'Translation for '+chat.target:'Translation';
+  fields.general.hidden=!!chat;
+  fields.chat.hidden=!chat;
+  fields.notice.textContent='';
+  fields.credential.value='';
+  if(chat){
+    const prefs=translationChatPrefs(settings,chat);
+    fields.incoming.value=prefs.incoming||'default';
+    fields.outgoing.value=prefs.outgoing==='peer'?'peer':prefs.outgoing&&prefs.outgoing!=='off'?'language':'off';
+    fields.peer.hidden=/^[#&+!]/.test(chat.target);
+    fields.outLanguage.value=fields.outgoing.value==='language'?prefs.outgoing:'';
+    fields.outLanguageRow.hidden=fields.outgoing.value!=='language';
+    fields.enableNotice.hidden=settings.enabled;
+    fields.protection.hidden=!translationProtected(chat);
+  }else{
+    fields.enabled.checked=settings.enabled;
+    fields.language.value=settings.language;
+    fields.auto.checked=settings.auto;
+    fields.provider.replaceChildren(...[[TRANSLATION_CLOUD,'Google Cloud Translation'],...AI_PROVIDER_OPTIONS]
+      .map(([id,label])=>new Option(label,id,id===settings.provider,id===settings.provider)));
+    const list=document.getElementById('translation-languages');
+    if(!list.options.length)list.replaceChildren(...TRANSLATION_LANGUAGES.map(([code,label])=>new Option(label,code)));
+    populateTranslationProvider();
+    if(_wsAuthed)wsend({type:'load_bot_config'});
+  }
+  if(!panel.open)panel.showModal();
+}
+function populateTranslationProvider(){
+  const fields=translationFields();
+  const provider=fields.provider.value;
+  const cfg=translationSettings().providers[provider]||{};
+  fields.modelRow.hidden=provider===TRANSLATION_CLOUD;
+  fields.model.value=cfg.model||translationModel(provider);
+  fields.baseRow.hidden=provider!=='custom';
+  fields.base.value=cfg.custom_base||'';
+  fields.credential.placeholder=provider==='openai-codex'?'Paste your Codex auth.json':'Paste API key';
+  fields.credential.value='';
+  fields.google.hidden=provider!==TRANSLATION_CLOUD;
+  fields.codex.hidden=provider!=='openai-codex';
+  fields.perplexity.hidden=provider!=='perplexity';
+  refreshTranslationCredential();
+}
+function refreshTranslationCredential(){
+  const panel=document.getElementById('translation-panel');
+  if(!panel)return;
+  const fields=translationFields();
+  const set=(window._aiKeysSet||[]).includes(fields.provider.value);
+  fields.keyState.textContent=set?'Saved in vault':fields.provider.value==='custom'?'Optional for this provider':'No credential saved';
+  fields.removeKey.disabled=!set;
+  if(translationCredentialUpdate?.provider===fields.provider.value&&translationCredentialUpdate.set===set){
+    fields.notice.textContent=set?'Credential saved.':'Credential removed.';
+    translationCredentialUpdate=null;
+  }
+}
+function saveTranslationCredential(remove){
+  const fields=translationFields();
+  const provider=fields.provider.value;
+  if(tweetVaultLocked()||!_wsAuthed){fields.notice.textContent='Connect and unlock your vault first.';return;}
+  const key=remove?'':fields.credential.value.trim();
+  if(!remove&&!key){fields.notice.textContent='Enter a credential first.';return;}
+  if(!remove&&provider==='openai-codex'){
+    try{JSON.parse(key);}catch(_){fields.notice.textContent='Paste the complete Codex auth.json.';return;}
+  }
+  if(wsend({type:'save_ai_key',provider,key})===false){fields.notice.textContent='Connection lost. Try again.';return;}
+  translationCredentialUpdate={provider,set:!remove};
+  translationCache.clear();
+  fields.credential.value='';
+  fields.notice.textContent=remove?'Removing the shared credential…':'Saving credential to the vault…';
+}
+function readTranslationSettings(fields){
+  const settings=translationSettings();
+  const language=translationLanguage(fields.language.value.trim());
+  if(!language)throw new Error('Enter a language code such as en, de or zh-CN.');
+  const provider=fields.provider.value;
+  const model=fields.model.value.trim();
+  const custom_base=fields.base.value.trim();
+  if(provider!==TRANSLATION_CLOUD&&!model)throw new Error('Enter a model ID.');
+  if(provider==='custom'){
+    let url;
+    try{url=new URL(custom_base);}catch(_){}
+    if(!url||!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash){
+      throw new Error('Enter a custom base URL such as https://example.com/v1.');
+    }
+  }
+  settings.enabled=fields.enabled.checked;
+  settings.language=language;
+  settings.auto=fields.auto.checked;
+  settings.provider=provider;
+  settings.providers[provider]={model,custom_base:provider==='custom'?custom_base:''};
+  return settings;
+}
+async function testTranslationProvider(){
+  const fields=translationFields();
+  const before=fields.provider.value;
+  fields.test.disabled=true;
+  try{
+    const settings=readTranslationSettings(fields);
+    fields.notice.textContent='Testing with a sample phrase…';
+    const data=await requestTranslation('Guten Morgen! Wie geht es dir?',settings.language,settings,{fresh:true});
+    if(document.getElementById('translation-panel').open&&!translationChat&&fields.provider.value===before){
+      fields.notice.textContent='Test translation — '+data.text;
+    }
+  }catch(error){
+    if(fields.provider.value===before)fields.notice.textContent=error.message;
+  }finally{fields.test.disabled=false;}
+}
+function saveTranslationPanel(event){
+  event.preventDefault();
+  const fields=translationFields();
+  try{
+    let settings;
+    if(translationChat){
+      settings=translationSettings();
+      const mode=fields.outgoing.value;
+      const outgoing=mode==='language'?translationLanguage(fields.outLanguage.value.trim()):mode;
+      if(!outgoing)throw new Error('Enter an outgoing language code.');
+      const key=translationChatKey(translationChat.connId,translationChat.target);
+      delete settings.chats[key];
+      settings.chats[key]={incoming:fields.incoming.value,outgoing};
+      settings.chats=Object.fromEntries(Object.entries(settings.chats).slice(-150));
+    }else settings=readTranslationSettings(fields);
+    if(!storeTranslationSettings(settings))return;
+    clearTranslationData();
+    renderChat();
+    renderSplitChat();
+    showToast('Translation settings saved');
+  }catch(error){fields.notice.textContent=error.message;}
+}
+
 function _aiCard(ai){
   ai=ai||{};
   const prov=ai.provider||'openai';
-  const provs=[['openai','OpenAI (ChatGPT)'],['anthropic','Anthropic (Claude)'],['xai','xAI (Grok)'],['google','Google (Gemini)'],['perplexity','Perplexity'],['openrouter','OpenRouter'],['groq','Groq'],['mistral','Mistral'],['openai-codex','ChatGPT — Sign in (OAuth / Codex)'],['custom','Custom (OpenAI-compatible)']];
+  const provs=AI_PROVIDER_OPTIONS;
   return `
    <div class="adm-card">
     <div class="adm-ct">🤖 AI Chatbot</div>

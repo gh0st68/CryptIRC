@@ -1065,6 +1065,39 @@ body.ts-custom .msg-ts { width:auto; min-width:72px; white-space:nowrap; }
 .msg-link-preview-title { font-size:12px; font-weight:600; color:var(--text); line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .msg-link-preview-desc { font-size:10px; color:var(--text3); margin-top:3px; line-height:1.3; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .msg-link-preview-img { display:block; width:100%; max-height:160px; object-fit:cover; border-radius:var(--media-radius-sm, 6px); margin-top:6px; }
+
+.translation-panel { width:min(470px,calc(100% - 24px)); max-height:min(760px,calc(100dvh - 24px)); padding:0; border:1px solid var(--border2); border-radius:14px; background:var(--bg2); color:var(--text); font:13px var(--sans); box-shadow:0 20px 60px #0008; }
+.translation-panel::backdrop { background:#0009; }
+.translation-panel form { display:flex; flex-direction:column; max-height:inherit; }
+.translation-panel header,.translation-panel footer { flex:none; display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border); }
+.translation-panel h2 { font-size:16px; margin:0; overflow-wrap:anywhere; }
+.translation-panel footer { border-bottom:0; border-top:1px solid var(--border); justify-content:flex-end; }
+.translation-panel section,.translation-fields { display:grid; gap:8px; }
+.translation-fields { min-height:0; overflow:auto; }
+.translation-panel form > .translation-fields { padding:16px 18px; }
+.translation-panel [hidden],.translation-result[hidden] { display:none; }
+.translation-panel label { font-weight:600; }
+.translation-panel input:not([type=checkbox]),.translation-panel select { width:100%; padding:9px; border:1px solid var(--border2); border-radius:6px; color:var(--text); background:var(--bg1); font:inherit; }
+.translation-panel input[type=checkbox] { accent-color:var(--accent); }
+.translation-check { display:flex; gap:8px; align-items:center; min-height:30px; }
+.translation-panel button,.translation-button { color:var(--text); background:var(--bg3); border:1px solid var(--border2); border-radius:6px; padding:6px 10px; cursor:pointer; font:inherit; }
+.translation-panel button:disabled,.translation-button:disabled { opacity:.65; cursor:default; }
+.translation-panel .translation-close { font-size:19px; padding:1px 9px; }
+.translation-panel .translation-save { border-color:var(--accent); font-weight:700; }
+.translation-panel .translation-configure { justify-self:start; }
+.translation-buttons { display:flex; gap:6px; flex-wrap:wrap; }
+.translation-hint,.translation-key-state { color:var(--text3); font-size:12px; line-height:1.5; }
+.translation-hint,.translation-status { margin:1px 0; }
+.translation-key-state { font-weight:400; margin-left:5px; }
+.translation-status { min-height:1.3em; overflow-wrap:anywhere; }
+.translation-action { display:block; margin:3px 0 2px; font:12px/1.45 var(--sans); }
+.translation-button { color:var(--text2); padding:2px 7px; background:transparent; border-color:transparent; }
+.translation-button:hover,.translation-button:focus-visible { color:var(--text); border-color:var(--border2); background:var(--bg2); }
+.translation-result { display:block; border-inline-start:2px solid var(--accent); color:var(--text); background:var(--bg2); white-space:pre-wrap; overflow-wrap:anywhere; border-radius:4px; margin:3px 0; padding:4px 8px; max-width:65ch; unicode-bidi:plaintext; }
+.link-preview-container { display:block; }
+.link-preview-container > .translation-action { max-width:min(340px,85%); }
+@media (pointer:coarse) { .translation-button { min-height:30px; } .translation-panel input:not([type=checkbox]),.translation-panel select { font-size:16px; } }
+
 /* X post preview cards (static/app.js "X previews" section) */
 .msg-tweet { box-sizing:border-box; width:100%; max-width:360px; min-width:0; margin:8px 0; padding:10px; border:1px solid var(--border); border-radius:var(--media-radius-sm,8px); background:var(--bg2); color:var(--text); font:inherit; line-height:1.45; overflow-wrap:anywhere; overflow-anchor:none; }
 .msg-tweet-expanded { max-width:520px; }
@@ -3755,6 +3788,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <button class="settings-menu-item" onclick="showSecurityPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Security</button>
           <button class="settings-menu-item" onclick="showIgnorePanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>Ignored Users</button>
           <div class="settings-menu-sect">Tools</div>
+          <button class="settings-menu-item" onclick="showTranslation();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h12m-6-2v2m3 0c-1 5-4 8-8 10m2-6c2 3 4 4 7 5m1 7 4-10 4 10m-6-4h4"/></svg>Translation</button>
           <button class="settings-menu-item" onclick="showBotPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="8.5" cy="16" r="1.3"/><circle cx="15.5" cy="16" r="1.3"/><path d="M12 7v4M12 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM2 14v3M22 14v3"/></svg>Bots</button>
           <button class="settings-menu-item" onclick="showNotepad();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Notepad</button>
           <button class="settings-menu-item" onclick="showStatsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>Channel Stats</button>
@@ -4109,6 +4143,63 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
   </div>
 </div>
 <style>#caps-overlay.show{display:flex !important;}</style>
+
+<dialog id="translation-panel" class="translation-panel" aria-labelledby="translation-heading" onclose="if(!this.open)closeTranslationPanel()">
+  <form onsubmit="saveTranslationPanel(event)" autocomplete="off">
+    <header><h2 id="translation-heading">Translation</h2><button type="button" class="translation-close" aria-label="Close" onclick="this.closest('dialog').close()">×</button></header>
+    <div class="translation-fields">
+      <section data-translation="general">
+        <label class="translation-check"><input data-translation="enabled" type="checkbox"> Enable translation</label>
+        <label for="translation-language">Reading language</label>
+        <input id="translation-language" data-translation="language" list="translation-languages" maxlength="35" placeholder="en">
+        <label class="translation-check"><input data-translation="auto" type="checkbox"> Automatically translate new incoming messages and previews</label>
+        <label for="translation-provider">Provider</label>
+        <select id="translation-provider" data-translation="provider" onchange="populateTranslationProvider()"></select>
+        <p class="translation-hint" data-translation="google">Use a Google Cloud project with Cloud Translation Basic enabled.</p>
+        <p class="translation-hint" data-translation="perplexity" hidden>Use a Perplexity Agent API model ID. Translation requests use no search tools.</p>
+        <p class="translation-hint" data-translation="codex" hidden>Imports the same Codex sign-in bundle as Bots. Availability depends on your ChatGPT account.</p>
+        <div data-translation="modelRow" class="translation-fields" hidden>
+          <label for="translation-model">Model ID</label>
+          <input id="translation-model" data-translation="model" maxlength="200" spellcheck="false">
+        </div>
+        <div data-translation="baseRow" class="translation-fields" hidden>
+          <label for="translation-base">Custom base URL</label>
+          <input id="translation-base" data-translation="base" maxlength="2048" type="url" placeholder="https://example.com/v1">
+        </div>
+        <label for="translation-credential">Provider credential <span data-translation="keyState" class="translation-key-state"></span></label>
+        <input id="translation-credential" data-translation="credential" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" maxlength="32768">
+        <div class="translation-buttons">
+          <button type="button" onclick="saveTranslationCredential(false)">Save credential</button>
+          <button type="button" data-translation="removeKey" onclick="saveTranslationCredential(true)">Remove</button>
+          <button type="button" data-translation="test" onclick="testTranslationProvider()">Test provider</button>
+        </div>
+        <p class="translation-hint">Credentials are encrypted in your vault and shared with Bots where applicable. Translation sends text to your chosen provider. Automatic translation skips encrypted conversations.</p>
+      </section>
+      <section data-translation="chat" hidden>
+        <p class="translation-hint" data-translation="enableNotice" hidden>Enable translation in Settings to apply these choices.</p>
+        <p class="translation-hint" data-translation="protection" hidden>Automatic translation is unavailable while this conversation is encrypted or its status is loading.</p>
+        <label for="translation-incoming">Incoming messages and previews</label>
+        <select id="translation-incoming" data-translation="incoming">
+          <option value="default">Use the default</option><option value="on">Translate automatically</option><option value="off">Translate on demand</option>
+        </select>
+        <label for="translation-outgoing">Outgoing messages</label>
+        <select id="translation-outgoing" data-translation="outgoing" onchange="document.querySelector('[data-translation=outLanguageRow]').hidden=this.value!=='language'">
+          <option value="off">Send as typed</option><option value="language">Translate to a language</option><option value="peer" data-translation="peer">Match the other person’s last message</option>
+        </select>
+        <div class="translation-fields" data-translation="outLanguageRow" hidden>
+          <label for="translation-out-language">Outgoing language</label>
+          <input id="translation-out-language" data-translation="outLanguage" list="translation-languages" maxlength="35" placeholder="de">
+        </div>
+        <p class="translation-hint">Translated drafts are sent when you press Send. If translation fails, the draft stays in the composer.</p>
+        <button type="button" class="translation-configure" onclick="showTranslation()">Translation settings</button>
+      </section>
+      <datalist id="translation-languages"></datalist>
+      <p class="translation-status" data-translation="notice" role="status"></p>
+    </div>
+    <footer><button type="submit" class="translation-save">Save settings</button></footer>
+  </form>
+</dialog>
+
 <!-- Security panel overlay -->
 <div id="security-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeSecurityPanel()">
   <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:min(80vh,80dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">

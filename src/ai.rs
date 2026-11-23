@@ -87,7 +87,7 @@ fn client() -> &'static reqwest::Client {
 }
 
 /// Read a response body, refusing (not truncating) one larger than `max` bytes.
-async fn read_body_capped(mut resp: reqwest::Response, max: usize, who: &str) -> Result<String, String> {
+pub(crate) async fn read_body_capped(mut resp: reqwest::Response, max: usize, who: &str) -> Result<String, String> {
     if resp.content_length().map_or(false, |n| n > max as u64) {
         return Err(format!("{}: response too large", who));
     }

@@ -2857,7 +2857,7 @@ fn ai_keys_path(data_dir: &str, username: &str) -> std::path::PathBuf {
 }
 
 /// Decrypt the AI key for `provider` (None if vault locked / no key / not set).
-async fn load_ai_key(state: &AppState, username: &str, provider: &str) -> Option<String> {
+pub(crate) async fn load_ai_key(state: &AppState, username: &str, provider: &str) -> Option<String> {
     if !state.crypto.is_unlocked(username).await { return None; }
     let enc = tokio::fs::read_to_string(ai_keys_path(&state.data_dir, username)).await.ok()?;
     let pt = state.crypto.decrypt(username, enc.trim()).await.ok()?;
@@ -2886,7 +2886,7 @@ pub async fn ai_providers_with_keys(state: &AppState, username: &str) -> Vec<Str
 /// aside as `.corrupt.<ts>` rather than silently replaced by a map holding one key.
 pub async fn save_ai_key(state: &AppState, username: &str, provider: &str, key: &str) -> Result<(), String> {
     if !state.crypto.is_unlocked(username).await { return Err("unlock your vault first".into()); }
-    if !valid_provider(provider) { return Err("unknown provider".into()); }
+    if !valid_provider(provider) && provider != crate::translation::GOOGLE_CLOUD { return Err("unknown provider".into()); }
     let path = ai_keys_path(&state.data_dir, username);
     let lock = save_lock(&format!("ai_keys/{}", crate::safe_username(username)));
     let _guard = lock.lock().await;

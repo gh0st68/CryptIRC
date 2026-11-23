@@ -699,6 +699,10 @@ impl AuthManager {
         self.check_rate_limit_with_max(&format!("mcp:{username}"), 120)
     }
 
+    pub(crate) fn check_translation_rate_limit(&self, username: &str) -> Result<()> {
+        self.check_rate_limit_with_max(&format!("translation:{username}"), 60)
+    }
+
     /// #13: WS-path rate limit for vault unlock / passphrase change. These trigger a
     /// 64-MiB Argon2id KDF, so an authenticated user spamming them over a WebSocket
     /// can exhaust CPU/RAM. Throttle per-username on the WS path the same way the
