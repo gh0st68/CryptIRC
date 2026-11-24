@@ -7,22 +7,10 @@
  * All crypto runs in the browser via WebCrypto (SubtleCrypto).
  *
  * 2026-11-01 audit fix pass (C1/C2/H5/H6 + MEDIUMs):
- *   C1 — the key that wraps every stored E2E blob (identity keys, ratchet state,
- *        channel PSKs, prekeys) is no longer derived by the server. The browser
- *        generates a random E2E master key and wraps it ("keyring") under a key it
- *        derives itself: HKDF( PBKDF2-SHA256(vault passphrase, per-user random salt,
- *        600k) || pepper ), where the pepper is a per-user value the server derives
- *        from the vault master key and hands ONLY to a socket that just proved the
- *        passphrase. The unwrapped master key is cached per browser as a
- *        NON-EXTRACTABLE CryptoKey in IndexedDB ("cryptirc-e2e"). Blobs are versioned
- *        ("e2e2." prefix) and bound with AEAD associated data to what they are
- *        (identity / session:<peer> / chan:<#chan> / state), so the server can't
- *        swap one for another. Legacy blobs (server key) are re-wrapped once on the
- *        first unlock; then the server refuses legacy-format writes.
- *        RESIDUAL: the passphrase is still typed into a page the server delivers and
- *        is sent to the server at vault unlock; a MODIFIED server/app.js could
- *        capture it. What is fixed: disk theft, a memory dump after unlock, or an
- *        admin reading the blobs no longer yields the E2E keys.
+ *   C1 — the browser wraps its storage master key with a generated recovery code.
+ *        Only the wrapped keyring is synced. Vault credentials are used solely to
+ *        open pre-upgrade keyrings. The browser caches non-extractable CryptoKeys
+ *        in IndexedDB and binds stored blobs to their slots with AEAD.
  *   C2 — a changed identity key never overwrites the pin; the peer stays "changed"
  *        (warned on every message, new key not used for encrypt or decrypt) until
  *        the user runs /encrypt accept (fingerprints shown) or /encrypt reject.
@@ -59,9 +47,12 @@ const E2E_MAX_SKIP      = 100;   // max buffered out-of-order message keys per s
 const OTPK_REFILL_BELOW = 10;   // replenish when server reports fewer than this (L5)
 const OTPK_BATCH_SIZE   = 20;   // keys generated per replenishment batch
 // C1: blob / keyring format + browser KDF.
-const E2E_BLOB_PREFIX    = 'e2e2.';   // blob wrapped under the client-held E2E master key
-const E2E_KEYRING_PREFIX = 'e2k2.';   // wrapped master key (stored opaque by the server)
-const E2E_KDF_ITER       = 600000;    // PBKDF2-SHA256 iterations (OWASP 2023)
+const E2E_STORAGE_VERSION = 3;
+const E2E_BLOB_PREFIX    = 'e2e3.';
+const E2E_KEYRING_PREFIX = 'e2k3.';
+const E2E_V2_BLOB       = 'e2e2.';
+const E2E_V2_KEYRING    = 'e2k2.';
+const E2E_KDF_ITER      = 600000;    // legacy v2 PBKDF2-SHA256 iterations
 const E2E_IDB_NAME       = 'cryptirc-e2e';  // IndexedDB db (wiped with other cryptirc* storage on logout)
 const E2E_IDB_STORE      = 'keys';
 // H6: IRC line budget. 512 bytes incl. CRLF; the server prepends ":nick!user@host
@@ -303,6 +294,7 @@ async function _e2eKeyCmdConfirm(msg, okLabel) {
 // ─── State ────────────────────────────────────────────────────────────────────
 
 window.E2E = {
+  storageVersion: E2E_STORAGE_VERSION,
   // app.js gates every send on `E2E.ready || E2E.channelKeys[target]` before calling
   // e2eEncryptOutgoing. That gate used to let sends to an E2E target go out in
   // cleartext whenever the identity wasn't loaded yet. e2eEncryptOutgoing must see
@@ -569,7 +561,8 @@ function _e2eResolveWaiter(ev) {
 
 // ─── C1: client-held key management ───────────────────────────────────────────
 
-function _e2eBlobAAD(ctx) { return new TextEncoder().encode('CryptIRC-E2E-BLOB-v2\n' + ctx); }
+function _e2eBlobAAD(ctx, version = 3) { return new TextEncoder().encode('CryptIRC-E2E-BLOB-v' + version + '\n' + ctx); }
+function _e2eWrappedBlob(blob) { return blob.startsWith(E2E_BLOB_PREFIX) || blob.startsWith(E2E_V2_BLOB); }
 function _e2eCtxSession(partner) { return 'session\n' + partner; }
 function _e2eCtxChan(channel)    { return 'chan\n' + _e2eK(channel); }
 
@@ -577,11 +570,8 @@ async function _e2eImportAesKey(raw, extractable = false) {
   return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, extractable, ['encrypt', 'decrypt']);
 }
 
-// KEK = HKDF-SHA256( PBKDF2-SHA256(passphrase, salt, iter) || pepper , info=user ).
-// The PBKDF2 half needs the passphrase (which the server does not keep); the pepper
-// half needs the vault master key (Argon2-protected at rest), so neither a stolen
-// data dir nor a memory dump of the running server is enough on its own.
-async function _e2eDeriveKek(pass, saltB64, iter, pepperB64, user) {
+// Read-only support for the old keyring during migration.
+async function _e2eDeriveV2Kek(pass, saltB64, iter, pepperB64, user) {
   const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveBits']);
   const pb = new Uint8Array(await crypto.subtle.deriveBits(
     { name: 'PBKDF2', hash: 'SHA-256', salt: base64ToBytes(saltB64), iterations: iter }, base, 256));
@@ -599,9 +589,17 @@ async function _e2eDeriveKek(pass, saltB64, iter, pepperB64, user) {
 // cheap (it:1) — and salt / wrapped key / check value must have their real sizes.
 // Anything else is refused (fail closed: E2E stays locked, nothing is re-wrapped).
 function _e2eKringParse(blob) {
-  if (typeof blob !== 'string' || !blob.startsWith(E2E_KEYRING_PREFIX) || blob.length > 4096) throw new Error('bad keyring');
+  if (typeof blob !== 'string' || blob.length > 4096) throw new Error('bad keyring');
+  const v = blob.startsWith(E2E_KEYRING_PREFIX) ? 3 : blob.startsWith(E2E_V2_KEYRING) ? 2 : 0;
+  if (!v) throw new Error('bad keyring');
   const o = JSON.parse(atob(blob.slice(E2E_KEYRING_PREFIX.length)));
-  if (!o || o.v !== 2 || typeof o.s !== 'string' || typeof o.w !== 'string' || !Number.isInteger(o.it)) throw new Error('bad keyring');
+  if (!o || o.v !== v || typeof o.s !== 'string' || typeof o.w !== 'string') throw new Error('bad keyring');
+  if (v === 3) {
+    const w = base64ToBytes(o.w).length;
+    if (base64ToBytes(o.s).length !== 16 || (w !== 60 && w !== 92) ||
+        typeof o.c !== 'string' || base64ToBytes(o.c).length !== 52) throw new Error('bad keyring (field sizes)');
+    return o;
+  }
   if (o.it !== E2E_KDF_ITER || (o.kdf !== undefined && o.kdf !== 'pbkdf2-sha256')) throw new Error('bad keyring (unexpected KDF parameters)');
   let sl = 0, wl = 0, cl = 0;
   try { sl = base64ToBytes(o.s).length; wl = base64ToBytes(o.w).length; cl = typeof o.c === 'string' ? base64ToBytes(o.c).length : 0; } catch (_) { throw new Error('bad keyring'); }
@@ -620,26 +618,56 @@ async function _e2eGcmDec(key, data, aad) {
 // Wrap raw master-key bytes under a fresh salt. Also stores a key-check value (a
 // constant encrypted under the master key itself) so a browser's cached key can be
 // validated against the current keyring without the passphrase.
-async function _e2eWrapKeyring(rawM, pass, pepperB64, user) {
+async function _e2eRecoveryKek(code, salt, user) {
+  const normalized = String(code).trim();
+  if (!/^[A-Za-z0-9_-]{43}$/.test(normalized)) throw new Error('invalid recovery code');
+  const raw = base64ToBytes(normalized.replace(/-/g, '+').replace(/_/g, '/') + '=');
+  try {
+    const key = await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveKey']);
+    return await crypto.subtle.deriveKey({
+      name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode('CryptIRC-E2E-KEK-v3\n' + user),
+    }, key, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  } finally { raw.fill(0); }
+}
+async function _e2eWrapKeyring(rawM, previous, code, user) {
   const salt = bytesToBase64(crypto.getRandomValues(new Uint8Array(16)));
-  const kek = await _e2eDeriveKek(pass, salt, E2E_KDF_ITER, pepperB64, user);
+  const kek = await _e2eRecoveryKek(code, base64ToBytes(salt), user);
   const enc = new TextEncoder();
-  const w = await _e2eGcmEnc(kek, rawM, enc.encode('CryptIRC-E2E-KEYRING-v2\n' + user));
+  const keys = previous ? concat(rawM, previous) : rawM;
+  let w;
+  try { w = await _e2eGcmEnc(kek, keys, enc.encode('CryptIRC-E2E-KEYRING-v3\n' + user)); }
+  finally { if (previous) keys.fill(0); }
   const M = await _e2eImportAesKey(rawM);
-  const c = await _e2eGcmEnc(M, enc.encode('CryptIRC-E2E-KEYCHECK-v2'), enc.encode(user));
-  const o = { v: 2, kdf: 'pbkdf2-sha256', it: E2E_KDF_ITER, s: salt, w: bytesToBase64(w), c: bytesToBase64(c) };
+  const c = await _e2eGcmEnc(M, enc.encode('CryptIRC-E2E-KEYCHECK-v3'), enc.encode(user));
+  const o = { v: 3, s: salt, w: bytesToBase64(w), c: bytesToBase64(c) };
   return E2E_KEYRING_PREFIX + btoa(JSON.stringify(o));
 }
-async function _e2eUnwrapKeyring(blob, pass, pepperB64, user) {
+async function _e2eUnwrapV2Keyring(blob, pass, pepperB64, user) {
   const o = _e2eKringParse(blob);
-  const kek = await _e2eDeriveKek(pass, o.s, o.it, pepperB64, user);
+  if (o.v !== 2) throw new Error('expected v2 keyring');
+  const kek = await _e2eDeriveV2Kek(pass, o.s, o.it, pepperB64, user);
   return _e2eGcmDec(kek, base64ToBytes(o.w), new TextEncoder().encode('CryptIRC-E2E-KEYRING-v2\n' + user));
+}
+async function _e2eUnwrapKeyring(blob, code, user) {
+  const o = _e2eKringParse(blob);
+  if (o.v !== 3) throw new Error('expected v3 keyring');
+  const kek = await _e2eRecoveryKek(code, base64ToBytes(o.s), user);
+  const raw = await _e2eGcmDec(kek, base64ToBytes(o.w), new TextEncoder().encode('CryptIRC-E2E-KEYRING-v3\n' + user));
+  try {
+    const k = await _e2eImportAesKey(raw.subarray(0, 32));
+    if (!(await _e2eKeyringCheck(blob, k, user))) throw new Error('invalid key check');
+    const previous = raw.length === 64 ? await _e2eImportAesKey(raw.subarray(32)) : null;
+    const finalized = previous
+      ? await _e2eWrapKeyring(raw.subarray(0, 32), null, code, user)
+      : null;
+    return { k, previous, finalized };
+  } finally { raw.fill(0); }
 }
 async function _e2eKeyringCheck(blob, M, user) {
   try {
     const o = _e2eKringParse(blob);
     const pt = await _e2eGcmDec(M, base64ToBytes(o.c), new TextEncoder().encode(user));
-    return new TextDecoder().decode(pt) === 'CryptIRC-E2E-KEYCHECK-v2';
+    return new TextDecoder().decode(pt) === 'CryptIRC-E2E-KEYCHECK-v' + o.v;
   } catch (_) { return false; }
 }
 
@@ -688,10 +716,10 @@ async function _e2eIdbOp(mode, fn) {
   } finally { try { db.close(); } catch (_) {} }
 }
 async function _e2eIdbGetKey(user) {
-  try { const rec = await _e2eIdbOp('readonly', s => s.get('m:' + user)); return rec && rec.k ? rec.k : null; } catch (_) { return null; }
+  try { const rec = await _e2eIdbOp('readonly', s => s.get('m:' + user)); return rec && rec.v === 3 && rec.k ? rec : null; } catch (_) { return null; }
 }
-async function _e2eIdbPutKey(user, key) {
-  try { await _e2eIdbOp('readwrite', s => s.put({ k: key, v: 1 }, 'm:' + user)); return true; } catch (_) { return false; }
+async function _e2eIdbPutKey(user, keys) {
+  try { await _e2eIdbOp('readwrite', s => s.put({ ...keys, v: 3 }, 'm:' + user)); return true; } catch (_) { return false; }
 }
 async function _e2eIdbDelKey(user) {
   try { await _e2eIdbOp('readwrite', s => s.delete('m:' + user)); } catch (_) {}
@@ -702,7 +730,7 @@ async function e2eForgetDevice() { await _e2eIdbDelKey(_e2eUser()); }
 
 // ─── Blob encrypt / decrypt ───────────────────────────────────────────────────
 
-// v2 blob: "e2e2." + base64(nonce || AES-GCM(masterKey, plain, AAD = context)).
+// Versioned blob: prefix + base64(nonce || AES-GCM(masterKey, plain, AAD)).
 // The context binds a blob to its slot (identity / session:<partner> / chan:<#chan>),
 // so a server serving one channel's key blob under another name, or one peer's session
 // under another peer, fails authentication instead of being silently used.
@@ -724,6 +752,11 @@ async function aesDecryptBlobEx(blob, ctx) {
     E2E._v2Slots.add(ctx);
     return { pt, legacy: false };
   }
+  if (blob.startsWith(E2E_V2_BLOB)) {
+    if (!E2E._previousKey) throw new Error('E2E v2 migration key unavailable');
+    const pt = await _e2eGcmDec(E2E._previousKey, base64ToBytes(blob.slice(E2E_V2_BLOB.length)), _e2eBlobAAD(ctx, 2));
+    return { pt, legacy: false };
+  }
   // Legacy (server-key) blobs are only ever read during the one-time migration. Once
   // the account is migrated the legacy key is gone and every non-v2 blob is refused —
   // a server (or an old backup) can't feed an old identity / ratchet / PSK back in —
@@ -738,29 +771,19 @@ async function aesDecryptBlob(blob, ctx) { return (await aesDecryptBlobEx(blob, 
 
 // ─── Vault hooks (called from app.js) ─────────────────────────────────────────
 
-// app.js doUnlock(): remember the passphrase the user just typed so the reply to this
-// unlock (which carries the pepper) can derive the E2E key-encryption key. Memory only,
-// cleared on use or after 60s.
+// The vault passphrase is retained briefly to migrate a pre-upgrade keyring.
 function e2eNotePassphrase(pass) {
   E2E._pendingPass = pass || null;
   clearTimeout(E2E._passTimer);
   if (pass) E2E._passTimer = setTimeout(() => { E2E._pendingPass = null; E2E._devicePromptPending = false; }, 60000);
 }
-// app.js showChangePass(): old + new passphrase so the client keyring can be re-wrapped
-// once the server confirms the change.
-function e2eNotePassphraseChange(oldPass, newPass) {
-  E2E._pendingPassChange = { old: oldPass, new: newPass };
-  clearTimeout(E2E._chgTimer);
-  E2E._chgTimer = setTimeout(() => { E2E._pendingPassChange = null; }, 60000);
-}
 function e2eOnVaultError(message) {
   if (E2E._devicePromptPending) {
     E2E._lockReason = 'declined';
-    E2E._devicePromptPending = false; E2E._pendingPass = null;
-    _e2eToast('🔐 ' + (message || 'Incorrect passphrase') + ' — E2E is still locked on this device');
-    _e2eSys(_e2eStatusTarget(), '🔐 ' + (message || 'Incorrect passphrase') + ' — E2E is still locked on this device (/encrypt unlock to retry)');
+    E2E._devicePromptPending = false;
+    _e2eSys(_e2eStatusTarget(), '🔐 ' + (message || 'Incorrect vault passphrase') + ' — run /encrypt unlock to retry');
   }
-  E2E._pendingPassChange = null;
+  e2eNotePassphrase(null);
 }
 // r3 (w-web INFO "console noise on vault lock"): a vault lock (any device) wipes the E2E
 // key while a boot / identity setup may still be running; what fails after that is an
@@ -796,14 +819,14 @@ async function e2eOnVaultUnlocked(ev) {
   const legacy = ev.e2e_legacy_key || ev.e2e_enc_key || '';
   if (legacy && !E2E._legacyKey && !E2E._migrated) { try { E2E._legacyKey = await _e2eImportAesKey(base64ToBytes(legacy)); } catch (_) {} }
   if (ev.e2e_pepper) E2E._pepper = ev.e2e_pepper;
-  const proven = !!ev.e2e_pepper;
-  if (proven && E2E._pendingPassChange) {
-    const chg = E2E._pendingPassChange; E2E._pendingPassChange = null;
-    return _e2eRun(() => _e2eRewrapKeyring(chg.old, chg.new));
+  const pass = ev.e2e_pepper ? E2E._pendingPass : null;
+  const verified = ev.vault_verified || ev.e2e_pepper || ev.e2e_legacy_key;
+  const resumeSetup = !!(verified && E2E._devicePromptPending);
+  if (verified) {
+    e2eNotePassphrase(null);
+    E2E._devicePromptPending = false;
   }
-  const pass = proven ? E2E._pendingPass : null;
-  if (proven) { E2E._pendingPass = null; E2E._devicePromptPending = false; }
-  return _e2eRun(() => _e2eBoot(pass));
+  return _e2eRun(() => _e2eBoot(pass, resumeSetup));
 }
 // Back-compat entry point (an app.js from before this change called e2eInit(key)).
 function e2eInit(e2eEncKeyB64) { return e2eOnVaultUnlocked({ e2e_enc_key: e2eEncKeyB64 || '' }); }
@@ -871,11 +894,11 @@ async function _e2eResync() {
     const user = _e2eUser();
     const kr = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
     if (_e2eBootStale(gen) || !kr) return;             // no answer: stays blocked, retried
-    if (kr.blob && !_e2eKringValid(kr.blob)) {
+    if (!kr.blob || !kr.blob.startsWith(E2E_KEYRING_PREFIX) || !_e2eKringValid(kr.blob)) {
       if (!E2E._resyncBadNotice) { E2E._resyncBadNotice = true; _e2eSys(_e2eStatusTarget(), '⚠️ E2E: the server returned an INVALID E2E keyring after the reconnect — messages stay blocked here until it is fixed (reload to retry).'); }
       return;
     }
-    if (kr.blob && !(await _e2eKeyringCheck(kr.blob, E2E.e2eEncKey, user))) {
+    if (!(await _e2eKeyringCheck(kr.blob, E2E.e2eEncKey, user))) {
       // The keyring was replaced elsewhere: this device's key no longer opens it. Same as
       // a stale cached key at boot — drop it and boot again (asks for the passphrase).
       if (_e2eBootStale(gen)) return;
@@ -935,6 +958,7 @@ async function e2eOnVaultLocked(opts) {
   E2E._vaultUp = false;
   E2E._lockGen++;
   if (!(opts && opts.deviceOnly)) E2E._serverLocked = true;
+  _e2eCancelPrompt();
   _e2eCloseIdentityQuestions();   // r4 (N3)
   clearTimeout(E2E._stateBootTimer);
   _e2eWipeMemory();
@@ -949,8 +973,9 @@ async function e2eOnVaultLocked(opts) {
 function _e2eWipeMemory() {
   E2E.keyReady = false; E2E.identityReady = false;
   E2E._v2Slots = new Set();
-  E2E.e2eEncKey = null; E2E._legacyKey = null; E2E._pepper = null; E2E.identityKeys = null;
-  E2E._pendingPass = null; E2E._pendingPassChange = null; E2E._devicePromptPending = false;
+  E2E.e2eEncKey = null; E2E._previousKey = null; E2E._finalKeyring = null; E2E._legacyKey = null; E2E._pepper = null; E2E.identityKeys = null;
+  e2eNotePassphrase(null);
+  E2E._devicePromptPending = false;
   for (const k of Object.keys(E2E.dmSessions)) delete E2E.dmSessions[k];
   for (const k of Object.keys(E2E.channelKeys)) delete E2E.channelKeys[k];
   E2E._chanKeyGen = Object.create(null);
@@ -970,44 +995,51 @@ function e2eOnSessionEnd() {
   E2E._lockGen++;
   clearTimeout(E2E._stateBootTimer);
   _e2eWipeMemory();
-  E2E._bootPhase = undefined; E2E._krReceived = false; E2E._serverHints = null;
+  E2E._bootPhase = undefined; E2E._krReceived = false; E2E._serverHints = null; E2E._migrated = false;
   E2E._autoPrompted = false; E2E._lockedNoticeShown = false; E2E._lockedHold = [];
 }
-const E2E_DEVICE_PROMPT = 'Enter your vault passphrase to enable end-to-end encryption on this device.';
 function _e2eCancelPrompt() {
-  if (!E2E._promptOpen) return;
-  E2E._promptCancelled = true;
+  if (!E2E._promptText) return;
   try {
-    const msgEl = document.getElementById('custom-prompt-msg');
-    const btn = document.getElementById('custom-prompt-cancel');
-    // Only OUR prompt (the overlay is shared by every customPrompt).
-    if (msgEl && btn && msgEl.textContent === E2E_DEVICE_PROMPT && typeof btn.onclick === 'function') btn.onclick();
+    const msg = document.getElementById('custom-prompt-msg');
+    const cancel = document.getElementById('custom-prompt-cancel');
+    if (msg && cancel && msg.textContent === E2E._promptText && typeof cancel.onclick === 'function') cancel.onclick();
   } catch (_) {}
 }
-
-// Ask for the vault passphrase to enable E2E in this browser (vault already unlocked
-// server-side, e.g. a second device, a new tab after logout/login, or cleared storage).
-async function e2ePromptDeviceUnlock() {
-  if (E2E.keyReady || E2E._promptOpen) return;
-  E2E._promptOpen = true; E2E._promptCancelled = false;
+async function _e2ePrompt(message, value = '', masked = true) {
+  E2E._promptText = message;
   try {
-    const msg = E2E_DEVICE_PROMPT;
-    let p = null;
-    if (typeof customPrompt === 'function') p = await customPrompt(msg, '', true);
-    else if (typeof prompt === 'function') p = prompt(msg);
-    if (E2E._promptCancelled) return;        // session ended / key arrived from another tab
-    if (!p) {
-      E2E._lockReason = 'declined';
-      if (!E2E.keyReady) _e2eSys(_e2eStatusTarget(), '🔐 E2E is locked on this device — run /encrypt unlock to enable it');
-      return;
-    }
-    if (E2E.keyReady) return;
-    e2eNotePassphrase(p);
-    E2E._devicePromptPending = true;
-    // The server re-verifies the passphrase (rate-limited) and replies vault_unlocked
-    // with the pepper → e2eOnVaultUnlocked → boot.
-    wsend({ type: 'unlock_vault', passphrase: p });
-  } finally { E2E._promptOpen = false; }
+    return await customPrompt(message, value, masked, true);
+  } finally { E2E._promptText = null; }
+}
+async function _e2eShowSharedKey(words) {
+  if (E2E.keyReady && !E2E._promptText) {
+    await _e2ePrompt('Copy this key and share it over a trusted, encrypted connection.', words, false);
+  }
+}
+function _e2eDiscardSetupCode() {
+  _e2eSys(_e2eStatusTarget(), '🔐 The recovery code just shown was not saved. Discard it and run /encrypt unlock.');
+}
+async function _e2eSetupCode(gen) {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  const code = bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  bytes.fill(0);
+  const saved = await _e2ePrompt('Copy this E2E recovery code and save it somewhere safe. The app will confirm when it is active. You’ll need it on other devices and after clearing browser data.', code, false);
+  if (saved === code && !_e2eBootStale(gen)) {
+    const confirm = await _e2ePrompt('Paste your saved E2E recovery code to confirm.');
+    if (!_e2eBootStale(gen) && confirm?.trim() === code) return code;
+  }
+  _e2eDiscardSetupCode();
+  return null;
+}
+async function e2ePromptDeviceUnlock() {
+  if (E2E.keyReady || E2E._promptText || E2E._devicePromptPending) return;
+  if (E2E._vaultUp !== true) {
+    _e2eSys(_e2eStatusTarget(), '🔐 Unlock the vault before unlocking encrypted chats.');
+    return;
+  }
+  E2E._autoPrompted = true;
+  return _e2eRun(() => _e2eBoot(null, true));
 }
 
 // r2: server 'error' events about E2E (app.js routes them here first). Returns true
@@ -1052,49 +1084,91 @@ async function _e2eStoreKeyring(blob, migrated, expect) {
   return { ok: true, migrated: !!r.migrated };
 }
 
-async function _e2eRewrapKeyring(oldPass, newPass) {
-  const user = _e2eUser();
-  const kr = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
-  if (!kr || !kr.blob || !E2E._pepper) {
-    if (!E2E.keyReady) return _e2eBoot(newPass);
-    return;
-  }
-  let raw = null;
-  try { raw = await _e2eUnwrapKeyring(kr.blob, oldPass, E2E._pepper, user); }
-  catch (_) {
-    try { (await _e2eUnwrapKeyring(kr.blob, newPass, E2E._pepper, user)).fill(0); }  // already under the new one
-    catch (_) { _e2eSys(_e2eStatusTarget(), '🔐 Could not re-wrap your E2E keys under the new passphrase (old passphrase did not open them)'); }
-    if (!E2E.keyReady) return _e2eBoot(newPass);
-    return;
-  }
-  const blob = await _e2eWrapKeyring(raw, newPass, E2E._pepper, user);
-  raw.fill(0);
-  const r = await _e2eStoreKeyring(blob, !!kr.migrated, kr.blob);
-  if (!r || !r.ok) _e2eSys(_e2eStatusTarget(), '🔐 Warning: failed to store your re-wrapped E2E keyring — your E2E keys still open with the OLD passphrase' + (r && !r.ok ? ' (it was changed on another device meanwhile — retry the passphrase change)' : ''));
-  if (!E2E.keyReady) return _e2eBoot(newPass);
+async function _e2eProveVault(gen, message) {
+  const pass = await _e2ePrompt(message);
+  if (!pass || _e2eBootStale(gen)) return;
+  e2eNotePassphrase(pass);
+  E2E._devicePromptPending = true;
+  if (wsend({ type: 'unlock_vault', passphrase: pass }) === false) e2eOnVaultError('Connection unavailable');
 }
-
-// The keyring didn't open with the current passphrase: it was wrapped under an older
-// one (passphrase changed from an out-of-date app). Recover gracefully.
-async function _e2eRecoverOldPassphrase(blob, curPass) {
-  const user = _e2eUser();
-  const msg = 'Your E2E keys are still protected by a PREVIOUS vault passphrase (it was changed from an older app version). Enter that previous passphrase to recover them:';
-  let p = null;
-  try {
-    if (typeof customPrompt === 'function') p = await customPrompt(msg, '', true);
-    else if (typeof prompt === 'function') p = prompt(msg);
-  } catch (_) {}
-  if (!p) return null;
-  try {
-    const raw = await _e2eUnwrapKeyring(blob, p, E2E._pepper, user);
-    const nb = await _e2eWrapKeyring(raw, curPass, E2E._pepper, user);
-    const kr = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
-    await _e2eStoreKeyring(nb, !!(kr && kr.migrated), blob);
-    return raw;
-  } catch (_) {
-    _e2eSys(_e2eStatusTarget(), '🔐 That passphrase did not open your E2E keys — E2E stays locked on this device');
+async function _e2eOpenKeys(kr, user, gen, vaultPass, interactive) {
+  if (kr.needs_legacy && !E2E._legacyKey) {
+    if (interactive) await _e2eProveVault(gen, 'Enter your vault passphrase to unlock your pre-upgrade E2E data.');
     return null;
   }
+  const isV3 = kr.blob && kr.blob.startsWith(E2E_KEYRING_PREFIX);
+  if (isV3) {
+    const cached = await _e2eIdbGetKey(user);
+    if (cached && await _e2eKeyringCheck(kr.blob, cached.k, user)) {
+      if (cached.previous && base64ToBytes(_e2eKringParse(kr.blob).w).length === 60) {
+        return { keys: { k: cached.k }, remember: true };
+      }
+      return { keys: cached, remember: false };
+    }
+    if (_e2eBootStale(gen) || !interactive) return null;
+    const code = await _e2ePrompt('Enter your E2E recovery code to unlock encrypted chats on this device.');
+    if (!code || _e2eBootStale(gen)) return null;
+    try { return { keys: await _e2eUnwrapKeyring(kr.blob, code, user), remember: true }; }
+    catch (_) { _e2eSys(_e2eStatusTarget(), '🔐 That recovery code did not open your E2E keyring. Run /encrypt unlock to retry.'); return null; }
+  }
+
+  const upgrade = !!kr.blob;
+  if (upgrade && !vaultPass) {
+    if (!interactive) return null;
+    await _e2eProveVault(gen, 'Enter your vault passphrase to upgrade your existing E2E keyring.');
+    return null;
+  }
+  if (!upgrade && !interactive) return null;
+
+  return _e2eXLock('keyring-setup', async () => {
+    let previous = null;
+    let raw = null;
+    try {
+      if (upgrade) {
+        if (!E2E._pepper) return null;
+        try { previous = await _e2eUnwrapV2Keyring(kr.blob, vaultPass, E2E._pepper, user); }
+        catch (_) {
+          const oldPass = await _e2ePrompt('Enter the previous vault passphrase that protected your old E2E keyring.');
+          if (!oldPass || _e2eBootStale(gen)) return null;
+          try { previous = await _e2eUnwrapV2Keyring(kr.blob, oldPass, E2E._pepper, user); }
+          catch (_) { _e2eSys(_e2eStatusTarget(), '🔐 That passphrase did not open the old E2E keyring.'); return null; }
+        }
+      }
+      if (_e2eBootStale(gen)) return null;
+      const latest = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
+      if (!latest || _e2eBootStale(gen)) return null;
+      if (latest.blob !== kr.blob) {
+        Object.assign(kr, latest);
+        if (latest.blob?.startsWith(E2E_KEYRING_PREFIX) && _e2eKringValid(latest.blob)) {
+          return _e2eOpenKeys(kr, user, gen, null, true);
+        }
+        _e2eSys(_e2eStatusTarget(), '🔐 E2E setup changed on another device. Run /encrypt unlock to retry.');
+        return null;
+      }
+      const code = await _e2eSetupCode(gen);
+      if (!code) return null;
+      raw = crypto.getRandomValues(new Uint8Array(32));
+      const blob = await _e2eWrapKeyring(raw, previous, code, user);
+      if (_e2eBootStale(gen)) { _e2eDiscardSetupCode(); return null; }
+      let result = await _e2eStoreKeyring(blob, !!kr.migrated, kr.blob);
+      if (!result && !_e2eBootStale(gen)) {
+        const saved = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
+        if (saved?.blob === blob) result = { ok: true, migrated: saved.migrated };
+      }
+      if (!result) {
+        _e2eSys(_e2eStatusTarget(), '🔐 Could not confirm setup. Keep the recovery code and run /encrypt unlock to check.');
+        return null;
+      }
+      if (!result.ok) { _e2eDiscardSetupCode(); return null; }
+      _e2eSys(_e2eStatusTarget(), '🔐 Your saved E2E recovery code is now active.');
+      kr.blob = blob;
+      kr.migrated = !!result.migrated;
+      return { keys: await _e2eUnwrapKeyring(blob, code, user), remember: true };
+    } finally {
+      if (previous) previous.fill(0);
+      if (raw) raw.fill(0);
+    }
+  });
 }
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
@@ -1106,7 +1180,7 @@ async function _e2eRecoverOldPassphrase(blob, curPass) {
 // results if a lock happened meanwhile. Boots are serialized (_e2eRun), so the next
 // boot after an unlock starts only once this one has returned.
 function _e2eBootStale(gen) { return gen !== E2E._lockGen; }
-async function _e2eBoot(pass) {
+async function _e2eBoot(vaultPass, interactive = false) {
   // r6: a ready device does not boot again — after a reconnect it re-syncs instead.
   if (E2E.keyReady && E2E.identityReady) return E2E._resyncPending ? _e2eResync() : undefined;
   const gen = E2E._lockGen;
@@ -1118,12 +1192,13 @@ async function _e2eBoot(pass) {
     const kr = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
     if (_e2eBootStale(gen)) return;
     if (!kr) { E2E._bootPhase = 'failed'; return; }
+    kr.peers = Array.isArray(kr.peers) ? kr.peers : [];
+    kr.channels = Array.isArray(kr.channels) ? kr.channels : [];
+    if (vaultPass) E2E._autoPrompted = true;
     E2E._krReceived = true;
     E2E._lockReason = null;
     if (kr.migrated) { E2E._migrated = true; E2E._legacyKey = null; }
     E2E._serverHints = { peers: (kr.peers || []).map(_e2eK), channels: (kr.channels || []).map(_e2eK), hasIdentity: !!kr.has_identity, migrated: !!kr.migrated };
-    let M = E2E.e2eEncKey;
-    let fresh = false;
     if (kr.blob && !_e2eKringValid(kr.blob)) {
       // r2: a malformed / tampered keyring is never unwrapped (no KDF run on server-chosen
       // parameters), never replaced, and does not cost this browser its cached key.
@@ -1134,47 +1209,16 @@ async function _e2eBoot(pass) {
       try { updateE2EIndicator(_e2eStatusTarget()); } catch (_) {}
       return;
     }
-    if (!M && pass && E2E._pepper) {
-      let raw = null;
-      if (kr.blob) {
-        try { raw = await _e2eUnwrapKeyring(kr.blob, pass, E2E._pepper, user); }
-        catch (_) { raw = await _e2eRecoverOldPassphrase(kr.blob, pass); }
-      } else {
-        // First unlock with an upgraded client: create the client-held master key and
-        // store the keyring BEFORE re-wrapping anything (crash-safe: a retry finds it).
-        // r2: create-if-absent. If another device's first unlock won the race, ADOPT its
-        // keyring (nothing has been wrapped under ours yet) — never replace it.
-        raw = crypto.getRandomValues(new Uint8Array(32));
-        const blob = await _e2eWrapKeyring(raw, pass, E2E._pepper, user);
-        const r = await _e2eStoreKeyring(blob, false, '');
-        if (!r) { raw.fill(0); raw = null; _e2eSys(_e2eStatusTarget(), '🔐 Could not store your E2E keyring — E2E unavailable for now'); }
-        else if (!r.ok) {
-          raw.fill(0); raw = null;
-          console.log('[E2E] another device created the E2E keyring first — using it');
-          kr.blob = r.blob; kr.migrated = r.migrated;
-          if (kr.blob && _e2eKringValid(kr.blob)) {
-            try { raw = await _e2eUnwrapKeyring(kr.blob, pass, E2E._pepper, user); }
-            catch (_) { raw = await _e2eRecoverOldPassphrase(kr.blob, pass); }
-          }
-        }
-        else { kr.blob = blob; kr.migrated = !!r.migrated; fresh = true; }
-      }
-      if (raw && _e2eBootStale(gen)) { raw.fill(0); raw = null; }
-      if (raw) { M = await _e2eImportAesKey(raw); raw.fill(0); }
-      if (_e2eBootStale(gen)) return;
-    }
-    if (!M && kr.blob) {
-      const cached = await _e2eIdbGetKey(user);
-      if (cached && await _e2eKeyringCheck(kr.blob, cached, user)) M = cached;
-      else if (cached) await _e2eIdbDelKey(user);  // stale (keyring replaced elsewhere)
-      if (_e2eBootStale(gen)) return;
-    }
-    if (!M) {
+    const opened = E2E.e2eEncKey
+      ? { keys: { k: E2E.e2eEncKey, previous: E2E._previousKey, finalized: E2E._finalKeyring }, remember: false }
+      : await _e2eOpenKeys(kr, user, gen, vaultPass, interactive);
+    if (_e2eBootStale(gen)) return;
+    if (!opened) {
       E2E._bootPhase = 'locked';
       if (!E2E._lockReason) E2E._lockReason = 'nokey';
       const h = E2E._serverHints;
-      const inUse = h.migrated || h.peers.length || h.channels.length || _e2eHints().dm.length || _e2eHints().ch.length;
-      if (inUse && !E2E._autoPrompted) {
+      const inUse = kr.blob || h.hasIdentity || h.migrated || h.peers.length || h.channels.length || _e2eHints().dm.length || _e2eHints().ch.length;
+      if (inUse && !E2E._autoPrompted && !vaultPass) {
         E2E._autoPrompted = true;
         setTimeout(() => { if (!E2E.keyReady && E2E._vaultUp !== false) e2ePromptDeviceUnlock(); }, 1200);
       } else if ((h.hasIdentity || kr.blob) && !E2E._lockedNoticeShown) {
@@ -1185,26 +1229,43 @@ async function _e2eBoot(pass) {
       return;
     }
     if (_e2eBootStale(gen)) return;
-    E2E.e2eEncKey = M;
+    E2E.e2eEncKey = opened.keys.k;
+    E2E._previousKey = opened.keys.previous;
+    E2E._finalKeyring = opened.keys.finalized;
+    E2E._pepper = null;
     E2E.keyReady = true;
-    if (pass) {
-      await _e2eIdbPutKey(user, M);
+    if (opened.remember) {
+      await _e2eIdbPutKey(user, opened.keys);
       // A lock during the write: the lock's forget may have run before it — remove it.
       if (_e2eBootStale(gen)) { try { await _e2eIdbDelKey(user); } catch (_) {} _e2eWipeMemory(); return; }
       _e2eBcPost({ t: 'key' });
     }
     _e2eCancelPrompt();   // the key arrived (e.g. from another tab) while we were asking
     if (!kr.migrated) {
-      const ok = await _e2eMigrate(kr, fresh);
+      const ok = await _e2eMigrate(kr);
       if (_e2eBootStale(gen)) { _e2eWipeMemory(); return; }
       if (ok) {
         // r2: CAS on the keyring we migrated under — if it was replaced meanwhile, the
         // account is NOT marked migrated (the next unlock re-checks everything).
         const r = await _e2eStoreKeyring(kr.blob, true, kr.blob);
         if (r && r.ok && r.migrated) {
-          E2E._serverHints.migrated = true; E2E._migrated = true; E2E._legacyKey = null;
+          kr.migrated = true; E2E._serverHints.migrated = true; E2E._migrated = true; E2E._legacyKey = null;
           console.log('[E2E] blobs re-wrapped under the client-held key (migration complete)');
         } else if (r && !r.ok) console.warn('[E2E] keyring changed during migration — not marking migrated');
+      }
+    }
+    if (kr.migrated && E2E._previousKey && E2E._finalKeyring) {
+      const done = await _e2eRewrapV2(gen, kr);
+      if (_e2eBootStale(gen)) { _e2eWipeMemory(); return; }
+      if (done) {
+        E2E._previousKey = null;
+        E2E._finalKeyring = null;
+        E2E._spkBlob = null;
+        E2E._sessionCache = Object.create(null);
+        await _e2eIdbPutKey(user, { k: E2E.e2eEncKey });
+        if (_e2eBootStale(gen)) { await _e2eIdbDelKey(user); _e2eWipeMemory(); return; }
+      } else {
+        _e2eSys(_e2eStatusTarget(), '🔐 Some E2E data still needs to be upgraded. CryptIRC will retry next time you unlock.');
       }
     }
     await _e2eLoadState();
@@ -1221,6 +1282,9 @@ async function _e2eBoot(pass) {
     E2E._bootPhase = 'ready';
     _e2eResyncDone();     // r6: a full boot loaded everything a re-sync would
     _e2eReleaseLockedHold();
+    if (typeof showEncryptPanel === 'function' && document.getElementById('encrypt-overlay')?.classList.contains('show')) {
+      showEncryptPanel();
+    }
   } finally {
     E2E._booting = false;
     if (E2E._bootPhase === 'loading') E2E._bootPhase = 'failed';
@@ -1233,13 +1297,13 @@ async function _e2eBoot(pass) {
 // the server keeps accepting legacy writes and offering the legacy key until the
 // caller marks the keyring migrated. Returns false if a legacy blob couldn't be read
 // (so migration is retried on a later unlock instead of stranding it).
-async function _e2eMigrate(kr, fresh) {
+async function _e2eMigrate(kr) {
   let allOk = true;
   const L = E2E._legacyKey;
   // Identity
   const idEv = await _e2eReq({ type: 'e2e_load_identity' }, 'e2e_identity_blob');
   if (!idEv) allOk = false;
-  if (idEv && idEv.blob && !idEv.blob.startsWith(E2E_BLOB_PREFIX)) {
+  if (idEv && idEv.blob && !_e2eWrappedBlob(idEv.blob)) {
     if (!L) allOk = false;
     else {
       try {
@@ -1259,14 +1323,14 @@ async function _e2eMigrate(kr, fresh) {
     const sev = await _e2eReq({ type: 'e2e_load_session', partner: p }, 'e2e_session', 6000, e => e.partner === p);
     if (!sev) { allOk = false; continue; }   // no reply (dropped/timeout): retry migration later
     const blob = sev.blob || '';
-    if (!blob || blob.startsWith(E2E_BLOB_PREFIX)) continue;
+    if (!blob || _e2eWrappedBlob(blob)) continue;
     if (!L) { allOk = false; continue; }
     try {
       const { pt } = await aesDecryptBlobEx(blob, _e2eCtxSession(p));
       const name = p.startsWith('__') ? p : '__legacy__' + _e2eK(p);
       const nb = await aesEncryptBlob(pt, _e2eCtxSession(name));
       _e2eWs({ type: 'e2e_store_session', partner: name, blob: nb });
-      if (name !== p) { _e2eWs({ type: 'e2e_delete_session', partner: p }); delete E2E._sessionCache[p]; }
+      if (name !== p) { _e2eWs({ type: 'e2e_delete_session', v: E2E_STORAGE_VERSION, partner: p }); delete E2E._sessionCache[p]; }
       else E2E._sessionCache[name] = nb;
       if (name === '__spk__') E2E._spkBlob = null;
     } catch (e) { console.warn('[E2E] migrate session failed:', p, e); allOk = false; }
@@ -1286,13 +1350,13 @@ async function _e2eMigrate(kr, fresh) {
   const opens = async (blob, ctx) => { try { await aesDecryptBlobEx(blob, ctx); return true; } catch (_) { return false; } };
   const unreadable = [];
   const v1 = await _e2eReq({ type: 'e2e_load_identity' }, 'e2e_identity_blob');
-  if (!v1 || (v1.blob && !v1.blob.startsWith(E2E_BLOB_PREFIX))) return false;
+  if (!v1 || (v1.blob && !_e2eWrappedBlob(v1.blob))) return false;
   if (v1.blob && !(await opens(v1.blob, 'identity'))) unreadable.push('identity');
   const sl2 = await _e2eReq({ type: 'e2e_list_sessions' }, 'e2e_session_list');
   if (!sl2) return false;
   for (const p of (Array.isArray(sl2.partners) ? sl2.partners : [])) {
     const sev = await _e2eReq({ type: 'e2e_load_session', partner: p }, 'e2e_session', 6000, e => e.partner === p);
-    if (!sev || (sev.blob && !sev.blob.startsWith(E2E_BLOB_PREFIX))) return false;
+    if (!sev || (sev.blob && !_e2eWrappedBlob(sev.blob))) return false;
     if (sev.blob && !(await opens(sev.blob, _e2eCtxSession(p)))) unreadable.push(p);
   }
   const kr2 = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
@@ -1307,6 +1371,53 @@ async function _e2eMigrate(kr, fresh) {
     _e2eSys(_e2eStatusTarget(), '⚠️ E2E: some of your stored E2E data does not open with your current E2E key (written by another device during the upgrade?) — not finishing the upgrade yet; it is retried on the next unlock.');
     return false;
   }
+  return true;
+}
+
+// Re-encrypt legacy v2 slots under the new master. Exact ciphertext matching lets
+// one device finish the upgrade while another advances a session or rotates a PSK.
+async function _e2eRewrapV2(gen, kr) {
+  const rewrap = async (slot, name, ctx, event) => {
+    if (!event || _e2eBootStale(gen)) return false;
+    const expect = event.blob || '';
+    if (!expect.startsWith(E2E_V2_BLOB)) return !expect || expect.startsWith(E2E_BLOB_PREFIX);
+    try {
+      const pt = await aesDecryptBlob(expect, ctx);
+      let blob;
+      try { blob = await aesEncryptBlob(pt, ctx); }
+      finally { pt.fill(0); }
+      if (_e2eBootStale(gen)) return false;
+      const r = await _e2eReq({ type: 'e2e_rewrap_blob', slot, name, expect, blob },
+        'e2e_blob_rewrapped', 6000, ev => ev.slot === slot && ev.name === name);
+      return !!(r && r.ok);
+    } catch (_) { return false; }
+  };
+  const identity = await _e2eReq({ type: 'e2e_load_identity' }, 'e2e_identity_blob');
+  if (!(await rewrap('identity', '', 'identity', identity))) return false;
+  const list = await _e2eReq({ type: 'e2e_list_sessions' }, 'e2e_session_list');
+  if (!list || _e2eBootStale(gen)) return false;
+  for (const name of list.partners || []) {
+    const event = await _e2eReq({ type: 'e2e_load_session', partner: name }, 'e2e_session', 6000, ev => ev.partner === name);
+    if (!(await rewrap('session', name, _e2eCtxSession(name), event))) return false;
+  }
+  const keyring = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
+  if (!keyring || _e2eBootStale(gen)) return false;
+  for (const name of keyring.channels || []) {
+    const req = crypto.randomUUID();
+    const event = await _e2eReq({ type: 'e2e_load_channel_key', channel: name, req }, 'e2e_channel_key', 6000, ev => ev.req === req);
+    if (!(await rewrap('channel', name, _e2eCtxChan(name), event))) return false;
+  }
+  if (_e2eBootStale(gen)) return false;
+  const result = await _e2eStoreKeyring(E2E._finalKeyring, true, kr.blob);
+  const current = result && !result.ok ? result.blob : E2E._finalKeyring;
+  if (!result || !current || _e2eBootStale(gen)) return false;
+  if (!result.ok) {
+    try {
+      if (base64ToBytes(_e2eKringParse(current).w).length !== 60 ||
+          !(await _e2eKeyringCheck(current, E2E.e2eEncKey, _e2eUser()))) return false;
+    } catch (_) { return false; }
+  }
+  kr.blob = current;
   return true;
 }
 
@@ -1665,7 +1776,7 @@ async function e2ePublishBundle(idHash = null) {
   if (_e2eKeyGone()) { console.log('[E2E] key bundle not published: the vault was locked meanwhile'); return; }
   _e2eWs({
     type: 'e2e_publish_bundle',
-    v: 2,
+    v: 3,
     ...(idHash ? { id_hash: idHash } : {}),
     bundle: {
       identity_dh_key:   dhPub,
@@ -1991,7 +2102,7 @@ async function _e2eEstablishInner(from, header, opts = {}) {
   // #29: now that the session is established (and x3dhRespond didn't abort on a
   // missing OTPK), it's safe to consume the one-time prekey.
   if (consumedOtpkId != null) {
-    _e2eWs({ type: 'e2e_delete_session', partner: `__otpk__${consumedOtpkId}` });
+    _e2eWs({ type: 'e2e_delete_session', v: E2E_STORAGE_VERSION, partner: `__otpk__${consumedOtpkId}` });
     delete E2E._sessionCache[`__otpk__${consumedOtpkId}`];
   }
   if (!opts.alt) _e2eStateSetDm(nk, true);
@@ -2838,14 +2949,22 @@ async function storeChannelKey(channel, key, keyB64) {
   _e2eStateSetChan(k, true, g);
 }
 
-async function removeChannelKey(channel) {
-  const k = _e2eK(channel);
+async function _e2eDeleteSlot(msg) {
+  const req = crypto.randomUUID();
+  const gen = E2E._lockGen;
+  // Retrying a delete could remove a replacement key saved after a lost reply.
+  const event = await _e2eReq({ ...msg, req, v: E2E_STORAGE_VERSION }, 'e2e_key_deleted', 6000, e => e.req === req, 0);
+  return !!event?.ok && !_e2eBootStale(gen);
+}
+async function removeChannelKey(k, storedNames) {
+  for (const channel of new Set([k, ...storedNames.filter(name => _e2eK(name) === k)])) {
+    if (!(await _e2eDeleteSlot({ type:'e2e_delete_channel_key', channel }))) return false;
+  }
   delete E2E.channelKeys[k];
   delete E2E._chanKeyGen[k];
   delete E2E.chanRemoved[k];
-  _e2eWs({ type:'e2e_delete_channel_key', channel: k });
-  if (channel !== k) _e2eWs({ type:'e2e_delete_channel_key', channel });
   if (E2E.state && E2E.state.ch[k]) _e2eStateSetChan(k, false, E2E.state.ch[k].g);
+  return true;
 }
 
 // Decode a channel-key blob for `k`. Returns { raw, g, legacy }.
@@ -2909,15 +3028,14 @@ async function saveSession(nick, session, opts = null) {
 }
 // Drop the session with `k` everywhere: memory, server, and every tab of this browser
 // (device tombstone) — /encrypt off, an accepted key change.
-function _e2eDropSession(k) {
+function _e2eDropSession(k, removeStored = true) {
   delete E2E.dmSessions[k];
-  delete E2E._encryptLock[k];
   if (E2E._glareAlt) delete E2E._glareAlt[k];
   if (E2E._moved) delete E2E._moved[k];
-  _e2eWs({ type:'e2e_delete_session', partner:k });
+  if (removeStored) _e2eWs({ type:'e2e_delete_session', v: E2E_STORAGE_VERSION, partner:k });
   const ep = Math.max(E2E._sessionEpoch[k] || 0, _e2eDev().ep[k] || 0) + 1;
   E2E._sessionEpoch[k] = ep;
-  _e2eDevSessPut(k, { ep, del: 1 });
+  return _e2eDevSessPut(k, { ep, del: 1 });
 }
 
 // ─── TOFU / trust ─────────────────────────────────────────────────────────────
@@ -3201,6 +3319,8 @@ async function e2eHandleEvent(ev) {
 
     case 'e2e_keyring':
     case 'e2e_keyring_stored':
+    case 'e2e_blob_rewrapped':
+    case 'e2e_key_deleted':
     case 'e2e_session_list':
       _e2eResolveWaiter(ev);
       break;
@@ -3322,6 +3442,7 @@ async function e2eHandleEvent(ev) {
     }
 
     case 'e2e_channel_key': {
+      if (ev.req) { _e2eResolveWaiter(ev); break; }
       const k = _e2eK(ev.channel);
       // r6 (codex-p3 e2e.js:3129): a lock (vault / device) while this reply is being
       // decrypted or imported wipes memory; the key must not be installed after that.
@@ -3336,7 +3457,7 @@ async function e2eHandleEvent(ev) {
         rec = await _e2eDecodeChanBlob(ev.blob, k);
         if (lockedMeanwhile()) { rec.raw && rec.raw.fill && rec.raw.fill(0); rec = null; _e2eResolveWaiter({ type: 'e2e_channel_key_done', channel: ev.channel, ok: false, locked: true }); break; }
       } catch (e) {
-        legacyUnreadable = typeof ev.blob === 'string' && !ev.blob.startsWith(E2E_BLOB_PREFIX);
+        legacyUnreadable = typeof ev.blob === 'string' && !_e2eWrappedBlob(ev.blob);
         console.warn('[E2E] channel key blob for', k, 'did not authenticate:', e && e.message);
         if (!legacyUnreadable) _e2eSys(ev.channel, `⚠️ E2E: the server sent an invalid key for ${ev.channel} (not the key stored for this channel) — ignored`);
         else if (E2E._migrated) _e2eSys(ev.channel, `⚠️ E2E: the server sent an outdated pre-upgrade key blob for ${ev.channel} — refused`);
@@ -3359,7 +3480,7 @@ async function e2eHandleEvent(ev) {
             const blob = await aesEncryptBlob(new TextEncoder().encode(JSON.stringify({ k: bytesToBase64(rec.raw), g })), _e2eCtxChan(k));
             if (lockedMeanwhile()) { _e2eResolveWaiter({ type: 'e2e_channel_key_done', channel: ev.channel, ok: false, locked: true }); break; }
             _e2eWs({ type:'e2e_store_channel_key', channel: k, blob });
-            if (ev.channel !== k) _e2eWs({ type:'e2e_delete_channel_key', channel: ev.channel });
+            if (ev.channel !== k) _e2eWs({ type:'e2e_delete_channel_key', v: E2E_STORAGE_VERSION, channel: ev.channel });
           }
           E2E._chanGen[k] = Math.max(E2E._chanGen[k] || 0, g);
           E2E._chanKeyGen[k] = g;
@@ -3382,7 +3503,7 @@ async function e2eHandleEvent(ev) {
         }
       }
       _e2eResolveWaiter({ type: 'e2e_channel_key_done', channel: ev.channel, legacyUnreadable, ok: !!rec,
-                          v2: typeof ev.blob === 'string' && ev.blob.startsWith(E2E_BLOB_PREFIX) });
+                          v2: typeof ev.blob === 'string' && _e2eWrappedBlob(ev.blob) });
       break;
     }
 
@@ -3468,7 +3589,7 @@ async function e2eReplenishOTPKs() {
     _e2eWs({ type:'e2e_store_session', partner:`__otpk__${keyId}`, blob });
     keys.push({ key_id: keyId, public_key: opkPub });
   }
-  _e2eWs({ type:'e2e_add_otpks', v: 2, keys });
+  _e2eWs({ type:'e2e_add_otpks', v: 3, keys });
 }
 
 // A header that arrived alone (relayed by the server, or inline/fragmented via IRC):
@@ -4027,7 +4148,7 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
             if (lb && await _e2eInstallStoredSession(fk, lb, '__legacy__' + fk)) {
               _e2eStateSetDm(fk, true);
               await saveSession(fk, E2E.dmSessions[fk]);
-              _e2eWs({ type:'e2e_delete_session', partner:'__legacy__' + fk });
+              _e2eWs({ type:'e2e_delete_session', v: E2E_STORAGE_VERSION, partner:'__legacy__' + fk });
             }
           }
         }
@@ -4305,10 +4426,9 @@ async function handleEncryptCommand(args, conn_id, target) {
       if (!E2E.keyReady) { e2eSysMsg(target, '🔐 E2E was locked meanwhile — nothing was changed'); return; }   // r5: locked during the key generation
       await storeChannelKey(kn, key, keyB64);
       const label = _e2eIsChan(target) ? 'Channel' : 'DM';
-      e2eSysMsg(target,`🔐 ${label} key generated for ${target}:`);
-      e2eSysMsg(target,`🔑 ${keyWords}`);
-      e2eSysMsg(target,`Share these 32 words privately with ${_e2eIsChan(target)?'channel members':target}.`);
+      e2eSysMsg(target,`🔐 ${label} key generated for ${target}.`);
       updateE2EIndicator(target);
+      await _e2eShowSharedKey(keyWords);
       break;
     }
     case 'add': {
@@ -4330,9 +4450,10 @@ async function handleEncryptCommand(args, conn_id, target) {
       const key = E2E.channelKeys[kn];
       if (!key) { e2eSysMsg(target,`No key for ${target} — use /encrypt keygen first`); return; }
       const raw   = await crypto.subtle.exportKey('raw', key);
-      const words = bytesToMnemonic(new Uint8Array(raw));
-      e2eSysMsg(target,`🔑 Key for ${target}: ${words.join(' ')}`);
-      e2eSysMsg(target,`Share out-of-band (voice/Signal/in-person). NOT in this channel.`);
+      const bytes = new Uint8Array(raw);
+      const words = bytesToMnemonic(bytes).join(' ');
+      bytes.fill(0);
+      if (E2E.channelKeys[kn] === key) await _e2eShowSharedKey(words);
       break;
     }
     case 'rotate': {
@@ -4342,52 +4463,58 @@ async function handleEncryptCommand(args, conn_id, target) {
       if (!E2E.keyReady) { e2eSysMsg(target, '🔐 E2E was locked meanwhile — nothing was changed'); return; }   // r5: locked during the key generation
       await storeChannelKey(kn, key, keyB64);
       e2eSysMsg(target,`🔐 Key rotated for ${target}.`);
-      e2eSysMsg(target,`🔑 New key: ${keyWords}`);
-      e2eSysMsg(target,`Re-share with ${_e2eIsChan(target)?'trusted members':'the other person'}. Old key holders cannot read future messages.`);
       updateE2EIndicator(target);
+      await _e2eShowSharedKey(keyWords);
       break;
     }
     case 'off': case 'stop': {
-      if (_e2eIsChan(target)) {
-        const kn = await keyName(target, 'Remove'); if (kn === null) return;
-        await removeChannelKey(kn);
-        const k = kn, sh = E2E._serverHints, h = _e2eHints();
-        if (sh) sh.channels = sh.channels.filter(x => x !== k);
-        if (h.ch.includes(k)) _e2eLsSet(_e2eHintKey(), { dm: h.dm, ch: h.ch.filter(x => x !== k) });
-        e2eSysMsg(target,`🔓 E2E disabled for ${target}`);
-        updateE2EIndicator(target);
-      } else {
-        const nick = args[1] || target;
-        const k = await keyName(nick, 'Remove'); if (k === null) return;
-        let did = false;
-        if (E2E._pendingOn && E2E._pendingOn[k]) { delete E2E._pendingOn[k]; did = true; }
-        if (E2E.channelKeys[k] || E2E.chanRemoved[k] || (E2E.state && E2E.state.ch[k] && E2E.state.ch[k].on)) {
-          await removeChannelKey(k);
-          e2eSysMsg(target,`🔓 Encryption disabled for ${nick}`);
-          did = true;
-        }
-        if (E2E.dmSessions[k]) {
-          _e2eDropSession(k);
-          e2eSysMsg(target,`🔓 E2E session with ${nick} closed`);
-          did = true;
-        }
-        // r2 (NEW-2): an explicit "off" is recorded (tombstone) so other tabs/devices'
-        // merged state can't silently turn it back on — and only this removes a peer.
-        if (E2E.state) { const was = !!(E2E.state.dm[k] && E2E.state.dm[k].on); _e2eStateSetDm(k, false, true); if (was) did = true; }
-        else _e2eHintsRefresh();
-        // E2E locked on this device: honour an explicit "off" too (otherwise the
-        // target would stay blocked by the server/local hints).
-        const sh = E2E._serverHints;
-        if (sh && (sh.peers.includes(k) || sh.channels.includes(k))) {
-          sh.peers = sh.peers.filter(x => x !== k); sh.channels = sh.channels.filter(x => x !== k);
-          if (!E2E.keyReady) { _e2eWs({ type:'e2e_delete_session', partner:k }); _e2eWs({ type:'e2e_delete_channel_key', channel:k }); }
-          did = true;
-        }
-        const h = _e2eHints();
-        if (h.dm.includes(k) || h.ch.includes(k)) { _e2eLsSet(_e2eHintKey(), { dm: h.dm.filter(x => x !== k), ch: h.ch.filter(x => x !== k) }); did = true; }
-        if (!did) e2eSysMsg(target,`🔓 No encryption active for ${nick}`);
-        updateE2EIndicator(nick);
+      if (!E2E.keyReady) {
+        e2eSysMsg(target, '🔐 Unlock encrypted chats before disabling encryption.');
+        return;
       }
+      const nick = _e2eIsChan(target) ? target : (args[1] || target);
+      const k = await keyName(nick, 'Remove');
+      if (k === null || !E2E.keyReady) return;
+      const gen = E2E._lockGen;
+      const stored = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
+      if (_e2eBootStale(gen)) return;
+      if (!stored) { e2eSysMsg(target, '🔐 Could not check stored keys. Encryption stays on.'); return; }
+      const channels = Array.isArray(stored.channels) ? stored.channels : [];
+      const peers = Array.isArray(stored.peers) ? stored.peers : [];
+      const sh = E2E._serverHints;
+      const h = _e2eHints();
+      const isChannel = _e2eIsChan(target);
+      const shared = isChannel || E2E.channelKeys[k] || E2E.chanRemoved[k] || E2E.state?.ch[k]?.on ||
+        sh?.channels.includes(k) || h.ch.includes(k) || channels.some(name => _e2eK(name) === k);
+      const storedSessions = peers.filter(name => _e2eK(name) === k);
+      const session = !isChannel && (E2E.dmSessions[k] || E2E.state?.dm[k]?.on || sh?.peers.includes(k) || h.dm.includes(k) || storedSessions.length);
+      if (shared && !(await removeChannelKey(k, channels))) {
+        e2eSysMsg(target, '🔐 Could not confirm shared-key removal. Encryption stays on.');
+        return;
+      }
+      if (session) {
+        const removed = await _withRatchetLock(k, async () => {
+          for (const partner of new Set([k, ...storedSessions])) {
+            if (_e2eBootStale(gen) || !(await _e2eDeleteSlot({ type:'e2e_delete_session', partner }))) return false;
+          }
+          await _e2eDropSession(k, false);
+          return true;
+        });
+        if (!removed) { e2eSysMsg(target, '🔐 Could not confirm session removal. Encryption stays on.'); return; }
+        _e2eStateSetDm(k, false, true);
+      }
+      const pending = !!E2E._pendingOn?.[k];
+      if (pending) delete E2E._pendingOn[k];
+      if (sh) {
+        if (shared) sh.channels = sh.channels.filter(x => x !== k);
+        if (session) sh.peers = sh.peers.filter(x => x !== k);
+      }
+      _e2eLsSet(_e2eHintKey(), {
+        dm: session ? h.dm.filter(x => x !== k) : h.dm,
+        ch: shared ? h.ch.filter(x => x !== k) : h.ch
+      });
+      e2eSysMsg(target, shared || session || pending ? '🔓 Encryption disabled for ' + nick : '🔓 No encryption active for ' + nick);
+      updateE2EIndicator(nick);
       break;
     }
     case 'verify': {

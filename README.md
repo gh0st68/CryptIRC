@@ -7,7 +7,7 @@
 <p align="center"><strong>IRC that stays connected.</strong><br>Self-hosted. Encrypted history. All your devices.</p>
 
 <p align="center">
-  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.13-00b894?style=flat-square" alt="Version 0.5.13"></a>
+  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.14-00b894?style=flat-square" alt="Version 0.5.14"></a>
   <img src="https://img.shields.io/badge/server-Linux-5a7085?style=flat-square" alt="Linux server">
   <img src="https://img.shields.io/badge/client-desktop%20%C2%B7%20mobile%20%C2%B7%20terminal-5a7085?style=flat-square" alt="Desktop, mobile, and terminal clients">
 </p>
@@ -38,9 +38,9 @@ The web server and IRC daemon run separately, so routine web updates can leave y
 | “Show my connected networks and who's in `#dev`.” | List connections, channels, topics, and members. |
 | “Find the messages in `#support` that mention the upgrade.” | Read and search IRC history while your vault is unlocked. |
 | “Join `#dev` and send a message that I'm here.” | Join and leave channels. Send channel messages, DMs, notices, and IRC actions. |
-| “Set the topic in `#dev` to today's release.” | Run raw IRC commands, including network-specific verbs and IRCv3 message tags. The IRC server applies your existing permissions. |
+| “Set the topic in `#dev` to today's release.” | Run raw IRC commands, including network-specific verbs such as `SAMODE` and IRCv3 message tags. The IRC server applies your existing permissions. |
 | “Show what's in my CryptIRC notepad.” | Read and update your notepad while the vault is unlocked. |
-| “Change this network’s quit message and turn on Do Not Disturb.” | Edit connection settings and manage appearance, synced preferences, notifications, and bots. CryptIRC administrators can also manage server and link-preview settings. |
+| “Change this network’s quit message and turn on Do Not Disturb.” | Edit connection settings through `irc_network`, and manage synced preferences, notifications, and bots through `cryptirc_settings`. The same settings tool supports server and link-preview settings for CryptIRC administrators. Appearance has its own tool. |
 
 Network credentials are write-only. Supply replacements or clear saved credentials when switching the server, port, or TLS policy. Use the CryptIRC app for messages in end-to-end encrypted conversations. Keep your MCP token private and revoke it in Profile when you stop using it.
 
@@ -62,7 +62,9 @@ codex mcp add cryptirc --url https://irc.example.com/cryptirc/mcp \
 
 </details>
 
-The ten tools operate within the account that issued the token. Each account has one active token, managed from Profile. Replacing or revoking it takes effect immediately. Web sign-out leaves the integration available. End-to-end encrypted conversations, vault unlocking, password-safe contents, and server administration stay in CryptIRC. Removing a network through MCP also removes its saved history.
+The eleven tools operate within the account that issued the token. Each account has one active token, managed from Profile. Replacing or revoking it takes effect immediately. Web sign-out leaves the integration available. Use the CryptIRC app to unlock the vault, access the password safe, send end-to-end encrypted messages, or apply mIRC color codes to a topic. Removing a network through MCP also removes its saved history.
+
+An `accepted` response to a raw command means CryptIRC accepted it for dispatch. Check the server status or re-read the channel state to confirm the IRC server applied the change.
 
 ## Translation
 
@@ -74,7 +76,7 @@ Read IRC in your preferred language. Translate a message, website preview title 
 
 Your provider receives the text selected for translation. Automatic translation is disabled in end-to-end encrypted conversations. To translate encrypted text manually, confirm before sharing it with the provider. Reading and chat preferences are saved on the device. Translated text is kept in the open tab.
 
-[Full v0.5.13 changelog](docs/CHANGES.md#v0513-november-2026)
+[Latest changelog](docs/CHANGES.md#v0514-november-2026)
 
 ## Passkey sign-in
 
@@ -289,6 +291,12 @@ CryptIRC provides encryption for stored data and optional end-to-end protection 
 | **Account controls** | Vault locking, configurable auto-lock, session revocation, PM blocking, and administrative account controls. |
 
 The server handles ordinary IRC traffic and unlocks the storage vault, so run CryptIRC on a server you trust. Encrypted storage does **not** make ordinary IRC traffic end-to-end encrypted or make the server unable to read unlocked data. AI providers, GIF services, and link previews are optional external integrations.
+
+Use `/encrypt unlock` or **Unlock encrypted chats** in the encryption panel to set up E2E. Save the generated recovery code. You’ll need it on another device or after clearing browser data. The client sends only the wrapped E2E keyring to the server. Changing your vault passphrase leaves the recovery code valid. Existing E2E accounts are prompted to upgrade and keep their existing identities and conversation keys.
+
+The web client still trusts the code served by your CryptIRC host. Upgrading replaces the old storage key, and previously exposed identity keys or channel keys require their own rotation.
+
+Encrypted chats send text over IRC. File uploads and server-hosted pastes are unavailable there because those features store the original content on the host.
 
 ## Commands and shortcuts
 

@@ -10,6 +10,7 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {checkSettingsSearch} from './settings-search-checks.mjs';
 import {checkTranslation, startTranslator} from './translation-checks.mjs';
+import {checkE2eChat, checkLegacyMigration, seedLegacyE2e} from './e2e-chat-checks.mjs';
 
 const {CRYPTIRC_BIN, CRYPTIRC_CORE_BIN, IRC_PORT, IRC_LEAF_PORT, CHROMIUM} = process.env;
 assert(CRYPTIRC_BIN && CRYPTIRC_CORE_BIN && Number(IRC_PORT), 'Set the test binaries and local IRC testnet port');
@@ -25,6 +26,8 @@ const password='TestOnly-Password-91!';
 const vault='TestOnly-Vault-92!';
 const channel='#mcp-'+stamp;
 const translationEnabled=process.env.CRYPTIRC_TEST_TRANSLATION==='1';
+const e2eEnabled=process.env.CRYPTIRC_TEST_E2E==='1';
+const legacyBin=process.env.CRYPTIRC_LEGACY_BIN;
 let translator;
 
 async function waitFor(checkFn, name, timeout=20000) {
@@ -81,14 +84,14 @@ async function connectWebsocket(token) {
   return {events,send,wait};
 }
 
-async function chromium() {
+async function chromium(profile='chrome') {
   const chrome=start(CHROMIUM||'/usr/bin/chromium',[
     '--headless=new','--no-sandbox','--disable-gpu','--remote-debugging-port=0',
-    '--user-data-dir='+tmp+'/chrome','--no-first-run','about:blank'
+    '--user-data-dir='+tmp+'/'+profile,'--no-first-run','about:blank'
   ],process.env);
   const cdpPort=await waitFor(async()=>{
     if(chrome.exitCode!==null)throw new Error('Chromium exited: '+chrome.logs);
-    return Number((await fs.readFile(tmp+'/chrome/DevToolsActivePort','utf8').catch(()=>'' )).split('\n')[0]);
+    return Number((await fs.readFile(path.join(tmp,profile,'DevToolsActivePort'),'utf8').catch(()=>'' )).split('\n')[0]);
   },'Chromium DevTools');
   const targets=await (await fetch('http://127.0.0.1:'+cdpPort+'/json')).json();
   const socket=new WebSocket(targets.find(x=>x.type==='page').webSocketDebuggerUrl);
@@ -97,9 +100,11 @@ async function chromium() {
   let id=0;
   const pending=new Map();
   const errors=[];
+  const frames=[];
   socket.onmessage=e=>{
     const m=JSON.parse(e.data);
     if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text);
+    if(e2eEnabled&&m.method==='Network.webSocketFrameSent')frames.push(m.params.response.payloadData);
     if(!pending.has(m.id))return;
     const {resolve,reject}=pending.get(m.id);
     pending.delete(m.id);
@@ -126,7 +131,7 @@ async function chromium() {
     protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,
     automaticPresenceSimulation:true,isUserVerified:true
   }});
-  return {send,evaluate,authenticatorId,errors};
+  return {send,evaluate,authenticatorId,errors,frames,chrome};
 }
 
 let rpcId=0;
@@ -148,11 +153,37 @@ try {
   await fs.writeFile(path.join(tmp,'admin_settings.json'),JSON.stringify({registration_open:true,captcha_enabled:false}));
   start(CRYPTIRC_CORE_BIN,[],env);
   await waitFor(()=>fs.stat(path.join(tmp,'irc-core.sock')).catch(()=>null),'isolated IRC core');
+  const waitWeb=()=>waitFor(()=>fetch(base+'/auth/status').then(r=>r.ok).catch(()=>false),'isolated web server');
+  const legacyUser='pkl'+stamp;
+  let legacy;
+  if(e2eEnabled&&legacyBin){
+    const oldWeb=start(legacyBin,[],env);
+    await waitWeb();
+    check('legacy migration fixture account registered',(await request('/auth/register',{
+      method:'POST',body:{username:legacyUser,password}
+    })).status===200);
+    const oldBrowser=await chromium('e2e-old-release');
+    legacy=await seedLegacyE2e({browser:oldBrowser,waitFor,check,tmp,user:legacyUser,password,vault,channel});
+    for(const child of [oldBrowser.chrome,oldWeb]){
+      process.kill(-child.pid,'SIGTERM');
+      await waitFor(()=>child.exitCode!==null||child.signalCode!==null,'old test process exited');
+      children.splice(children.indexOf(child),1);
+    }
+  }
   start(CRYPTIRC_BIN,[],env);
-  await waitFor(()=>fetch(base+'/auth/status').then(r=>r.ok).catch(()=>false),'isolated web server');
+  await waitWeb();
+  if(legacy){
+    const migrationBrowser=await chromium('e2e-migration');
+    await checkLegacyMigration({browser:migrationBrowser,waitFor,check,tmp,user:legacyUser,password,vault,channel,legacy});
+  }
   for(const username of [owner,other]){
     const res=await request('/auth/register',{method:'POST',body:{username,password}});
     check('disposable test account registered',res.status===200);
+  }
+  if(e2eEnabled){
+    const record=path.join(tmp,'users',owner+'.json');
+    const account=JSON.parse(await fs.readFile(record,'utf8'));
+    await fs.writeFile(record,JSON.stringify({...account,can_upload:true}),{mode:0o600});
   }
   const browser=await chromium();
   const {evaluate:ev,send:cdp}=browser;
@@ -361,6 +392,15 @@ try {
     network:networkA,target:other,text:'fail closed test'
   },true)));
   await fs.rm(brokenSlot);
+  if(e2eEnabled){
+    ownerWs.send({type:'e2e_delete_channel_key',channel,v:2});
+    await waitFor(async()=>{
+      const files=await fs.readdir(path.join(tmp,'e2e',owner,'channels'));
+      return !files.some(name=>name.endsWith('.enc'));
+    },'test plaintext policy fixture removed');
+    await checkE2eChat({browser,chromium,check,waitFor,pause,owner,other,password,vault,tmp,ownerWs,otherWs,
+      networkA,networkB,channel,stamp,request,ownerSession});
+  }
   await tool(token,'cryptirc_appearance',{settings:{theme:'arctic'}});
   check('MCP appearance can be updated and read',(await tool(token,'cryptirc_appearance')).settings.theme==='arctic');
   const browserPrefCount=ownerWs.events.length;

@@ -1830,7 +1830,7 @@ function handleEvent(ev) {
     // r4 (C3-1): only while the E2E engine is loaded — a page without it is treated
     // by the server like an outdated tab (its guard refuses cleartext to E2E targets).
     case 'auth_required':
-      if(_e2eEngineOk()) wsend({type:'auth',token:sessionToken||'',e2e:2});
+      if(_e2eEngineOk()) wsend({type:'auth',token:sessionToken||'',e2e:window.E2E.storageVersion||2});
       else { wsend({type:'auth',token:sessionToken||''}); _e2eEngineFailNotice(); }
       break;
     case 'bot_config':
@@ -2390,6 +2390,8 @@ function handleEvent(ev) {
     case 'e2e_x3dh_header':
     case 'e2e_keyring':
     case 'e2e_keyring_stored':
+    case 'e2e_blob_rewrapped':
+    case 'e2e_key_deleted':
     case 'e2e_session_list':
     case 'e2e_session_moved':
       // .catch: e2eHandleEvent is async + fire-and-forget; a malformed server-supplied
@@ -6916,7 +6918,7 @@ document.addEventListener('DOMContentLoaded',()=>{
     const txt=e.clipboardData?.getData('text/plain')||'';
     if(txt && document.activeElement===document.getElementById('msg-input')){
       const kind=classifyPasteText(txt);
-      if(kind){
+      if(kind&&_chatAllowsPublicContent(active)){
         e.preventDefault();
         _smartPasteText=txt;
         _smartPasteType=kind;
@@ -8261,6 +8263,11 @@ function tabComplete(inp){
 function insertNick(nick){const inp=document.getElementById('msg-input');if(!inp.disabled){inp.value+=nick+': ';inp.focus();}}
 
 // ─── Upload ───────────────────────────────────────────────────────────────────
+function _chatAllowsPublicContent(chat){
+  if(!chat||chat.target==='status') return true;
+  return _e2eKnown()&&e2eTargetState(chat.target,{conn_id:chat.conn_id}).mode==='none';
+}
+
 function triggerUpload(){if(!active){showToast('Select a channel first');return;}document.getElementById('file-input').click();}
 
 // ─── Encrypted Notepad ───────────────────────────────────────────────────────
@@ -8312,6 +8319,7 @@ function closeNotepad(){const ov=document.getElementById('notepad-overlay');if(o
   _notepadEdited=false; _notepadLoaded=false;   // r10: nothing left to send from this editor
 }}
 function showPasteModal(){
+  if(!_chatAllowsPublicContent(active)){showToast('Server-hosted pastes are unavailable in encrypted chats. Paste the text into the composer instead.');return;}
   if(!active){showToast('Select a channel first');return;}
   const ov=document.createElement('div');
   ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:500;display:flex;align-items:center;justify-content:center;padding:16px;';
@@ -8372,6 +8380,7 @@ function updatePasteKindHint(){
     :'Code/text pastes render as plain text.';
 }
 async function submitPaste(btn){
+  if(!_chatAllowsPublicContent(active)){showToast('Server-hosted pastes are unavailable in encrypted chats.');return;}
   const content=document.getElementById('paste-content')?.value;
   if(!content?.trim()){showToast('Paste cannot be empty');return;}
   const lang=document.getElementById('paste-lang')?.value||'text';
@@ -8630,6 +8639,7 @@ async function uploadFile(file){
   const _srcRef=(active && !isUploadsConn(active.conn_id)) ? active : _lastIrcActive;
   if(!_srcRef){showToast('Select a channel first');return;}
   const src={conn_id:_srcRef.conn_id, target:_srcRef.target};
+  if(!_chatAllowsPublicContent(src)){showToast('This server does not support end-to-end encrypted file uploads.');return;}
   // Some environments hand us a File whose .size is 0 even though the file has
   // data — notably drag-and-drop on certain Linux/Chromium (Wayland, or sandboxed
   // Flatpak/Snap) setups, and cloud "online-only" placeholders. The chunk loop is
@@ -8664,6 +8674,7 @@ async function uploadFile(file){
     if(!(await confirmUploadPreview(file,src))) return;
     _autoSend=true;
   }
+  if(!_chatAllowsPublicContent(src)){showToast('This server does not support end-to-end encrypted file uploads.');return;}
   const id=_newUploadId();
   await idbPutFile(id,file);
   if(_autoSend) _upcFlagSet(id);   // survives tab close → resume keeps the promise
@@ -10094,16 +10105,15 @@ function _deviceUnlock(){
 }
 // Dispatcher wrapper (same pattern as the window.addMessage ignore wrapper): runs the
 // normal handler, then keeps a locked device locked. Only a VaultUnlocked that answers
-// this device's own unlock_vault can unlock it — with the e2e server that event carries
-// the pepper/legacy key (sent only after the passphrase was verified); with an older
-// server it must arrive within 60 s of the Unlock click.
+// this device's own unlock_vault can unlock it. Current servers mark passphrase-proven
+// replies with vault_verified. Fallbacks retain older server support.
 if(typeof handleEvent==='function'){
   const _hev=handleEvent;
   handleEvent=function(ev){
     if(ev && (_deviceLocked||_devLockFlag()) && window._appShown){
       if(ev.type==='vault_unlocked'){
-        const newServer=Object.prototype.hasOwnProperty.call(ev,'e2e_migrated');
-        const proven=newServer ? !!(ev.e2e_pepper||ev.e2e_legacy_key) : (!!_devUnlockPending && Date.now()-_devUnlockPending<60000);
+        const proven=ev.vault_verified ?? (!!(ev.e2e_pepper||ev.e2e_legacy_key) ||
+          (!Object.prototype.hasOwnProperty.call(ev,'e2e_migrated') && !!_devUnlockPending && Date.now()-_devUnlockPending<60000));
         if(!proven){ if(!_deviceLocked) _deviceLockNow(true); return; }   // unprompted (WS reconnect): ignore while locked
         const r=_hev.apply(this,arguments); _deviceUnlock(); return r;
       }
@@ -10171,11 +10181,9 @@ async function showChangePass(){
     // r4 (srv-b C1-4 follow-up): a lock that landed right after the NEW passphrase was
     // saved — the server says "Your vault passphrase WAS changed, but the vault was
     // locked …" (crypto.rs LockedMeanwhile{committed:true}; this prefix is the marker).
-    // The change IS done: show the server's words as they are, and keep the E2E keyring
-    // re-wrap pending for the next unlock (with the new passphrase) — the lock wiped it.
     const changedButLocked=!ok && /^Your vault passphrase WAS changed\b/.test(String(why||''));
     if(ok) showToast('✓ Vault passphrase changed');
-    else if(changedButLocked){ customAlert(String(why)); try{ if(typeof e2eNotePassphraseChange==='function') e2eNotePassphraseChange(old,nw); }catch(_){} }
+    else if(changedButLocked) customAlert(String(why));
     else customAlert('Vault passphrase NOT changed: '+why);
   };
   const onMsg=e=>{let m;try{m=JSON.parse(e.data);}catch(_){return;}
@@ -10184,8 +10192,6 @@ async function showChangePass(){
   const onClose=()=>finish(false,'the connection dropped before the server answered. Lock and unlock the vault to check which passphrase is now valid.');
   sock.addEventListener('message',onMsg); sock.addEventListener('close',onClose);
   timer=setTimeout(()=>finish(false,'no answer from the server after 2 minutes. Lock and unlock the vault to check which passphrase is now valid.'),120000);
-  // e2e: lets e2e.js re-wrap its client-held keyring once the server confirms.
-  if(typeof e2eNotePassphraseChange==='function') e2eNotePassphraseChange(old,nw);
   wsend({type:'change_passphrase',old,new:nw});
   showToast('Changing vault passphrase…');
 }
@@ -11499,6 +11505,15 @@ function showEncryptPanel(){
   const isChan=target.startsWith('#')||target.startsWith('&');
   const body=document.getElementById('encrypt-panel-body');
   const title=document.getElementById('encrypt-panel-title');
+  if (!window.E2E?.keyReady) {
+    title.textContent=`Encryption — ${target}`;
+    body.innerHTML=`<div class="encrypt-status">🔒 Encrypted chats are locked on this device</div>
+      <div class="encrypt-actions"><button class="encrypt-btn" data-encrypt-cmd="unlock">Unlock encrypted chats</button></div>`;
+    const overlay=document.getElementById('encrypt-overlay');
+    _overlayOpen('encryptPanel', closeEncryptPanel);
+    overlay.classList.add('show');
+    return;
+  }
 
   if(isChan){
     title.textContent=`Encryption — ${target}`;
@@ -11512,7 +11527,7 @@ function showEncryptPanel(){
         <div class="encrypt-actions">
           <button class="encrypt-btn" data-encrypt-cmd="share">
             <span class="encrypt-btn-icon">👁</span>
-            <div class="encrypt-btn-text">Show Key<div class="encrypt-btn-sub">Display the 32-word key in chat</div></div>
+            <div class="encrypt-btn-text">Show Key<div class="encrypt-btn-sub">Show the 32-word key in a dialog</div></div>
           </button>
           <button class="encrypt-btn" data-encrypt-fn="copyKey">
             <span class="encrypt-btn-icon">📋</span>
@@ -11545,7 +11560,7 @@ function showEncryptPanel(){
         </div>
         <div class="encrypt-note">
           Everyone in the channel needs the same key to read encrypted messages.
-          Share the 32-word key privately (e.g. via DM) with people who should have access.
+          Share the 32-word key over a trusted, encrypted connection with people who should have access.
         </div>`;
     }
   } else if(target!=='status') {
@@ -11714,7 +11729,7 @@ async function copyChannelKey(){
   const raw=await crypto.subtle.exportKey('raw',key);
   const words=bytesToMnemonic(new Uint8Array(raw));
   try{await navigator.clipboard.writeText(words.join(' '));showToast('Key copied to clipboard!');}
-  catch(e){await customPrompt('Copy this key:',words.join(' '));}
+  catch(e){await _e2eShowSharedKey(words.join(' '));}
   closeEncryptPanel();
 }
 
@@ -16343,6 +16358,11 @@ function _smartPasteApplyExpire(){
 function smartPasteYes(){
   document.getElementById('smart-paste-dialog').classList.remove('show');
   if(!_smartPasteText||!active)return;
+  if(!_chatAllowsPublicContent(active)){
+    smartPasteNo();
+    showToast('Server-hosted pastes are unavailable in encrypted chats. Your text is in the composer.');
+    return;
+  }
   const text=_smartPasteText,type=_smartPasteType;
   _smartPasteText='';
   const sel=document.getElementById('sp-expire');
@@ -18499,7 +18519,7 @@ function viewFullTopic(){
   box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Topic — ${esc(active.target)}</div>${parseMircColors(topic)}`;
   ov.innerHTML='';ov.appendChild(box);
 }
-function customPrompt(message,defaultValue,isPassword){
+function customPrompt(message,defaultValue,isPassword,clearOnClose=isPassword){
   return new Promise(resolve=>{
     const ov=document.getElementById('custom-prompt-overlay');
     const msg=document.getElementById('custom-prompt-msg');
@@ -18517,7 +18537,7 @@ function customPrompt(message,defaultValue,isPassword){
     inp.select();
     // For password prompts, clear the shared input's value on close so the secret
     // doesn't linger in the live DOM for later scripts/inspection to read.
-    function finish(val){ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;inp.onkeydown=null;if(isPassword)inp.value='';resolve(val);}
+    function finish(val){ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;inp.onkeydown=null;if(clearOnClose)inp.value='';resolve(val);}
     ok.onclick=()=>finish(inp.value);
     cancel.onclick=()=>finish(null);
     inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();e.stopPropagation();finish(inp.value);}else if(e.key==='Escape'){e.preventDefault();e.stopPropagation();finish(null);}};

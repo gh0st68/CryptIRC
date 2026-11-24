@@ -593,7 +593,7 @@ impl AppState {
 pub enum ClientMessage {
     // r2: `e2e` = the E2E protocol generation the browser client speaks (current
     // app.js sends 2; older app.js and the TUI send nothing). Used to protect a stale
-    // cached app.js from silently sending cleartext (see e2e_legacy_send_blocked).
+    // cached app.js from silently sending cleartext (see e2e_send_blocked).
     Auth             { token: String, #[serde(default)] e2e: u32 },
     UnlockVault      { passphrase: String },
     LockVault        {},
@@ -655,13 +655,13 @@ pub enum ClientMessage {
     #[serde(rename = "e2e_load_session")]
     E2ELoadSession    { partner: String },
     #[serde(rename = "e2e_delete_session")]
-    E2EDeleteSession  { partner: String },
+    E2EDeleteSession  { partner: String, #[serde(default)] v: u32, #[serde(default)] req: Option<String> },
     #[serde(rename = "e2e_store_channel_key")]
     E2EStoreChannelKey  { channel: String, blob: String },
     #[serde(rename = "e2e_load_channel_key")]
-    E2ELoadChannelKey   { channel: String },
+    E2ELoadChannelKey   { channel: String, #[serde(default)] req: Option<String> },
     #[serde(rename = "e2e_delete_channel_key")]
-    E2EDeleteChannelKey { channel: String },
+    E2EDeleteChannelKey { channel: String, #[serde(default)] v: u32, #[serde(default)] req: Option<String> },
     #[serde(rename = "e2e_list_channel_keys")]
     E2EListChannelKeys  {},
     #[serde(rename = "e2e_update_trust")]
@@ -681,6 +681,8 @@ pub enum ClientMessage {
     E2EStoreKeyring   { blob: String, #[serde(default)] migrated: bool,
                         // r2: the keyring the client expects to replace ("" = create only).
                         #[serde(default)] expect: Option<String> },
+    #[serde(rename = "e2e_rewrap_blob")]
+    E2ERewrapBlob { slot: String, name: String, expect: String, blob: String },
     #[serde(rename = "e2e_list_sessions")]
     E2EListSessions   {},
     // Appearance
@@ -737,18 +739,15 @@ pub enum ServerEvent {
     AuthOk           { username: String, assets: String },
     AuthFailed       { message: String },
     VaultLocked      {},
-    /// e2e_enc_key: the LEGACY server-derived E2E blob key (base64). Since C1 it is
-    /// only sent while the user's blobs have not been migrated to the client-held key
-    /// (older app.js still needs it); empty afterwards.
-    /// e2e_legacy_key / e2e_pepper: only on a reply to a socket that just proved the
-    /// passphrase — the legacy key (to read + re-wrap old blobs) and the per-user pepper
-    /// the browser mixes into its own passphrase KDF. e2e_migrated: blobs migrated.
-    /// All additive + optional, so the TUI / older clients keep parsing this event.
+    /// vault_verified distinguishes a passphrase-proven response from a state refresh.
+    /// Older key material is sent only to a verified socket while migration requires it.
+    /// e2e_enc_key is kept for older clients that still expect a string field.
     VaultUnlocked    {
         e2e_enc_key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")] e2e_legacy_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")] e2e_pepper: Option<String>,
         #[serde(default)] e2e_migrated: bool,
+        #[serde(default)] vault_verified: bool,
     },
     VaultError       { message: String },
     /// `replayed` = true when this message was re-emitted from the daemon's
@@ -831,7 +830,9 @@ pub enum ServerEvent {
     #[serde(rename = "e2e_session")]
     E2ESession       { partner: String, blob: String },
     #[serde(rename = "e2e_channel_key")]
-    E2EChannelKey    { channel: String, blob: String },
+    E2EChannelKey    { channel: String, blob: String, #[serde(default, skip_serializing_if = "Option::is_none")] req: Option<String> },
+    #[serde(rename = "e2e_key_deleted")]
+    E2EKeyDeleted { req: String, ok: bool },
     #[serde(rename = "e2e_channel_list")]
     E2EChannelList   { channels: Vec<String> },
     #[serde(rename = "e2e_trust")]
@@ -844,12 +845,14 @@ pub enum ServerEvent {
     // can't unlock E2E yet know which targets were encrypted (so it blocks rather than
     // sends cleartext) and whether to prompt for the passphrase.
     #[serde(rename = "e2e_keyring")]
-    E2EKeyring       { blob: String, migrated: bool, has_identity: bool, peers: Vec<String>, channels: Vec<String> },
+    E2EKeyring       { blob: String, migrated: bool, has_identity: bool, #[serde(default)] needs_legacy: bool, peers: Vec<String>, channels: Vec<String> },
     #[serde(rename = "e2e_keyring_stored")]
     E2EKeyringStored { migrated: bool,
                        // r2: CAS lost — nothing written; `blob` is the keyring to adopt.
                        #[serde(default, skip_serializing_if = "std::ops::Not::not")] conflict: bool,
                        #[serde(default, skip_serializing_if = "Option::is_none")] blob: Option<String> },
+    #[serde(rename = "e2e_blob_rewrapped")]
+    E2EBlobRewrapped { slot: String, name: String, ok: bool },
     // r2 (NEW-7): another device of this user advanced the ratchet for `partner` by
     // SENDING (dv = that device's random id). Other devices re-sync before they send.
     #[serde(rename = "e2e_session_moved")]
@@ -3620,6 +3623,17 @@ async fn route_upload_init(
     Json(body): Json<ChunkedInitBody>,
 ) -> impl IntoResponse {
     let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
+    if !body.source_target.is_empty() && body.source_target != "status" {
+        let blocked = match state.e2e_store.protected_names(&user).await {
+            Ok((channels, peers)) => match_e2e_target(&body.source_target, channels, peers).is_some(),
+            Err(_) => true,
+        };
+        if blocked {
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+                "error": "Server-hosted files are unavailable in encrypted chats"
+            }))).into_response();
+        }
+    }
     // #32: per-user rate limit on the chunked-upload entry point. Gating init bounds
     // how many new uploads (and thus finalize-time metadata strips) one account can
     // start; the per-chunk route stays unlimited so large multi-chunk files still
@@ -5528,7 +5542,8 @@ fn cmd_allows_large_frame(cmd: &ClientMessage) -> bool {
     matches!(cmd,
         ClientMessage::SaveNotepad { .. } | ClientMessage::SaveStats { .. }
         | ClientMessage::SavePasswords { .. } | ClientMessage::SavePreferences { .. }
-        | ClientMessage::SaveBotConfig { .. } | ClientMessage::SaveAiKey { .. })
+        | ClientMessage::SaveBotConfig { .. } | ClientMessage::SaveAiKey { .. }
+        | ClientMessage::E2ERewrapBlob { .. })
 }
 
 /// F2: the canonical spelling of a network id — validate_uuid's lower-case copy for a
@@ -5760,7 +5775,7 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
     info!("WS authenticated: {}", username);
     // r2 (codex-p3 HIGH main.rs:4697 / v-e2e NEW-1): a browser socket that did not
     // announce the current E2E protocol is an outdated cached app.js.
-    let legacy_web = browser && client_e2e_proto < 2;
+    let legacy_web = browser && client_e2e_proto < 3;
     // r6 (codex P1 main.rs:4989): SUBSCRIBE FIRST, then re-validate the session (and with
     // it the account generation, r4 V3S-1) immediately before EVERY account-data snapshot
     // is built and written, and once more before anything is forwarded.
@@ -5810,11 +5825,8 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
     }).unwrap();
     session_still_valid!();
     if !ws_send_bounded(&mut sender, state_snapshot).await { abort_handshake!(None::<&str>); }
-    // If vault is already unlocked, tell the frontend so it can init E2E. C1/F12: this
-    // socket has NOT proved the passphrase, so it gets no pepper; once the user's blobs
-    // were migrated to the client-held key it gets no key at all (the browser uses its
-    // own cached key or asks for the passphrase). Unmigrated users still get the legacy
-    // key so an older cached app.js keeps working until it migrates.
+    // An already-unlocked vault lets the browser resume with its own cached keys.
+    // The socket has not verified a passphrase and receives no migration material.
     session_still_valid!();
     if vault_unlocked {
         let ev = e2e_vault_unlocked_event(&state, &username, false).await;
@@ -6047,9 +6059,8 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
                             let _ = socket_tx2.try_send(ServerEvent::Error { message: format!(
                                 "Message too large ({} KB; max {} KB) — not processed.",
                                 text.len() / 1024, WS_MAX_MSG_BYTES / 1024) });
-                        } else if legacy_web && e2e_legacy_send_blocked(&state2, &user2, &socket_tx2, &cmd).await {
-                            // r2: cleartext from an outdated cached app.js to a target this
-                            // account encrypts — refused, the tab was told (E2E region).
+                        } else if e2e_send_blocked(&state2, &user2, &socket_tx2, &cmd, legacy_web).await {
+                            // The client has been told why the encrypted target was blocked.
                         } else {
                             handle_command(cmd, &user2, &state2, &socket_tx2, false).await;
                         }
@@ -6212,33 +6223,32 @@ fn user_bulk_prune(username: &str) {
     user_bulk_events().remove_if(username, |_, txs| txs.iter().all(|tx| tx.receiver_count() == 0));
 }
 
-/// C1/F12: build the VaultUnlocked event for one socket.
-/// `proven` = this socket just proved the vault passphrase (unlock, re-verify on an
-/// already-unlocked vault, or passphrase change) — only then does it get the E2E
-/// pepper (input to the browser's own passphrase KDF) and, while not yet migrated, the
-/// legacy key (to read and re-wrap pre-upgrade blobs). `e2e_enc_key` keeps carrying the legacy key ONLY
-/// for users whose blobs are not migrated yet, so an older cached app.js still works;
-/// once migrated it is empty on every path (a stale client then never initialises
-/// E2E, and the server refuses its legacy-format writes).
+/// The unlock response supplies older key material only for migration.
 async fn e2e_vault_unlocked_event(state: &AppState, username: &str, proven: bool) -> ServerEvent {
     let b64 = |k: [u8; 32]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, k);
-    let migrated = state.e2e_store.is_migrated(username).await;
-    let legacy = state.crypto.derive_e2e_enc_key(username).await.ok().map(b64);
-    let e2e_enc_key = if migrated { String::new() } else { legacy.clone().unwrap_or_default() };
-    // Once migrated the legacy key is never sent again (not even to a proven socket):
-    // nothing legitimate is wrapped under it any more, and offering it would let an old
-    // legacy blob (a backup, or a malicious server) be fed back into the client.
-    let (e2e_legacy_key, e2e_pepper) = if proven {
-        (if migrated { None } else { legacy }, state.crypto.derive_e2e_kek_pepper(username).await.ok().map(b64))
-    } else {
-        (None, None)
+    let keyring = state.e2e_store.load_keyring(username).await;
+    let migrated = match &keyring {
+        Some((_, migrated)) => *migrated,
+        None => state.e2e_store.identity_is_v2(username).await,
     };
-    ServerEvent::VaultUnlocked { e2e_enc_key, e2e_legacy_key, e2e_pepper, e2e_migrated: migrated }
+    let v2_keyring = matches!(keyring, Some((ref blob, _)) if blob.starts_with("e2k2."));
+    let legacy = if !migrated && proven && state.e2e_store.needs_legacy_key(username).await.unwrap_or(true) {
+        state.crypto.derive_e2e_enc_key(username).await.ok().map(b64)
+    } else { None };
+    let e2e_pepper = if proven && v2_keyring {
+        state.crypto.derive_e2e_kek_pepper(username).await.ok().map(b64)
+    } else { None };
+    ServerEvent::VaultUnlocked {
+        e2e_enc_key: String::new(), e2e_legacy_key: legacy, e2e_pepper,
+        e2e_migrated: migrated, vault_verified: proven,
+    }
 }
 
-/// C1: legacy-format E2E blobs are bare base64 (no '.'), client-held-key blobs carry
-/// the "e2e2." prefix. Once a user is migrated only the latter may be written.
-fn e2e_blob_is_v2(blob: &str) -> bool { blob.starts_with("e2e2.") }
+fn e2e_blob_version(blob: &str) -> u32 {
+    if blob.starts_with("e2e3.") { 3 }
+    else if blob.starts_with("e2e2.") { 2 }
+    else { 1 }
+}
 
 /// r2: split an outgoing IRC line into (VERB, targets, text) for PRIVMSG / NOTICE —
 /// skipping an IRCv3 `@tags` prefix and a `:source` prefix. None for anything else.
@@ -6342,48 +6352,41 @@ fn e2e_text_is_cleartext(text: &str) -> bool {
     true
 }
 
-/// r2 (codex-p3 HIGH main.rs:4697, v-e2e NEW-1 HIGH): protect an OUTDATED browser client.
-/// Once a user's E2E data has moved to the client-held keyring, an app.js cached from
-/// before that change gets no E2E key (VaultUnlocked.e2e_enc_key is empty) — it never
-/// initialises E2E and would send every message in cleartext, including to channels /
-/// DMs this account encrypts (and a still-open old tab can lose a channel key when the
-/// migration renames it). That code can't be changed, so the server refuses, for such
-/// a socket only (browser + no `e2e:2` in its auth frame; the TUI is not a browser and
-/// is never affected), a cleartext PRIVMSG/NOTICE (incl. /me) to any target that has
-/// stored E2E state for this account: a channel / DM pre-shared key, or a DM ratchet
-/// session. Ciphertext, CTCP replies and every other command pass unchanged. The tab
-/// gets a visible notice in that conversation telling the user to reload. Accounts
-/// that never ran the upgraded client (no keyring yet) keep the old behaviour.
-/// Returns true when the command was refused (and must not be handled).
-async fn e2e_legacy_send_blocked(
+/// Protect known encrypted targets from plaintext sends, including from clients
+/// that do not implement E2E. Outdated browsers on recovery-keyring accounts
+/// also need to reload before sending ciphertext from a stale ratchet.
+async fn e2e_send_blocked(
     state: &AppState, username: &str,
-    socket_tx: &tokio::sync::mpsc::Sender<ServerEvent>, cmd: &ClientMessage,
+    socket_tx: &tokio::sync::mpsc::Sender<ServerEvent>, cmd: &ClientMessage, outdated_browser: bool,
 ) -> bool {
     let ClientMessage::Send { conn_id, raw } = cmd else { return false };
     let Some((_verb, targets, text)) = e2e_split_chat_line(&strip_crlf(raw)) else { return false };
-    if !e2e_text_is_cleartext(&text) { return false; }
-    // r5 (codex P1 main.rs:5440): fail closed. The caller canonicalises first now; an id
-    // this account does not own (re-cased or not) is refused here too — the Send handler
-    // would drop it anyway, so nothing that would have been sent is lost.
+    let outdated_recovery = outdated_browser && !text.starts_with('\u{1}')
+        && matches!(state.e2e_store.load_keyring(username).await,
+            Some((blob, _)) if blob.starts_with("e2k3."));
+    if !outdated_recovery && !e2e_text_is_cleartext(&text) { return false; }
     let conn_id = &canonical_network_id(conn_id);
     if !state.owns_conn(username, conn_id) { return true; }
-    // r3 (agy-P1 HIGH main.rs:5170, fail closed): the account counts as upgraded once a
-    // keyring exists — or an "e2e2." identity does (keyring lost / unreadable), which
-    // is also when e2e_vault_unlocked_event stops handing out the legacy key.
-    if !state.e2e_store.has_upgraded_e2e(username).await { return false; }
-    // r3 (codex-p1 HIGH main.rs:5178): names compared under the widest case-fold
-    // (`#a[b]` and `#a{b}` are one channel on RFC1459 networks), not plain lowercase.
-    if let Some(bare) = e2e_protected_target(state, username, &targets).await {
-        let bare = bare.as_str();
-        let shown = if is_plausible_target(bare) { bare.to_string() } else { "status".to_string() };
+    let protected = match state.e2e_store.protected_names(username).await {
+        Ok((channels, peers)) => match_e2e_target(&targets, channels, peers),
+        Err(_) => {
+            let _ = socket_tx.try_send(ServerEvent::Error { message: "Unable to verify encryption for this conversation. Message blocked.".into() });
+            return true;
+        }
+    };
+    if let Some(bare) = protected {
+        let shown = if is_plausible_target(&bare) { bare } else { "status".to_string() };
+        let message = if outdated_browser {
+            format!("🔒 Message to {shown} blocked. Reload CryptIRC to use encrypted chat.")
+        } else {
+            format!("🔒 Plaintext message to {shown} blocked. Unlock encrypted chat to send.")
+        };
         let _ = socket_tx.try_send(ServerEvent::IrcMessage {
             replayed: false,
             conn_id: conn_id.clone(),
             from: "*".into(),
-            target: shown.clone(),
-            text: format!("⛔ NOT SENT: this browser tab is running an outdated version of CryptIRC that can no \
-                longer encrypt messages for {} (end-to-end encryption is on for it). Nothing was sent. Reload the \
-                page (Ctrl+Shift+R, or close and reopen the app) to update.", shown),
+            target: shown,
+            text: message,
             ts: chrono::Utc::now().timestamp(),
             kind: MessageKind::Notice,
             msg_id: 0,
@@ -6392,12 +6395,6 @@ async fn e2e_legacy_send_blocked(
         return true;
     }
     false
-}
-
-async fn e2e_protected_target(state: &AppState, username: &str, targets: &str) -> Option<String> {
-    let channels = state.e2e_store.list_channel_keys(username).await;
-    let peers = state.e2e_store.list_sessions(username).await;
-    match_e2e_target(targets, channels, peers)
 }
 
 fn match_e2e_target(targets: &str, channels: Vec<String>, peers: Vec<String>) -> Option<String> {
@@ -6649,10 +6646,7 @@ async fn handle_command(
             };
             match chpass_res {
                 Ok(_)  => {
-                    // #60/C1: only to the originating socket. The pepper lets the browser
-                    // re-wrap its client-held E2E keyring under the NEW passphrase (it has
-                    // the old + new passphrase in hand); the master key, and therefore the
-                    // pepper and legacy key, are unchanged by a passphrase change.
+                    // Only acknowledge the passphrase change on the initiating socket.
                     send_self(e2e_vault_unlocked_event(state, username, true).await);
                 }
                 Err(e) => send_self(ServerEvent::VaultError { message: e.to_string() }),
@@ -7377,11 +7371,8 @@ async fn handle_command(
             // cached app.js (which can't read the upgraded identity and would "helpfully"
             // regenerate one) can never overwrite it. r3: checked atomically with the
             // write (the permit is held until the write is done).
-            let _legacy_permit = if e2e_blob_is_v2(&blob) { None } else {
-                match state.e2e_store.legacy_write_permit(username).await {
-                    Some(g) => Some(g),
-                    None => { send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return; }
-                }
+            let Some(_permit) = state.e2e_store.write_permit(username, e2e_blob_version(&blob)).await else {
+                send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return;
             };
             // r3: create-if-absent for a first unlock (`expect`). A conflict writes
             // nothing and is silent: the client reads the identity back right after
@@ -7416,11 +7407,8 @@ async fn handle_command(
             // C1: a stale app.js (no `v`) can't store the private halves any more once the
             // user is migrated, so its bundle would advertise keys nobody holds.
             // r3: checked atomically with the write (permit held until it is done).
-            let _legacy_permit = if v >= 2 { None } else {
-                match state.e2e_store.legacy_write_permit(username).await {
-                    Some(g) => Some(g),
-                    None => { send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return; }
-                }
+            let Some(_permit) = state.e2e_store.write_permit(username, v.max(1)).await else {
+                send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return;
             };
             // r3 (codex-p3 MED e2e.js:1129): a bundle names the identity blob it was made
             // for; one for an identity that is not (or no longer) the stored one — a
@@ -7459,11 +7447,8 @@ async fn handle_command(
                 send(ServerEvent::Error { message: "Vault must be unlocked to add E2E prekeys".into() }); return;
             }
             // C1: same stale-client guard as E2EPublishBundle (r3: atomic with the write).
-            let _legacy_permit = if v >= 2 { None } else {
-                match state.e2e_store.legacy_write_permit(username).await {
-                    Some(g) => Some(g),
-                    None => { send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return; }
-                }
+            let Some(_permit) = state.e2e_store.write_permit(username, v.max(1)).await else {
+                send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return;
             };
             // HIGH: cap per-call OTPK count so a single add can't exhaust
             // inodes/disk (one file per key). 256 matches the client refill batch.
@@ -7549,11 +7534,8 @@ async fn handle_command(
             }
             // C1: no legacy-format writes after migration (stale app.js). r3: checked
             // atomically with the write (permit held until it is done).
-            let _legacy_permit = if e2e_blob_is_v2(&blob) { None } else {
-                match state.e2e_store.legacy_write_permit(username).await {
-                    Some(g) => Some(g),
-                    None => { send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return; }
-                }
+            let Some(_permit) = state.e2e_store.write_permit(username, e2e_blob_version(&blob)).await else {
+                send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return;
             };
             // #13: pass the RAW partner through; the single canonical injective sanitizer
             // lives in e2e::safe_partner (applied inside store_session), so client cache,
@@ -7584,9 +7566,13 @@ async fn handle_command(
                 None       => send_self(ServerEvent::E2ESession { partner, blob: String::new() }),
             }
         }
-        ClientMessage::E2EDeleteSession { partner } => {
-            // #13: pass the RAW partner; e2e::safe_partner does the sole filename derivation.
-            let _ = state.e2e_store.delete_session(username, &partner).await;
+        ClientMessage::E2EDeleteSession { partner, v, req } => {
+            let permit = if state.crypto.is_unlocked(username).await {
+                state.e2e_store.write_permit(username, v.max(1)).await
+            } else { None };
+            let ok = permit.is_some() && state.e2e_store.delete_session(username, &partner).await.is_ok();
+            if let Some(req) = req { send_self(ServerEvent::E2EKeyDeleted { req, ok }); }
+            else if !ok { send_self(ServerEvent::Error { message: "E2E: could not remove session; unlock the vault and reload if needed".into() }); }
         }
 
         // ── E2E: channel pre-shared keys ──────────────────────────────────────
@@ -7601,11 +7587,8 @@ async fn handle_command(
             }
             // C1: no legacy-format writes after migration (stale app.js). r3: checked
             // atomically with the write (permit held until it is done).
-            let _legacy_permit = if e2e_blob_is_v2(&blob) { None } else {
-                match state.e2e_store.legacy_write_permit(username).await {
-                    Some(g) => Some(g),
-                    None => { send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return; }
-                }
+            let Some(_permit) = state.e2e_store.write_permit(username, e2e_blob_version(&blob)).await else {
+                send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return;
             };
             // #13/#36: one canonical, injective sanitizer lives in e2e::safe_channel
             // (applied inside store_channel_key). Pass the raw channel through and echo
@@ -7615,23 +7598,26 @@ async fn handle_command(
                 Ok(_)  => {
                     // Notify ALL sessions so other devices load the new key
                     state.send_to_user(username, ServerEvent::E2EChannelKey {
-                        channel, blob,
+                        channel, blob, req: None,
                     });
                 }
                 Err(e) => send(ServerEvent::Error { message: format!("E2E store channel key: {}", e) }),
             }
         }
-        ClientMessage::E2ELoadChannelKey { channel } => {
-            // #13/#36: pass/echo the RAW channel; e2e::safe_channel is the sole sanitizer.
-            match state.e2e_store.load_channel_key(username, &channel).await {
-                Some(blob) => send_self(ServerEvent::E2EChannelKey { channel, blob }),
-                None       => {} // no key — channel not encrypted (or non-canonical name)
+        ClientMessage::E2ELoadChannelKey { channel, req } => {
+            let blob = state.e2e_store.load_channel_key(username, &channel).await;
+            if blob.is_some() || req.is_some() {
+                send_self(ServerEvent::E2EChannelKey { channel, blob: blob.unwrap_or_default(), req });
             }
         }
-        ClientMessage::E2EDeleteChannelKey { channel } => {
-            // #13/#36: pass the RAW channel; e2e::safe_channel no-ops internally on a
-            // non-canonical name.
-            let _ = state.e2e_store.delete_channel_key(username, &channel).await;
+        ClientMessage::E2EDeleteChannelKey { channel, v, req } => {
+            let permit = if state.crypto.is_unlocked(username).await {
+                state.e2e_store.write_permit(username, v.max(1)).await
+            } else { None };
+            let ok = permit.is_some() && state.e2e_store.delete_channel_key(username, &channel).await.is_ok();
+            if let Some(req) = req { send_self(ServerEvent::E2EKeyDeleted { req, ok }); }
+            else if !ok { send_self(ServerEvent::Error { message: "E2E: could not remove shared key; unlock the vault and reload if needed".into() }); }
+            if !ok { return; }
             let channels = state.e2e_store.list_channel_keys(username).await;
             // r2 (v-e2e NEW-1): the upgraded client re-stores a mixed-case legacy PSK
             // (#MixCase) under its lowercased name and then deletes the original. The
@@ -7838,9 +7824,13 @@ async fn handle_command(
             let peers: Vec<String> = state.e2e_store.list_sessions(username).await
                 .into_iter().filter(|p| !p.starts_with("__")).collect();
             let channels = state.e2e_store.list_channel_keys(username).await;
-            send_self(ServerEvent::E2EKeyring { blob, migrated, has_identity, peers, channels });
+            let needs_legacy = !migrated && state.e2e_store.needs_legacy_key(username).await.unwrap_or(true);
+            send_self(ServerEvent::E2EKeyring { blob, migrated, has_identity, needs_legacy, peers, channels });
         }
         ClientMessage::E2EStoreKeyring { blob, migrated, expect } => {
+            if !blob.starts_with("e2k3.") {
+                send_self(ServerEvent::Error { message: "E2E: reload the app to set up a recovery keyring".into() }); return;
+            }
             if !state.crypto.is_unlocked(username).await {
                 send_self(ServerEvent::Error { message: "Vault must be unlocked to store the E2E keyring".into() }); return;
             }
@@ -7851,6 +7841,12 @@ async fn handle_command(
                 Ok((eff, Some(cur))) => send_self(ServerEvent::E2EKeyringStored { migrated: eff, conflict: true, blob: Some(cur) }),
                 Err(e)  => send_self(ServerEvent::Error { message: format!("E2E store keyring: {}", e) }),
             }
+        }
+        ClientMessage::E2ERewrapBlob { slot, name, expect, blob } => {
+            let ok = expect.len() <= WS_MAX_MSG_BYTES && blob.len() <= WS_MAX_MSG_BYTES
+                && state.crypto.is_unlocked(username).await &&
+                state.e2e_store.rewrap_v2_blob(username, &slot, &name, &expect, &blob).await.unwrap_or(false);
+            send_self(ServerEvent::E2EBlobRewrapped { slot, name, ok });
         }
         ClientMessage::E2EListSessions {} => {
             let partners = state.e2e_store.list_sessions(username).await;

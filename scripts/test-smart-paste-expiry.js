@@ -72,7 +72,7 @@ function makeSelect(options) {
   };
 }
 
-async function run({ stored, pick, selectPresent = true, options = OPTIONS }) {
+async function run({ stored, pick, selectPresent = true, options = OPTIONS, encrypted = false }) {
   const store = new Map();
   if (stored !== undefined) store.set('cryptirc_smartpaste_expire', stored);
 
@@ -100,13 +100,14 @@ async function run({ stored, pick, selectPresent = true, options = OPTIONS }) {
     location: { pathname: '/cryptirc/' },
     sessionToken: 'tok',
     active: { conn_id: 1, target: '#x' },
+    _chatAllowsPublicContent: () => !encrypted,
     showToast: m => toasts.push(m),
     savePrefsToServer: () => { prefsSaved++; },
     fetch: (url, opts) => {
       sent.push({ url, body: JSON.parse(opts.body) });
       // Resolve like the real route does so the .then tail (input bar + toast)
       // actually runs and can be asserted on.
-      return Promise.resolve({ json: () => Promise.resolve({ url: 'https://x/paste/abc' }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ url: 'https://x/paste/abc' }) });
     },
     JSON, String, Number, RegExp, Object, Array, Promise, parseInt, console,
   };
@@ -188,6 +189,11 @@ for (const bad of ['', 'abc', '-1', '99999999999999999999', '3600; DROP', '1e9',
 }
 
 console.log('\n# 4. "Paste as Text" is unaffected');
+{
+  const r = await run({ encrypted: true });
+  eq(r.sent.length, 0, 'an encrypted chat never creates a server-hosted paste');
+  eq(r.input.value, 'a\nb\nc\nd\ne', 'the original text stays in the composer');
+}
 {
   const store = new Map();
   const sandbox2 = {

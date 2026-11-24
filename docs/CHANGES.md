@@ -1,5 +1,12 @@
 # CryptIRC changelog
 
+## v0.5.14 (November 2026)
+
+- **Encrypted chat recovery.** A browser-generated recovery code protects E2E keys independently of the vault passphrase. Existing accounts migrate their stored E2E data when they set up the recovery code. CryptIRC blocks plaintext sends to known encrypted targets and shows shared keys in a separate dialog. Server-hosted uploads and pastes are unavailable in encrypted chats.
+- **Expanded CryptIRC MCP.** The raw command tool accepts network-specific IRC verbs and IRCv3 message tags. The IRC server continues to enforce channel and operator permissions.
+- **Network and account settings.** Read and update saved network settings, including auto-join, reconnect behavior, and quit messages. Network credentials are write-only. The new `cryptirc_settings` tool covers synced preferences, notifications, and bots. Server and link-preview settings require a CryptIRC administrator.
+- **Upgrade.** Use **Unlock encrypted chats** or `/encrypt unlock` and save the recovery code for other devices. A web service update is enough. Refresh the tool list in your MCP client or start a new session to discover the updated tools.
+
 ## v0.5.13 (November 2026)
 
 - **Chat translation.** Pick a reading language in **Settings → Translation**, then translate messages on demand or automatically as new messages arrive. Each conversation can override the incoming setting. Translations appear alongside the original text.

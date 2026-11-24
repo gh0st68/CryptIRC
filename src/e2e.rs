@@ -24,6 +24,7 @@
 
 // #93: `bail` was imported but never used — dropped to clear the compiler warning.
 use anyhow::Result;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::{Duration, Instant}};
@@ -157,6 +158,8 @@ pub struct E2EStore {
     /// r3: per-user mutex for creating NEW session / channel-key slots (cap check +
     /// write), see `store_slot`.
     cap_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    #[cfg(unix)]
+    protected_slot_cache: DashMap<PathBuf, ((u64, u64, i64, i64, i64, i64), Vec<String>)>,
     /// #27: per-target sliding-window counter of OTPK consumptions. Keyed by the
     /// target username (the pool being drained). Value is (window_start, count).
     /// r5: the target-wide ceiling (OTPK_CONSUME_MAX_PER_TARGET_WINDOW).
@@ -192,6 +195,8 @@ impl E2EStore {
             otpk_locks:        Arc::new(DashMap::new()),
             trust_locks:       Arc::new(DashMap::new()),
             cap_locks:         Arc::new(DashMap::new()),
+            #[cfg(unix)]
+            protected_slot_cache: DashMap::new(),
             otpk_consume_rate: Arc::new(DashMap::new()),
             otpk_pair_rate:    Arc::new(DashMap::new()),
         }
@@ -310,23 +315,8 @@ impl E2EStore {
         tokio::fs::read_to_string(self.user_dir(username).join("identity.enc")).await.ok()
     }
 
-    // ── C1 (2026-11-01): client-held keyring ──────────────────────────────────
-    //
-    // The E2E blob-wrapping key is no longer derived by the server. The browser
-    // generates a random E2E master key, wraps it under a key it derives itself
-    // (PBKDF2 over the vault passphrase, combined with a per-user server "pepper"
-    // that is only handed to a socket which just proved the passphrase), and stores
-    // the WRAPPED result here as an opaque string. The server can't unwrap it.
-    //
-    // keyring.json = {"v":1,"blob":"e2k2.…","migrated":bool}
-    //   migrated=false : the client has stored a keyring but is still re-wrapping the
-    //                    user's legacy (server-key) blobs; legacy-format writes are
-    //                    still accepted and the legacy key is still offered.
-    //   migrated=true  : every blob was re-wrapped. From now on the server refuses
-    //                    legacy-format blob writes (stale app.js can't clobber the
-    //                    upgraded identity/sessions/PSKs) and stops sending the legacy
-    //                    key to new sockets. It never flips back to false.
-
+    // The browser wraps its E2E master key with its own recovery code. The
+    // server holds the wrapped keyring and the migration status for v1 blobs.
     fn keyring_path(&self, username: &str) -> PathBuf {
         self.user_dir(username).join("keyring.json")
     }
@@ -347,7 +337,8 @@ impl E2EStore {
     /// this state only arises when keyring.json was lost or damaged; legacy-format
     /// writes (a stale tab regenerating an identity it can't read) and the legacy key
     /// stay withheld instead of being handed out again.
-    pub async fn is_migrated(&self, username: &str) -> bool {
+    #[cfg(test)]
+    async fn is_migrated(&self, username: &str) -> bool {
         match self.load_keyring(username).await {
             Some((_, m)) => m,
             None => self.identity_is_v2(username).await,
@@ -356,47 +347,124 @@ impl E2EStore {
 
     /// The identity blob is in the client-held-key ("e2e2.") format.
     pub async fn identity_is_v2(&self, username: &str) -> bool {
-        matches!(read_prefix(&self.user_dir(username).join("identity.enc")).await, Some(p) if p.starts_with(b"e2e2."))
+        matches!(read_prefix(&self.user_dir(username).join("identity.enc")).await, Some(p) if p.starts_with(b"e2e2.") || p.starts_with(b"e2e3."))
     }
 
     /// r3 (codex-p3 HIGH main.rs:5003 / agy-P1 main.rs:5170): has an upgraded client
     /// ever run for this account (a keyring, or any "e2e2." identity)? The outdated-tab
     /// send guard applies from then on.
-    pub async fn has_upgraded_e2e(&self, username: &str) -> bool {
+    #[cfg(test)]
+    async fn has_upgraded_e2e(&self, username: &str) -> bool {
         // keyring.json present at all (even unparseable) counts.
         tokio::fs::metadata(self.keyring_path(username)).await.is_ok()
             || self.identity_is_v2(username).await
     }
 
-    /// r3 (codex-p1 MED main.rs:5888): the "no legacy-format writes once migrated" rule,
-    /// made atomic with the migration flip. The migrated check used to run before, and
-    /// separately from, the storage write, so a stale tab's legacy write admitted just
-    /// before the flip could land after it and overwrite an upgraded identity / session /
-    /// key. Now a legacy-format write holds this per-user lock (the one store_keyring
-    /// flips `migrated` under) from the check until its write is done: it either commits
-    /// before the flip — which then sees it (has_legacy_blobs) and is refused — or is
-    /// refused itself. Returns None when the account is migrated (refuse the write).
-    pub async fn legacy_write_permit(&self, username: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-        let g = self.trust_lock(username).lock_owned().await;
-        if self.is_migrated(username).await { None } else { Some(g) }
+    /// Serializes keyring changes with encrypted slot writes.
+    async fn slot_update_lock(&self, username: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.trust_lock(username).lock_owned().await
     }
 
-    /// r3: is any stored E2E blob (identity, a session slot, a channel key) still in the
-    /// legacy (server-key) format? Checked under the keyring lock before the account is
-    /// marked migrated.
-    async fn has_legacy_blobs(&self, username: &str) -> bool {
+    pub async fn write_permit(&self, username: &str, version: u32) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        let permit = self.slot_update_lock(username).await;
+        let keyring = self.load_keyring(username).await;
+        let (recovery, migrated) = match keyring {
+            Some((blob, migrated)) if blob.starts_with("e2k3.") => (true, migrated),
+            Some((blob, migrated)) if blob.starts_with("e2k2.") => (false, migrated),
+            Some(_) => return None,
+            None => {
+                match tokio::fs::metadata(self.keyring_path(username)).await {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return None,
+                }
+                let identity = read_prefix(&self.user_dir(username).join("identity.enc")).await;
+                let recovery = identity.as_ref().is_some_and(|p| p.starts_with(b"e2e3."));
+                let migrated = recovery || identity.as_ref().is_some_and(|p| p.starts_with(b"e2e2."));
+                (recovery, migrated)
+            }
+        };
+        let min_version = if recovery { 3 } else if migrated { 2 } else { 1 };
+        (version >= min_version && (version < 3 || recovery)).then_some(permit)
+    }
+
+    /// Replace an old ciphertext only while it is still the current slot value.
+    /// Normal slot writes and deletes acquire the same per-user lock.
+    pub async fn rewrap_v2_blob(&self, username: &str, slot: &str, name: &str, expect: &str, blob: &str) -> Result<bool> {
+        if !expect.starts_with("e2e2.") || !blob.starts_with("e2e3.") {
+            anyhow::bail!("invalid E2E rewrap");
+        }
+        let Some(_permit) = self.write_permit(username, 3).await else { return Ok(false) };
+        let already_rewrapped = |current: Option<&str>| {
+            current.is_none_or(|b| b.starts_with("e2e3."))
+        };
+        match slot {
+            "identity" => {
+                let conflict = self.store_identity_enc_cas(username, blob, Some(expect)).await?;
+                Ok(conflict.as_ref().is_none_or(|current| current.is_empty() || already_rewrapped(Some(current))))
+            }
+            "session" | "channel" => {
+                // Keep private-prekey slots stable against quota eviction during rewrap.
+                let cap_lock = self.cap_lock(username);
+                let _cap = cap_lock.lock().await;
+                let (dir, safe): (&str, fn(u8) -> bool) = if slot == "session" {
+                    ("sessions", partner_is_safe)
+                } else {
+                    ("channels", channel_is_safe)
+                };
+                let dir = self.user_dir(username).join(dir);
+                let disk_name = slot_name(name, safe);
+                let current = load_slot(&dir, &disk_name).await;
+                if current.as_deref() != Some(expect) {
+                    return Ok(already_rewrapped(current.as_deref()));
+                }
+                write_slot(&dir, &disk_name, name, blob).await?;
+                Ok(true)
+            }
+            _ => anyhow::bail!("unknown E2E slot"),
+        }
+    }
+
+    async fn has_stored_blob_matching(&self, username: &str, matches: impl Fn(&[u8]) -> bool) -> Result<bool> {
         let dir = self.user_dir(username);
-        let is_legacy = |p: Option<Vec<u8>>| matches!(p, Some(b) if !b.is_empty() && !b.starts_with(b"e2e2."));
-        if is_legacy(read_prefix(&dir.join("identity.enc")).await) { return true; }
+        if let Some(prefix) = read_blob_prefix(&dir.join("identity.enc")).await? {
+            if matches(&prefix) { return Ok(true); }
+        }
         for sub in ["sessions", "channels"] {
-            let Ok(mut rd) = tokio::fs::read_dir(dir.join(sub)).await else { continue };
-            while let Ok(Some(e)) = rd.next_entry().await {
-                let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) != Some("enc") { continue; }
-                if is_legacy(read_prefix(&p).await) { return true; }
+            let mut entries = match tokio::fs::read_dir(dir.join(sub)).await {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("enc") { continue; }
+                if let Some(prefix) = read_blob_prefix(&path).await? {
+                    if matches(&prefix) { return Ok(true); }
+                }
             }
         }
-        false
+        Ok(false)
+    }
+
+    pub async fn needs_legacy_key(&self, username: &str) -> Result<bool> {
+        self.has_stored_blob_matching(username,
+            |p| !p.is_empty() && !p.starts_with(b"e2e2.") && !p.starts_with(b"e2e3.")).await
+    }
+
+    fn recovery_keyring_has_previous(blob: &str) -> Result<bool> {
+        let bytes = STANDARD.decode(&blob["e2k3.".len()..])?;
+        let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let decode = |name: &str| -> Result<Vec<u8>> {
+            let value = body[name].as_str().ok_or_else(|| anyhow::anyhow!("invalid E2E keyring field"))?;
+            Ok(STANDARD.decode(value)?)
+        };
+        let wrapped = decode("w")?.len();
+        if body["v"].as_u64() != Some(3) || decode("s")?.len() != 16
+            || decode("c")?.len() != 52 || !matches!(wrapped, 60 | 92)
+        {
+            anyhow::bail!("invalid E2E recovery keyring");
+        }
+        Ok(wrapped == 92)
     }
 
     /// Store the wrapped keyring. `migrated` can only move false -> true; a request
@@ -413,7 +481,7 @@ impl E2EStore {
     /// Returns (effective migrated flag, Some(current blob) on a CAS conflict).
     /// Atomic tmp+rename (write_secret).
     pub async fn store_keyring(&self, username: &str, blob: &str, migrated: bool, expect: Option<&str>) -> Result<(bool, Option<String>)> {
-        if !blob.starts_with("e2k2.") || blob.len() > 4096
+        if !(blob.starts_with("e2k2.") || blob.starts_with("e2k3.")) || blob.len() > 4096
             || !blob.bytes().all(|b| b.is_ascii_graphic()) {
             anyhow::bail!("invalid keyring");
         }
@@ -421,6 +489,15 @@ impl E2EStore {
         let _g = lock.lock().await;
         let cur = self.load_keyring(username).await;
         let prev_migrated = matches!(cur, Some((_, true)));
+        if blob.starts_with("e2k3.") {
+            if expect.is_none() { anyhow::bail!("E2E recovery keyring requires a compare-and-swap"); }
+            if cur.is_none() && self.identity_is_v2(username).await {
+                anyhow::bail!("E2E keyring is missing for an existing identity");
+            }
+        } else if matches!(&cur, Some((old, _)) if old.starts_with("e2k3.")) {
+            anyhow::bail!("E2E keyring downgrade refused");
+        }
+
         if let Some(exp) = expect {
             let cur_blob = cur.as_ref().map(|(b, _)| b.as_str()).unwrap_or("");
             if cur_blob != exp {
@@ -432,12 +509,22 @@ impl E2EStore {
                 }
             }
         }
-        // r3 (codex-p1 MED main.rs:5888): only flip to migrated when no legacy-format blob
-        // is left. Legacy writes take this same lock (legacy_write_permit), so one that
-        // landed after the client's own verification pass is seen here; the flip is then
-        // not done (the client keeps the account unmigrated and retries on a later unlock)
-        // instead of stranding that blob unreadable behind the flag.
-        let eff = prev_migrated || (migrated && !self.has_legacy_blobs(username).await);
+        if blob.starts_with("e2k3.") {
+            let previous = Self::recovery_keyring_has_previous(blob)?;
+            let finalized = match &cur {
+                Some((old, _)) if old.starts_with("e2k3.") => !Self::recovery_keyring_has_previous(old)?,
+                _ => false,
+            };
+            if previous && finalized {
+                anyhow::bail!("E2E keyring migration rollback refused");
+            }
+            if !previous && !finalized
+                && self.has_stored_blob_matching(username, |p| p.starts_with(b"e2e2.")).await?
+            {
+                anyhow::bail!("E2E data still needs the previous key");
+            }
+        }
+        let eff = prev_migrated || (migrated && !self.needs_legacy_key(username).await?);
         if migrated && !eff {
             warn!("[E2E] not marking E2E data migrated yet: a legacy-format blob is still stored (written by an outdated tab?)");
         }
@@ -753,8 +840,7 @@ impl E2EStore {
     }
 
     pub async fn delete_session(&self, username: &str, partner: &str) -> Result<()> {
-        delete_slot(&self.user_dir(username).join("sessions"), &slot_name(partner, partner_is_safe)).await;
-        Ok(())
+        delete_slot(&self.user_dir(username).join("sessions"), &slot_name(partner, partner_is_safe)).await
     }
 
     // ── Channel PSKs ──────────────────────────────────────────────────────────
@@ -769,8 +855,7 @@ impl E2EStore {
     }
 
     pub async fn delete_channel_key(&self, username: &str, channel: &str) -> Result<()> {
-        delete_slot(&self.user_dir(username).join("channels"), &slot_name(channel, channel_is_safe)).await;
-        Ok(())
+        delete_slot(&self.user_dir(username).join("channels"), &slot_name(channel, channel_is_safe)).await
     }
 
     pub async fn list_channel_keys(&self, username: &str) -> Vec<String> {
@@ -782,9 +867,41 @@ impl E2EStore {
     pub(crate) async fn protected_names(&self, username: &str) -> Result<(Vec<String>, Vec<String>)> {
         let dir = self.user_dir(username);
         Ok((
-            list_slots_checked(&dir.join("channels"), channel_is_safe, MAX_CHANNEL_KEY_FILES, true).await?,
-            list_slots_checked(&dir.join("sessions"), partner_is_safe, MAX_SESSION_FILES, true).await?,
+            self.protected_slots(dir.join("channels"), channel_is_safe, MAX_CHANNEL_KEY_FILES).await?,
+            self.protected_slots(dir.join("sessions"), partner_is_safe, MAX_SESSION_FILES).await?,
         ))
+    }
+
+    async fn protected_slots(&self, dir: PathBuf, is_safe: fn(u8) -> bool, cap: usize) -> Result<Vec<String>> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let stamp = |m: std::fs::Metadata| (m.dev(), m.ino(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec());
+            let before = match tokio::fs::metadata(&dir).await {
+                Ok(m) => stamp(m),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.protected_slot_cache.remove(&dir);
+                    return Ok(Vec::new());
+                }
+                Err(e) => return Err(e.into()),
+            };
+            if let Some(cached) = self.protected_slot_cache.get(&dir) {
+                if cached.0 == before { return Ok(cached.1.clone()); }
+            }
+            let names = list_slots_checked(&dir, is_safe, cap, true).await?;
+            // The directory stamp tracks name changes. Long names depend on
+            // sidecar contents as well, so they always use the strict scan.
+            if names.iter().all(|name| !slot_name(name, is_safe).hashed)
+                && tokio::fs::metadata(&dir).await.ok().map(stamp) == Some(before)
+            {
+                self.protected_slot_cache.insert(dir, (before, names.clone()));
+            } else {
+                self.protected_slot_cache.remove(&dir);
+            }
+            Ok(names)
+        }
+        #[cfg(not(unix))]
+        list_slots_checked(&dir, is_safe, cap, true).await
     }
 
     // ── TOFU trust ────────────────────────────────────────────────────────────
@@ -1139,21 +1256,34 @@ async fn write_secret_locked(path: &std::path::Path, bytes: &[u8]) -> std::io::R
 
 /// Delete an e2e file under the same per-file lock as write_secret.
 async fn remove_secret(path: &std::path::Path) {
+    let _ = remove_secret_checked(path).await;
+}
+
+async fn remove_secret_checked(path: &std::path::Path) -> Result<()> {
     let lock = slot_lock(path);
     let _g = lock.lock().await;
-    let _ = tokio::fs::remove_file(path).await;
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// The first bytes (≤ 8) of a file, or None if it can't be read.
 async fn read_prefix(path: &std::path::Path) -> Option<Vec<u8>> {
+    read_blob_prefix(path).await.ok().flatten()
+}
+
+async fn read_blob_prefix(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
     use tokio::io::AsyncReadExt;
-    let mut f = tokio::fs::File::open(path).await.ok()?;
-    let mut buf = [0u8; 8];
-    let mut n = 0;
-    while n < buf.len() {
-        match f.read(&mut buf[n..]).await { Ok(0) => break, Ok(k) => n += k, Err(_) => return None }
-    }
-    Some(buf[..n].to_vec())
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut buf = Vec::with_capacity(8);
+    file.take(8).read_to_end(&mut buf).await?;
+    Ok(Some(buf))
 }
 
 /// Count the slot files (`*.enc`) in a directory, for the per-user file caps. A
@@ -1235,10 +1365,15 @@ async fn load_slot(dir: &std::path::Path, sn: &SlotName) -> Option<String> {
     tokio::fs::read_to_string(dir.join(format!("{}.enc", l))).await.ok()
 }
 
-async fn delete_slot(dir: &std::path::Path, sn: &SlotName) {
-    remove_secret(&dir.join(format!("{}.enc", sn.stem))).await;
-    if sn.hashed { remove_secret(&dir.join(format!("{}.name", sn.stem))).await; }
-    if let Some(l) = &sn.legacy { remove_secret(&dir.join(format!("{}.enc", l))).await; }
+async fn delete_slot(dir: &std::path::Path, sn: &SlotName) -> Result<()> {
+    if let Some(l) = &sn.legacy {
+        remove_secret_checked(&dir.join(format!("{}.enc", l))).await?;
+    }
+    remove_secret_checked(&dir.join(format!("{}.enc", sn.stem))).await?;
+    if sn.hashed {
+        remove_secret_checked(&dir.join(format!("{}.name", sn.stem))).await?;
+    }
+    Ok(())
 }
 
 /// The client-side names of the slots in `dir` (≤ cap). A hashed stem is reported by
@@ -1467,6 +1602,78 @@ mod keyring_tests {
         d.to_string_lossy().into_owned()
     }
 
+
+    fn recovery_keyring(wrapped_len: usize) -> String {
+        let body = serde_json::json!({
+            "v": 3,
+            "s": STANDARD.encode([0; 16]),
+            "w": STANDARD.encode(vec![0; wrapped_len]),
+            "c": STANDARD.encode([0; 52]),
+        });
+        format!("e2k3.{}", STANDARD.encode(body.to_string()))
+    }
+
+    #[tokio::test]
+    async fn recovery_keyring_rewrap_preserves_current_slots_and_refuses_downgrades() {
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        store.store_keyring("alice", "e2k2.test", true, Some("")).await.unwrap();
+        store.store_identity_enc("alice", "e2e2.identity").await.unwrap();
+        store.store_session("alice", "bob", "e2e2.session").await.unwrap();
+        store.store_channel_key("alice", "#chat", "e2e2.channel").await.unwrap();
+        let transitional = recovery_keyring(92);
+        let final_blob = recovery_keyring(60);
+        assert!(store.store_keyring("alice", &final_blob, true, Some("e2k2.test")).await.is_err());
+        assert_eq!(store.store_keyring("alice", &transitional, true, Some("e2k2.test")).await.unwrap(), (true, None));
+        assert!(store.write_permit("alice", 2).await.is_none());
+        assert!(store.write_permit("alice", 3).await.is_some());
+        assert!(store.store_keyring("alice", &final_blob, true, Some(&transitional)).await.is_err());
+
+        assert!(!store.rewrap_v2_blob("alice", "identity", "", "e2e2.stale", "e2e3.identity").await.unwrap());
+        assert!(!store.rewrap_v2_blob("alice", "channel", "#chat", "e2e2.stale", "e2e3.channel").await.unwrap());
+        assert!(store.rewrap_v2_blob("alice", "identity", "", "e2e2.identity", "e2e3.identity").await.unwrap());
+        store.store_session("alice", "bob", "e2e3.newer").await.unwrap();
+        store.rewrap_v2_blob("alice", "session", "bob", "e2e2.session", "e2e3.old").await.unwrap();
+        assert_eq!(store.load_session("alice", "bob").await.as_deref(), Some("e2e3.newer"));
+        store.rewrap_v2_blob("alice", "channel", "#chat", "e2e2.channel", "e2e3.channel").await.unwrap();
+        assert_eq!(store.load_identity_enc("alice").await.as_deref(), Some("e2e3.identity"));
+        assert_eq!(store.load_channel_key("alice", "#chat").await.as_deref(), Some("e2e3.channel"));
+        assert_eq!(store.store_keyring("alice", &final_blob, true, Some(&transitional)).await.unwrap(), (true, None));
+        assert_eq!(store.store_keyring("alice", &final_blob, true, Some(&transitional)).await.unwrap(), (true, None));
+        assert!(store.store_keyring("alice", "e2k2.test", true, None).await.is_err());
+        assert!(store.store_keyring("alice", &transitional, true, Some(&final_blob)).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn protection_snapshot_tracks_slot_changes_and_errors() {
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        assert!(store.protected_names("alice").await.unwrap().0.is_empty());
+        store.store_channel_key("alice", "#chat", "e2e3.channel").await.unwrap();
+        assert_eq!(store.protected_names("alice").await.unwrap().0, ["#chat"]);
+        assert_eq!(store.protected_names("alice").await.unwrap().0, ["#chat"]);
+        let invalid = store.user_dir("alice").join("channels/invalid~slot.enc");
+        std::fs::write(&invalid, "test").unwrap();
+        assert!(store.protected_names("alice").await.is_err());
+        std::fs::remove_file(invalid).unwrap();
+        store.delete_channel_key("alice", "#chat").await.unwrap();
+        assert!(store.protected_names("alice").await.unwrap().0.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn corrupt_keyring_refuses_slot_writes() {
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        store.store_identity_enc("alice", "e2e2.identity").await.unwrap();
+        assert!(store.write_permit("alice", 2).await.is_some());
+        std::fs::write(store.keyring_path("alice"), "invalid keyring").unwrap();
+        assert!(store.write_permit("alice", 2).await.is_none());
+        assert!(store.write_permit("alice", 3).await.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn keyring_roundtrip_and_migrated_never_downgrades() {
         let dir = tmpdir();
@@ -1680,7 +1887,7 @@ mod keyring_tests {
         st.store_keyring("alice", "e2k2.K", false, Some("")).await.unwrap();
         // a stale tab holds a legacy-write permit while the flip is requested: the flip
         // waits for it, then sees the legacy blob and is NOT done
-        let permit = st.legacy_write_permit("alice").await.expect("not migrated yet");
+        let permit = st.write_permit("alice", 1).await.expect("not migrated yet");
         let st2 = st.clone();
         let flip = tokio::spawn(async move { st2.store_keyring("alice", "e2k2.K", true, Some("e2k2.K")).await.unwrap() });
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1692,7 +1899,7 @@ mod keyring_tests {
         // once every blob is v2 the flip happens, and later legacy writes are refused
         st.store_session("alice", "bob", "e2e2.b").await.unwrap();
         assert_eq!(st.store_keyring("alice", "e2k2.K", true, Some("e2k2.K")).await.unwrap(), (true, None));
-        assert!(st.legacy_write_permit("alice").await.is_none());
+        assert!(st.write_permit("alice", 1).await.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1713,7 +1920,7 @@ mod keyring_tests {
         // no keyring but an e2e2. identity (keyring lost): treated as upgraded+migrated
         assert!(st.load_keyring("alice").await.is_none());
         assert!(st.is_migrated("alice").await && st.has_upgraded_e2e("alice").await);
-        assert!(st.legacy_write_permit("alice").await.is_none());
+        assert!(st.write_permit("alice", 1).await.is_none());
         // legacy-only account (never upgraded): neither
         st.store_identity_enc("bob", "bGVnYWN5").await.unwrap();
         assert!(!st.is_migrated("bob").await && !st.has_upgraded_e2e("bob").await);
