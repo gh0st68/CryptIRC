@@ -389,7 +389,7 @@ fn tool_list() -> Vec<Value> {
             json!({"settings":{"type":"object"}}), &[], false, true),
         tool("cryptirc_notepad", "Read or replace your encrypted notepad while your vault is unlocked.",
             json!({"text":string}), &[], false, true),
-        tool("cryptirc_settings", "Read or save CryptIRC settings. Preferences, notifications, and admin accept partial updates. Bots replace their settings object. Link previews accept the full policy. Preferences require the unlocked vault. Admin and link previews require a CryptIRC administrator.",
+        tool("cryptirc_settings", "Read or save CryptIRC settings. Preferences, notifications, and admin accept partial updates. Bots replace their settings object. Link previews accept the full policy. Preferences require the unlocked vault. Admin and link previews require a CryptIRC administrator. Invite codes are write-only. Set with new_registration_code or clear with clear_registration_code.",
             json!({"section":{"enum":["preferences","bots","notifications","admin","link_previews"]},
               "settings":{"type":"object"}}), &["section"], false, true),
     ]

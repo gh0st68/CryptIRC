@@ -9,7 +9,6 @@
 //!   - Encrypted private key blobs (encrypted client-side with e2e_enc_key)
 //!   - Encrypted ratchet session states
 //!   - Encrypted channel PSKs
-//!   - TOFU trust records
 //!
 //! No plaintext private key material or message content ever lives here.
 //!
@@ -20,7 +19,6 @@
 //!     otpk/{id}.json         — one-time prekey public halves
 //!     sessions/{partner}.enc — encrypted ratchet/spk/otpk blobs
 //!     channels/{chan}.enc    — encrypted channel PSK
-//!     trust.json             — TOFU records
 
 // #93: `bail` was imported but never used — dropped to clear the compiler warning.
 use anyhow::Result;
@@ -69,21 +67,6 @@ const MAX_OTPK_WRITES_PER_CALL: usize = 256;
 // and channels), so a generous reject/evict-when-exceeded policy is
 // behaviour-preserving for legitimate use while denying a disk/inode-exhaustion
 // DoS primitive.
-const MAX_TRUST_RECORDS: usize = 4096;
-/// r6 (codex P1 main.rs:6743 / e2e.rs:711): per-field size limits of a trust record. A real
-/// record is a lower-cased IRC nick and a 79-character SHA-256 fingerprint ("ABCD EF01 …");
-/// without limits one account could store 4,096 records of any size, and every trust load
-/// then carried a multi-megabyte snapshot.
-const MAX_TRUST_NICK_BYTES: usize = 256;
-const MAX_TRUST_FP_BYTES: usize = 512;
-/// r6: a trust.json larger than this can only have been produced by oversized records
-/// (4,096 valid records are well under 4 MiB): it is set aside instead of loaded.
-const MAX_TRUST_FILE_BYTES: u64 = 8 * 1024 * 1024;
-
-/// r6: does a trust record fit the per-field limits?
-fn trust_record_fits(nick: &str, fingerprint: &str) -> bool {
-    !nick.is_empty() && nick.len() <= MAX_TRUST_NICK_BYTES && fingerprint.len() <= MAX_TRUST_FP_BYTES
-}
 const MAX_SESSION_FILES: usize = 4096;
 const MAX_OTPK_TOTAL: usize = 1024;
 const MAX_CHANNEL_KEY_FILES: usize = 4096;
@@ -133,16 +116,6 @@ pub struct FetchedBundle {
     pub one_time_prekey:   Option<OneTimePrekey>,
 }
 
-// ─── Trust record ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrustRecord {
-    pub nick:        String,
-    pub fingerprint: String,
-    pub first_seen:  i64,
-    pub verified:    bool,
-}
-
 // ─── E2E Store ────────────────────────────────────────────────────────────────
 
 pub struct E2EStore {
@@ -150,11 +123,8 @@ pub struct E2EStore {
     /// S2: per-user mutex prevents TOCTOU races on OTPK consumption.
     /// DashMap<username, Mutex<()>>
     otpk_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
-    /// MEDIUM: per-user mutex serializing the load->mutate->save window in
-    /// `update_trust`. Without it, concurrent same-user E2EUpdateTrust calls form
-    /// an unserialized read-modify-write on trust.json and can silently drop a
-    /// pin (undetected key-change). Mirrors the otpk_locks pattern.
-    trust_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+    /// Serializes keyring changes with encrypted slot writes for the same account.
+    slot_locks: DashMap<String, Arc<Mutex<()>>>,
     /// r3: per-user mutex for creating NEW session / channel-key slots (cap check +
     /// write), see `store_slot`.
     cap_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
@@ -193,7 +163,7 @@ impl E2EStore {
         Self {
             data_dir:          data_dir.to_string(),
             otpk_locks:        Arc::new(DashMap::new()),
-            trust_locks:       Arc::new(DashMap::new()),
+            slot_locks:        DashMap::new(),
             cap_locks:         Arc::new(DashMap::new()),
             #[cfg(unix)]
             protected_slot_cache: DashMap::new(),
@@ -212,15 +182,6 @@ impl E2EStore {
     /// S2: acquire the per-user OTPK lock.
     fn otpk_lock(&self, username: &str) -> Arc<Mutex<()>> {
         self.otpk_locks
-            .entry(username.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    /// MEDIUM: acquire the per-user trust lock, serializing the
-    /// load->mutate->save window in `update_trust`.
-    fn trust_lock(&self, username: &str) -> Arc<Mutex<()>> {
-        self.trust_locks
             .entry(username.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
@@ -362,7 +323,10 @@ impl E2EStore {
 
     /// Serializes keyring changes with encrypted slot writes.
     async fn slot_update_lock(&self, username: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        self.trust_lock(username).lock_owned().await
+        let lock = self.slot_locks.entry(username.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        lock.lock_owned().await
     }
 
     pub async fn write_permit(&self, username: &str, version: u32) -> Option<tokio::sync::OwnedMutexGuard<()>> {
@@ -485,8 +449,7 @@ impl E2EStore {
             || !blob.bytes().all(|b| b.is_ascii_graphic()) {
             anyhow::bail!("invalid keyring");
         }
-        let lock = self.trust_lock(username); // same per-user serialisation as trust.json
-        let _g = lock.lock().await;
+        let _g = self.slot_update_lock(username).await;
         let cur = self.load_keyring(username).await;
         let prev_migrated = matches!(cur, Some((_, true)));
         if blob.starts_with("e2k3.") {
@@ -876,15 +839,25 @@ impl E2EStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            let stamp = |m: std::fs::Metadata| (m.dev(), m.ino(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec());
-            let before = match tokio::fs::metadata(&dir).await {
-                Ok(m) => stamp(m),
+            let stamp = |m: &std::fs::Metadata| (m.dev(), m.ino(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec());
+            let metadata = match tokio::fs::metadata(&dir).await {
+                Ok(m) => m,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     self.protected_slot_cache.remove(&dir);
                     return Ok(Vec::new());
                 }
                 Err(e) => return Err(e.into()),
             };
+            // Rapid directory changes can share one timestamp. Wait for coarse
+            // filesystem clocks to advance before trusting a cached inventory.
+            let cache_before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default()
+                .as_secs().saturating_sub(2) as i64;
+            if metadata.mtime().max(metadata.ctime()) >= cache_before {
+                self.protected_slot_cache.remove(&dir);
+                return list_slots_checked(&dir, is_safe, cap, true).await;
+            }
+            let before = stamp(&metadata);
             if let Some(cached) = self.protected_slot_cache.get(&dir) {
                 if cached.0 == before { return Ok(cached.1.clone()); }
             }
@@ -892,7 +865,7 @@ impl E2EStore {
             // The directory stamp tracks name changes. Long names depend on
             // sidecar contents as well, so they always use the strict scan.
             if names.iter().all(|name| !slot_name(name, is_safe).hashed)
-                && tokio::fs::metadata(&dir).await.ok().map(stamp) == Some(before)
+                && tokio::fs::metadata(&dir).await.ok().as_ref().map(stamp) == Some(before)
             {
                 self.protected_slot_cache.insert(dir, (before, names.clone()));
             } else {
@@ -904,107 +877,35 @@ impl E2EStore {
         list_slots_checked(&dir, is_safe, cap, true).await
     }
 
-    // ── TOFU trust ────────────────────────────────────────────────────────────
-
-    pub async fn load_trust(&self, username: &str) -> Vec<TrustRecord> {
-        let path = self.user_dir(username).join("trust.json");
-        // r6: an oversized store (only possible with oversized records, see
-        // MAX_TRUST_FILE_BYTES) is set aside, not read into memory on every load.
-        if let Ok(md) = tokio::fs::metadata(&path).await {
-            if md.len() > MAX_TRUST_FILE_BYTES {
-                warn!("[E2E] trust.json of '{}' is {} bytes (over {}): set aside as trust.json.oversized", username, md.len(), MAX_TRUST_FILE_BYTES);
-                let _ = tokio::fs::rename(&path, self.user_dir(username).join("trust.json.oversized")).await;
-                return vec![];
-            }
-        }
-        let Ok(json) = tokio::fs::read_to_string(&path).await else { return vec![]; };
-        match serde_json::from_str::<Vec<TrustRecord>>(&json) {
-            Ok(mut records) => {
-                // r6: records over the per-field limits (stored before they existed) are
-                // skipped — they can't be a real nick / fingerprint.
-                let before = records.len();
-                records.retain(|r| trust_record_fits(&r.nick, &r.fingerprint));
-                if records.len() != before {
-                    warn!("[E2E] skipped {} oversized trust record(s) of '{}'", before - records.len(), username);
-                }
-                records
-            }
-            Err(e) => {
-                // #90: a corrupt trust.json must NOT silently become an empty pin set —
-                // that downgrades every pinned peer to "first contact", masking a
-                // key-change. Log loudly and preserve the bad file as a `.corrupt`
-                // backup so update_trust's subsequent save doesn't overwrite/erase the
-                // (recoverable) pins. Returning empty here is unavoidable for the
-                // signature, but the operator is alerted and the data is retained.
-                warn!("[E2E] CORRUPT trust.json for '{}' ({}). Backing up to trust.json.corrupt; \
-                       TOFU pins are temporarily unavailable — manual recovery required.", username, e);
-                let backup = self.user_dir(username).join("trust.json.corrupt");
-                let _ = tokio::fs::rename(&path, &backup).await;
-                vec![]
-            }
-        }
-    }
-
-    pub async fn save_trust(&self, username: &str, records: &[TrustRecord]) -> Result<()> {
-        let dir = self.user_dir(username);
-        create_dir_secure(&dir).await?;
-        // #90: atomic tmp+rename so a crash mid-write can't leave a truncated
-        // (corrupt) trust.json that would erase all pins on next load.
-        // (write_secret is itself tmp + fsync + rename, serialised per file.)
-        write_secret(&dir.join("trust.json"), serde_json::to_string_pretty(records)?).await?;
-        Ok(())
-    }
-
-    pub async fn update_trust(
-        &self, username: &str, nick: &str, fingerprint: &str, verified: bool
-    ) -> Result<(TrustRecord, bool)> {
-        // MEDIUM: serialize the entire load->mutate->save window per user so
-        // concurrent same-user E2EUpdateTrust calls can't form an unserialized
-        // read-modify-write that silently drops a pin (undetected key-change).
-        // r6 (codex P1 e2e.rs:711): per-field size limits.
-        if !trust_record_fits(nick, fingerprint) {
-            anyhow::bail!("Trust record rejected (nick or fingerprint too long)");
-        }
-        let lock = self.trust_lock(username);
-        let _g = lock.lock().await;
-
-        let mut records = self.load_trust(username).await;
-        let now = chrono::Utc::now().timestamp();
-
-        if let Some(existing) = records.iter_mut().find(|r| r.nick == nick) {
-            let fp_changed = existing.fingerprint != fingerprint;
-            existing.fingerprint = fingerprint.to_string();
-            if fp_changed {
-                existing.verified = false;  // reset trust on key change
-            } else if verified {
-                existing.verified = true;
-            }
-            let rec = existing.clone();
-            self.save_trust(username, &records).await?;
-            return Ok((rec, fp_changed));
-        }
-
-        // HIGH: bound per-user trust.json growth (and its O(n^2) rewrite cost) so a
-        // flood of distinct nicks can't exhaust disk/inodes. REJECT at the cap rather
-        // than evicting: silently dropping a pinned fingerprint would erase TOFU
-        // history and let a later key-change for the evicted peer go undetected.
-        // Overwriting an existing nick (handled above) is unaffected, and legitimate
-        // users with a handful of trusted nicks never reach this limit. Consistent
-        // with the session/channel-key file caps.
-        if records.len() >= MAX_TRUST_RECORDS {
-            warn!("[E2E] trust record cap ({}) reached for '{}' — rejecting new pin", MAX_TRUST_RECORDS, username);
-            anyhow::bail!("Trust record limit reached");
-        }
-
-        let rec = TrustRecord {
-            nick:       nick.to_string(),
-            fingerprint: fingerprint.to_string(),
-            first_seen: now,
-            verified,
+    /// Confirmed pins live in encrypted client state. Older releases also kept
+    /// an unauthenticated mirror. Retire those files, including old fallback copies.
+    pub async fn remove_legacy_trust_mirrors(&self) -> std::io::Result<()> {
+        let mut users = match tokio::fs::read_dir(PathBuf::from(&self.data_dir).join("e2e")).await {
+            Ok(users) => users,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
         };
-        records.push(rec.clone());
-        self.save_trust(username, &records).await?;
-        Ok((rec, false))
+        while let Some(user) = users.next_entry().await? {
+            match user.file_type().await {
+                Ok(kind) if kind.is_dir() => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!("[E2E] could not check account directory {}: {}", user.path().display(), e);
+                    }
+                    continue;
+                }
+            }
+            for filename in ["trust.json", "trust.json.corrupt", "trust.json.oversized"] {
+                let path = user.path().join(filename);
+                if let Err(e) = tokio::fs::remove_file(&path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!("[E2E] could not remove legacy trust mirror {}: {}", path.display(), e);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1539,33 +1440,23 @@ mod keyring_tests {
         }
     }
 
-    /// r6 (codex P1 e2e.rs:711): trust records are size-limited on store, and oversized
-    /// ones already on disk are skipped (an oversized file is set aside) instead of loaded.
     #[tokio::test]
-    async fn trust_records_are_size_limited() {
-        let d = tmpdir();
-        let st = E2EStore::new(&d);
-        let fp = "ABCD EF01 2345 6789 ABCD EF01 2345 6789 ABCD EF01 2345 6789 ABCD EF01 2345 6789";
-        st.update_trust("alice", "bob", fp, false).await.unwrap();
-        assert!(st.update_trust("alice", "carol", &"F".repeat(60_000), false).await.is_err(), "60 KB fingerprint refused");
-        assert!(st.update_trust("alice", &"n".repeat(300), fp, false).await.is_err(), "300-byte nick refused");
-        assert!(st.update_trust("alice", "", fp, false).await.is_err());
-        assert_eq!(st.load_trust("alice").await.len(), 1);
-        // records written before the limits existed: oversized ones are skipped, the rest kept
-        let path = std::path::Path::new(&d).join("e2e/alice/trust.json");
-        let recs = vec![
-            TrustRecord { nick: "bob".into(), fingerprint: fp.into(), first_seen: 1, verified: true },
-            TrustRecord { nick: "big".into(), fingerprint: "F".repeat(60_000), first_seen: 2, verified: false },
-        ];
-        std::fs::write(&path, serde_json::to_string(&recs).unwrap()).unwrap();
-        let got = st.load_trust("alice").await;
-        assert_eq!(got.iter().map(|r| r.nick.as_str()).collect::<Vec<_>>(), vec!["bob"]);
-        // a file only oversized records can produce is set aside, not read
-        let big: Vec<TrustRecord> = (0..200).map(|i| TrustRecord { nick: format!("n{i}"), fingerprint: "F".repeat(60_000), first_seen: i, verified: false }).collect();
-        std::fs::write(&path, serde_json::to_string(&big).unwrap()).unwrap();
-        assert!(st.load_trust("alice").await.is_empty());
-        assert!(std::path::Path::new(&d).join("e2e/alice/trust.json.oversized").exists());
-        let _ = std::fs::remove_dir_all(d);
+    async fn removes_only_legacy_trust_mirrors() {
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        let user = store.user_dir("alice");
+        tokio::fs::create_dir_all(&user).await.unwrap();
+        for filename in ["trust.json", "trust.json.corrupt", "trust.json.oversized"] {
+            tokio::fs::write(user.join(filename), "legacy mirror").await.unwrap();
+        }
+        store.store_session("alice", "__state__", "e2e3.encrypted").await.unwrap();
+        store.remove_legacy_trust_mirrors().await.unwrap();
+        store.remove_legacy_trust_mirrors().await.unwrap();
+        for filename in ["trust.json", "trust.json.corrupt", "trust.json.oversized"] {
+            assert!(!user.join(filename).exists());
+        }
+        assert_eq!(store.load_session("alice", "__state__").await.as_deref(), Some("e2e3.encrypted"));
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
     /// r5 (codex P1 e2e.rs:523): one account fetching a victim's bundle over and over can

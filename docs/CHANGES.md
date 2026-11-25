@@ -1,5 +1,13 @@
 # CryptIRC changelog
 
+## v0.5.15 (November 2026)
+
+- Peer verification now uses encrypted state alone. The server removes old plaintext trust mirrors, and peers known only through those records prompt for confirmation again.
+- Recent key changes trigger a fresh check of which conversations require encryption.
+- File downloads require a session cookie or bearer header. Session tokens in links are rejected.
+- Invite codes are write-only in the admin UI, HTTP API, and MCP. Use `new_registration_code` to set a code or `clear_registration_code` to clear it.
+- Script CSP blocks inline event handlers. Sign-in, offline startup, password reset, and sandboxed HTML pastes retain their controls.
+
 ## v0.5.14 (November 2026)
 
 - **Encrypted chat recovery.** A browser-generated recovery code protects E2E keys independently of the vault passphrase. Existing accounts migrate their stored E2E data when they set up the recovery code. CryptIRC blocks plaintext sends to known encrypted targets and shows shared keys in a separate dialog. Server-hosted uploads and pastes are unavailable in encrypted chats.

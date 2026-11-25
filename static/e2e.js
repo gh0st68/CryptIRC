@@ -310,7 +310,7 @@ window.E2E = {
   identityKeys: null,       // { dhKeyPair, signKeyPair }
   dmSessions:   _e2eCiMap(),   // nick → DoubleRatchetSession
   channelKeys:  _e2eCiMap(),   // channel/nick → CryptoKey (AES-256-GCM PSK)
-  trustStore:   _e2eCiMap(),   // nick → { fingerprint, verified, keyChanged, pendingFingerprint, server_seeded }
+  trustStore:   _e2eCiMap(),   // nick → { fingerprint, verified, keyChanged, pendingFingerprint }
   chanRemoved:  _e2eCiMap(),   // channel → true when the server's key list dropped a key we hold
   _spkBlob:     null,       // raw encrypted SPK blob (set when server sends it)
   _encryptLock: Object.create(null),  // nick → Promise chain (S3: serialise ALL per-session ratchet ops)
@@ -919,7 +919,6 @@ async function _e2eResync() {
     if (_e2eBootStale(gen)) return;
     if (srv && E2E.state && _e2eMergeStateInto(E2E.state, srv)) _e2eApplyMergedState();
     for (const s of Object.values(E2E.dmSessions)) { try { await _e2eSessFp(s); } catch (_) {} }   // r7: pin comparison
-    _e2eWs({ type: 'e2e_load_trust' });
     // Channel keys: the list (a key missing from it → blocked, see e2e_channel_list), then
     // every listed key, waiting (bounded) until each one was processed.
     const list = await _e2eReq({ type: 'e2e_list_channel_keys' }, 'e2e_channel_list');
@@ -1272,7 +1271,6 @@ async function _e2eBoot(vaultPass, interactive = false) {
     if (_e2eBootStale(gen)) { _e2eWipeMemory(); return; }
     await _e2eLoadIdentity(kr, gen);
     if (_e2eBootStale(gen)) { _e2eWipeMemory(); return; }
-    _e2eWs({ type: 'e2e_load_trust' });
     _e2eWs({ type: 'e2e_list_channel_keys' });
     _e2eWs({ type: 'e2e_load_session', partner: '__spk__' });
     await _e2eRestoreSessions(gen);
@@ -1486,7 +1484,7 @@ function _e2eApplyMergedState() {
   for (const [nick, t] of Object.entries(st.trust || {})) {
     if (!t || typeof t.fp !== 'string') continue;
     const ts = E2E.trustStore[nick];
-    if (!ts || ts.server_seeded || ts.fingerprint !== t.fp) {
+    if (!ts || ts.fingerprint !== t.fp) {
       const pending = ts && ts.pendingFingerprint && ts.pendingFingerprint !== t.fp ? ts.pendingFingerprint : null;
       E2E.trustStore[nick] = { fingerprint: t.fp, verified: !!t.ver, keyChanged: !!pending, pendingFingerprint: pending };
     } else if (!!ts.verified !== !!t.ver) ts.verified = !!t.ver;
@@ -1519,7 +1517,6 @@ async function _e2eLoadState() {
   }
   E2E.state = st;
   if ((st.seq | 0) > (dev.seq | 0)) { dev.seq = st.seq | 0; _e2eDevSave(); }
-  // Pins from the authenticated state are locally owned (not server_seeded).
   for (const [nick, t] of Object.entries(st.trust)) {
     if (!t || typeof t.fp !== 'string') continue;
     E2E.trustStore[nick] = { fingerprint: t.fp, verified: !!t.ver, keyChanged: false, pendingFingerprint: null };
@@ -1572,7 +1569,7 @@ function _e2eStateSetChan(k, on, g) {
 function _e2eStateSetTrust(k) {
   if (!E2E.state) return;
   const t = E2E.trustStore[k];
-  if (!t || t.server_seeded) return;
+  if (!t) return;
   const cur = E2E.state.trust[k];
   if (cur && cur.fp === t.fingerprint && !!cur.ver === !!t.verified) return;
   const fp = t.fingerprint, ver = !!t.verified;
@@ -2187,7 +2184,7 @@ async function _e2eInstallStoredInner(nk, blob, slot = null, opts = null) {
           // is not — the peer's replacement identity was accepted on another device, which
           // then set up this session with it.
           const tr = E2E.trustStore[nk];
-          const pinNow = tr && !tr.server_seeded ? tr.fingerprint : null;
+          const pinNow = tr?.fingerprint || null;
           const newFp = await _e2eSessFp(session), curFp = await _e2eSessFp(cur);
           // r8 (agy-flash e2e.js:2076): a pre-#11 pin hashes the DH key only — the same
           // fallback as _e2eSessPinMismatch.
@@ -2300,7 +2297,7 @@ async function _e2eSessFp(s) {
 // server-seeded pin, a legacy session without the signing key).
 function _e2eSessPinMismatch(k, s) {
   const tr = E2E.trustStore[k];
-  if (!s || s._unusable || !tr || tr.server_seeded || !tr.fingerprint || !_e2eSessFpKey(s)) return false;
+  if (!s || s._unusable || !tr || !tr.fingerprint || !_e2eSessFpKey(s)) return false;
   const fp = _e2eSessFpCached(s);
   if (fp === undefined) { _e2eSessFp(s).catch(() => {}); return null; }
   return fp !== tr.fingerprint && E2E._fpCache.get('dh|' + s.theirIdentityPub) !== tr.fingerprint;
@@ -3045,10 +3042,6 @@ function _e2eDropSession(k, removeStored = true) {
 // connection map, so the first party to grab a peer's nick can offer its own key.
 // Never silently auto-pin — force the local user to eyeball the fingerprint and confirm
 // it out-of-band before it is pinned and used. Returns true iff the user approves.
-// `seededFp`: a fingerprint the SERVER has on record for this nick (trust.json — not
-// authenticated). The prompt says whether the presented key matches it, so a
-// post-upgrade re-confirmation can't look identical to an attacker's new key.
-//
 // r3 (agy-flash P3 HIGH e2e.js:2355): this used to be a synchronous confirm(). Any IRC
 // user (even an /ignore'd one — decryption runs before the ignore check) could DM an
 // [e2ex3dh] header from a fresh nick and freeze the whole page in a modal dialog (no
@@ -3062,32 +3055,14 @@ function _e2eDropSession(k, removeStored = true) {
 //    (the user's own /encrypt on <peer> still asks);
 //  - fail closed throughout: nothing is pinned and no session exists until "Accept".
 // opts.solicited: the user asked for this (the bundle reply to their /encrypt on).
-async function e2eConfirmNewIdentity(nick, fingerprint, seededFp = null, opts = null) {
+async function e2eConfirmNewIdentity(nick, fingerprint, opts = null) {
   try {
-    let msg;
-    if (seededFp && seededFp !== fingerprint) {
-      msg =
-        `⚠️ KEY CHANGE for ${nick}\n\n` +
-        `The server's record for ${nick} has fingerprint:\n${seededFp}\n\n` +
-        `but the identity presented now is:\n${fingerprint}\n\n` +
-        `This may be a man-in-the-middle or a new device. Accept the NEW key only after ` +
-        `confirming it with ${nick} over a trusted channel (voice/in person).\n\n` +
-        `Accept the new key and start encrypting with ${nick}?`;
-    } else if (seededFp) {
-      msg =
-        `🔐 Confirm encryption identity for ${nick}\n\n` +
-        `Fingerprint:\n${fingerprint}\n\n` +
-        `This matches the fingerprint the server has on record for ${nick}, but that record ` +
-        `is not authenticated and was not confirmed on this device.\n\n` +
-        `Accept and start encrypting with ${nick}?`;
-    } else {
-      msg =
-        `🔐 New encryption identity for ${nick}\n\n` +
-        `Fingerprint:\n${fingerprint}\n\n` +
-        `Anyone can claim this IRC nick. Confirm this fingerprint with ${nick} over a ` +
-        `trusted channel (voice/in person) BEFORE accepting.\n\n` +
-        `Accept and start encrypting with ${nick}?`;
-    }
+    const msg =
+      `🔐 New encryption identity for ${nick}\n\n` +
+      `Fingerprint:\n${fingerprint}\n\n` +
+      `Anyone can claim this IRC nick. Confirm this fingerprint with ${nick} over a ` +
+      `trusted channel (voice/in person) BEFORE accepting.\n\n` +
+      `Accept and start encrypting with ${nick}?`;
     return await _e2eAskIdentity(_e2eK(nick), fingerprint, msg, !!(opts && opts.solicited));
   } catch (e) { console.warn('[E2E] identity confirmation unavailable:', e); return false; }
 }
@@ -3217,15 +3192,10 @@ function _e2eAskIdentity(k, fp, msg, solicited) {
 async function e2eCheckTrust(nick, fingerprint, opts = null) {
   const k = _e2eK(nick);
   const existing = E2E.trustStore[k];
-  // #F1: a server_seeded pin (delivered via e2e_trust with NO local confirmation) must
-  // never stand in for a user-confirmed pin — treat it like first contact, but tell the
-  // user whether the presented key matches the server's record.
-  if (!existing || existing.server_seeded) {
-    const seeded = existing && existing.server_seeded ? existing.fingerprint : null;
-    const confirmed = await e2eConfirmNewIdentity(nick, fingerprint, seeded, opts);
+  if (!existing) {
+    const confirmed = await e2eConfirmNewIdentity(nick, fingerprint, opts);
     if (!confirmed) return { status:'rejected', keyChanged:false };
     E2E.trustStore[k] = { fingerprint, verified:false, keyChanged:false, pendingFingerprint:null };
-    _e2eWs({ type:'e2e_update_trust', nick:k, fingerprint, verified:false });
     _e2eStateSetTrust(k);
     return { status:'tofu', keyChanged:false };
   }
@@ -3243,9 +3213,8 @@ async function e2eCheckTrust(nick, fingerprint, opts = null) {
 function e2eMarkVerified(nick) {
   const k = _e2eK(nick);
   const t = E2E.trustStore[k];
-  if (!t || t.server_seeded || t.keyChanged) return false;
+  if (!t || t.keyChanged) return false;
   t.verified = true;
-  _e2eWs({ type:'e2e_update_trust', nick:k, fingerprint:t.fingerprint, verified:true });
   _e2eStateSetTrust(k);
   return true;
 }
@@ -3523,25 +3492,6 @@ async function e2eHandleEvent(ev) {
       E2E._bulkKeyLoad = new Set(listed);
       for (const ch of (ev.channels || [])) _e2eWs({ type:'e2e_load_channel_key', channel:ch });
       _e2eResolveWaiter(ev);   // r6: the reconnect re-sync waits for the list
-      break;
-    }
-
-    case 'e2e_trust': {
-      // #3/#46: the local pin is AUTHORITATIVE. The server can't re-pin, can't flip
-      // keyChanged, can't mark verified. A nick with no local pin gets a server_seeded
-      // record (confirmation still required before use, F1).
-      const k = _e2eK(ev.nick);
-      if (!k) break;
-      if (!E2E.trustStore[k]) {
-        E2E.trustStore[k] = {
-          fingerprint: String(ev.fingerprint || ''),
-          verified:    false,
-          keyChanged:  false,
-          pendingFingerprint: null,
-          server_seeded: true,
-        };
-      }
-      updateE2EIndicator(ev.nick);
       break;
     }
 
@@ -4535,16 +4485,14 @@ async function handleEncryptCommand(args, conn_id, target) {
       break;
     }
     case 'trust': {
-      // MEDIUM: /encrypt trust used to mark ANY pin verified — including one the server
-      // seeded, with no session and no fingerprint shown — and dropped the server_seeded
-      // guard. Now it needs a live session whose identity IS the pinned key, no pending
-      // key change, and an explicit confirm showing the fingerprint + safety phrase.
+      // Verification requires a live session matching the pin, no pending key
+      // change, and confirmation of the fingerprint and safety phrase.
       const nick = args[1] || dmTarget;
       if (!nick) { e2eSysMsg(target,'Usage: /encrypt trust <nick>'); return; }
       const k = _e2eK(nick);
       const t = E2E.trustStore[k];
       const s = E2E.dmSessions[k];
-      if (!t || t.server_seeded) { e2eSysMsg(target,`🔐 No identity for ${nick} has been confirmed on this device yet — start a session first (/encrypt on ${nick})`); return; }
+      if (!t) { e2eSysMsg(target,`🔐 No identity for ${nick} has been confirmed on this device yet — start a session first (/encrypt on ${nick})`); return; }
       if (t.keyChanged) { e2eSysMsg(target,`⚠️ ${nick}'s identity key changed — /encrypt accept or /encrypt reject first`); return; }
       if (!s || s._unusable || !s.theirIdentityPub) { e2eSysMsg(target,`🔐 No E2E session with ${nick} — /encrypt on ${nick} first`); return; }
       if (s.theirSignPub && await computeIdentityFingerprint(s.theirIdentityPub, s.theirSignPub) !== t.fingerprint) {
@@ -4572,7 +4520,6 @@ async function handleEncryptCommand(args, conn_id, target) {
         `Only accept after confirming the NEW fingerprint with ${nick} over a trusted channel. If you did not expect ${nick} to change keys, this may be an attack.`);
       if (!ok) { e2eSysMsg(target,'Key change NOT accepted — messages under the new key stay blocked'); return; }
       t.fingerprint = t.pendingFingerprint; t.pendingFingerprint = null; t.keyChanged = false; t.verified = false;
-      _e2eWs({ type:'e2e_update_trust', nick:k, fingerprint:t.fingerprint, verified:false });
       _e2eStateSetTrust(k);
       // The old session belongs to the old identity.
       if (E2E.dmSessions[k]) _e2eDropSession(k);

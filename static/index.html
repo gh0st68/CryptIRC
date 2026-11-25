@@ -2409,7 +2409,7 @@ body.no-nicklist #nick-panel{display:none!important}
 :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .auth-input, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .form-input, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .form-select { border-radius:10px; }
 :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .auth-btn, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .btn-save, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .btn-cancel { border-radius:10px; }
 :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .auth-input:focus, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .form-input:focus, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .form-select:focus { box-shadow:none; }
-:where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) #topbar :is(button,[onclick]):focus-visible, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .chan-item:focus-visible, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .sidebar-btn:focus-visible { outline:2px solid var(--text2); outline-offset:-2px; }
+:where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) #topbar :is(button,[data-cryptirc-click]):focus-visible, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .chan-item:focus-visible, :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .sidebar-btn:focus-visible { outline:2px solid var(--text2); outline-offset:-2px; }
 @media (min-width:600px) {
 :where(html:not(:is([data-theme="mirc"],[data-theme="hexchat"],[data-theme="xchat"],[data-theme="irssi"]))) .modal-box { border-radius:16px; }
 }
@@ -2474,7 +2474,7 @@ body.no-nicklist #nick-panel{display:none!important}
   #topbar #mentions-btn { width:44px; flex-basis:44px; }
 }
 </style>
-<script>
+<script nonce="__CRYPTIRC_SCRIPT_NONCE__">
 // Resolve CSS colors in the browser, then move low-contrast text toward black or
 // white without changing saved preferences. Both boot and runtime use this helper.
 function readableTextColor(color, background, minimum=4.8){
@@ -2572,7 +2572,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
   <div class="boot-sub">&lsaquo; secure link &rsaquo;</div>
   <div class="boot-bar"></div>
 </div>
-<script>
+<script nonce="__CRYPTIRC_SCRIPT_NONCE__">
 // Boot-splash decision (runs before paint): keep the warp splash up only when a
 // saved session token exists, to mask the verify-over-network gap. With no token,
 // drop it instantly so the login screen shows with NO splash flash. Safety timeout
@@ -2602,8 +2602,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div class="auth-logo">CryptIRC</div>
     <div class="auth-sub">End-to-end encrypted IRC client</div>
     <div class="auth-tabs">
-      <button class="auth-tab active" id="tab-login"    onclick="switchAuthTab('login')">Sign In</button>
-      <button class="auth-tab"        id="tab-register" onclick="switchAuthTab('register')">Register</button>
+      <button class="auth-tab active" id="tab-login" data-cryptirc-click="switchAuthTabLogin">Sign In</button>
+      <button class="auth-tab"        id="tab-register" data-cryptirc-click="switchAuthTabRegister">Register</button>
     </div>
     <div id="login-form">
       <div class="auth-field"><label class="auth-label">Username or email</label>
@@ -2613,27 +2613,27 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div class="auth-field" id="login-captcha-field" style="display:none"><label class="auth-label">Verify you're human</label>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <img id="login-captcha-img" alt="Captcha challenge" style="max-height:56px;max-width:calc(100% - 52px);height:auto;width:auto;border:1px solid var(--border);border-radius:8px;background:#e9ece8;flex:0 1 auto;min-width:0">
-          <button type="button" id="login-captcha-refresh" onclick="loadLoginCaptcha()" title="New challenge" aria-label="New challenge" style="background:none;border:1px solid var(--border);border-radius:8px;color:var(--text3);font-size:16px;width:38px;height:38px;cursor:pointer;flex:0 0 auto">↻</button>
+          <button type="button" id="login-captcha-refresh" data-cryptirc-click="loadLoginCaptcha" title="New challenge" aria-label="New challenge" style="background:none;border:1px solid var(--border);border-radius:8px;color:var(--text3);font-size:16px;width:38px;height:38px;cursor:pointer;flex:0 0 auto">↻</button>
         </div>
         <input class="auth-input" type="text" inputmode="numeric" id="l-captcha" placeholder="Type the answer" autocomplete="off"></div>
       <div class="auth-err" id="login-err"></div>
-      <button class="auth-btn" id="login-btn" onclick="doLogin()">Sign In</button>
-      <button class="auth-btn" id="passkey-login-btn" onclick="doPasskeyLogin()" hidden
+      <button class="auth-btn" id="login-btn" data-cryptirc-click="doLogin">Sign In</button>
+      <button class="auth-btn" id="passkey-login-btn" data-cryptirc-click="doPasskeyLogin" hidden
               style="margin-top:8px;background:var(--bg2);color:var(--text);border:1px solid var(--border)">Sign In with a Passkey</button>
       <div class="login-lights" id="login-lights"><span></span><span></span><span></span><span></span><span></span></div>
-      <div style="text-align:center;margin-top:12px;"><a href="#" onclick="switchAuthTab('forgot');return false;" style="color:var(--text3);font-size:11px;text-decoration:none;">Forgot password?</a></div>
+      <div style="text-align:center;margin-top:12px;"><a href="#" data-cryptirc-click="forgotPassword" style="color:var(--text3);font-size:11px;text-decoration:none;">Forgot password?</a></div>
     </div>
     <div id="forgot-form" style="display:none">
       <div style="color:var(--text3);font-size:11px;text-align:center;margin-bottom:16px;line-height:1.6;">Enter your email address and we'll send you a link to reset your password.</div>
       <div class="auth-field"><label class="auth-label">Email</label>
         <input class="auth-input" type="email" id="f-email" placeholder="you@example.com" autocomplete="email" autocapitalize="none"></div>
       <div class="auth-err" id="forgot-err"></div>
-      <button class="auth-btn" id="forgot-btn" onclick="doForgot()">Send Reset Link</button>
-      <div style="text-align:center;margin-top:12px;"><a href="#" onclick="switchAuthTab('login');return false;" style="color:var(--text3);font-size:11px;text-decoration:none;">← Back to sign in</a></div>
+      <button class="auth-btn" id="forgot-btn" data-cryptirc-click="doForgot">Send Reset Link</button>
+      <div style="text-align:center;margin-top:12px;"><a href="#" data-cryptirc-click="backToLogin" style="color:var(--text3);font-size:11px;text-decoration:none;">← Back to sign in</a></div>
     </div>
     <div id="forgot-success" style="display:none;color:var(--join);font-size:12px;text-align:center;line-height:1.7;padding:8px 0;">
       ✓ If that email is registered, a reset link has been sent.<br>Check your inbox (and spam folder).
-      <div style="margin-top:12px;"><a href="#" onclick="switchAuthTab('login');return false;" style="color:var(--text3);font-size:11px;text-decoration:none;">← Back to sign in</a></div>
+      <div style="margin-top:12px;"><a href="#" data-cryptirc-click="backToLogin" style="color:var(--text3);font-size:11px;text-decoration:none;">← Back to sign in</a></div>
     </div>
     <div id="register-form" style="display:none">
       <div class="auth-field"><label class="auth-label">Username</label>
@@ -2649,11 +2649,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div class="auth-field" id="reg-captcha-field" style="display:none"><label class="auth-label">Verify you're human</label>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
           <img id="reg-captcha-img" alt="Captcha challenge" style="max-height:56px;max-width:calc(100% - 52px);height:auto;width:auto;border:1px solid var(--border);border-radius:8px;background:#e9ece8;flex:0 1 auto;min-width:0">
-          <button type="button" id="reg-captcha-refresh" onclick="loadCaptcha()" title="New challenge" aria-label="New challenge" style="background:none;border:1px solid var(--border);border-radius:8px;color:var(--text3);font-size:16px;width:38px;height:38px;cursor:pointer;flex:0 0 auto">↻</button>
+          <button type="button" id="reg-captcha-refresh" data-cryptirc-click="loadCaptcha" title="New challenge" aria-label="New challenge" style="background:none;border:1px solid var(--border);border-radius:8px;color:var(--text3);font-size:16px;width:38px;height:38px;cursor:pointer;flex:0 0 auto">↻</button>
         </div>
         <input class="auth-input" type="text" inputmode="numeric" id="r-captcha" placeholder="Type the answer" autocomplete="off"></div>
       <div class="auth-err" id="reg-err"></div>
-      <button class="auth-btn" id="reg-btn" onclick="doRegister()">Create Account</button>
+      <button class="auth-btn" id="reg-btn" data-cryptirc-click="doRegister">Create Account</button>
     </div>
     <div id="reg-success" style="display:none;color:var(--join);font-size:12px;text-align:center;line-height:1.7;padding:8px 0;">
       ✓ Account created!<br>Check your inbox to verify your email.
@@ -2674,7 +2674,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div class="auth-field"><label class="auth-label">Passphrase</label>
       <input class="auth-input" type="password" id="vault-pass" placeholder="Enter passphrase…" autocomplete="current-password"></div>
     <div class="auth-err" id="vault-err"></div>
-    <button class="auth-btn" onclick="doUnlock()">Unlock</button>
+    <button class="auth-btn" data-cryptirc-click="doUnlock">Unlock</button>
     <div style="font-size:10px;color:var(--text3);text-align:center;margin-top:10px;line-height:1.6;">
       AES-256-GCM · Argon2id KDF · Logs encrypted at rest · Non-E2E messages pass through the server in plaintext
     </div>
@@ -2682,9 +2682,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </div>
 
 <!-- ── LIGHTBOX ──────────────── -->
-<div id="lightbox" role="dialog" aria-modal="true" aria-label="Image viewer" onclick="if(event.target===this)closeLightbox()">
-  <button id="lightbox-close" onclick="closeLightbox();event.stopPropagation()" title="Close" aria-label="Close image viewer">✕</button>
-  <img id="lightbox-img" src="" alt="Enlarged image preview" ondblclick="toggleLightboxZoom(event)">
+<div id="lightbox" role="dialog" aria-modal="true" aria-label="Image viewer" data-cryptirc-click="closeLightboxOnBackdrop">
+  <button id="lightbox-close" data-cryptirc-click="closeLightboxButton" title="Close" aria-label="Close image viewer">✕</button>
+  <img id="lightbox-img" src="" alt="Enlarged image preview" data-cryptirc-dblclick="toggleLightboxZoom">
   <div id="lightbox-status" role="status" aria-live="polite"></div>
   <div class="lightbox-gallery-controls">
     <button id="lightbox-prev" type="button" aria-label="Previous image" hidden>Previous</button>
@@ -2697,7 +2697,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 <div id="drop-overlay">📎 Drop file to upload</div>
 
 <!-- ── UPLOAD PREVIEW/CONFIRM (images & videos: thumbnail + destination + Upload/Cancel) ──────── -->
-<div id="upload-confirm-overlay" onclick="if(event.target===this)_upcClose(false)">
+<div id="upload-confirm-overlay" data-cryptirc-click="cancelUploadOnBackdrop">
   <div class="upc-box">
     <div class="upc-title">📤 Upload this?</div>
     <div class="upc-preview" id="upc-preview"></div>
@@ -2711,7 +2711,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </div>
 
 <!-- ── SIDEBAR BACKDROP ──────── -->
-<div id="sidebar-backdrop" onclick="closeSidebar();document.getElementById('nick-panel').classList.remove('open');this.classList.remove('show')"></div>
+<div id="sidebar-backdrop" data-cryptirc-click="closeSidebarBackdrop"></div>
 
 <!-- ── RECONNECT TOAST ────────── -->
 
@@ -2726,7 +2726,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div class="notif-section-title">Trigger</div>
       <div class="notif-row">
         <div class="notif-label" style="flex:1">Notify me for</div>
-        <select class="form-select" id="notif-trigger" style="flex:none;width:auto;min-width:180px" onchange="saveNotifPrefs()">
+        <select class="form-select" id="notif-trigger" style="flex:none;width:auto;min-width:180px" data-cryptirc-change="saveNotifPrefs">
           <option value="mentions_and_dms">Mentions &amp; DMs</option>
           <option value="mentions_only">Mentions only</option>
           <option value="dms_only">Direct messages only</option>
@@ -2743,7 +2743,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <div class="notif-sublabel">Receive push notifications on your phone/device when the app is closed</div>
         </div>
         <label class="toggle toggle-wrap">
-          <input type="checkbox" id="notif-enabled" onchange="onNotifToggle()">
+          <input type="checkbox" id="notif-enabled" data-cryptirc-change="onNotifToggle">
           <span class="toggle-track"><span class="toggle-thumb"></span></span>
         </label>
       </div>
@@ -2756,7 +2756,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <div class="notif-label">🖥 Desktop popups</div>
           <div class="notif-sublabel">Show popup bubbles when the tab isn't focused</div>
         </div>
-        <button class="appear-toggle" id="a-desktop-notif" onclick="this.classList.toggle('on');toggleDesktopNotif()"></button>
+        <button class="appear-toggle" id="a-desktop-notif" data-cryptirc-click="toggleDesktopNotif"></button>
       </div>
     </div>
 
@@ -2767,14 +2767,14 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <div class="notif-label">🔊 PM sound</div>
           <div class="notif-sublabel">Chirp when a DM arrives</div>
         </div>
-        <button class="appear-toggle" id="a-sound-pm" onclick="this.classList.toggle('on');saveNotifSoundPrefs()"></button>
+        <button class="appear-toggle" id="a-sound-pm" data-cryptirc-click="saveNotifSoundPrefs"></button>
       </div>
       <div class="notif-row">
         <div>
           <div class="notif-label">🔊 Mention sound</div>
           <div class="notif-sublabel">Ping when someone mentions you</div>
         </div>
-        <button class="appear-toggle" id="a-sound-mention" onclick="this.classList.toggle('on');saveNotifSoundPrefs()"></button>
+        <button class="appear-toggle" id="a-sound-mention" data-cryptirc-click="saveNotifSoundPrefs"></button>
       </div>
       <div class="notif-row">
         <div>
@@ -2782,16 +2782,16 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <div class="notif-sublabel">Pick the alert tone — ▶ to preview</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-shrink:0">
-          <select id="a-sound-style" onchange="saveNotifSoundPrefs()" style="min-width:160px;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)"></select>
-          <button onclick="previewNotifSound(document.getElementById('a-sound-style').value)" title="Preview" style="padding:4px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">▶</button>
+          <select id="a-sound-style" data-cryptirc-change="saveNotifSoundPrefs" style="min-width:160px;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)"></select>
+          <button data-cryptirc-click="previewNotifSound" title="Preview" style="padding:4px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">▶</button>
         </div>
       </div>
       <div id="a-sound-custom-row" style="display:none;margin-top:8px">
         <div class="notif-sublabel" style="margin-bottom:6px">Custom sound — upload a short audio file, or paste an audio URL (mp3/ogg/wav).</div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-          <input id="a-sound-url" type="text" placeholder="https://example.com/ping.mp3" onchange="saveNotifSoundPrefs()" style="flex:1 1 200px;min-width:160px;padding:4px 8px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)">
-          <button onclick="document.getElementById('a-sound-file').click()" style="padding:4px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">Upload…</button>
-          <input id="a-sound-file" type="file" accept="audio/*" onchange="pickNotifSoundFile(this)" style="display:none">
+          <input id="a-sound-url" type="text" placeholder="https://example.com/ping.mp3" data-cryptirc-change="saveNotifSoundPrefs" style="flex:1 1 200px;min-width:160px;padding:4px 8px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)">
+          <button data-cryptirc-click="chooseNotificationSound" style="padding:4px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:12px">Upload…</button>
+          <input id="a-sound-file" type="file" accept="audio/*" data-cryptirc-change="pickNotifSoundFile" style="display:none">
         </div>
       </div>
     </div>
@@ -2800,8 +2800,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div class="notif-section-title">Custom Highlight Words</div>
       <div class="notif-sublabel" style="margin-bottom:8px">Get notified when these words appear in any message. Press Enter to add.</div>
       <div style="display:flex;gap:6px;margin-bottom:8px">
-        <input class="form-input" id="notif-highlight-input" placeholder="Type a word and press Enter" style="flex:1" onkeydown="if(event.key==='Enter'){event.preventDefault();addHighlightWord();}">
-        <button onclick="addHighlightWord()" style="background:var(--accent);color:#000;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-family:var(--mono);font-weight:700;font-size:12px;flex-shrink:0">+ Add</button>
+        <input class="form-input" id="notif-highlight-input" placeholder="Type a word and press Enter" style="flex:1" data-cryptirc-keydown="addHighlightOnEnter">
+        <button data-cryptirc-click="addHighlightWord" style="background:var(--accent);color:#000;border:none;border-radius:6px;padding:6px 12px;cursor:pointer;font-family:var(--mono);font-weight:700;font-size:12px;flex-shrink:0">+ Add</button>
       </div>
       <div id="highlight-tags" style="display:flex;flex-wrap:wrap;gap:6px;min-height:24px"></div>
       <input type="hidden" id="notif-highlight-words">
@@ -2818,20 +2818,20 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div class="notif-section-title">Diagnostic</div>
       <div id="notif-diag-status" style="font-size:12px;color:var(--text3);margin-bottom:8px"></div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">
-        <button onclick="notifDiagTest('basic')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Basic Popup</button>
-        <button onclick="notifDiagTest('tagged')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">With Tag</button>
-        <button onclick="notifDiagTest('sticky')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Sticky</button>
-        <button onclick="notifDiagTest('silent')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Silent</button>
-        <button onclick="notifDiagTest('sw')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">SW Notif</button>
-        <button onclick="notifDiagTest('sound-pm')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">PM Sound</button>
-        <button onclick="notifDiagTest('sound-mention')" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Mention Sound</button>
+        <button data-cryptirc-click="notifDiagTestBasic" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Basic Popup</button>
+        <button data-cryptirc-click="notifDiagTestTagged" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">With Tag</button>
+        <button data-cryptirc-click="notifDiagTestSticky" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Sticky</button>
+        <button data-cryptirc-click="notifDiagTestSilent" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Silent</button>
+        <button data-cryptirc-click="notifDiagTestSw" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">SW Notif</button>
+        <button data-cryptirc-click="notifDiagTestSoundPm" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">PM Sound</button>
+        <button data-cryptirc-click="notifDiagTestSoundMention" style="background:var(--bg4);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:11px">Mention Sound</button>
       </div>
       <div id="notif-diag-log" style="margin-top:8px;font-family:var(--mono);font-size:11px;max-height:150px;overflow-y:auto;background:var(--bg1);border-radius:6px;padding:8px;display:none;white-space:pre-wrap"></div>
     </div>
 
     <div class="modal-actions" style="margin-top:0">
-      <button class="btn-cancel" style="flex:none;min-width:80px" onclick="closeNotifModal()">Done</button>
-      <button class="btn-save" id="notif-test-btn" onclick="sendTestNotification()" style="flex:none">📨 Push Test</button>
+      <button class="btn-cancel" style="flex:none;min-width:80px" data-cryptirc-click="closeNotifModal">Done</button>
+      <button class="btn-save" id="notif-test-btn" data-cryptirc-click="sendTestNotification" style="flex:none">📨 Push Test</button>
     </div>
   </div>
 </div>
@@ -2841,7 +2841,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
   <div class="encrypt-box">
     <div class="encrypt-header">
       <span class="encrypt-title" id="encrypt-panel-title">Encryption</span>
-      <button class="encrypt-close" onclick="closeEncryptPanel()">&times;</button>
+      <button class="encrypt-close" data-cryptirc-click="closeEncryptPanel">&times;</button>
     </div>
     <div class="encrypt-body" id="encrypt-panel-body"></div>
   </div>
@@ -2855,12 +2855,12 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
   <div class="appear-box">
     <div class="appear-header">
       <span class="appear-title">Appearance</span>
-      <button class="appear-close" onclick="closeAppearanceModal()">&times;</button>
+      <button class="appear-close" data-cryptirc-click="closeAppearanceModal">&times;</button>
     </div>
     <div class="appear-body">
       <div class="appear-section">
         <div class="appear-section-title">Theme</div>
-        <input type="text" id="theme-search" class="theme-search-input" placeholder="🔍 Search themes…" autocomplete="off" spellcheck="false" oninput="filterThemeGrid()">
+        <input type="text" id="theme-search" class="theme-search-input" placeholder="🔍 Search themes…" autocomplete="off" spellcheck="false" data-cryptirc-input="filterThemeGrid">
         <div class="theme-grid" id="theme-grid"></div>
         <div style="font-size:10px;color:var(--text3);margin-top:8px;line-height:1.5">Hover any theme and hit <b>✎</b> to customize it — colors, animation and background. Your version is saved alongside the original, which is never changed.</div>
       </div>
@@ -2869,7 +2869,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Background</div>
         <div class="appear-row">
           <span class="appear-label">Show</span>
-          <select id="a-bg-mode" class="te-input" style="flex:1;max-width:220px" onchange="_toggleBgRows();applyAppearance()">
+          <select id="a-bg-mode" class="te-input" style="flex:1;max-width:220px" data-cryptirc-change="toggleBgRows">
             <option value="theme">The theme’s own</option>
             <option value="custom">My own image</option>
             <option value="none">Nothing (flat color)</option>
@@ -2879,33 +2879,33 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row" id="a-bg-image-row" style="display:none">
           <span class="appear-label">Image</span>
           <div style="display:flex;gap:6px">
-            <button class="te-btn" type="button" onclick="document.getElementById('a-bg-file').click()">Upload</button>
-            <button class="te-btn" type="button" onclick="bgClearImage()">Clear</button>
+            <button class="te-btn" type="button" data-cryptirc-click="chooseBackgroundImage">Upload</button>
+            <button class="te-btn" type="button" data-cryptirc-click="bgClearImage">Clear</button>
           </div>
         </div>
-        <input type="file" id="a-bg-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" onchange="bgUploadImage(this.files&&this.files[0]);this.value=''">
+        <input type="file" id="a-bg-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" data-cryptirc-change="bgUploadImage">
         <div class="appear-row" id="a-bg-url-row" style="display:none">
           <span class="appear-label">Image URL</span>
-          <input id="a-bg-url" type="text" placeholder="https://… (or upload above)" oninput="bgSetUrl()" class="te-input" style="flex:1;max-width:220px">
+          <input id="a-bg-url" type="text" placeholder="https://… (or upload above)" data-cryptirc-input="bgSetUrl" class="te-input" style="flex:1;max-width:220px">
         </div>
         <div class="appear-row" id="a-bg-opacity-row">
           <span class="appear-label">Opacity</span>
-          <input type="range" class="appear-slider" id="a-bg-opacity" min="0" max="100" step="5" value="25" oninput="document.getElementById('a-bg-opacity-val').textContent=this.value+'%';applyAppearance()">
+          <input type="range" class="appear-slider" id="a-bg-opacity" min="0" max="100" step="5" value="25" data-cryptirc-input="updateABgOpacityVal">
           <span class="appear-value" id="a-bg-opacity-val">25%</span>
         </div>
         <div class="appear-row" id="a-bg-blur-row">
           <span class="appear-label">Blur</span>
-          <input type="range" class="appear-slider" id="a-bg-blur" min="0" max="20" step="1" value="0" oninput="document.getElementById('a-bg-blur-val').textContent=this.value+'px';applyAppearance()">
+          <input type="range" class="appear-slider" id="a-bg-blur" min="0" max="20" step="1" value="0" data-cryptirc-input="updateABgBlurVal">
           <span class="appear-value" id="a-bg-blur-val">0px</span>
         </div>
         <div class="appear-row" id="a-bg-dim-row">
           <span class="appear-label">Dim</span>
-          <input type="range" class="appear-slider" id="a-bg-dim" min="0" max="80" step="5" value="0" oninput="document.getElementById('a-bg-dim-val').textContent=this.value+'%';applyAppearance()">
+          <input type="range" class="appear-slider" id="a-bg-dim" min="0" max="80" step="5" value="0" data-cryptirc-input="updateABgDimVal">
           <span class="appear-value" id="a-bg-dim-val">0%</span>
         </div>
         <div class="appear-row" id="a-bg-repeat-row">
           <span class="appear-label">Tile / repeat</span>
-          <button class="appear-toggle" id="a-bg-repeat" type="button" onclick="this.classList.toggle('on');applyAppearance()"></button>
+          <button class="appear-toggle" id="a-bg-repeat" type="button" data-cryptirc-click="applyAppearance"></button>
         </div>
         <div id="a-bg-status-row" style="display:none">
           <div id="a-bg-status" style="font-size:10px;color:var(--text3);min-height:14px"></div>
@@ -2916,7 +2916,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Font</div>
         <div class="appear-row">
           <span class="appear-label">Chat font</span>
-          <select id="a-font" style="flex:1;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px" onchange="applyAppearance()">
+          <select id="a-font" style="flex:1;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px" data-cryptirc-change="applyAppearance">
             <option value="'JetBrains Mono',monospace">JetBrains Mono</option>
             <option value="'Fira Code',monospace">Fira Code</option>
             <option value="'Source Code Pro',monospace">Source Code Pro</option>
@@ -3065,17 +3065,17 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Font Size</div>
         <div class="appear-row">
           <span class="appear-label">Chat text</span>
-          <input type="range" class="appear-slider" id="a-chat-size" min="10" max="20" step="1" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-chat-size" min="10" max="20" step="1" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-chat-size-val"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Sidebar</span>
-          <input type="range" class="appear-slider" id="a-sidebar-font" min="10" max="18" step="1" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-sidebar-font" min="10" max="18" step="1" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-sidebar-font-val"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Nick list</span>
-          <input type="range" class="appear-slider" id="a-nick-font" min="10" max="18" step="1" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-nick-font" min="10" max="18" step="1" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-nick-font-val"></span>
         </div>
       </div>
@@ -3084,32 +3084,32 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Layout</div>
         <div class="appear-row">
           <span class="appear-label">Sidebar width</span>
-          <input type="range" class="appear-slider" id="a-sidebar-w" min="160" max="360" step="1" oninput="_rzSliderLive('sidebarW',this.value)" onchange="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-sidebar-w" min="160" max="360" step="1" data-cryptirc-input="resizeSidebar" data-cryptirc-change="applyAppearance">
           <span class="appear-value" id="a-sidebar-w-val"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Nick column</span>
-          <input type="range" class="appear-slider" id="a-nick-w" min="60" max="180" step="1" oninput="_rzSliderLive('nickW',this.value)" onchange="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-nick-w" min="60" max="180" step="1" data-cryptirc-input="resizeNickList" data-cryptirc-change="applyAppearance">
           <span class="appear-value" id="a-nick-w-val"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Nick panel width</span>
-          <input type="range" class="appear-slider" id="a-nickpanel-w" min="120" max="320" step="1" oninput="_rzSliderLive('nickPanelW',this.value)" onchange="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-nickpanel-w" min="120" max="320" step="1" data-cryptirc-input="resizeNickPanel" data-cryptirc-change="applyAppearance">
           <span class="appear-value" id="a-nickpanel-w-val"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Line spacing</span>
-          <input type="range" class="appear-slider" id="a-line-height" min="1.2" max="2.2" step="0.1" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-line-height" min="1.2" max="2.2" step="0.1" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-line-height-val"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Message gap</span>
-          <input type="range" class="appear-slider" id="a-msg-gap" min="0" max="12" step="1" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-msg-gap" min="0" max="12" step="1" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-msg-gap-val"></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Input bar height</span>
-          <input type="range" class="appear-slider" id="a-input-h" min="32" max="96" step="2" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-input-h" min="32" max="96" step="2" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-input-h-val"></span>
         </div>
       </div>
@@ -3119,7 +3119,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div style="font-size:10px;color:var(--text3);margin-bottom:8px">Controls how images, videos, YouTube thumbs, and link previews render in chat.</div>
         <div class="appear-row">
           <span class="appear-label">External media</span>
-          <select id="a-ext-media" onchange="applyAppearance();_toggleExtMediaHostsRow()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+          <select id="a-ext-media" data-cryptirc-change="updateExternalMediaHosts" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
             <option value="all">Show all — auto-load (default)</option>
             <option value="allowlist">Allowed hosts only</option>
             <option value="off">Click to view</option>
@@ -3127,25 +3127,25 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row" id="a-ext-media-hosts-row" style="display:none;flex-direction:column;align-items:stretch">
           <span class="appear-label" style="margin-bottom:4px">Allowed hosts (one per line)</span>
-          <textarea id="a-ext-media-hosts" onchange="applyAppearance()" rows="4" spellcheck="false" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;font-family:var(--mono);padding:6px 8px;resize:vertical" placeholder="giphy.com&#10;tenor.com&#10;imgur.com"></textarea>
+          <textarea id="a-ext-media-hosts" data-cryptirc-change="applyAppearance" rows="4" spellcheck="false" style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;font-family:var(--mono);padding:6px 8px;resize:vertical" placeholder="giphy.com&#10;tenor.com&#10;imgur.com"></textarea>
           <span style="font-size:10px;color:var(--text3);margin-top:4px">A host like <code>giphy.com</code> also covers <code>media.giphy.com</code>. Your own uploads always load.</span>
         </div>
         <div class="appear-row">
           <span class="appear-label">YouTube previews</span>
-          <select id="a-yt-preview" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+          <select id="a-yt-preview" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
             <option value="auto">Show automatically (default)</option>
             <option value="click">Click to load</option>
           </select>
         </div>
         <div class="appear-row">
           <label class="appear-label" for="a-x-preview-mode">X preview layout</label>
-          <select id="a-x-preview-mode" onchange="setTweetPreviewMode(this.value)" class="x-preview-setting">
+          <select id="a-x-preview-mode" data-cryptirc-change="setTweetPreviewMode" class="x-preview-setting">
             <option value="expanded">Expanded (default)</option><option value="compact">Compact</option>
           </select>
         </div>
         <div class="appear-row">
           <span class="appear-label">Shape</span>
-          <select id="a-media-shape" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+          <select id="a-media-shape" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
             <option value="rounded">Rounded (default)</option>
             <option value="square">Square (sharp)</option>
             <option value="pronounced">Pronounced</option>
@@ -3155,12 +3155,12 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row" id="a-media-radius-row" style="display:none">
           <span class="appear-label">Radius</span>
-          <input type="range" class="appear-slider" id="a-media-radius" min="0" max="40" step="1" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-media-radius" min="0" max="40" step="1" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-media-radius-val">10px</span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Size</span>
-          <select id="a-media-size" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+          <select id="a-media-size" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
             <option value="small">Small (200px)</option>
             <option value="medium">Medium (320px)</option>
             <option value="large">Large (400px)</option>
@@ -3169,7 +3169,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">Border</span>
-          <select id="a-media-border" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+          <select id="a-media-border" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
             <option value="none">None</option>
             <option value="subtle">Subtle</option>
             <option value="accent">Accent (bold)</option>
@@ -3178,7 +3178,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">Aspect</span>
-          <select id="a-media-aspect" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+          <select id="a-media-aspect" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
             <option value="natural">Natural</option>
             <option value="sixteen_nine">16:9 (crop)</option>
             <option value="square">Square (crop)</option>
@@ -3186,12 +3186,12 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">Max height</span>
-          <input type="range" class="appear-slider" id="a-media-max-h" min="150" max="600" step="10" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-media-max-h" min="150" max="600" step="10" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-media-max-h-val">280px</span>
         </div>
         <div class="appear-row">
           <span class="appear-label">YouTube ▶ overlay</span>
-          <button class="appear-toggle" id="a-yt-play" onclick="this.classList.toggle('on');applyAppearance()"></button>
+          <button class="appear-toggle" id="a-yt-play" data-cryptirc-click="applyAppearance"></button>
         </div>
       </div>
 
@@ -3199,11 +3199,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Display</div>
         <div class="appear-row">
           <span class="appear-label">Show timestamps</span>
-          <button class="appear-toggle" id="a-timestamps" onclick="this.classList.toggle('on');applyAppearance()"></button>
+          <button class="appear-toggle" id="a-timestamps" data-cryptirc-click="applyAppearance"></button>
         </div>
         <div class="appear-row">
           <span class="appear-label">Custom timestamp format</span>
-          <button class="appear-toggle" id="a-ts-custom" onclick="_toggleTsCustom(this)"></button>
+          <button class="appear-toggle" id="a-ts-custom" data-cryptirc-click="toggleTsCustom"></button>
         </div>
         <div class="appear-row" id="a-ts-format-row" style="display:none">
           <span class="appear-label">Format
@@ -3214,8 +3214,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
             </span>
           </span>
           <input id="a-ts-format" type="text" spellcheck="false" autocomplete="off" maxlength="64" placeholder="%-l:%M%P"
-                 style="width:auto;min-width:120px;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)"
-                 oninput="_updateTsPreview()" onchange="applyAppearance()">
+                 style="width:auto;min-width:120px;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" data-cryptirc-input="updateTsPreview" data-cryptirc-change="applyAppearance">
         </div>
         <div class="appear-row" id="a-ts-preview-row" style="display:none">
           <span class="appear-label">Preview</span>
@@ -3223,7 +3222,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">Status messages</span>
-          <select id="a-statusmsg" style="width:auto;min-width:120px;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="applyAppearance()">
+          <select id="a-statusmsg" style="width:auto;min-width:120px;padding:4px 6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" data-cryptirc-change="applyAppearance">
             <option value="show">Show all</option>
             <option value="condense">Condense</option>
             <option value="hide">Hide</option>
@@ -3231,19 +3230,19 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">Compact mode</span>
-          <button class="appear-toggle" id="a-compact" onclick="this.classList.toggle('on');applyAppearance()"></button>
+          <button class="appear-toggle" id="a-compact" data-cryptirc-click="applyAppearance"></button>
         </div>
         <div class="appear-row">
           <span class="appear-label">Colored nicks</span>
-          <button class="appear-toggle" id="a-colorednicks" onclick="this.classList.toggle('on');applyAppearance()"></button>
+          <button class="appear-toggle" id="a-colorednicks" data-cryptirc-click="applyAppearance"></button>
         </div>
         <div class="appear-row">
           <span class="appear-label">Show nick list</span>
-          <button class="appear-toggle" id="a-nicklist" onclick="this.classList.toggle('on');applyAppearance()"></button>
+          <button class="appear-toggle" id="a-nicklist" data-cryptirc-click="applyAppearance"></button>
         </div>
         <div class="appear-row">
           <span class="appear-label">Messages tab<span style="display:block;color:var(--text3);font-size:10px;margin-top:2px">Unified inbox of all DMs from every network</span></span>
-          <button class="appear-toggle" id="a-msgs-tab" onclick="this.classList.toggle('on');applyAppearance();_onMsgsTabToggle()"></button>
+          <button class="appear-toggle" id="a-msgs-tab" data-cryptirc-click="toggleMessagesTab"></button>
         </div>
       </div>
 
@@ -3255,15 +3254,15 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">Upload</span>
-          <span style="display:flex;gap:14px"><button class="appear-toggle" id="a-bar-upload-d" onclick="this.classList.toggle('on');applyAppearance()"></button><button class="appear-toggle" id="a-bar-upload-m" onclick="this.classList.toggle('on');applyAppearance()"></button></span>
+          <span style="display:flex;gap:14px"><button class="appear-toggle" id="a-bar-upload-d" data-cryptirc-click="applyAppearance"></button><button class="appear-toggle" id="a-bar-upload-m" data-cryptirc-click="applyAppearance"></button></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Paste snippet</span>
-          <span style="display:flex;gap:14px"><button class="appear-toggle" id="a-bar-paste-d" onclick="this.classList.toggle('on');applyAppearance()"></button><button class="appear-toggle" id="a-bar-paste-m" onclick="this.classList.toggle('on');applyAppearance()"></button></span>
+          <span style="display:flex;gap:14px"><button class="appear-toggle" id="a-bar-paste-d" data-cryptirc-click="applyAppearance"></button><button class="appear-toggle" id="a-bar-paste-m" data-cryptirc-click="applyAppearance"></button></span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Text color (🎨)</span>
-          <span style="display:flex;gap:14px"><button class="appear-toggle" id="a-bar-color-d" onclick="this.classList.toggle('on');applyAppearance()"></button><button class="appear-toggle" id="a-bar-color-m" onclick="this.classList.toggle('on');applyAppearance()"></button></span>
+          <span style="display:flex;gap:14px"><button class="appear-toggle" id="a-bar-color-d" data-cryptirc-click="applyAppearance"></button><button class="appear-toggle" id="a-bar-color-m" data-cryptirc-click="applyAppearance"></button></span>
         </div>
       </div>
 
@@ -3271,7 +3270,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">🐑 Desktop Pet</div>
         <div class="appear-row">
           <span class="appear-label">🐑 eSheep<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A little sheep wanders your client — climbs the edges, naps, gets abducted by a UFO, and more. The classic '95 desktop pet. Silent. Choose where it runs.</div></span>
-          <select id="a-esheep" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+          <select id="a-esheep" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>
@@ -3280,7 +3279,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">🦀 Angry Crab<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A furious little crab scuttles sideways across your client — snaps its claws, rages, blows bubbles, charges, and mutters threats. Poke near it and it gets ANGRY. Silent.</div></span>
-          <select id="a-crab" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+          <select id="a-crab" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>
@@ -3289,7 +3288,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">👻 Ghost<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A friendly little ghost floats gently around your client — drifting, fading through walls, the odd spin or surprise "BOO!". Low-key and never in the way (it phases through clicks). Silent.</div></span>
-          <select id="a-ghost" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+          <select id="a-ghost" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>
@@ -3298,7 +3297,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">🐟 Calm Fish<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A serene little fish glides slowly around your client, fins gently waving. Click on it to feed it — a flake drops in and it calmly swims over to nibble, blowing a few bubbles. Never in the way (clicks pass right through). Silent.</div></span>
-          <select id="a-fish" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+          <select id="a-fish" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>
@@ -3307,7 +3306,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
         <div class="appear-row">
           <span class="appear-label">👽 Little Alien<div style="font-size:10px;color:var(--text3);margin-top:2px;max-width:220px">A flying saucer with a tiny green alien drifts around your client doing sci-fi tricks — tractor-beam abductions, teleports, scans, laser zaps, wormhole jumps, hologram glitches, a split mini-saucer buddy and more. Click near it and it swoops over to beam something up. Never in the way (clicks pass right through). Silent.</div></span>
-          <select id="a-alien" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+          <select id="a-alien" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>
@@ -3321,7 +3320,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div style="font-size:10px;color:var(--text3);margin-bottom:8px;line-height:1.5">A wider cast of quiet companions. They keep to the edges of the window and out of the text you're reading, rest far more than they move, make no sound, and clicks pass straight through them. Pick up to <b id="a-pets-max">4</b> at a time.</div>
         <div class="appear-row">
           <span class="appear-label">Show them</span>
-          <select id="a-pets-mode" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
+          <select id="a-pets-mode" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;min-width:118px;flex:none">
             <option value="off">Off</option>
             <option value="desktop">Desktop only</option>
             <option value="mobile">Mobile only</option>
@@ -3337,43 +3336,43 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div style="font-size:10px;color:var(--text3);margin-bottom:8px">These only apply on phones/tablets. Leave theme blank to use desktop theme.</div>
         <div class="appear-row">
           <span class="appear-label">Theme</span>
-          <select id="a-mobile-theme" onchange="applyAppearance()" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
+          <select id="a-mobile-theme" data-cryptirc-change="applyAppearance" style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;padding:4px 8px;flex:1">
             <option value="">Same as desktop</option>
           </select>
         </div>
         <div class="appear-row">
           <span class="appear-label">Accent</span>
           <div class="color-input-wrap">
-            <div class="color-swatch" id="a-mobile-accent-swatch"><input type="color" id="a-mobile-accent-color" oninput="applyAppearance()"></div>
+            <div class="color-swatch" id="a-mobile-accent-swatch"><input type="color" id="a-mobile-accent-color" data-cryptirc-input="applyAppearance"></div>
           </div>
         </div>
         <div class="appear-row">
           <span class="appear-label">Accent 2</span>
           <div class="color-input-wrap">
-            <div class="color-swatch" id="a-mobile-accent2-swatch"><input type="color" id="a-mobile-accent2-color" oninput="applyAppearance()"></div>
+            <div class="color-swatch" id="a-mobile-accent2-swatch"><input type="color" id="a-mobile-accent2-color" data-cryptirc-input="applyAppearance"></div>
           </div>
         </div>
         <div class="appear-row">
           <span class="appear-label">Links</span>
           <div class="color-input-wrap">
             <span style="font-size:10px;color:var(--text3)">Inherit</span>
-            <button class="appear-toggle" id="a-mobile-link-inherit" onclick="this.classList.toggle('on');applyAppearance()" title="Use the desktop link color on mobile"></button>
-            <div class="color-swatch" id="a-mobile-link-swatch"><input type="color" id="a-mobile-link-color" oninput="document.getElementById('a-mobile-link-inherit').classList.remove('on');applyAppearance()"></div>
+            <button class="appear-toggle" id="a-mobile-link-inherit" data-cryptirc-click="applyAppearance" title="Use the desktop link color on mobile"></button>
+            <div class="color-swatch" id="a-mobile-link-swatch"><input type="color" id="a-mobile-link-color" data-cryptirc-input="updateAMobileLinkInherit"></div>
           </div>
         </div>
         <div class="appear-row">
           <span class="appear-label">Chat font size</span>
-          <input type="range" class="appear-slider" id="a-mobile-chat-size" min="11" max="22" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-mobile-chat-size" min="11" max="22" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-mobile-chat-size-val">15px</span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Nick width</span>
-          <input type="range" class="appear-slider" id="a-mobile-nick-w" min="30" max="120" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-mobile-nick-w" min="30" max="120" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-mobile-nick-w-val">60px</span>
         </div>
         <div class="appear-row">
           <span class="appear-label">Show timestamps</span>
-          <button class="appear-toggle" id="a-mobile-timestamps" onclick="this.classList.toggle('on');applyAppearance()"></button>
+          <button class="appear-toggle" id="a-mobile-timestamps" data-cryptirc-click="applyAppearance"></button>
         </div>
       </div>
 
@@ -3383,35 +3382,35 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <span class="appear-label">Accent</span>
           <div class="color-input-wrap">
-            <div class="color-swatch" id="a-accent-swatch"><input type="color" id="a-accent-color" oninput="applyAppearance()"></div>
+            <div class="color-swatch" id="a-accent-swatch"><input type="color" id="a-accent-color" data-cryptirc-input="applyAppearance"></div>
           </div>
         </div>
         <div class="appear-row">
           <span class="appear-label">Accent 2</span>
           <div class="color-input-wrap">
-            <div class="color-swatch" id="a-accent2-swatch"><input type="color" id="a-accent2-color" oninput="applyAppearance()"></div>
+            <div class="color-swatch" id="a-accent2-swatch"><input type="color" id="a-accent2-color" data-cryptirc-input="applyAppearance"></div>
           </div>
         </div>
         <div class="appear-row">
           <span class="appear-label">Links <span id="a-link-match-hint" style="font-size:10px;color:var(--text3)"></span></span>
           <div class="color-input-wrap">
             <span style="font-size:10px;color:var(--text3)">Theme default</span>
-            <button class="appear-toggle" id="a-link-match" onclick="this.classList.toggle('on');applyAppearance()" title="Use the theme link color, or Accent 2"></button>
-            <div class="color-swatch" id="a-link-swatch"><input type="color" id="a-link-color" oninput="document.getElementById('a-link-match').classList.remove('on');applyAppearance()"></div>
+            <button class="appear-toggle" id="a-link-match" data-cryptirc-click="applyAppearance" title="Use the theme link color, or Accent 2"></button>
+            <div class="color-swatch" id="a-link-swatch"><input type="color" id="a-link-color" data-cryptirc-input="updateALinkMatch"></div>
           </div>
         </div>
         <div class="appear-row">
           <label class="appear-label" for="a-self-nick-color" style="color:var(--text)">My nickname</label>
           <div class="color-input-wrap">
             <span style="font-size:10px;color:var(--text)">Default</span>
-            <button type="button" class="appear-toggle" id="a-self-nick-default" role="switch" aria-label="Use default nickname color" aria-checked="true" onclick="this.classList.toggle('on');applyAppearance()"></button>
-            <div class="color-swatch" id="a-self-nick-swatch"><input type="color" id="a-self-nick-color" aria-describedby="a-self-nick-help" oninput="document.getElementById('a-self-nick-default').classList.remove('on');applyAppearance()"></div>
+            <button type="button" class="appear-toggle" id="a-self-nick-default" role="switch" aria-label="Use default nickname color" aria-checked="true" data-cryptirc-click="applyAppearance"></button>
+            <div class="color-swatch" id="a-self-nick-swatch"><input type="color" id="a-self-nick-color" aria-describedby="a-self-nick-help" data-cryptirc-input="updateASelfNickDefault"></div>
           </div>
         </div>
         <div id="a-self-nick-help" style="font-size:11px;color:var(--text);margin:4px 0 12px;line-height:1.5">Your nickname color applies to chat and the user list on all devices. Link and nickname colors adapt to the theme for readability.</div>
         <div class="appear-row">
           <span class="appear-label">Brightness</span>
-          <input type="range" class="appear-slider" id="a-brightness" min="50" max="150" step="5" oninput="applyAppearance()">
+          <input type="range" class="appear-slider" id="a-brightness" min="50" max="150" step="5" data-cryptirc-input="applyAppearance">
           <span class="appear-value" id="a-brightness-val"></span>
         </div>
       </div>
@@ -3424,7 +3423,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <!-- Privacy/Security and Behavior sections moved to standalone Security panel -->
 
       <div style="display:flex;justify-content:center;padding-top:8px;">
-        <button class="appear-reset" onclick="resetAppearance()">Reset to Defaults</button>
+        <button class="appear-reset" data-cryptirc-click="resetAppearance">Reset to Defaults</button>
       </div>
     </div>
   </div>
@@ -3434,19 +3433,19 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 <div id="theme-editor-overlay">
   <div class="appear-box te-box">
     <div class="appear-header">
-      <button class="appear-close" onclick="closeThemeEditor()" title="Back to Appearance" style="font-size:20px">&larr;</button>
+      <button class="appear-close" data-cryptirc-click="closeThemeEditor" title="Back to Appearance" style="font-size:20px">&larr;</button>
       <span class="appear-title" id="te-title">Custom Theme</span>
-      <button class="appear-close" onclick="closeThemeEditor()" title="Close">&times;</button>
+      <button class="appear-close" data-cryptirc-click="closeThemeEditor" title="Close">&times;</button>
     </div>
     <div class="appear-body">
       <div class="appear-section">
         <div class="appear-row">
           <span class="appear-label">Name</span>
-          <input id="te-name" type="text" maxlength="32" placeholder="My Theme" oninput="_teNameInput()" class="te-input" style="flex:1;max-width:220px">
+          <input id="te-name" type="text" maxlength="32" placeholder="My Theme" data-cryptirc-input="teNameInput" class="te-input" style="flex:1;max-width:220px">
         </div>
         <div class="appear-row">
           <span class="appear-label">Start from</span>
-          <select id="te-base" onchange="teStartFrom(this.value)" class="te-input" style="flex:1;max-width:220px">
+          <select id="te-base" data-cryptirc-change="teStartFrom" class="te-input" style="flex:1;max-width:220px">
             <option value="">— current colors —</option>
           </select>
         </div>
@@ -3463,7 +3462,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           </div>
           <div class="te-pv-main">
             <div class="te-pv-topic">Topic: welcome to the channel</div>
-            <div class="te-pv-msg"><span class="te-pv-nick">alice</span><span class="te-pv-text">hey, check this <a href="#" onclick="return false" class="te-pv-link">https://example.com</a></span></div>
+            <div class="te-pv-msg"><span class="te-pv-nick">alice</span><span class="te-pv-text">hey, check this <a href="#" data-cryptirc-click="stayOnPage" class="te-pv-link">https://example.com</a></span></div>
             <div class="te-pv-msg"><span class="te-pv-nick te-pv-nick2">bob</span><span class="te-pv-text">looks great 🎉</span></div>
             <div class="te-pv-status te-pv-join">→ carol has joined</div>
             <div class="te-pv-status te-pv-part">← dave has quit</div>
@@ -3479,7 +3478,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Animation</div>
         <div class="appear-row">
           <span class="appear-label">Background animation</span>
-          <select id="te-anim" onchange="teSetAnim(this.value)" class="te-input" style="flex:1;max-width:220px">
+          <select id="te-anim" data-cryptirc-change="teSetAnim" class="te-input" style="flex:1;max-width:220px">
             <option value="">None</option>
           </select>
         </div>
@@ -3491,22 +3490,22 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <span class="appear-label">Image</span>
           <div style="display:flex;gap:6px">
-            <button class="te-btn" type="button" onclick="document.getElementById('te-bg-file').click()">Upload</button>
-            <button class="te-btn" type="button" onclick="teClearBg()">Clear</button>
+            <button class="te-btn" type="button" data-cryptirc-click="chooseThemeImage">Upload</button>
+            <button class="te-btn" type="button" data-cryptirc-click="teClearBg">Clear</button>
           </div>
         </div>
-        <input type="file" id="te-bg-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" onchange="teUploadBg(this.files&&this.files[0]);this.value=''">
+        <input type="file" id="te-bg-file" accept="image/png,image/jpeg,image/gif,image/webp" style="display:none" data-cryptirc-change="teUploadBg">
         <div class="appear-row">
           <span class="appear-label">Image URL</span>
-          <input id="te-bg-url" type="text" placeholder="https://… (or leave blank)" oninput="teSetBgUrl(this.value)" class="te-input" style="flex:1;max-width:220px">
+          <input id="te-bg-url" type="text" placeholder="https://… (or leave blank)" data-cryptirc-input="teSetBgUrl" class="te-input" style="flex:1;max-width:220px">
         </div>
         <div class="appear-row">
           <span class="appear-label">Tile / repeat</span>
-          <button class="appear-toggle" id="te-bg-repeat" type="button" onclick="this.classList.toggle('on');teSetRepeat()"></button>
+          <button class="appear-toggle" id="te-bg-repeat" type="button" data-cryptirc-click="teSetRepeat"></button>
         </div>
         <div class="appear-row">
           <span class="appear-label">Opacity</span>
-          <input type="range" class="appear-slider" id="te-bg-opacity" min="0" max="100" step="5" value="25" oninput="teSetOpacity(this.value)">
+          <input type="range" class="appear-slider" id="te-bg-opacity" min="0" max="100" step="5" value="25" data-cryptirc-input="teSetOpacity">
           <span class="appear-value" id="te-bg-opacity-val">25%</span>
         </div>
         <div id="te-bg-status" style="font-size:10px;color:var(--text3);min-height:14px"></div>
@@ -3515,10 +3514,10 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div id="te-size-warn" style="display:none;font-size:11px;color:var(--warn);background:rgba(255,170,0,.1);border:1px solid rgba(255,170,0,.3);border-radius:6px;padding:8px 10px;margin-bottom:12px"></div>
 
       <div style="display:flex;gap:8px;justify-content:space-between;padding-top:4px;align-items:center;">
-        <button class="appear-reset" id="te-delete" type="button" onclick="deleteCustomTheme()" style="color:var(--error);border-color:var(--error)">Delete</button>
+        <button class="appear-reset" id="te-delete" type="button" data-cryptirc-click="deleteCustomTheme" style="color:var(--error);border-color:var(--error)">Delete</button>
         <div style="display:flex;gap:8px">
-          <button class="appear-reset" type="button" onclick="closeThemeEditor()">Cancel</button>
-          <button class="te-save" type="button" onclick="saveCustomTheme()">Save &amp; Apply</button>
+          <button class="appear-reset" type="button" data-cryptirc-click="closeThemeEditor">Cancel</button>
+          <button class="te-save" type="button" data-cryptirc-click="saveCustomTheme">Save &amp; Apply</button>
         </div>
       </div>
     </div>
@@ -3531,9 +3530,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div class="chanlist-header">
       <span class="chanlist-title">Channel List</span>
       <span class="chanlist-count" id="chanlist-count"></span>
-      <button class="chanlist-close" onclick="closeChanList()">&times;</button>
+      <button class="chanlist-close" data-cryptirc-click="closeChanList">&times;</button>
     </div>
-    <input class="chanlist-search" id="chanlist-search" placeholder="Search channels..." oninput="filterChanList()">
+    <input class="chanlist-search" id="chanlist-search" placeholder="Search channels..." data-cryptirc-input="filterChanList">
     <div class="chanlist-head-row"><span>Channel</span><span>Users</span><span>Topic</span></div>
     <div class="chanlist-body" id="chanlist-body">
       <div class="chanlist-loading" id="chanlist-loading">Waiting for server response...</div>
@@ -3547,9 +3546,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div class="newmsg-header">
       <span class="newmsg-title">✎ New Message</span>
       <span class="newmsg-count" id="newmsg-count"></span>
-      <button class="newmsg-close" onclick="closeNewMessageModal()" aria-label="Close">&times;</button>
+      <button class="newmsg-close" data-cryptirc-click="closeNewMessageModal" aria-label="Close">&times;</button>
     </div>
-    <input class="newmsg-search" id="newmsg-search" placeholder="Search people…" oninput="filterNewMessageList()" autocomplete="off">
+    <input class="newmsg-search" id="newmsg-search" placeholder="Search people…" data-cryptirc-input="filterNewMessageList" autocomplete="off">
     <div class="newmsg-body" id="newmsg-body"></div>
   </div>
 </div>
@@ -3560,7 +3559,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div class="modal-title" id="modal-title">Add Network</div>
     <div class="form-row">
       <div class="form-field"><label class="form-label">Preset (optional)</label>
-        <select class="form-select" id="f-preset" onchange="applyNetPreset(this.value)">
+        <select class="form-select" id="f-preset" data-cryptirc-change="applyNetPreset">
           <option value="">— Choose a network —</option>
           <option value="twistednet">TwistedNET</option>
           <option value="libera">Libera.Chat</option>
@@ -3590,7 +3589,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     </div>
     <div class="form-row">
       <div class="form-field"><label class="form-label">Connection Type</label>
-        <select class="form-select" id="f-mode" onchange="onServerModeChange()">
+        <select class="form-select" id="f-mode" data-cryptirc-change="onServerModeChange">
           <option value="direct" selected>Direct IRC server</option>
           <option value="znc">ZNC bouncer</option>
         </select>
@@ -3634,7 +3633,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div style="font-size:11px;color:var(--text2);letter-spacing:.06em;text-transform:uppercase;margin-bottom:10px;">SASL Authentication</div>
       <div class="form-row">
         <div class="form-field"><label class="form-label">Method</label>
-          <select class="form-select" id="f-sasl-method" onchange="onSaslMethodChange()">
+          <select class="form-select" id="f-sasl-method" data-cryptirc-change="onSaslMethodChange">
             <option value="none">None</option>
             <option value="plain">PLAIN (username/password)</option>
             <option value="external">EXTERNAL (client certificate)</option>
@@ -3682,8 +3681,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div id="f-caps-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px"></div>
     </div>
     <div class="modal-actions">
-      <button class="btn-cancel" onclick="closeModal()">Cancel</button>
-      <button class="btn-save" id="modal-save-btn" onclick="saveNetwork()">Add &amp; Connect</button>
+      <button class="btn-cancel" data-cryptirc-click="closeModal">Cancel</button>
+      <button class="btn-save" id="modal-save-btn" data-cryptirc-click="saveNetwork">Add &amp; Connect</button>
     </div>
   </div>
 </div>
@@ -3698,12 +3697,12 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         No client certificate for this network.<br>
         Generate one to use SASL EXTERNAL — NickServ identifies you by fingerprint instead of password.
       </div>
-      <button class="btn-save" style="width:100%;margin-bottom:0" onclick="generateCert()">⚡ Generate Certificate</button>
+      <button class="btn-save" style="width:100%;margin-bottom:0" data-cryptirc-click="generateCert">⚡ Generate Certificate</button>
     </div>
     <div id="cert-has-state" style="display:none;">
       <div style="margin-bottom:14px;">
         <div style="font-size:10px;color:var(--text2);letter-spacing:.07em;text-transform:uppercase;margin-bottom:8px;">SHA-256 FINGERPRINT (tap to copy)</div>
-        <div id="cert-fingerprint" onclick="copyCertFp()"></div>
+        <div id="cert-fingerprint" data-cryptirc-click="copyCertFp"></div>
         <div style="font-size:10px;color:var(--text3);margin-top:6px;">Add to NickServ: <code style="color:var(--accent2)">/msg NickServ CERT ADD &lt;fp&gt;</code></div>
       </div>
       <div style="margin-bottom:16px;">
@@ -3711,14 +3710,14 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <textarea id="cert-pem" readonly style="width:100%;height:100px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text3);font-family:var(--mono);font-size:11px;padding:10px;resize:vertical;outline:none;-webkit-appearance:none;"></textarea>
       </div>
       <div class="modal-actions">
-        <button class="btn-save" onclick="autoCertAdd()" style="flex:1">🔐 Add to NickServ</button>
-        <button class="btn-cancel" onclick="copyCertFp()" style="flex:1">📋 Copy FP</button>
-        <button class="btn-cancel" style="flex:1;color:var(--error);border-color:var(--error)" onclick="deleteCert()">🗑 Delete</button>
+        <button class="btn-save" data-cryptirc-click="autoCertAdd" style="flex:1">🔐 Add to NickServ</button>
+        <button class="btn-cancel" data-cryptirc-click="copyCertFp" style="flex:1">📋 Copy FP</button>
+        <button class="btn-cancel" style="flex:1;color:var(--error);border-color:var(--error)" data-cryptirc-click="deleteCert">🗑 Delete</button>
       </div>
     </div>
     <div id="cert-loading" style="display:none;color:var(--text3);font-size:12px;text-align:center;padding:20px;">⏳ Generating…</div>
     <div class="modal-actions" style="margin-top:16px;">
-      <button class="btn-cancel" onclick="closeCertModal()">Close</button>
+      <button class="btn-cancel" data-cryptirc-click="closeCertModal">Close</button>
     </div>
   </div>
 </div>
@@ -3728,7 +3727,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-weight:600;color:var(--text)">Server Links</span>
       <span id="links-count" style="font-size:11px;color:var(--text3)"></span>
-      <span onclick="closeLinksOverlay()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+      <span data-cryptirc-click="closeLinksOverlay" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
     </div>
     <div id="links-body" style="overflow-y:auto;flex:1;padding:4px 0;-webkit-overflow-scrolling:touch"></div>
   </div>
@@ -3743,9 +3742,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div id="sidebar-header">
       <canvas id="starfield" width="300" height="50"></canvas>
       <span class="logo">CryptIRC</span>
-      <button class="lock-btn" id="vault-lock-btn" title="Lock vault" onclick="lockVault()">🔒</button>
+      <button class="lock-btn" id="vault-lock-btn" title="Lock vault" data-cryptirc-click="lockVault">🔒</button>
     </div>
-    <div id="favs-bar" onclick="toggleFavsOnly()" title="Toggle favorites filter">
+    <div id="favs-bar" data-cryptirc-click="toggleFavsOnly" title="Toggle favorites filter">
       <svg id="favs-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
       <span id="favs-label">Favorites</span>
     </div>
@@ -3761,93 +3760,92 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div id="uploads-pin"></div>
     </div>
     <div id="sidebar-footer">
-      <button class="sidebar-btn" onclick="showAddNetwork()">+ Server</button>
+      <button class="sidebar-btn" data-cryptirc-click="showAddNetwork">+ Server</button>
       <div style="position:relative">
-        <button class="sidebar-btn" onclick="toggleSettingsMenu()" id="settings-gear-btn">⚙ Settings</button>
+        <button class="sidebar-btn" data-cryptirc-click="toggleSettingsMenu" id="settings-gear-btn">⚙ Settings</button>
         <div id="settings-menu" class="settings-menu">
           <div class="settings-search-wrap">
             <input id="settings-search" type="search" role="combobox" aria-label="Search settings" aria-autocomplete="list"
               aria-expanded="false" aria-controls="settings-search-results" placeholder="Search settings…" autocomplete="off"
-              spellcheck="false" enterkeyhint="search" maxlength="100" oninput="settingsSearch(this.value)" onkeydown="settingsSearchKey(event)"
-              onfocus="document.getElementById('settings-menu').classList.add('search-focus')">
+              spellcheck="false" enterkeyhint="search" maxlength="100" data-cryptirc-input="settingsSearch" data-cryptirc-keydown="settingsSearchKey" data-cryptirc-focus="focusSettingsSearch">
           </div>
           <div id="settings-search-status" role="status"></div>
           <div id="settings-search-results" role="listbox" aria-label="Matching settings"></div>
-          <button class="settings-menu-item" onclick="showProfilePanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Profile</button>
+          <button class="settings-menu-item" data-cryptirc-click="showProfilePanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>Profile</button>
           <div class="settings-menu-sect">Account</div>
-          <button class="settings-menu-item" onclick="showSessionManager();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>Sessions</button>
-          <button class="settings-menu-item" onclick="showPasswordPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>Password Safe</button>
-          <button class="settings-menu-item" id="cert-menu-btn" onclick="showCertModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 7V5a4 4 0 0 0-8 0v2"/><circle cx="12" cy="14" r="1.5"/></svg> Certs</button>
+          <button class="settings-menu-item" data-cryptirc-click="showSessionManager"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>Sessions</button>
+          <button class="settings-menu-item" data-cryptirc-click="showPasswordPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>Password Safe</button>
+          <button class="settings-menu-item" id="cert-menu-btn" data-cryptirc-click="showCertModal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"/><path d="M16 7V5a4 4 0 0 0-8 0v2"/><circle cx="12" cy="14" r="1.5"/></svg> Certs</button>
           <div class="settings-menu-sect">Look &amp; Feel</div>
-          <button class="settings-menu-item" onclick="showAppearanceModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="19" cy="13.5" r="2.5"/><circle cx="6.5" cy="10" r="2.5"/><circle cx="10.5" cy="17.5" r="2.5"/></svg>Theme</button>
-          <button class="settings-menu-item" onclick="closeSettingsMenu();openMsgColorPop()"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="13.5" cy="6.5" r="1.1"/><circle cx="17.3" cy="10.3" r="1.1"/><circle cx="6.7" cy="12.3" r="1.1"/><circle cx="8.7" cy="7.7" r="1.1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3C7 3 3 7 3 12s4 9 9 9c1.1 0 2-.9 2-2 0-.5-.2-.95-.5-1.3-.32-.36-.5-.82-.5-1.2 0-1.1.9-2 2-2H17c2.2 0 4-1.8 4-4 0-4.4-4-7.5-9-7.5z"/></svg>Text Color</button>
+          <button class="settings-menu-item" data-cryptirc-click="showAppearanceModal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="19" cy="13.5" r="2.5"/><circle cx="6.5" cy="10" r="2.5"/><circle cx="10.5" cy="17.5" r="2.5"/></svg>Theme</button>
+          <button class="settings-menu-item" data-cryptirc-click="settingsMessageColors"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="13.5" cy="6.5" r="1.1"/><circle cx="17.3" cy="10.3" r="1.1"/><circle cx="6.7" cy="12.3" r="1.1"/><circle cx="8.7" cy="7.7" r="1.1"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3C7 3 3 7 3 12s4 9 9 9c1.1 0 2-.9 2-2 0-.5-.2-.95-.5-1.3-.32-.36-.5-.82-.5-1.2 0-1.1.9-2 2-2H17c2.2 0 4-1.8 4-4 0-4.4-4-7.5-9-7.5z"/></svg>Text Color</button>
           <div class="settings-menu-sect">Alerts</div>
-          <button class="settings-menu-item" onclick="showNotifModal();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Notifications</button>
-          <button class="settings-menu-item" onclick="closeSettingsMenu();closeSidebar();setTimeout(showMonitorPanel,150)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>Monitor</button>
+          <button class="settings-menu-item" data-cryptirc-click="showNotifModal"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>Notifications</button>
+          <button class="settings-menu-item" data-cryptirc-click="settingsMonitor"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>Monitor</button>
           <div class="settings-menu-sect">Privacy</div>
-          <button class="settings-menu-item" onclick="showSecurityPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Security</button>
-          <button class="settings-menu-item" onclick="showIgnorePanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>Ignored Users</button>
+          <button class="settings-menu-item" data-cryptirc-click="showSecurityPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Security</button>
+          <button class="settings-menu-item" data-cryptirc-click="showIgnorePanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>Ignored Users</button>
           <div class="settings-menu-sect">Tools</div>
-          <button class="settings-menu-item" onclick="showTranslation();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h12m-6-2v2m3 0c-1 5-4 8-8 10m2-6c2 3 4 4 7 5m1 7 4-10 4 10m-6-4h4"/></svg>Translation</button>
-          <button class="settings-menu-item" onclick="showBotPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="8.5" cy="16" r="1.3"/><circle cx="15.5" cy="16" r="1.3"/><path d="M12 7v4M12 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM2 14v3M22 14v3"/></svg>Bots</button>
-          <button class="settings-menu-item" onclick="showNotepad();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Notepad</button>
-          <button class="settings-menu-item" onclick="showStatsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>Channel Stats</button>
-          <button class="settings-menu-item" onclick="showUploadsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>My Uploads</button>
-          <button class="settings-menu-item" onclick="setUploadsHidden(false);setActive(UPLOAD_CONN,UPLOAD_TARGET);closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Upload Status</button>
-          <button class="settings-menu-item" onclick="showCapsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRCv3 Caps</button>
+          <button class="settings-menu-item" data-cryptirc-click="showTranslation"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h12m-6-2v2m3 0c-1 5-4 8-8 10m2-6c2 3 4 4 7 5m1 7 4-10 4 10m-6-4h4"/></svg>Translation</button>
+          <button class="settings-menu-item" data-cryptirc-click="showBotPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="8.5" cy="16" r="1.3"/><circle cx="15.5" cy="16" r="1.3"/><path d="M12 7v4M12 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM2 14v3M22 14v3"/></svg>Bots</button>
+          <button class="settings-menu-item" data-cryptirc-click="showNotepad"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>Notepad</button>
+          <button class="settings-menu-item" data-cryptirc-click="showStatsPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>Channel Stats</button>
+          <button class="settings-menu-item" data-cryptirc-click="showUploadsPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>My Uploads</button>
+          <button class="settings-menu-item" data-cryptirc-click="openUploadsView"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Upload Status</button>
+          <button class="settings-menu-item" data-cryptirc-click="showCapsPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRCv3 Caps</button>
           <div class="settings-menu-sect">App</div>
-          <button class="settings-menu-item" id="pwa-install-menu-btn" style="display:none" onclick="closeSettingsMenu();pwaInstallFromMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="8 12 12 16 16 12"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Install CryptIRC to your device</button>
-          <button class="settings-menu-item" id="news-menu-btn" onclick="showNewsPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8M15 18h-5M10 6h8v4h-8z"/></svg>News</button>
-          <button class="settings-menu-item" onclick="showHelpPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Help</button>
+          <button class="settings-menu-item" id="pwa-install-menu-btn" style="display:none" data-cryptirc-click="settingsInstall"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="8 12 12 16 16 12"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Install CryptIRC to your device</button>
+          <button class="settings-menu-item" id="news-menu-btn" data-cryptirc-click="showNewsPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/><path d="M18 14h-8M15 18h-5M10 6h8v4h-8z"/></svg>News</button>
+          <button class="settings-menu-item" data-cryptirc-click="showHelpPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Help</button>
           <div class="settings-menu-rule"></div>
           <div class="settings-menu-sect dz">Power &amp; Danger</div>
-          <button class="settings-menu-item" onclick="showOperPanel();closeSettingsMenu()" style="color:#f0c040"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRC Oper</button>
-          <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" onclick="showAdminPanel();closeSettingsMenu()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Admin</button>
-          <button class="settings-menu-item" onclick="clearAllLogs();closeSettingsMenu()" style="color:#e05555"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Clear All Data</button>
+          <button class="settings-menu-item" data-cryptirc-click="showOperPanel" style="color:#f0c040"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>IRC Oper</button>
+          <button class="settings-menu-item" id="admin-menu-btn" style="display:none;color:#f0c040" data-cryptirc-click="showAdminPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>Admin</button>
+          <button class="settings-menu-item" data-cryptirc-click="clearAllLogs" style="color:#e05555"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>Clear All Data</button>
         </div>
       </div>
-      <button class="sidebar-btn" onclick="doLogout()">Logout</button>
+      <button class="sidebar-btn" data-cryptirc-click="doLogout">Logout</button>
     </div>
   </div>
 
   <div id="main">
     <div id="topbar">
-      <button id="sidebar-toggle-btn" onclick="toggleSidebarCollapse()" title="Toggle channel list"><svg id="sidebar-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
-      <button id="hamburger" onclick="toggleSidebar()"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+      <button id="sidebar-toggle-btn" data-cryptirc-click="toggleSidebarCollapse" title="Toggle channel list"><svg id="sidebar-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+      <button id="hamburger" data-cryptirc-click="toggleSidebar"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
       <span id="chan-title" style="color:var(--text3)">—</span>
       <span id="lag-mobile" data-empty="1" title="Server lag (ping time)">
         <span class="lag-dot" id="lag-mobile-dot"></span>
         <span id="lag-mobile-val"></span>
       </span>
-      <span id="e2e-lock" title="Not encrypted — click to set up" style="flex-shrink:0;cursor:pointer;padding:2px;color:var(--text2)" onclick="showEncryptPanel()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9 0" fill="none"/></svg></span>
-      <button type="button" id="mentions-btn" onclick="toggleMentionsPanel()" title="Notices" aria-label="Notices" aria-expanded="false" aria-controls="mentions-panel" aria-haspopup="dialog"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z"/><path d="M8 11h8m-8 4h5"/></svg><span class="mentions-count" id="mentions-count"></span></button>
-      <span id="search-btn" onclick="toggleSearchPanel()" title="Search" style="cursor:pointer;padding:4px;color:var(--text2);flex-shrink:0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
+      <span id="e2e-lock" title="Not encrypted — click to set up" style="flex-shrink:0;cursor:pointer;padding:2px;color:var(--text2)" data-cryptirc-click="showEncryptPanel"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9 0" fill="none"/></svg></span>
+      <button type="button" id="mentions-btn" data-cryptirc-click="toggleMentionsPanel" title="Notices" aria-label="Notices" aria-expanded="false" aria-controls="mentions-panel" aria-haspopup="dialog"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z"/><path d="M8 11h8m-8 4h5"/></svg><span class="mentions-count" id="mentions-count"></span></button>
+      <span id="search-btn" data-cryptirc-click="toggleSearchPanel" title="Search" style="cursor:pointer;padding:4px;color:var(--text2);flex-shrink:0"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
       <span id="topic-sep" style="display:none;color:var(--border);font-size:14px;flex-shrink:0">│</span>
-      <span id="topic-inline" style="display:none;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3);font-size:11px;cursor:pointer" onclick="showTopicMenu(event)"></span>
+      <span id="topic-inline" style="display:none;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text3);font-size:11px;cursor:pointer" data-cryptirc-click="showTopicMenu"></span>
       <span style="flex:1" id="topbar-spacer"></span>
       <span id="led-tx" style="display:none"></span>
       <span id="led-rx" style="display:none"></span>
       <span id="usercount" style="display:none"></span>
-      <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text2);cursor:pointer;padding:4px;flex-shrink:0;outline:none" onclick="showTopicMenu(event)" title="Options" aria-label="Conversation options"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
-      <button id="reattach-btn" onclick="_detachedReattachSelf()" title="Close this popped-out window and return to main">⧉ Reattach</button>
-      <button id="nick-toggle" onclick="toggleNickPanel()" title="Toggle user list" aria-label="Toggle user list"><span class="toggle-icon"><svg id="nick-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="9 18 15 12 9 6"/></svg></span><span class="toggle-mobile"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span></button>
+      <button id="topic-menu-btn" style="display:none;background:none;border:none;color:var(--text2);cursor:pointer;padding:4px;flex-shrink:0;outline:none" data-cryptirc-click="showTopicMenu" title="Options" aria-label="Conversation options"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
+      <button id="reattach-btn" data-cryptirc-click="detachedReattachSelf" title="Close this popped-out window and return to main">⧉ Reattach</button>
+      <button id="nick-toggle" data-cryptirc-click="toggleNickPanel" title="Toggle user list" aria-label="Toggle user list"><span class="toggle-icon"><svg id="nick-toggle-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="9 18 15 12 9 6"/></svg></span><span class="toggle-mobile"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span></button>
       <div id="topic-menu"></div>
       <div id="mentions-panel" role="dialog" aria-label="Notices">
-        <div id="mentions-panel-hdr"><span>Notices</span><div class="notices-actions"><button type="button" id="mentions-clear" onclick="clearMentions()">Clear</button><button type="button" id="mentions-close" onclick="closeMentionsPanel(true)" aria-label="Close notices">✕</button></div></div>
+        <div id="mentions-panel-hdr"><span>Notices</span><div class="notices-actions"><button type="button" id="mentions-clear" data-cryptirc-click="clearMentions">Clear</button><button type="button" id="mentions-close" data-cryptirc-click="closeMentionsPanelTrue" aria-label="Close notices">✕</button></div></div>
         <div id="mentions-list"><div class="mention-empty">No mentions yet</div></div>
       </div>
       <div id="search-panel">
         <div id="search-panel-hdr">
           <input id="search-input" placeholder="Search messages…" autocomplete="off" spellcheck="false">
-          <span onclick="closeSearchPanel()" style="cursor:pointer;color:var(--text3);font-size:16px;padding:4px">✕</span>
+          <span data-cryptirc-click="closeSearchPanel" style="cursor:pointer;color:var(--text3);font-size:16px;padding:4px">✕</span>
         </div>
         <div id="search-results"><div class="search-empty">Type to search current conversation</div></div>
       </div>
     </div>
     <!-- a11y: log role + polite live region so screen readers announce incoming messages (audit #48) -->
     <div id="chat-area" style="display:none" role="log" aria-live="polite" aria-label="Conversation"></div>
-    <div id="split-panel"><div class="split-header"><span>Split:</span><select id="split-chan-select" onchange="_splitTarget=this.value;renderSplitChat()"></select><button onclick="toggleSplitView()" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px" title="Close split">✕</button></div><div class="split-chat" id="split-chat-area"></div></div>
-    <button id="scroll-bottom-btn" onclick="scrollForce()" title="Jump to latest" aria-label="Jump to latest message">↓</button>
+    <div id="split-panel"><div class="split-header"><span>Split:</span><select id="split-chan-select" data-cryptirc-change="setSplitTarget"></select><button data-cryptirc-click="toggleSplitView" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px" title="Close split">✕</button></div><div class="split-chat" id="split-chat-area"></div></div>
+    <button id="scroll-bottom-btn" data-cryptirc-click="scrollForce" title="Jump to latest" aria-label="Jump to latest message">↓</button>
     <div id="welcome">
       <div class="welcome-logo">CryptIRC</div>
       <div class="welcome-sub">Select a channel to start chatting, or add a new network.</div>
@@ -3859,7 +3857,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <span class="badge">PWA</span>
       </div>
     </div>
-    <div id="reply-bar"><span id="reply-bar-nick"></span><span id="reply-bar-text"></span><span id="reply-bar-close" onclick="cancelReply()">✕</span></div>
+    <div id="reply-bar"><span id="reply-bar-nick"></span><span id="reply-bar-text"></span><span id="reply-bar-close" data-cryptirc-click="cancelReply">✕</span></div>
     <div id="typing-indicator"></div>
     <div id="input-wrap" class="esheep-perch">
       <div id="input-inner">
@@ -3867,20 +3865,20 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           rows="1" wrap="off" autocomplete="off" aria-autocomplete="none"
           data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore data-form-type="other"
           spellcheck="true" autocorrect="on" autocapitalize="none" enterkeyhint="send" inputmode="text"></textarea>
-        <button id="send-btn" onclick="doSend()" title="Send" aria-label="Send message">
+        <button id="send-btn" data-cryptirc-click="doSend" title="Send" aria-label="Send message">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="pointer-events:none" aria-hidden="true" focusable="false"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
-        <button class="upload-btn" id="btn-upload" title="Upload file" onclick="triggerUpload()" aria-label="Upload file">
+        <button class="upload-btn" id="btn-upload" title="Upload file" data-cryptirc-click="triggerUpload" aria-label="Upload file">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
         </button>
-        <button class="upload-btn" id="btn-paste" title="Paste snippet" onclick="showPasteModal()" aria-label="Paste snippet">
+        <button class="upload-btn" id="btn-paste" title="Paste snippet" data-cryptirc-click="showPasteModal" aria-label="Paste snippet">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
         </button>
-        <button class="upload-btn" id="msgcolor-btn" title="My text color (all messages)" onclick="toggleMsgColorPop(event)" aria-label="My text color">
+        <button class="upload-btn" id="msgcolor-btn" title="My text color (all messages)" data-cryptirc-click="toggleMsgColorPop" aria-label="My text color">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="13.5" cy="6.5" r="1.2"/><circle cx="17.3" cy="10.3" r="1.2"/><circle cx="6.7" cy="12.3" r="1.2"/><circle cx="8.7" cy="7.7" r="1.2"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 3C7 3 3 7 3 12s4 9 9 9c1.1 0 2-.9 2-2 0-.5-.2-.95-.5-1.3-.32-.36-.5-.82-.5-1.2 0-1.1.9-2 2-2H17c2.2 0 4-1.8 4-4 0-4.4-4-7.5-9-7.5z"/></svg>
         </button>
       </div>
-      <input type="file" id="file-input" multiple accept="*/*" onchange="handleFileSelect(this.files)">
+      <input type="file" id="file-input" multiple accept="*/*" data-cryptirc-change="handleFileSelect">
     </div>
     <div id="emoji-picker" style="display:none">
       <input id="emoji-search" placeholder="Search emoji…" autocomplete="off">
@@ -3902,16 +3900,16 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
   <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(440px,92vw);max-height:min(80vh,80dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-weight:600;color:var(--text)">Nick Monitor</span>
-      <span onclick="closeMonitorPanel()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+      <span data-cryptirc-click="closeMonitorPanel" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
     </div>
     <div style="padding:8px 16px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:6px">
       <div style="display:flex;align-items:center;justify-content:space-between">
         <span style="font-size:12px;color:var(--text2)">🔔 In-app alerts</span>
-        <button class="appear-toggle" id="monitor-notif-toggle" onclick="toggleMonitorNotifs()" style="flex-shrink:0"></button>
+        <button class="appear-toggle" id="monitor-notif-toggle" data-cryptirc-click="toggleMonitorNotifs" style="flex-shrink:0"></button>
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between">
         <span style="font-size:12px;color:var(--text2)">📲 Push notifications</span>
-        <button class="appear-toggle" id="monitor-push-toggle" onclick="toggleMonitorPush()" style="flex-shrink:0"></button>
+        <button class="appear-toggle" id="monitor-push-toggle" data-cryptirc-click="toggleMonitorPush" style="flex-shrink:0"></button>
       </div>
     </div>
     <div id="monitor-list" style="overflow-y:auto;flex:1"></div>
@@ -3922,17 +3920,17 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
   <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(560px,94vw);max-height:min(85vh,85dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-family:var(--sans);font-weight:700;font-size:16px;color:var(--text);display:flex;align-items:center;gap:8px">❓ Help <span class="ver-pill" id="help-ver-pill"></span></span>
-      <span onclick="closeHelpPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+      <span data-cryptirc-click="closeHelpPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
     </div>
     <div id="help-body" style="overflow-y:auto;flex:1;padding:16px 20px;-webkit-overflow-scrolling:touch"></div>
   </div>
 </div>
 
-<div id="news-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeNewsPanel()">
+<div id="news-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" data-cryptirc-click="closeNewsPanelOnBackdrop">
   <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(560px,94vw);max-height:min(85vh,85dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px">
       <span style="font-family:var(--sans);font-weight:700;font-size:16px;color:var(--text);display:flex;align-items:center;gap:8px">📰 News <span class="ver-pill" id="news-ver-pill"></span></span>
-      <span onclick="closeNewsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+      <span data-cryptirc-click="closeNewsPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
     </div>
     <div id="news-body" style="overflow-y:auto;flex:1;padding:16px 20px;-webkit-overflow-scrolling:touch"></div>
   </div>
@@ -4015,7 +4013,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
   <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(600px,94vw);max-height:min(85vh,85dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-family:var(--sans);font-weight:700;font-size:16px;color:var(--accent)">🤖 Bots</span>
-      <span onclick="closeBotPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+      <span data-cryptirc-click="closeBotPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
     </div>
     <div id="bot-body" style="overflow-y:auto;flex:1;padding:16px 20px;-webkit-overflow-scrolling:touch"></div>
   </div>
@@ -4024,7 +4022,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
   <div style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(600px,94vw);max-height:min(85vh,85dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-family:var(--sans);font-weight:700;font-size:16px;color:#f0c040">👑 Admin Panel</span>
-      <span onclick="closeAdminPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+      <span data-cryptirc-click="closeAdminPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
     </div>
     <div id="admin-body" style="overflow-y:auto;flex:1;padding:16px 20px;-webkit-overflow-scrolling:touch"></div>
   </div>
@@ -4129,24 +4127,24 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </style>
 
 <!-- IRCv3 Caps overlay -->
-<div id="caps-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeCapsPanel()">
+<div id="caps-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" data-cryptirc-click="closeCapsPanelOnBackdrop">
   <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:480px;width:92%;max-height:min(80vh,80dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">🔧 IRCv3 Capabilities</span>
-      <span onclick="closeCapsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+      <span data-cryptirc-click="closeCapsPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
     </div>
     <div style="padding:8px 20px 4px;font-size:11px;color:var(--text3)">Toggle capabilities per network. Changes take effect on next connect.</div>
     <div style="padding:4px 20px 8px">
-      <select id="caps-net-select" onchange="renderCapsToggles()" style="width:100%;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)"></select>
+      <select id="caps-net-select" data-cryptirc-change="renderCapsToggles" style="width:100%;padding:6px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)"></select>
     </div>
     <div id="caps-list" style="overflow-y:auto;flex:1;padding:4px 20px 16px;-webkit-overflow-scrolling:touch"></div>
   </div>
 </div>
 <style>#caps-overlay.show{display:flex !important;}</style>
 
-<dialog id="translation-panel" class="translation-panel" aria-labelledby="translation-heading" onclose="if(!this.open)closeTranslationPanel()">
-  <form onsubmit="saveTranslationPanel(event)" autocomplete="off">
-    <header><h2 id="translation-heading">Translation</h2><button type="button" class="translation-close" aria-label="Close" onclick="this.closest('dialog').close()">×</button></header>
+<dialog id="translation-panel" class="translation-panel" aria-labelledby="translation-heading" data-cryptirc-close="closeTranslationPanel">
+  <form data-cryptirc-submit="saveTranslationPanel" autocomplete="off">
+    <header><h2 id="translation-heading">Translation</h2><button type="button" class="translation-close" aria-label="Close" data-cryptirc-click="closeDialog">×</button></header>
     <div class="translation-fields">
       <section data-translation="general">
         <label class="translation-check"><input data-translation="enabled" type="checkbox"> Enable translation</label>
@@ -4154,7 +4152,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <input id="translation-language" data-translation="language" list="translation-languages" maxlength="35" placeholder="en">
         <label class="translation-check"><input data-translation="auto" type="checkbox"> Automatically translate new incoming messages and previews</label>
         <label for="translation-provider">Provider</label>
-        <select id="translation-provider" data-translation="provider" onchange="populateTranslationProvider()"></select>
+        <select id="translation-provider" data-translation="provider" data-cryptirc-change="populateTranslationProvider"></select>
         <p class="translation-hint" data-translation="google">Use a Google Cloud project with Cloud Translation Basic enabled.</p>
         <p class="translation-hint" data-translation="perplexity" hidden>Use a Perplexity Agent API model ID. Translation requests use no search tools.</p>
         <p class="translation-hint" data-translation="codex" hidden>Imports the same Codex sign-in bundle as Bots. Availability depends on your ChatGPT account.</p>
@@ -4169,9 +4167,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <label for="translation-credential">Provider credential <span data-translation="keyState" class="translation-key-state"></span></label>
         <input id="translation-credential" data-translation="credential" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" maxlength="32768">
         <div class="translation-buttons">
-          <button type="button" onclick="saveTranslationCredential(false)">Save credential</button>
-          <button type="button" data-translation="removeKey" onclick="saveTranslationCredential(true)">Remove</button>
-          <button type="button" data-translation="test" onclick="testTranslationProvider()">Test provider</button>
+          <button type="button" data-cryptirc-click="saveTranslationCredentialFalse">Save credential</button>
+          <button type="button" data-translation="removeKey" data-cryptirc-click="saveTranslationCredentialTrue">Remove</button>
+          <button type="button" data-translation="test" data-cryptirc-click="testTranslationProvider">Test provider</button>
         </div>
         <p class="translation-hint">Credentials are encrypted in your vault and shared with Bots where applicable. Translation sends text to your chosen provider. Automatic translation skips encrypted conversations.</p>
       </section>
@@ -4183,7 +4181,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <option value="default">Use the default</option><option value="on">Translate automatically</option><option value="off">Translate on demand</option>
         </select>
         <label for="translation-outgoing">Outgoing messages</label>
-        <select id="translation-outgoing" data-translation="outgoing" onchange="document.querySelector('[data-translation=outLanguageRow]').hidden=this.value!=='language'">
+        <select id="translation-outgoing" data-translation="outgoing" data-cryptirc-change="showTranslationLanguage">
           <option value="off">Send as typed</option><option value="language">Translate to a language</option><option value="peer" data-translation="peer">Match the other person’s last message</option>
         </select>
         <div class="translation-fields" data-translation="outLanguageRow" hidden>
@@ -4191,7 +4189,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <input id="translation-out-language" data-translation="outLanguage" list="translation-languages" maxlength="35" placeholder="de">
         </div>
         <p class="translation-hint">Translated drafts are sent when you press Send. If translation fails, the draft stays in the composer.</p>
-        <button type="button" class="translation-configure" onclick="showTranslation()">Translation settings</button>
+        <button type="button" class="translation-configure" data-cryptirc-click="openTranslationPanel">Translation settings</button>
       </section>
       <datalist id="translation-languages"></datalist>
       <p class="translation-status" data-translation="notice" role="status"></p>
@@ -4201,11 +4199,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 </dialog>
 
 <!-- Security panel overlay -->
-<div id="security-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeSecurityPanel()">
+<div id="security-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" data-cryptirc-click="closeSecurityPanelOnBackdrop">
   <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:min(80vh,80dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">🔒 Security &amp; Privacy</span>
-      <span onclick="closeSecurityPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+      <span data-cryptirc-click="closeSecurityPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
     </div>
     <div style="overflow-y:auto;flex:1;padding:12px 20px;-webkit-overflow-scrolling:touch">
 
@@ -4213,7 +4211,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Vault</div>
         <div class="appear-row">
           <div><span class="appear-label">Auto-lock timer</span><div style="font-size:10px;color:var(--text3)">Lock this device after inactivity (IRC stays connected)</div></div>
-          <select id="sec-vault-autolock" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="setVaultAutoLock(+this.value)">
+          <select id="sec-vault-autolock" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" data-cryptirc-change="setVaultAutoLock">
             <option value="0">Off</option><option value="5">5 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="60">1 hour</option><option value="120">2 hours</option>
           </select>
         </div>
@@ -4223,13 +4221,13 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Messages</div>
         <div class="appear-row">
           <div><span class="appear-label">Message expiry</span><div style="font-size:10px;color:var(--text3)">Hide older messages on this device (server history is kept)</div></div>
-          <select id="sec-msg-expiry" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="setMessageExpiry(+this.value)">
+          <select id="sec-msg-expiry" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" data-cryptirc-change="setMessageExpiry">
             <option value="0">Off</option><option value="1">1 hour</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">24 hours</option><option value="72">3 days</option><option value="168">7 days</option>
           </select>
         </div>
         <div class="appear-row">
           <div><span class="appear-label">Rate limit</span><div style="font-size:10px;color:var(--text3)">Delay between sent messages (flood protection)</div></div>
-          <select id="sec-ratelimit" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" onchange="setRateLimit(+this.value)">
+          <select id="sec-ratelimit" style="width:auto;min-width:100px;padding:4px 6px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;font-size:12px;font-family:var(--mono)" data-cryptirc-change="setRateLimit">
             <option value="200">200ms (fast)</option><option value="500">500ms (default)</option><option value="1000">1 sec</option><option value="2000">2 sec</option><option value="3000">3 sec (safe)</option>
           </select>
         </div>
@@ -4240,8 +4238,8 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-row">
           <div><span class="appear-label">Block private messages</span><div style="font-size:10px;color:var(--text3)">Protect yourself from unwanted DMs with an allow list, cooldown, and optional notice</div></div>
           <div style="display:flex;gap:8px;align-items:center">
-            <button onclick="showPmProtectionPanel()" style="background:var(--bg4);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">⚙ Manage</button>
-            <button class="appear-toggle" id="sec-block-pms" onclick="this.classList.toggle('on');localStorage.setItem('cryptirc_block_pms',this.classList.contains('on')?'true':'false');savePrefsToServer()"></button>
+            <button data-cryptirc-click="showPmProtectionPanel" style="background:var(--bg4);border:1px solid var(--border);color:var(--text);padding:6px 12px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">⚙ Manage</button>
+            <button class="appear-toggle" id="sec-block-pms" data-cryptirc-click="toggleBlockPms"></button>
           </div>
         </div>
       </div>
@@ -4250,48 +4248,48 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div class="appear-section-title">Behavior</div>
         <div class="appear-row">
           <span class="appear-label">Auto-rejoin on kick</span>
-          <button class="appear-toggle" id="sec-autorejoin" onclick="this.classList.toggle('on');localStorage.setItem('cryptirc_autorejoin',this.classList.contains('on')?'true':'false')"></button>
+          <button class="appear-toggle" id="sec-autorejoin" data-cryptirc-click="toggleAutoRejoin"></button>
         </div>
         <div class="appear-row">
           <span class="appear-label">Link previews</span>
-          <button class="appear-toggle" id="sec-linkpreviews" onclick="this.classList.toggle('on');secSaveToggle('linkPreviews',this.classList.contains('on'))"></button>
+          <button class="appear-toggle" id="sec-linkpreviews" data-cryptirc-click="secSaveToggleLinkpreviews"></button>
         </div>
         <div class="x-disclosure-settings">
           <label for="sec-x-mode">X preview loading on this device</label>
-          <select id="sec-x-mode" class="x-preview-setting" onchange="setXDisclosure(this.value)">
+          <select id="sec-x-mode" class="x-preview-setting" data-cryptirc-change="setXDisclosure">
             <option value="auto_public">Auto in public, unencrypted messages (default)</option><option value="manual">Click to load</option><option value="hidden">Hide X previews</option>
           </select>
           <label id="sec-x-conversation-label" for="sec-x-conversation">This conversation</label>
-          <select id="sec-x-conversation" class="x-preview-setting" onchange="setXConversationDisclosure(this.value)">
+          <select id="sec-x-conversation" class="x-preview-setting" data-cryptirc-change="setXConversationDisclosure">
             <option value="inherit">Use global rule</option><option value="manual">Click to load</option><option value="auto">Auto, including encrypted and private messages</option><option value="hidden">Hide previews here</option>
           </select>
           <p>Loading reveals the post ID to your CryptIRC server and may contact X. A conversation auto setting includes future encrypted messages and DMs. External media and published threads require their own permissions.</p>
           <p>These disclosure settings stay on this device for this account.</p>
           <p id="sec-x-unavailable" hidden>X previews are not configured on this server, so X links stay plain links.</p>
-          <button type="button" class="msg-tweet-button" onclick="resetXDisclosure()">Reset X disclosure settings</button>
+          <button type="button" class="msg-tweet-button" data-cryptirc-click="resetXDisclosure">Reset X disclosure settings</button>
         </div>
         <div class="appear-row">
           <span class="appear-label">Spellcheck</span>
-          <button class="appear-toggle" id="sec-spellcheck" onclick="this.classList.toggle('on');secSaveToggle('spellcheck',this.classList.contains('on'))"></button>
+          <button class="appear-toggle" id="sec-spellcheck" data-cryptirc-click="secSaveToggleSpellcheck"></button>
         </div>
       </div>
 
       <div style="text-align:center;padding-top:8px">
-        <button onclick="closeSecurityPanel()" style="background:var(--bg4);border:1px solid var(--border);color:var(--text);padding:8px 24px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:12px">Done</button>
+        <button data-cryptirc-click="closeSecurityPanel" style="background:var(--bg4);border:1px solid var(--border);color:var(--text);padding:8px 24px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:12px">Done</button>
       </div>
     </div>
   </div>
 </div>
 <style>#security-overlay.show{display:flex !important;}</style>
 <!-- Channel Stats panel -->
-<div id="chanstats-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeStatsPanel()">
+<div id="chanstats-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" data-cryptirc-click="closeStatsPanelOnBackdrop">
   <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:500px;width:92%;max-height:min(80vh,80dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
       <span id="chanstats-title" style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent);display:flex;align-items:center;gap:8px">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
         Channel Stats
       </span>
-      <span onclick="closeStatsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px 8px;border-radius:4px;min-width:32px;min-height:32px;display:flex;align-items:center;justify-content:center">&#10005;</span>
+      <span data-cryptirc-click="closeStatsPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px 8px;border-radius:4px;min-width:32px;min-height:32px;display:flex;align-items:center;justify-content:center">&#10005;</span>
     </div>
     <div id="chanstats-body" style="overflow-y:auto;flex:1;padding:12px 20px;-webkit-overflow-scrolling:touch"></div>
   </div>
@@ -4315,24 +4313,24 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 .cst-detail-total{font-size:11px;color:var(--text3);}
 </style>
 <!-- Session manager overlay -->
-<div id="sessions-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeSessionsPanel()">
+<div id="sessions-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" data-cryptirc-click="closeSessionsPanelOnBackdrop">
   <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:440px;width:92%;max-height:min(70vh,70dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">📱 Active Sessions</span>
-      <span onclick="closeSessionsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+      <span data-cryptirc-click="closeSessionsPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
     </div>
     <div id="sessions-list" style="overflow-y:auto;flex:1;padding:12px 16px;-webkit-overflow-scrolling:touch"></div>
   </div>
 </div>
 <style>#sessions-overlay.show{display:flex !important;}</style>
 <!-- Uploads overlay -->
-<div id="uploads-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeUploadsPanel()">
+<div id="uploads-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" data-cryptirc-click="closeUploadsPanelOnBackdrop">
   <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:500px;width:92%;max-height:min(80vh,80dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:var(--accent)">📁 My Uploads</span>
       <div style="display:flex;gap:8px;align-items:center">
-        <button onclick="clearAllUploads()" style="background:var(--bg4);border:1px solid var(--border);color:var(--error);padding:4px 10px;border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:11px">Delete All</button>
-        <span onclick="closeUploadsPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
+        <button data-cryptirc-click="clearAllUploads" style="background:var(--bg4);border:1px solid var(--border);color:var(--error);padding:4px 10px;border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:11px">Delete All</button>
+        <span data-cryptirc-click="closeUploadsPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px">✕</span>
       </div>
     </div>
     <div id="uploads-list" style="overflow-y:auto;flex:1;padding:8px 16px;-webkit-overflow-scrolling:touch"></div>
@@ -4341,11 +4339,11 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 <style>#uploads-overlay.show{display:flex !important;}</style>
 <!-- Stats overlay -->
 <!-- IRC Oper Panel -->
-<div id="oper-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeOperPanel()">
+<div id="oper-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center" data-cryptirc-click="closeOperPanelOnBackdrop">
   <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;max-width:560px;width:94%;max-height:min(85vh,85dvh);display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.6)">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
       <span style="font-family:var(--sans);font-weight:700;font-size:15px;color:#f0c040;display:flex;align-items:center;gap:8px">⚡ IRC Oper Panel</span>
-      <span onclick="closeOperPanel()" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px 8px">&#10005;</span>
+      <span data-cryptirc-click="closeOperPanel" style="cursor:pointer;color:var(--text3);font-size:18px;padding:4px 8px">&#10005;</span>
     </div>
     <div id="oper-body" style="overflow-y:auto;flex:1;padding:12px 20px;-webkit-overflow-scrolling:touch"></div>
   </div>
@@ -4371,9 +4369,9 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
 .oper-back:hover{background:var(--bg4);}
 .oper-net-select{width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:12px;padding:6px 8px;border-radius:6px;margin-bottom:6px;}
 </style>
-<div id="stats-overlay" onclick="if(event.target===this)this.classList.remove('show')"><div class="stats-box"></div></div>
+<div id="stats-overlay" data-cryptirc-click="closeStatsDetailOnBackdrop"><div class="stats-box"></div></div>
 <!-- Smart paste dialog -->
-<div id="smart-paste-dialog"><div class="sp-info"></div><div class="sp-row"><label for="sp-expire">Expires</label><select id="sp-expire"><option value="0">Never</option><option value="600">10 minutes</option><option value="3600">1 hour</option><option value="86400">1 day</option><option value="604800">1 week</option><option value="2592000">30 days</option></select></div><div class="sp-btns"><button class="sp-btn sp-yes" id="smart-paste-yes" onclick="smartPasteYes()">Create Pastebin</button><button class="sp-btn sp-no" onclick="smartPasteNo()">Paste as Text</button></div></div>
+<div id="smart-paste-dialog"><div class="sp-info"></div><div class="sp-row"><label for="sp-expire">Expires</label><select id="sp-expire"><option value="0">Never</option><option value="600">10 minutes</option><option value="3600">1 hour</option><option value="86400">1 day</option><option value="604800">1 week</option><option value="2592000">30 days</option></select></div><div class="sp-btns"><button class="sp-btn sp-yes" id="smart-paste-yes" data-cryptirc-click="smartPasteYes">Create Pastebin</button><button class="sp-btn sp-no" data-cryptirc-click="smartPasteNo">Paste as Text</button></div></div>
 <!-- Animation overlay for animated themes -->
 <div id="theme-bg-layer"></div>
 <div id="theme-bg-dim"></div>

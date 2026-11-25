@@ -664,10 +664,8 @@ pub enum ClientMessage {
     E2EDeleteChannelKey { channel: String, #[serde(default)] v: u32, #[serde(default)] req: Option<String> },
     #[serde(rename = "e2e_list_channel_keys")]
     E2EListChannelKeys  {},
-    #[serde(rename = "e2e_update_trust")]
-    E2EUpdateTrust    { nick: String, fingerprint: String, verified: bool },
-    #[serde(rename = "e2e_load_trust")]
-    E2ELoadTrust      {},
+    #[serde(rename = "e2e_update_trust", alias = "e2e_load_trust")]
+    E2ELegacyTrust    {},
     // conn_id (optional, F10): the sender's connection; from_nick and the target
     // lookup are taken from / scoped to that network.
     #[serde(rename = "e2e_relay_x3dh")]
@@ -835,8 +833,6 @@ pub enum ServerEvent {
     E2EKeyDeleted { req: String, ok: bool },
     #[serde(rename = "e2e_channel_list")]
     E2EChannelList   { channels: Vec<String> },
-    #[serde(rename = "e2e_trust")]
-    E2ETrust         { nick: String, fingerprint: String, verified: bool, key_changed: bool },
     #[serde(rename = "e2e_otpk_low")]
     E2EOTPKLow       { remaining: usize },
     #[serde(rename = "e2e_x3dh_header")]
@@ -1005,7 +1001,6 @@ pub struct LogLine { pub id: u64, pub ts: i64, pub from: String, pub text: Strin
 #[derive(Deserialize)] struct ForgotBody         { email: String }
 #[derive(Deserialize)] struct ResetQuery         { token: String }
 #[derive(Deserialize)] struct ResetPasswordBody  { token: String, password: String }
-#[derive(Deserialize)] struct FileQuery    { token: Option<String> }
 #[derive(Serialize)]   struct AuthOkBody   { token: String, username: String }
 #[derive(Serialize)]   struct LoginErr     { message: String, captcha_required: bool }
 #[derive(Serialize)]   struct MeOk         { username: String, email: String, admin: bool, lastfm_user: String, lastfm_enabled: bool, lastfm_own_key: bool }
@@ -1149,12 +1144,13 @@ impl Drop for WsConnGuard {
 
 async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
     let mut response = next.run(req).await;
+    let page_scripts = response.extensions_mut().remove::<PageScriptNonce>();
     let h = response.headers_mut();
     // `serve_paste_app` marks its response so it may be framed by the same-origin
     // paste page; the marker is private and removed here before the response leaves.
     let is_app_frame = h.remove(HeaderName::from_static(PASTE_APP_FRAME_MARKER)).is_some();
     let is_sandbox_doc = h.remove(HeaderName::from_static(PASTE_SANDBOX_DOC_MARKER)).is_some();
-    apply_security_headers(h, is_app_frame);
+    apply_security_headers(h, is_app_frame, page_scripts.as_ref());
     if is_sandbox_doc && !is_app_frame { apply_sandbox_doc_csp(h); }
     h.insert(HeaderName::from_static("x-content-type-options"),   HeaderValue::from_static("nosniff"));
     h.insert(HeaderName::from_static("referrer-policy"),          HeaderValue::from_static("no-referrer"));
@@ -1186,7 +1182,7 @@ async fn security_headers_mw(req: Request<Body>, next: Next) -> Response {
 /// - The global policy keeps `frame-ancestors 'none'` + `XFO: DENY`, so the
 ///   `frame-src 'self'` allowance (needed to frame the app route) cannot expose
 ///   any other route to framing.
-fn apply_security_headers(h: &mut HeaderMap, is_app_frame: bool) {
+fn apply_security_headers(h: &mut HeaderMap, is_app_frame: bool, nonce: Option<&PageScriptNonce>) {
     if is_app_frame {
         h.insert(HeaderName::from_static("x-frame-options"), HeaderValue::from_static("SAMEORIGIN"));
         // NOTE (#55): 'unsafe-inline'/'unsafe-eval' and wildcard sources are the
@@ -1212,18 +1208,30 @@ fn apply_security_headers(h: &mut HeaderMap, is_app_frame: bool) {
         return;
     }
     h.insert(HeaderName::from_static("x-frame-options"),          HeaderValue::from_static("DENY"));
-    // NOTE (#55): script-src still includes 'unsafe-inline' because the frontend
-    // (static/app.js inline onclick handlers + static/index.html theme bootstrap
-    // script) currently requires it. 'unsafe-inline' cannot be dropped here until
-    // those inline handlers/scripts are removed/nonce'd (frontend change, see #3/#9/#10).
-    h.insert(HeaderName::from_static("content-security-policy"),  HeaderValue::from_static(
-        "default-src 'self'; object-src 'none'; base-uri 'self'; script-src 'self' 'unsafe-inline'; \
+    const PAGE_CSP: &str =
+        "default-src 'self'; object-src 'none'; base-uri 'none'; script-src 'self'; script-src-attr 'none'; \
          style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
          font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https:; \
          media-src 'self' blob: data: https:; \
          connect-src 'self' wss: ws: https://noembed.com https://returnyoutubedislikeapi.com https://api.urbandictionary.com https://api.giphy.com https://tenor.googleapis.com; \
-         frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';"
-    ));
+         frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'none';";
+    let policy = match nonce {
+        Some(nonce) => HeaderValue::try_from(PAGE_CSP.replace("script-src 'self';",
+            &format!("script-src 'self' 'nonce-{}';", nonce.0)))
+            .expect("base64 nonce is a valid header value"),
+        None => HeaderValue::from_static(PAGE_CSP),
+    };
+    h.insert(HeaderName::from_static("content-security-policy"), policy);
+}
+
+#[derive(Clone)]
+struct PageScriptNonce(String);
+
+impl PageScriptNonce {
+    fn new() -> Self {
+        Self(base64::Engine::encode(&base64::engine::general_purpose::STANDARD,
+            rand::random::<[u8; 16]>()))
+    }
 }
 
 #[cfg(test)]
@@ -1233,7 +1241,7 @@ mod security_headers_tests {
     #[test]
     fn app_frame_gets_sameorigin_sandbox_policy() {
         let mut h = HeaderMap::new();
-        apply_security_headers(&mut h, true);
+        apply_security_headers(&mut h, true, None);
         assert_eq!(h.get("x-frame-options").unwrap(), "SAMEORIGIN");
         let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
         assert!(csp.contains("frame-ancestors 'self'"), "{}", csp);
@@ -1245,7 +1253,7 @@ mod security_headers_tests {
     #[test]
     fn normal_responses_keep_deny_policy() {
         let mut h = HeaderMap::new();
-        apply_security_headers(&mut h, false);
+        apply_security_headers(&mut h, false, None);
         assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
         let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
         assert!(csp.contains("frame-ancestors 'none'"), "{}", csp);
@@ -1413,6 +1421,9 @@ async fn main() -> Result<()> {
     let vapid    = notifications::load_or_generate_vapid(&data_dir)?;
     let notifier = Arc::new(NotificationManager::new(&data_dir, vapid));
     let e2e_store = Arc::new(E2EStore::new(&data_dir));
+    if let Err(e) = e2e_store.remove_legacy_trust_mirrors().await {
+        warn!("[E2E] could not scan for legacy trust mirrors: {}", e);
+    }
     let paste_store = Arc::new(paste::PasteStore::new(&data_dir));
     // #33: one outbound-preview permit pool, shared by generic /preview and the X adapter.
     let preview_sem = Arc::new(Semaphore::new(PREVIEW_MAX_CONCURRENT));
@@ -1428,10 +1439,10 @@ async fn main() -> Result<()> {
     let static_index    = Arc::new(include_str!("../static/index.html").replace("/cryptirc", bp_trimmed));
     let static_manifest = Arc::new(include_str!("../static/manifest.json").replace("/cryptirc", bp_trimmed));
     let static_sw       = Arc::new(include_str!("../static/sw.js").replace("/cryptirc", bp_trimmed));
-    // app.js holds the main frontend script (extracted verbatim from index.html).
+    // Serve the controls with app.js so online and cached copies use the same wiring.
     // It contains /cryptirc asset/WS paths, so it needs the same base-path rewrite.
     let static_app_js   = Arc::new(render_app_js(
-        include_str!("../static/app.js"),
+        concat!(include_str!("../static/page-controls.js"), "\n", include_str!("../static/app.js")),
         bp_trimmed,
         option_env!("CRYPTIRC_BUILD").unwrap_or("dev"),
         env!("CARGO_PKG_VERSION"),
@@ -1748,9 +1759,9 @@ async fn main() -> Result<()> {
 // minutes-to-hours.
 const NO_CACHE: &str = "no-store, no-cache, must-revalidate";
 async fn serve_index(State(state): State<AppState>) -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8"),
-      (header::CACHE_CONTROL, NO_CACHE)],
-     (*state.static_index).clone())
+    let nonce = PageScriptNonce::new();
+    let html = state.static_index.replace("__CRYPTIRC_SCRIPT_NONCE__", &nonce.0);
+    (axum::Extension(nonce), [(header::CACHE_CONTROL, NO_CACHE)], Html(html))
 }
 async fn serve_manifest(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/manifest+json"),(header::CACHE_CONTROL,NO_CACHE)], (*state.static_manifest).clone()) }
 async fn serve_sw(State(state): State<AppState>) -> impl IntoResponse { ([(header::CONTENT_TYPE,"application/javascript; charset=utf-8"),(header::CACHE_CONTROL,NO_CACHE)], (*state.static_sw).clone()) }
@@ -1836,15 +1847,13 @@ async fn serve_file_public(Path(name): Path<String>, headers: HeaderMap, State(s
     stream_upload_file(&path, &name, &headers, "public, max-age=86400", inline).await
 }
 
-async fn serve_file(Path(name): Path<String>, Query(q): Query<FileQuery>, headers: HeaderMap, State(state): State<AppState>) -> impl IntoResponse {
-    // Accept token from query param, cookie, or Authorization header
-    let token = q.token.clone()
-        .or_else(|| headers.get(header::COOKIE)
+async fn serve_file(Path(name): Path<String>, headers: HeaderMap, State(state): State<AppState>) -> impl IntoResponse {
+    let token = headers.get(header::COOKIE)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.split(';').find_map(|c| {
                 let c = c.trim();
                 c.strip_prefix("cryptirc_token=").map(|t| t.to_string())
-            })))
+            }))
         .or_else(|| bearer_token(&headers).map(|s| s.to_string()))
         .unwrap_or_default();
     if state.auth.validate_session(&token).is_none() {
@@ -2720,14 +2729,14 @@ async fn route_admin_get_settings(State(state): State<AppState>, headers: Header
 
 async fn admin_settings(state: &AppState) -> serde_json::Value {
     let open = *state.registration_open.read().await;
-    let code = state.registration_code.read().await.clone();
+    let code_set = !state.registration_code.read().await.is_empty();
     let upload_mb = *state.max_upload_mb.read().await;
     let giphy_key = state.giphy_server_key.read().await.clone();
     let tenor_key = state.tenor_server_key.read().await.clone();
     let lastfm_key = state.lastfm_api_key.read().await.clone();
     serde_json::json!({
         "registration_open": open,
-        "registration_code": code,
+        "registration_code_set": code_set,
         "max_upload_mb": upload_mb,
         "email_required": *state.email_required.read().await,
         "captcha_enabled": *state.captcha_enabled.read().await,
@@ -2749,6 +2758,9 @@ async fn admin_settings(state: &AppState) -> serde_json::Value {
 struct AdminSettings {
     registration_open: Option<bool>,
     registration_code: Option<String>,
+    new_registration_code: Option<String>,
+    #[serde(default)]
+    clear_registration_code: bool,
     max_upload_mb: Option<usize>,
     // Signup policy (optional; omitted = keep current).
     email_required: Option<bool>,
@@ -2831,17 +2843,31 @@ async fn route_admin_put_settings(State(state): State<AppState>, headers: Header
 }
 
 async fn save_admin_settings(state: &AppState, body: AdminSettings) -> axum::response::Response {
+    // Old clients sent whatever was displayed in the invite-code field on every
+    // settings change. Once reads omit the code, those writes must never replace it.
+    let legacy_code = body.registration_code.is_some();
+    if legacy_code && (body.registration_open.is_none() || body.new_registration_code.is_some() || body.clear_registration_code) {
+        return (StatusCode::BAD_REQUEST, Json(Msg {
+            message: "Refresh CryptIRC or use new_registration_code to set an invite code.".into(),
+        })).into_response();
+    }
+    let reg_code = match (body.new_registration_code, body.clear_registration_code) {
+        (Some(_), true) => return (StatusCode::BAD_REQUEST, Json(Msg {
+            message: "Set or clear the invite code in a single request.".into(),
+        })).into_response(),
+        (Some(code), false) if code.trim().is_empty() => return (StatusCode::BAD_REQUEST, Json(Msg {
+            message: "Use clear_registration_code to clear the invite code.".into(),
+        })).into_response(),
+        (None, true) => Some(String::new()),
+        (code, false) => code,
+    };
     let _guard = state.admin_settings_lock.lock().await;
     // #5: remember whether THIS save explicitly set the registration fields. Only then
     // (or if the file already holds them) are they persisted — a GIF / Last.fm save must
     // not freeze the env-derived CRYPTIRC_REGISTRATION / CRYPTIRC_REG_CODE into the file.
     let set_reg_open = body.registration_open.is_some();
-    let set_reg_code = body.registration_code.is_some();
     if let Some(open) = body.registration_open {
         *state.registration_open.write().await = open;
-    }
-    if let Some(code) = body.registration_code {
-        *state.registration_code.write().await = code;
     }
     if let Some(mb) = body.max_upload_mb {
         // Clamp to 1–500 MB
@@ -2899,7 +2925,9 @@ async fn save_admin_settings(state: &AppState, body: AdminSettings) -> axum::res
     if set_reg_open || existing.get("registration_open").is_some() {
         existing["registration_open"] = serde_json::json!(*state.registration_open.read().await);
     }
-    if set_reg_code || existing.get("registration_code").is_some() {
+    if let Some(code) = &reg_code {
+        existing["registration_code"] = serde_json::json!(code);
+    } else if existing.get("registration_code").is_some() {
         existing["registration_code"] = serde_json::json!(*state.registration_code.read().await);
     }
     existing["max_upload_mb"] = serde_json::json!(*state.max_upload_mb.read().await);
@@ -2917,9 +2945,19 @@ async fn save_admin_settings(state: &AppState, body: AdminSettings) -> axum::res
         tracing::error!("failed to persist admin_settings.json: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(Msg { message: "Failed to save settings.".into() })).into_response();
     }
+    if let Some(code) = reg_code {
+        *state.registration_code.write().await = code;
+    }
     drop(_guard);
     if avatars_switched {
         avatar::remote::republish_all(&state.auth, &state.avatars, &state.connections, &state.conn_owners).await;
+    }
+    // Old panels also set registration/captcha policy in this request. Keep
+    // those changes even for clients that don't check the response status.
+    if legacy_code {
+        return (StatusCode::CONFLICT, Json(Msg {
+            message: "Other settings saved. Invite code unchanged. Refresh CryptIRC to set an invite code.".into(),
+        })).into_response();
     }
     (StatusCode::OK, Json(Msg { message: "Settings updated.".into() })).into_response()
 }
@@ -3329,7 +3367,8 @@ async fn route_reset_page(State(state): State<AppState>, Query(q): Query<ResetQu
     // #6: link home and POST the reset to the CONFIGURED base path (see app_home_href).
     let home = html_escape(&app_home_href(&state.base_path));
     let reset_url = js_escape(&format!("{}/auth/reset", state.base_path));
-    Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+    let nonce = PageScriptNonce::new();
+    let html = Html(format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Reset Password — CryptIRC</title>
 <style>
 body{{background:#0b0d0f;color:#c8d8e8;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}}
@@ -3354,12 +3393,12 @@ a{{color:#00d4aa;text-decoration:none;}}
   <label>Confirm Password</label>
   <input type="password" id="rp-pass2" placeholder="Repeat password" autocomplete="new-password">
   <div class="err" id="rp-err"></div>
-  <button id="rp-btn" onclick="doReset()">Set New Password</button>
+  <button id="rp-btn">Set New Password</button>
 </div>
 <div id="reset-ok" style="display:none" class="ok">
   ✓ Password reset!<br>You can now <a href="{home}">sign in</a> with your new password.
 </div>
-<script>
+<script nonce="{nonce}">
 const TOKEN="{token}";
 async function doReset(){{
   const pass=document.getElementById('rp-pass').value;
@@ -3380,9 +3419,11 @@ async function doReset(){{
   }}catch(e){{err.textContent='Network error';}}
   finally{{btn.disabled=false;btn.textContent='Set New Password';}}
 }}
+document.getElementById('rp-btn').addEventListener('click',doReset);
 document.querySelectorAll('input').forEach(i=>i.addEventListener('keydown',e=>{{if(e.key==='Enter')doReset();}}));
 </script>
-</div></body></html>"#, home = home, token = js_escape(&q.token), reset_url = reset_url))
+</div></body></html>"#, home = home, token = js_escape(&q.token), reset_url = reset_url, nonce = nonce.0));
+    (axum::Extension(nonce), [(header::CACHE_CONTROL, NO_CACHE)], html)
 }
 
 async fn route_reset_password(State(state): State<AppState>, headers: HeaderMap, Json(body): Json<ResetPasswordBody>) -> impl IntoResponse {
@@ -4082,14 +4123,14 @@ const PASTE_APP_CSS: &str = "body{height:100vh;display:flex;flex-direction:colum
 /// no token. The app route repeats this isolation with a CSP `sandbox` directive.
 const PASTE_APP_SANDBOX: &str =
     "allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-pointer-lock";
-const PASTE_APP_TOGGLE_JS: &str = "<script>(function(){\
+const PASTE_APP_TOGGLE_JS: &str = "(function(){\
     var t=document.getElementById('tab-app'),s=document.getElementById('tab-src');\
     function show(n){var a=document.getElementById('pane-app'),p=document.getElementById('pane-src');\
     var isApp=n==='app';a.style.display=isApp?'block':'none';p.style.display=isApp?'none':'block';\
     t.classList.toggle('active',isApp);s.classList.toggle('active',!isApp);}\
     t.addEventListener('click',function(){show('app');});\
     s.addEventListener('click',function(){show('src');});\
-    var f=document.getElementById('app-auth');if(f){f.submit();}})();</script>";
+    var f=document.getElementById('app-auth');if(f){f.submit();}})();";
 
 /// NEW-2 (verify v-srv-a): a paste-password check (Argon2) run through the shared
 /// auth-KDF cap (`run_auth_kdf`: bounded concurrency, so a burst of wrong unlocks from
@@ -4176,6 +4217,7 @@ async fn render_paste(state: &AppState, id: &str, headers: &HeaderMap, pw: &str)
                 "<div class=\"hdr\"><span><a href=\"{}/\">CryptIRC</a> Paste</span><span class=\"meta\">{}</span></div>",
                 base, meta
             );
+            let mut page_scripts = None;
             let (style, body) = match paste.content_type {
                 paste::PasteKind::Text => (
                     format!("{}{}", PASTE_BASE_CSS, PASTE_TEXT_CSS),
@@ -4197,6 +4239,9 @@ async fn render_paste(state: &AppState, id: &str, headers: &HeaderMap, pw: &str)
                     )
                 }
                 paste::PasteKind::Html => {
+                    let nonce = PageScriptNonce::new();
+                    let scripts = format!("<script nonce=\"{}\">{}</script>", nonce.0, PASTE_APP_TOGGLE_JS);
+                    page_scripts = Some(nonce);
                     // The app runs only on this dedicated route (never the raw URL,
                     // which stays text/plain) inside a sandbox with an opaque origin.
                     let app_url = format!("{}/paste/{}/app", base, id_esc);
@@ -4242,7 +4287,7 @@ async fn render_paste(state: &AppState, id: &str, headers: &HeaderMap, pw: &str)
                         format!("{}{}", PASTE_BASE_CSS, PASTE_APP_CSS),
                         format!(
                             "{}<div class=\"pane\" id=\"pane-app\">{}</div><div id=\"pane-src\"><pre>{}</pre></div>{}{}",
-                            toolbar, frame, escaped, auth_form, PASTE_APP_TOGGLE_JS
+                            toolbar, frame, escaped, auth_form, scripts
                         ),
                     )
                 }
@@ -4251,13 +4296,17 @@ async fn render_paste(state: &AppState, id: &str, headers: &HeaderMap, pw: &str)
                 "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>CryptIRC Paste — {}</title><style>{}</style></head><body>{}</body></html>",
                 id_esc, style, body
             )).into_response();
+            let has_page_scripts = page_scripts.is_some();
+            if let Some(nonce) = page_scripts {
+                resp.extensions_mut().insert(nonce);
+            }
             if paste.content_type == paste::PasteKind::Markdown {
                 // rust-content LOW: rendered Markdown (user-authored <img>/links) runs
                 // in an opaque-origin, script-less sandbox instead of the app origin.
                 resp.headers_mut().insert(HeaderName::from_static(PASTE_SANDBOX_DOC_MARKER), HeaderValue::from_static("1"));
             }
-            if is_protected {
-                // The page now embeds the verified password (raw/app forms).
+            if is_protected || has_page_scripts {
+                // Protected forms carry the password. Script nonces are per response.
                 resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_CACHE));
             }
             resp
@@ -6133,53 +6182,6 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
     user_bulk_prune(&username);
 }
 
-/// r6 (codex P1 main.rs:6743): the sockets with a trust load in flight (see
-/// E2ELoadTrust). A slot is held for the whole delivery and released on drop.
-struct TrustLoadSlot { id: u64 }
-fn trust_loads_in_flight() -> &'static std::sync::Mutex<Vec<(u64, tokio::sync::mpsc::WeakSender<ServerEvent>)>> {
-    static M: std::sync::OnceLock<std::sync::Mutex<Vec<(u64, tokio::sync::mpsc::WeakSender<ServerEvent>)>>> = std::sync::OnceLock::new();
-    M.get_or_init(|| std::sync::Mutex::new(Vec::new()))
-}
-impl TrustLoadSlot {
-    /// None = this socket already has a trust load in flight.
-    fn claim(socket_tx: &tokio::sync::mpsc::Sender<ServerEvent>) -> Option<Self> {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let mut l = trust_loads_in_flight().lock().unwrap_or_else(|e| e.into_inner());
-        // Entries of sockets that are gone can never match again: prune them.
-        l.retain(|(_, w)| w.upgrade().is_some());
-        if l.iter().any(|(_, w)| w.upgrade().map_or(false, |s| s.same_channel(socket_tx))) { return None; }
-        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        l.push((id, socket_tx.downgrade()));
-        Some(TrustLoadSlot { id })
-    }
-}
-impl Drop for TrustLoadSlot {
-    fn drop(&mut self) {
-        let mut l = trust_loads_in_flight().lock().unwrap_or_else(|e| e.into_inner());
-        l.retain(|(id, _)| *id != self.id);
-    }
-}
-
-/// r5 (codex P1 main.rs:6625): queue `evts` for one socket without ever filling its
-/// queue: each event waits until at least half of WS_SOCKET_QUEUE is free (the receive
-/// loop closes a socket whose queue is full — the sign of a client that stopped reading).
-/// Holds only a weak sender, so it never keeps a closed socket's channel alive; it stops
-/// as soon as the socket is gone.
-async fn pace_socket_events(tx: tokio::sync::mpsc::WeakSender<ServerEvent>, evts: Vec<ServerEvent>) {
-    for evt in evts {
-        loop {
-            let Some(s) = tx.upgrade() else { return };
-            if s.is_closed() { return; }
-            if s.capacity() > WS_SOCKET_QUEUE / 2 {
-                if s.try_send(evt).is_err() { return; }
-                break;
-            }
-            drop(s);
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    }
-}
-
 /// r5 (codex P1 main.rs:4991): write one handshake frame with the same bound as
 /// send_task's writes (WS_SEND_TIMEOUT + size / WS_SEND_MIN_RATE, at most
 /// WS_SEND_TIMEOUT_MAX). False = not written in time (or the socket failed): close.
@@ -7638,57 +7640,8 @@ async fn handle_command(
             send_self(ServerEvent::E2EChannelList { channels });
         }
 
-        // ── E2E: TOFU trust management ────────────────────────────────────────
-        ClientMessage::E2EUpdateTrust { nick, fingerprint, verified } => {
-            // #13: pass the RAW nick; trust.json keys records by the nick string itself,
-            // so string identity is already injective — no filename sanitizer needed, and
-            // the client keys trustStore by the raw nick.
-            match state.e2e_store.update_trust(username, &nick, &fingerprint, verified).await {
-                Ok((rec, key_changed)) => send(ServerEvent::E2ETrust {
-                    nick:        rec.nick,
-                    fingerprint: rec.fingerprint,
-                    verified:    rec.verified,
-                    key_changed,
-                }),
-                Err(e) => send(ServerEvent::Error { message: e.to_string() }),
-            }
-        }
-        ClientMessage::E2ELoadTrust {} => {
-            // r5 (codex P1 main.rs:6625): the store holds up to 4,096 records; one try_send
-            // each filled the 256-slot socket queue before send_task could drain it (dropping
-            // the rest), and a full queue then closed the socket — on every reconnect, since
-            // the browser loads trust at startup. Same events as before (every client keeps
-            // working), but paced: a background task queues them only while the queue has
-            // room to spare (see pace_socket_events).
-            // r6 (codex P1 main.rs:6743): at most ONE trust load in flight per socket. Each
-            // load used to take its own snapshot and start its own pacing task, so a client
-            // that stopped reading while repeating the request piled snapshots up in memory.
-            // A request while this socket's previous load is still being delivered is
-            // coalesced into it (dropped: that load carries the same records, and later
-            // changes reach every socket as e2e_trust events anyway). Records are also
-            // size-limited now (e2e.rs trust_record_fits).
-            let Some(slot) = TrustLoadSlot::claim(socket_tx) else {
-                tracing::debug!("[E2E] trust load coalesced (one already in flight on this socket)");
-                return;
-            };
-            let records = state.e2e_store.load_trust(username).await;
-            let evts: Vec<ServerEvent> = records.into_iter().map(|rec| ServerEvent::E2ETrust {
-                nick:        rec.nick,
-                fingerprint: rec.fingerprint,
-                verified:    rec.verified,
-                key_changed: false,
-            }).collect();
-            if evts.len() <= WS_SOCKET_QUEUE / 4 {
-                for e in evts { send_self(e); }
-                drop(slot);
-            } else {
-                let weak = socket_tx.downgrade();
-                tokio::spawn(async move {
-                    pace_socket_events(weak, evts).await;
-                    drop(slot);
-                });
-            }
-        }
+        // Stale tabs can still send these. Confirmed pins sync in encrypted state.
+        ClientMessage::E2ELegacyTrust {} => {}
         ClientMessage::E2ERelayX3DH { target_nick, header, conn_id } => {
             // Per-caller rate limit (mirrors E2EFetchBundle #27): this is the only
             // unthrottled high-volume, large-payload (<=64KiB) cross-user WRITE primitive.
@@ -10069,21 +10022,6 @@ mod ws_fix_tests {
         assert!(matches!(c, ClientMessage::E2EFetchBundle { conn_id: None, .. }));
     }
 
-    /// r6 (codex P1 main.rs:6743): at most one trust load in flight per socket (sender
-    /// clones of one socket share the slot; another socket has its own; released on drop).
-    #[test]
-    fn r6_trust_load_slot_is_one_per_socket() {
-        let (tx1, _rx1) = tokio::sync::mpsc::channel::<ServerEvent>(4);
-        let (tx2, _rx2) = tokio::sync::mpsc::channel::<ServerEvent>(4);
-        let a = TrustLoadSlot::claim(&tx1).expect("first load");
-        assert!(TrustLoadSlot::claim(&tx1).is_none(), "second load on the same socket is coalesced");
-        assert!(TrustLoadSlot::claim(&tx1.clone()).is_none(), "same socket through another sender clone");
-        let b = TrustLoadSlot::claim(&tx2).expect("another socket has its own slot");
-        drop(a);
-        let a2 = TrustLoadSlot::claim(&tx1).expect("released when the load is done");
-        drop((a2, b));
-    }
-
     /// r5 (codex P1 main.rs:7399): the E2E nick fold follows the network's own rules and is
     /// never wider than them.
     #[test]
@@ -10279,6 +10217,16 @@ mod disconnect_reason_tests {
 #[cfg(test)]
 mod e2e_r2_protocol_tests {
     use super::*;
+
+    #[test]
+    fn legacy_trust_commands_parse_as_no_ops() {
+        for frame in [
+            r#"{"type":"e2e_load_trust"}"#,
+            r#"{"type":"e2e_update_trust","nick":"peer","fingerprint":"legacy","verified":true}"#,
+        ] {
+            assert!(matches!(serde_json::from_str(frame), Ok(ClientMessage::E2ELegacyTrust {})));
+        }
+    }
 
     /// SCHEMA LAW (r2): the new optional fields must not break any existing sender —
     /// the TUI's / an older app.js's auth frame, older keyring stores and session stores.

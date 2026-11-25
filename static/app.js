@@ -1,3 +1,16 @@
+// Bind only trusted markup just parsed from the page or rendered by a UI component.
+// DOM event properties preserve native handler semantics, including return false.
+function bindControls(root, handlers){
+  for(const [event, actions] of Object.entries(handlers)){
+    const attr='data-cryptirc-'+event;
+    for(const control of root.querySelectorAll('['+attr+']')){
+      const action=control.getAttribute(attr);
+      if(Object.prototype.hasOwnProperty.call(actions,action) && control['on'+event]==null){
+        control['on'+event]=actions[action];
+      }
+    }
+  }
+}
 
 // ─── Quota-exceeded guard ────────────────────────────────────────────────────
 // Safari (esp. in private mode) and some Android browsers throw QuotaExceeded
@@ -1116,7 +1129,7 @@ async function checkAuth() {
     if(sr.ok){
       const sd=await sr.json();
       if(!sd.registration_open){
-        const regTab=document.querySelector('[onclick*="switchAuthTab(\'register\')"]');
+        const regTab=document.getElementById('tab-register');
         if(regTab) regTab.style.display='none';
       }
       if(sd.requires_code){
@@ -2385,7 +2398,6 @@ function handleEvent(ev) {
     case 'e2e_bundle':
     case 'e2e_channel_key':
     case 'e2e_channel_list':
-    case 'e2e_trust':
     case 'e2e_otpk_low':
     case 'e2e_x3dh_header':
     case 'e2e_keyring':
@@ -3850,15 +3862,16 @@ function _renderSidebarNow(){
     // draggable handled by SortableJS
     const sk=bk(id,'status'),sa=isActive(id,'status'),sc=0; // status buffer kept fully quiet — never render an unread badge
     const netMuted=isMuted('net:'+id)||isMuted(id+'/status');
-    g.innerHTML=`<div class="net-label${sa?' active':''}" onclick="setActive('${id}','status');closeSidebar();" style="${sa?'background:var(--bg4);':''}">
-      <span class="net-dot ${net.connected?'online':''}" id="dot-${id}"></span>
+    g.innerHTML=`<div class="net-label${sa?' active':''}" style="${sa?'background:var(--bg4);':''}">
+      <span class="net-dot ${net.connected?'online':''}" id="dot-${esc(id)}"></span>
       <span class="net-name">${esc(net.config.label||net.config.server)}</span>${_netTlsBadge(net)}
       ${sc&&!netMuted?`<span class="chan-unread-badge${mentionUnread.get(sk)?` highlight`:''}">${sc>99?'99+':sc}</span>`:''}
       <span class="net-actions">
-        <button class="net-btn net-kebab" data-net-id="${id}" title="Options">⋮</button>
+        <button class="net-btn net-kebab" data-net-id="${esc(id)}" title="Options">⋮</button>
       </span>
     </div>`;
-    // Attach net kebab listener safely (no inline onclick with user data)
+    g.querySelector('.net-label').onclick=()=>{setActive(id,'status');closeSidebar();};
+    // Keep the kebab click separate from the network label.
     const netKebab=g.querySelector('.net-kebab');
     if(netKebab){netKebab.addEventListener('click',e=>{e.stopPropagation();toggleNetMenu(e.currentTarget,id,net.config.label||net.config.server);});}
     // Sort channels by saved order
@@ -8157,22 +8170,27 @@ function showMircColorPicker(inp){
   picker.innerHTML=`
     <div style="font-size:10px;color:var(--text3);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">
       <span>mIRC Colors — Ctrl+K</span>
-      <span onclick="document.getElementById('mirc-color-picker').remove()" style="cursor:pointer;padding:2px 6px">✕</span>
+      <span data-cryptirc-click="closeMircColors" style="cursor:pointer;padding:2px 6px">✕</span>
     </div>
     <div style="display:flex;gap:2px;flex-wrap:wrap;margin-bottom:6px">
       <span style="font-size:9px;color:var(--text3);width:100%">Foreground:</span>
-      ${colors.map((c,i)=>`<div onclick="pickMircColor(${i},'fg')" style="width:22px;height:22px;background:${c};border-radius:3px;cursor:pointer;border:1px solid var(--border)" title="${i}"></div>`).join('')}
+      ${colors.map((c,i)=>`<div data-cryptirc-click="pickMircColor" data-color="${i}" data-layer="fg" style="width:22px;height:22px;background:${c};border-radius:3px;cursor:pointer;border:1px solid var(--border)" title="${i}"></div>`).join('')}
     </div>
     <div style="display:flex;gap:2px;flex-wrap:wrap">
       <span style="font-size:9px;color:var(--text3);width:100%">Background (optional — click after a foreground):</span>
-      ${colors.map((c,i)=>`<div onclick="pickMircColor(${i},'bg')" style="width:22px;height:22px;background:${c};border-radius:3px;cursor:pointer;border:1px solid var(--border)" title="${i}"></div>`).join('')}
+      ${colors.map((c,i)=>`<div data-cryptirc-click="pickMircColor" data-color="${i}" data-layer="bg" style="width:22px;height:22px;background:${c};border-radius:3px;cursor:pointer;border:1px solid var(--border)" title="${i}"></div>`).join('')}
     </div>
     <div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap">
-      <button onclick="insertAtCursor(document.getElementById('msg-input'),'^B');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-weight:bold;font-size:12px">B</button>
-      <button onclick="insertAtCursor(document.getElementById('msg-input'),'^I');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-style:italic;font-size:12px">I</button>
-      <button onclick="insertAtCursor(document.getElementById('msg-input'),'^U');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;text-decoration:underline;font-size:12px">U</button>
-      <button onclick="insertAtCursor(document.getElementById('msg-input'),'^O');document.getElementById('mirc-color-picker').remove()" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text3);border-radius:4px;cursor:pointer;font-size:10px">Reset</button>
+      <button data-cryptirc-click="insertMircFormat" data-format="^B" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-weight:bold;font-size:12px">B</button>
+      <button data-cryptirc-click="insertMircFormat" data-format="^I" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-style:italic;font-size:12px">I</button>
+      <button data-cryptirc-click="insertMircFormat" data-format="^U" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;text-decoration:underline;font-size:12px">U</button>
+      <button data-cryptirc-click="insertMircFormat" data-format="^O" style="padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text3);border-radius:4px;cursor:pointer;font-size:10px">Reset</button>
     </div>`;
+  bindControls(picker,{click:{
+    closeMircColors:()=>picker.remove(),
+    pickMircColor:function(){pickMircColor(Number(this.dataset.color),this.dataset.layer);},
+    insertMircFormat:function(){insertAtCursor(document.getElementById('msg-input'),this.dataset.format);picker.remove();}
+  }});
   inp.parentNode.appendChild(picker);
   // Close on outside click
   setTimeout(()=>document.addEventListener('click',function closer(e){
@@ -8288,10 +8306,11 @@ function showNotepad(){
       <span style="font-weight:700;font-size:14px;color:var(--text)">📝 Encrypted Notepad</span>
       <div style="display:flex;align-items:center;gap:8px">
         <span id="notepad-status" style="font-size:10px;color:var(--text3)"></span>
-        <span onclick="closeNotepad()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+        <span class="notepad-close" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
       </div>
     </div>
     <textarea id="notepad-area" placeholder="Your private encrypted notes..." style="flex:1;min-height:300px;background:var(--bg2);color:var(--text);font-family:var(--mono);font-size:14px;padding:16px;border:none;outline:none;resize:none;-webkit-overflow-scrolling:touch"></textarea>`;
+  box.querySelector('.notepad-close').onclick=()=>closeNotepad();
   ov.appendChild(box);
   ov.onclick=e=>{if(e.target===ov)closeNotepad();};
   document.body.appendChild(ov);
@@ -8328,12 +8347,12 @@ function showPasteModal(){
   box.innerHTML=`
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
       <span style="font-weight:700;font-size:14px;color:var(--text)">📋 New Paste</span>
-      <span onclick="this.closest('[style*=fixed]').remove()" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+      <span class="paste-close" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
     </div>
     <div style="padding:16px 20px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:10px">
       <textarea id="paste-content" placeholder="Paste your text here..." style="width:100%;min-height:200px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:14px;padding:10px;resize:vertical;outline:none;box-sizing:border-box"></textarea>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <select id="paste-lang" onchange="updatePasteKindHint()" style="flex:1;padding:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px">
+        <select id="paste-lang" style="flex:1;padding:6px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:13px">
           <option value="text">Plain Text</option>
           <option value="javascript">JavaScript</option>
           <option value="python">Python</option>
@@ -8362,8 +8381,11 @@ function showPasteModal(){
       </div>
       <div id="paste-kind-hint" style="font-size:11px;color:var(--text3);line-height:1.4">Code/text pastes render as plain text.</div>
       <input id="paste-password" type="password" placeholder="Password (optional)" style="padding:6px 10px;background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:14px;outline:none">
-      <button onclick="submitPaste(this)" style="padding:10px;background:var(--accent,#00d4aa);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:14px">Create Paste</button>
+      <button class="paste-submit" style="padding:10px;background:var(--accent,#00d4aa);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:700;font-size:14px">Create Paste</button>
     </div>`;
+  box.querySelector('.paste-close').onclick=()=>ov.remove();
+  box.querySelector('#paste-lang').onchange=()=>updatePasteKindHint();
+  box.querySelector('.paste-submit').onclick=event=>submitPaste(event.currentTarget);
   ov.appendChild(box);
   document.body.appendChild(ov);
   ov.onclick=e=>{if(e.target===ov)ov.remove();};
@@ -10206,10 +10228,11 @@ async function showProfilePanel(){
     ov.innerHTML=`<div style="background:var(--bg1);border:1px solid var(--border);border-radius:14px;width:min(440px,94vw);max-height:min(90vh,90dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.6)">
       <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
         <span style="font-weight:700;font-size:15px;color:var(--text);display:flex;align-items:center;gap:8px">👤 User Profile</span>
-        <span onclick="closeProfilePanel()" style="cursor:pointer;color:var(--text3);font-size:18px;line-height:1">✕</span>
+        <span class="profile-close" style="cursor:pointer;color:var(--text3);font-size:18px;line-height:1">✕</span>
       </div>
       <div id="profile-body" style="padding:18px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch"></div>
     </div>`;
+    ov.querySelector('.profile-close').onclick=()=>closeProfilePanel();
     document.body.appendChild(ov);
   }
   ov.style.display='flex'; ov.classList.add('show');
@@ -10240,7 +10263,7 @@ async function renderProfilePanel(){
       <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">Email${hasEmail?'':' <span style="color:var(--text3)">(optional — needed for password resets)</span>'}</label>
       <div style="display:flex;gap:8px">
         <input id="profile-email" type="email" value="${esc(me.email||'')}" placeholder="you@example.com" autocomplete="email" autocapitalize="none" style="flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:9px 11px;outline:none;box-sizing:border-box">
-        <button id="profile-email-save" onclick="saveProfileEmail()" style="background:var(--accent);border:none;border-radius:8px;color:#04212a;font-weight:700;font-size:13px;padding:0 16px;cursor:pointer;flex:0 0 auto">Save</button>
+        <button id="profile-email-save" style="background:var(--accent);border:none;border-radius:8px;color:#04212a;font-weight:700;font-size:13px;padding:0 16px;cursor:pointer;flex:0 0 auto">Save</button>
       </div>
       ${hasEmail?'':'<div style="font-size:11px;color:var(--warn);margin-top:8px">⚠ Without an email you cannot reset your password if you forget it.</div>'}
       <div id="profile-email-msg" style="font-size:11px;margin-top:8px;min-height:14px"></div>
@@ -10255,7 +10278,7 @@ async function renderProfilePanel(){
       <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">Last.fm username <span style="color:var(--text3)">— enables the /np now-playing command</span></label>
       <div style="display:flex;gap:8px">
         <input id="profile-lfm-user" type="text" value="${esc(me.lastfm_user||'')}" placeholder="your-lastfm-name" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;min-width:0;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:9px 11px;outline:none;box-sizing:border-box">
-        <button id="profile-lfm-save" onclick="saveProfileLastfm()" style="background:var(--accent);border:none;border-radius:8px;color:#04212a;font-weight:700;font-size:13px;padding:0 16px;cursor:pointer;flex:0 0 auto">Save</button>
+        <button id="profile-lfm-save" style="background:var(--accent);border:none;border-radius:8px;color:#04212a;font-weight:700;font-size:13px;padding:0 16px;cursor:pointer;flex:0 0 auto">Save</button>
       </div>
       <details style="margin-top:10px">
         <summary style="font-size:11px;color:var(--text3);cursor:pointer">Advanced: use your own Last.fm API key</summary>
@@ -10267,9 +10290,9 @@ async function renderProfilePanel(){
     </div>`:''}
     <div style="${card}">
       <div style="${lbl}">Security</div>
-      <button id="profile-login-password" onclick="closeProfilePanel();showChangeClientPassword()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">🔑 <span>Change login password</span></button>
-      <button id="profile-vault-passphrase" onclick="closeProfilePanel();showChangePass()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px;margin-top:8px">🔐 <span>Change vault passphrase</span></button>
-      <button onclick="closeProfilePanel();showSessionManager()" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px;margin-top:8px">💻 <span>Active sessions</span></button>
+      <button id="profile-login-password" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">🔑 <span>Change login password</span></button>
+      <button id="profile-vault-passphrase" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px;margin-top:8px">🔐 <span>Change vault passphrase</span></button>
+      <button id="profile-sessions" style="width:100%;text-align:left;background:var(--bg3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px;margin-top:8px">💻 <span>Active sessions</span></button>
     </div>
     <div style="${card}" id="profile-passkeys-card">
       <div style="${lbl}">Passkeys</div>
@@ -10281,8 +10304,15 @@ async function renderProfilePanel(){
     </div>
     <div style="background:rgba(255,68,102,.06);border:1px solid rgba(255,68,102,.3);border-radius:10px;padding:16px">
       <div style="${lbl};color:var(--error)">Danger zone</div>
-      <button id="profile-delete-account" onclick="closeProfilePanel();showDeleteAccount()" style="width:100%;text-align:left;background:none;border:1px solid var(--error);border-radius:8px;color:var(--error);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">⚠ <span>Delete account</span></button>
+      <button id="profile-delete-account" style="width:100%;text-align:left;background:none;border:1px solid var(--error);border-radius:8px;color:var(--error);font-size:13px;padding:11px 13px;cursor:pointer;display:flex;align-items:center;gap:10px">⚠ <span>Delete account</span></button>
     </div>`;
+  body.querySelector('#profile-email-save').onclick=()=>saveProfileEmail();
+  const lastfmSave=body.querySelector('#profile-lfm-save');
+  if(lastfmSave) lastfmSave.onclick=()=>saveProfileLastfm();
+  body.querySelector('#profile-login-password').onclick=()=>{closeProfilePanel();showChangeClientPassword();};
+  body.querySelector('#profile-vault-passphrase').onclick=()=>{closeProfilePanel();showChangePass();};
+  body.querySelector('#profile-sessions').onclick=()=>{closeProfilePanel();showSessionManager();};
+  body.querySelector('#profile-delete-account').onclick=()=>{closeProfilePanel();showDeleteAccount();};
   const inp=document.getElementById('profile-email');
   if(inp) inp.addEventListener('keydown',e=>{ if(e.key==='Enter') saveProfileEmail(); });
   // Settings search waits for these cards to reach their final heights
@@ -10878,10 +10908,11 @@ function showPasswordPanel(){
     ov.innerHTML=`<div id="pwsafe-box" style="background:var(--bg1);border:1px solid var(--border);border-radius:12px;width:min(500px,94vw);max-height:min(88vh,88dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.6)">
       <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0">
         <span style="font-weight:700;font-size:14px;color:var(--text)">🔐 Password Safe</span>
-        <span onclick="document.getElementById('pwsafe-overlay').classList.remove('show');document.getElementById('pwsafe-overlay').style.display='none'" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
+        <span class="pwsafe-close" style="cursor:pointer;color:var(--text3);font-size:18px">✕</span>
       </div>
       <div id="pwsafe-body" style="padding:14px 20px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch"></div>
     </div>`;
+    ov.querySelector('.pwsafe-close').onclick=()=>{ov.classList.remove('show');ov.style.display='none';};
     document.body.appendChild(ov);
   }
   ov.style.display='flex';ov.classList.add('show');
@@ -10899,6 +10930,9 @@ function _bindPwSafeDelegation(){
     const el=e.target.closest('[data-pw-act]');
     if(!el||!body.contains(el))return;
     const act=el.dataset.pwAct;
+    if(act==='add'){pwSafeAdd();return;}
+    if(act==='edit'){pwSafeEdit(Number(el.dataset.pwIdx));return;}
+    if(act==='delete'){pwSafeDelete(Number(el.dataset.pwIdx));return;}
     if(act==='copyuser'){
       const entry=_pwSafe[+el.dataset.pwIdx];
       if(entry){navigator.clipboard?.writeText(entry.username||'');showToast('Username copied');}
@@ -10935,7 +10969,7 @@ function renderPasswordSafe(){
 }
 function renderPasswordSafeHTML(){
   let html=`<div class="psafe-note"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Stored on the server encrypted with your vault key. The server holds that key while your vault is unlocked, so this is not end-to-end encryption. Syncs across your devices.</span></div>
-  <button class="psafe-add" onclick="pwSafeAdd()">+ Add credential</button>`;
+  <button class="psafe-add" data-pw-act="add">+ Add credential</button>`;
   if(!_pwSafe.length){
     html+=`<div class="psafe-empty"><b>Your vault is empty</b>Saved passwords are sent to the server over your encrypted connection and written to disk encrypted with your vault key.</div>`;
     return html;
@@ -10945,9 +10979,8 @@ function renderPasswordSafeHTML(){
     const safeId='pw-'+i;
     // SECURITY (#10): the entry username is user-provided — never interpolated into an
     // inline-handler JS-string. Copy/reveal carry data-pw-act/data-pw-idx/data-pw-target
-    // and a delegated listener reads _pwSafe[idx] / dataset.v at click time. Edit/Delete
-    // take a numeric index (safe). dataset.v (base64 password) is set after render.
-    html+=`<div class="psafe-card"><div class="top"><span class="nm">${esc(e.name||'Untitled')}</span><div class="acts"><button onclick="pwSafeEdit(${i})">Edit</button><button class="del" onclick="pwSafeDelete(${i})">Delete</button></div></div>`;
+    // and the delegated listener reads the requested entry at click time.
+    html+=`<div class="psafe-card"><div class="top"><span class="nm">${esc(e.name||'Untitled')}</span><div class="acts"><button data-pw-act="edit" data-pw-idx="${i}">Edit</button><button class="del" data-pw-act="delete" data-pw-idx="${i}">Delete</button></div></div>`;
     if(e.username) html+=`<div class="psafe-field"><span class="k">User</span><span class="v">${esc(e.username)}</span><span class="ico" data-pw-act="copyuser" data-pw-idx="${i}" title="Copy username">📋</span></div>`;
     html+=`<div class="psafe-field"><span class="k">Pass</span><span class="v" id="${safeId}">••••••••</span><span class="ico" data-pw-act="reveal" data-pw-target="${safeId}" title="Reveal">👁</span><span class="ico" data-pw-act="copypass" data-pw-target="${safeId}" title="Copy password">📋</span></div>`;
     if(e.notes) html+=`<div class="psafe-notes">${esc(e.notes)}</div>`;
@@ -11682,15 +11715,17 @@ function showImportKeyUI(){
       <textarea class="encrypt-input" id="encrypt-import-words" rows="3" placeholder="word1 word2 word3 ... word32" style="resize:vertical;"></textarea>
     </div>
     <div class="encrypt-actions" style="flex-direction:row;gap:8px;">
-      <button class="encrypt-btn" style="flex:1;justify-content:center;" onclick="showEncryptPanel()">
+      <button class="encrypt-btn" style="flex:1;justify-content:center;" id="encrypt-import-cancel">
         <span class="encrypt-btn-text" style="text-align:center">Cancel</span>
       </button>
-      <button class="encrypt-btn" style="flex:2;justify-content:center;background:var(--accent);color:#000;border-color:var(--accent);" onclick="doImportKey()">
+      <button class="encrypt-btn" style="flex:2;justify-content:center;background:var(--accent);color:#000;border-color:var(--accent);" id="encrypt-import-submit">
         <span class="encrypt-btn-icon">🔑</span>
         <span class="encrypt-btn-text" style="text-align:center;font-weight:700;">Import Key</span>
       </button>
     </div>
     <div class="encrypt-note">Get this key from someone who already has encryption enabled on this channel. Share it only through a secure channel (e.g. encrypted DM).</div>`;
+  body.querySelector('#encrypt-import-cancel').onclick=()=>showEncryptPanel();
+  body.querySelector('#encrypt-import-submit').onclick=()=>doImportKey();
   document.getElementById('encrypt-import-words').focus();
 }
 async function doImportKey(){
@@ -14988,8 +15023,8 @@ function operSend(raw){
 }
 function operPrompt(title,fields,onSubmit){
   const body=document.getElementById('oper-body');
-  let html='<button class="oper-back" onclick="renderOperMain()">&larr; Back</button>';
-  html+=`<div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:12px">${title}</div>`;
+  let html='<button class="oper-back" data-cryptirc-click="backToOper">&larr; Back</button>';
+  html+=`<div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:12px">${esc(title)}</div>`;
   html+='<div class="oper-form">';
   for(const f of fields){
     html+=`<label>${esc(f.label)}</label>`;
@@ -15003,9 +15038,10 @@ function operPrompt(title,fields,onSubmit){
       html+=`<input id="oper-f-${f.id}" type="${f.type||'text'}" placeholder="${esc(f.placeholder||'')}" value="${esc(f.default||'')}">`;
     }
   }
-  html+='<div class="oper-form-actions"><button class="oper-form-btn cancel" onclick="renderOperMain()">Cancel</button>';
+  html+='<div class="oper-form-actions"><button class="oper-form-btn cancel" data-cryptirc-click="backToOper">Cancel</button>';
   html+=`<button class="oper-form-btn" id="oper-submit">Execute</button></div></div>`;
   body.innerHTML=html;
+  bindControls(body,{click:{backToOper:()=>renderOperMain()}});
   document.getElementById('oper-submit').onclick=()=>{
     const vals={};for(const f of fields)vals[f.id]=document.getElementById('oper-f-'+f.id)?.value||'';
     onSubmit(vals);
@@ -15016,12 +15052,13 @@ function operPrompt(title,fields,onSubmit){
 }
 function operConfirm(title,msg,onYes){
   const body=document.getElementById('oper-body');
-  let html='<button class="oper-back" onclick="renderOperMain()">&larr; Back</button>';
-  html+=`<div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:8px">${title}</div>`;
-  html+=`<div style="font-size:12px;color:var(--text3);margin-bottom:16px">${msg}</div>`;
-  html+='<div class="oper-form-actions"><button class="oper-form-btn cancel" onclick="renderOperMain()">Cancel</button>';
+  let html='<button class="oper-back" data-cryptirc-click="backToOper">&larr; Back</button>';
+  html+=`<div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:8px">${esc(title)}</div>`;
+  html+=`<div style="font-size:12px;color:var(--text3);margin-bottom:16px">${esc(msg)}</div>`;
+  html+='<div class="oper-form-actions"><button class="oper-form-btn cancel" data-cryptirc-click="backToOper">Cancel</button>';
   html+=`<button class="oper-form-btn danger" id="oper-yes">Confirm</button></div>`;
   body.innerHTML=html;
+  bindControls(body,{click:{backToOper:()=>renderOperMain()}});
   document.getElementById('oper-yes').onclick=()=>{onYes();showToast('Command sent');renderOperMain();};
 }
 
@@ -15257,7 +15294,7 @@ function renderOperMain(){
   const body=document.getElementById('oper-body');
   let html='';
   html+='<div class="oper-section"><div class="oper-section-title">Network</div>';
-  html+='<select class="oper-net-select" id="oper-net-select" onchange="_operConnId=this.value">';
+  html+='<select class="oper-net-select" id="oper-net-select">';
   html+='<option value="">— Select network —</option>';
   for(const net of networks){
     const sel=_operConnId===net.config.id?' selected':'';
@@ -15265,7 +15302,7 @@ function renderOperMain(){
   }
   html+='</select></div>';
   html+='<div class="oper-section"><div class="oper-section-title">IRCd Type</div>';
-  html+='<select class="oper-net-select" id="oper-ircd-select" onchange="_operIRCd=this.value;renderOperMain()">';
+  html+='<select class="oper-net-select" id="oper-ircd-select">';
   for(const[k,v] of Object.entries(OPER_IRCDS)){
     html+=`<option value="${k}"${_operIRCd===k?' selected':''}>${esc(v.label)}</option>`;
   }
@@ -15283,6 +15320,8 @@ function renderOperMain(){
     }
   }
   body.innerHTML=html;
+  body.querySelector('#oper-net-select').onchange=event=>{_operConnId=event.currentTarget.value;};
+  body.querySelector('#oper-ircd-select').onchange=event=>{_operIRCd=event.currentTarget.value;renderOperMain();};
   // Bind oper login
   const loginBtn=body.querySelector('[data-oper-cmd="_operlogin"]');
   if(loginBtn) loginBtn.onclick=()=>{if(!_operConnId){showToast('Select a network first');return;}operPrompt('OPER Login',[{id:'name',label:'Oper name',placeholder:'admin'},{id:'pass',label:'Password',type:'password',placeholder:'oper password'}],v=>operSend(`OPER ${v.name} ${v.pass}`));};
@@ -15734,10 +15773,11 @@ async function showSessionManager(){
       const agoStr=ago<1?'just now':ago<60?ago+'m ago':ago<1440?Math.round(ago/60)+'h ago':Math.round(ago/1440)+'d ago';
       row.innerHTML=`<span style="font-size:16px;flex-shrink:0">${s.current?'🟢':'⚪'}</span>
         <div style="flex:1;min-width:0">
-          <div style="color:var(--text)">${s.prefix} ${s.current?'<span style="color:var(--accent);font-size:10px">(this device)</span>':''}</div>
+          <div style="color:var(--text)">${esc(s.prefix)} ${s.current?'<span style="color:var(--accent);font-size:10px">(this device)</span>':''}</div>
           <div style="font-size:10px;color:var(--text3)">Active ${agoStr} · Created ${created.toLocaleDateString()}</div>
         </div>
-        ${s.current?'':'<button onclick="revokeSession(\''+s.prefix+'\')" style="background:none;border:1px solid var(--border);color:var(--error);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;flex-shrink:0;font-family:var(--mono)">Revoke</button>'}`;
+        ${s.current?'':'<button class="revoke-session" style="background:none;border:1px solid var(--border);color:var(--error);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:10px;flex-shrink:0;font-family:var(--mono)">Revoke</button>'}`;
+      if(!s.current) row.querySelector('.revoke-session').onclick=()=>revokeSession(s.prefix);
       list.appendChild(row);
     }
   }catch(e){list.innerHTML='<div style="color:var(--error);font-size:12px;padding:20px;text-align:center">Failed to load sessions.</div>';}
@@ -15803,7 +15843,8 @@ function renderCapsToggles(){
       <div style="font-size:12px;color:var(--text);font-weight:500">${c.label}</div>
       <div style="font-size:10px;color:var(--text3)">${c.desc}</div>
     </div>
-    <button class="appear-toggle${on?' on':''}" data-cap="${c.cap}" onclick="toggleCap(this,'${connId}','${c.cap}')"></button>`;
+    <button class="appear-toggle${on?' on':''}" data-cap="${c.cap}"></button>`;
+    row.querySelector('.appear-toggle').onclick=event=>toggleCap(event.currentTarget,connId,c.cap);
     list.appendChild(row);
   }
   const note=document.createElement('div');
@@ -16100,9 +16141,9 @@ function renderStatsChannelList(){
   const body=document.getElementById('chanstats-body');
   // Enable/disable toggle + refresh
   let html='<div class="appear-section"><div class="appear-row"><div><span class="appear-label">Enable channel stats</span><div style="font-size:10px;color:var(--text3)">Track message counts per nick across sessions</div></div>';
-  html+=`<button class="appear-toggle${_chanStatsEnabled?' on':''}" id="cst-toggle" onclick="this.classList.toggle('on');toggleStatsEnabled(this)"></button></div>`;
+  html+=`<button class="appear-toggle${_chanStatsEnabled?' on':''}" id="cst-toggle" data-stats-toggle></button></div>`;
   html+=`<div class="appear-row"><div><span class="appear-label">Sync from server</span><div style="font-size:10px;color:var(--text3)">Pull latest stats from all your devices</div></div>`;
-  html+=`<button onclick="refreshStats()" style="background:var(--bg3);border:1px solid var(--border);color:var(--text2);padding:5px 12px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px;display:flex;align-items:center;gap:4px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh</button></div></div>`;
+  html+=`<button data-stats-refresh style="background:var(--bg3);border:1px solid var(--border);color:var(--text2);padding:5px 12px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px;display:flex;align-items:center;gap:4px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh</button></div></div>`;
   if(!_chanStatsEnabled){
     html+='<div class="cst-empty">Stats tracking is disabled. Enable it above to start collecting channel statistics.</div>';
     body.innerHTML=html;return;
@@ -16137,7 +16178,7 @@ function renderStatsChannelList(){
   }
   html+='</div>';
   // Clear all button
-  html+='<div style="text-align:center;padding:8px 0"><button onclick="customConfirm(\'Clear all channel stats? This cannot be undone.\',\'Clear all\').then(ok=>{if(ok){_chanStats={};_chanStatsDirty=true;saveStatsToServer();renderStatsChannelList();}})" style="background:none;border:1px solid var(--border);color:var(--text3);padding:6px 16px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">Clear All Stats</button></div>';
+  html+='<div style="text-align:center;padding:8px 0"><button data-stats-clear-all style="background:none;border:1px solid var(--border);color:var(--text3);padding:6px 16px;border-radius:6px;cursor:pointer;font-family:var(--mono);font-size:11px">Clear All Stats</button></div>';
   body.innerHTML=html;
 }
 function renderStatsDetail(key){
@@ -16150,7 +16191,7 @@ function renderStatsDetail(key){
   const total=sorted.reduce((a,b)=>a+b[1],0);
   const parts=key.split('/');
   const chanName=parts.slice(1).join('/');
-  let html='<button class="cst-back" onclick="renderStatsChannelList()">&larr; Back</button>';
+  let html='<button class="cst-back" data-stats-back>&larr; Back</button>';
   html+=`<div class="cst-detail-header"><div class="cst-detail-title">${esc(chanName)}</div><div class="cst-detail-total">${sorted.length} nicks &middot; ${total.toLocaleString()} msgs</div></div>`;
   if(!sorted.length){
     html+='<div class="cst-empty">No messages tracked for this channel.</div>';
@@ -16183,6 +16224,22 @@ function _bindStatsDelegation(){
   if(!body||body._statsDelegated)return;
   body._statsDelegated=true;
   body.addEventListener('click',e=>{
+    const control=e.target.closest('[data-stats-toggle],[data-stats-refresh],[data-stats-back],[data-stats-clear-all]');
+    if(control&&body.contains(control)){
+      if(control.hasAttribute('data-stats-toggle')){
+        control.classList.toggle('on');
+        toggleStatsEnabled(control);
+      }else if(control.hasAttribute('data-stats-refresh')){
+        refreshStats();
+      }else if(control.hasAttribute('data-stats-back')){
+        renderStatsChannelList();
+      }else{
+        customConfirm('Clear all channel stats? This cannot be undone.','Clear all').then(ok=>{
+          if(ok){_chanStats={};_chanStatsDirty=true;saveStatsToServer();renderStatsChannelList();}
+        });
+      }
+      return;
+    }
     const row=e.target.closest('[data-stats-key]');
     if(row&&body.contains(row)){renderStatsDetail(row.dataset.statsKey);return;}
     const clr=e.target.closest('[data-stats-clear]');
@@ -18882,9 +18939,10 @@ function renderNotifNetworkList() {
         <div class="notif-sublabel">${net.connected ? '● Connected' : '○ Disconnected'}</div>
       </div>
       <label class="toggle toggle-wrap">
-        <input type="checkbox" ${muted?'':'checked'} onchange="toggleMuteNetwork('${net.config.id}',this)">
+        <input type="checkbox" ${muted?'':'checked'}>
         <span class="toggle-track"><span class="toggle-thumb"></span></span>
       </label>`;
+    row.querySelector('input').onchange=event=>toggleMuteNetwork(net.config.id,event.currentTarget);
     list.appendChild(row);
   }
 }
@@ -21020,7 +21078,8 @@ async function showAdminPanel(){
   try{
     const hdr={headers:{'Authorization':'Bearer '+sessionToken}};
     const sr=await fetch('/cryptirc/admin/settings',hdr);
-    const settings=sr.ok?await sr.json():{registration_open:true,registration_code:''};
+    if(!sr.ok) throw new Error('Could not load admin settings');
+    const settings=await sr.json();
     const ur=await fetch('/cryptirc/admin/users',hdr);
     const users=ur.ok?await ur.json():[];
     const lpR=await fetch('/cryptirc/admin/link-preview',hdr);
@@ -21050,52 +21109,53 @@ async function showAdminPanel(){
 
       <div class="adm-card">
         <div class="adm-ct">Sign-up</div>
-        <div class="adm-row"><span class="l">Open registration</span><button class="appear-toggle${settings.registration_open?' on':''}" id="admin-reg-open" onclick="this.classList.toggle('on');adminSaveSettings()"></button></div>
-        <div class="adm-row"><span class="l">Require email</span><button class="appear-toggle${settings.email_required?' on':''}" id="admin-email-required" onclick="this.classList.toggle('on');adminSaveSettings()"></button></div>
+        <div class="adm-row"><span class="l">Open registration</span><button class="appear-toggle${settings.registration_open?' on':''}" id="admin-reg-open" data-cryptirc-click="saveAdminToggle"></button></div>
+        <div class="adm-row"><span class="l">Require email</span><button class="appear-toggle${settings.email_required?' on':''}" id="admin-email-required" data-cryptirc-click="saveAdminToggle"></button></div>
         <div class="adm-hint">On: new sign-ups must give a verified email. Off: email is optional (they can add one later for password resets).</div>
-        <div class="adm-row"><span class="l">Sign-up captcha</span><button class="appear-toggle${settings.captcha_enabled?' on':''}" id="admin-captcha-enabled" onclick="this.classList.toggle('on');adminSaveSettings()"></button></div>
+        <div class="adm-row"><span class="l">Sign-up captcha</span><button class="appear-toggle${settings.captcha_enabled?' on':''}" id="admin-captcha-enabled" data-cryptirc-click="saveAdminToggle"></button></div>
         <div class="adm-hint">Show a math captcha on the sign-up form to deter bots.</div>
-        <div class="adm-row"><span class="l">Invite code</span><input id="admin-reg-code" class="adm-in" value="${esc(settings.registration_code)}" placeholder="None" onchange="adminSaveSettings()"></div>
-        <div class="adm-hint">If set, people must enter this code to register.</div>
-        <div class="adm-row"><span class="l">Max upload size</span><span style="display:flex;align-items:center;gap:6px;flex:0 0 auto"><input id="admin-upload-mb" type="number" min="1" max="500" value="${settings.max_upload_mb||25}" class="adm-in" style="width:74px;flex:0 0 auto;text-align:center" onchange="adminSaveSettings()"><span style="font-size:12px;color:var(--text3)">MB</span></span></div>
+        <div class="adm-row"><label class="l" for="admin-reg-code">Invite code</label><input id="admin-reg-code" class="adm-in" type="password" autocomplete="new-password" placeholder="${settings.registration_code_set?'Code set':'No code set'}"></div>
+        <div class="adm-row"><span></span><span><button type="button" id="admin-reg-code-set" class="adm-save">Set code</button> <button type="button" id="admin-reg-code-clear" class="adm-save">Clear code</button></span></div>
+        <div class="adm-hint">A code is required to register when one is set.</div>
+        <div class="adm-row"><span class="l">Max upload size</span><span style="display:flex;align-items:center;gap:6px;flex:0 0 auto"><input id="admin-upload-mb" type="number" min="1" max="500" value="${settings.max_upload_mb||25}" class="adm-in" style="width:74px;flex:0 0 auto;text-align:center" data-cryptirc-change="saveAdminSettings"><span style="font-size:12px;color:var(--text3)">MB</span></span></div>
       </div>
 
       <div class="adm-card">
         <div class="adm-ct">Link previews</div>
-        <div class="adm-row"><span class="l">Mode</span><select id="admin-lp-mode" class="adm-sel" onchange="adminSaveLinkPreview()">
+        <div class="adm-row"><span class="l">Mode</span><select id="admin-lp-mode" class="adm-sel" data-cryptirc-change="saveLinkPreview">
           <option value="off"${lp.mode==='off'?' selected':''}>Off — no previews</option>
           <option value="whitelist"${lp.mode==='whitelist'?' selected':''}>Approved domains only</option>
           <option value="all"${lp.mode==='all'?' selected':''}>Any HTTPS link</option>
         </select></div>
         <div class="adm-hint">"Approved domains only" fetches metadata just from the list below. "Any HTTPS link" previews everything (private IPs blocked).</div>
         <div style="font-size:11px;color:var(--text2);font-weight:600;margin-bottom:5px">Approved domains <span style="color:var(--text3);font-weight:400">— one per line</span></div>
-        <textarea id="admin-lp-whitelist" class="adm-in" style="width:100%;min-height:108px;font-size:12px;resize:vertical" onchange="adminSaveLinkPreview()">${lp.whitelist.map(esc).join('\n')}</textarea>
+        <textarea id="admin-lp-whitelist" class="adm-in" style="width:100%;min-height:108px;font-size:12px;resize:vertical" data-cryptirc-change="saveLinkPreview">${lp.whitelist.map(esc).join('\n')}</textarea>
       </div>
 
       <div class="adm-card">
         <div class="adm-ct">GIF picker</div>
-        <div class="adm-row"><span class="l">Provider</span><select id="admin-gif-provider" class="adm-sel" onchange="adminSaveGif()"><option value="giphy"${gp==='giphy'?' selected':''}>Giphy</option><option value="tenor"${gp==='tenor'?' selected':''}>Tenor (Google)</option></select></div>
-        <div class="adm-row"><span class="l">Mode</span><select id="admin-gif-mode" class="adm-sel" onchange="adminSaveGif()"><option value="off"${gm==='off'?' selected':''}>Off — no GIFs</option><option value="user"${gm==='user'?' selected':''}>Each user's own key</option><option value="server"${gm==='server'?' selected':''}>Shared key (below)</option></select></div>
+        <div class="adm-row"><span class="l">Provider</span><select id="admin-gif-provider" class="adm-sel" data-cryptirc-change="saveGif"><option value="giphy"${gp==='giphy'?' selected':''}>Giphy</option><option value="tenor"${gp==='tenor'?' selected':''}>Tenor (Google)</option></select></div>
+        <div class="adm-row"><span class="l">Mode</span><select id="admin-gif-mode" class="adm-sel" data-cryptirc-change="saveGif"><option value="off"${gm==='off'?' selected':''}>Off — no GIFs</option><option value="user"${gm==='user'?' selected':''}>Each user's own key</option><option value="server"${gm==='server'?' selected':''}>Shared key (below)</option></select></div>
         <div class="adm-hint">In shared mode everyone uses the key below; a user who set their own key still uses theirs.</div>
         <div class="adm-row"><span class="l">Giphy key</span><input id="admin-gif-giphy-key" class="adm-in" type="password" autocomplete="off" placeholder="${gkPh}"></div>
         <div class="adm-row"><span class="l">Tenor key</span><input id="admin-gif-tenor-key" class="adm-in" type="password" autocomplete="off" placeholder="${tkPh}"></div>
-        <button class="adm-save" style="width:100%;margin-top:4px" onclick="adminSaveGif()">Save GIF settings</button>
+        <button class="adm-save" style="width:100%;margin-top:4px" data-cryptirc-click="saveGif">Save GIF settings</button>
         <div id="admin-gif-msg" style="font-size:11px;color:var(--accent);margin-top:8px"></div>
         <div class="adm-hint" style="margin-top:8px">Keys live on the server, never shown to users. Giphy: developers.giphy.com. Tenor: Google Cloud → enable the Tenor API.</div>
       </div>
 
       <div class="adm-card">
         <div class="adm-ct">Last.fm now-playing 🎵</div>
-        <div class="adm-row"><span class="l">Enabled</span><select id="admin-lfm-enabled" class="adm-sel" onchange="adminSaveLastfm()"><option value="off"${lfmOn?'':' selected'}>Off</option><option value="on"${lfmOn?' selected':''}>On — users can /np</option></select></div>
+        <div class="adm-row"><span class="l">Enabled</span><select id="admin-lfm-enabled" class="adm-sel" data-cryptirc-change="saveLastfm"><option value="off"${lfmOn?'':' selected'}>Off</option><option value="on"${lfmOn?' selected':''}>On — users can /np</option></select></div>
         <div class="adm-row"><span class="l">Shared API key</span><input id="admin-lfm-key" class="adm-in" type="password" autocomplete="off" placeholder="${lfmPh}"></div>
-        <button class="adm-save" style="width:100%;margin-top:4px" onclick="adminSaveLastfm()">Save Last.fm settings</button>
+        <button class="adm-save" style="width:100%;margin-top:4px" data-cryptirc-click="saveLastfm">Save Last.fm settings</button>
         <div id="admin-lfm-msg" style="font-size:11px;color:var(--accent);margin-top:8px"></div>
         <div class="adm-hint" style="margin-top:8px">One free key serves everyone — get it at last.fm/api. Users set their Last.fm username in Settings ▸ Profile; a user who pastes their own key uses theirs.</div>
       </div>
 
       <div class="adm-card">
         <div class="adm-ct">Avatars</div>
-        <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${settings.avatars_enabled!==false?' on':''}" id="admin-avatars-enabled" onclick="this.classList.toggle('on');adminSaveAvatars()"></button></div>
+        <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${settings.avatars_enabled!==false?' on':''}" id="admin-avatars-enabled" data-cryptirc-click="saveAvatars"></button></div>
         <div class="adm-hint">Users upload a picture in Settings ▸ Profile; it shows next to their nick to other CryptIRC users of this server on the same IRC server. Off: none are shown or accepted (saved pictures stay until removed). Remove one user's picture from their entry below.</div>
       </div>
 
@@ -21108,12 +21168,29 @@ async function showAdminPanel(){
           <div><label>Username</label><input id="admin-add-user" class="adm-in" placeholder="username"></div>
           <div><label>Password <span style="color:var(--text3)">(min 10)</span></label><input id="admin-add-pass" class="adm-in" type="password" placeholder="••••••••••"></div>
           <div><label>Email <span style="color:var(--text3)">(optional)</span></label><input id="admin-add-email" class="adm-in" placeholder="user@example.com"></div>
-          <button class="adm-save" style="width:100%" onclick="adminAddUser()">Create user</button>
+          <button class="adm-save" style="width:100%" data-cryptirc-click="addUser">Create user</button>
           <div id="admin-add-err" style="font-size:11px;color:var(--error)"></div>
         </div>
       </div>
     `;
 
+    bindControls(body,{
+      click:{
+        saveAdminToggle:function(){this.classList.toggle('on');adminSaveSettings();},
+        saveGif:()=>adminSaveGif(),
+        saveLastfm:()=>adminSaveLastfm(),
+        saveAvatars:function(){this.classList.toggle('on');adminSaveAvatars();},
+        addUser:()=>adminAddUser()
+      },
+      change:{
+        saveAdminSettings:()=>adminSaveSettings(),
+        saveLinkPreview:()=>adminSaveLinkPreview(),
+        saveGif:()=>adminSaveGif(),
+        saveLastfm:()=>adminSaveLastfm()
+      }
+    });
+    body.querySelector('#admin-reg-code-set').onclick=()=>adminSaveRegistrationCode(false);
+    body.querySelector('#admin-reg-code-clear').onclick=()=>adminSaveRegistrationCode(true);
     // Roster — clean rows, tap to open the dossier. Username rides the row dataset (no
     // user data in an inline-handler JS-string, #10); a delegated listener reads it.
     const roster=document.getElementById('admin-roster');
@@ -21157,7 +21234,8 @@ function showUserDetail(uname){
     ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:1100;display:none;align-items:center;justify-content:center;padding:16px';
     ov.addEventListener('click',e=>{ if(e.target===ov) closeUserDetail(); });
     document.addEventListener('keydown',e=>{ if(e.key==='Escape'){ const o=document.getElementById('admin-detail-overlay'); if(o&&o.classList.contains('show')){ e.stopPropagation(); closeUserDetail(); } } });
-    ov.innerHTML='<div style="background:var(--bg1);border:1px solid var(--border);border-radius:16px;width:min(420px,94vw);max-height:min(90vh,90dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.65)"><div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0"><span style="font-family:var(--sans);font-weight:700;font-size:13px;color:var(--text2);text-transform:uppercase;letter-spacing:.08em">User</span><span onclick="closeUserDetail()" style="cursor:pointer;color:var(--text3);font-size:18px;line-height:1">✕</span></div><div id="admin-detail-body" style="padding:18px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch"></div></div>';
+    ov.innerHTML='<div style="background:var(--bg1);border:1px solid var(--border);border-radius:16px;width:min(420px,94vw);max-height:min(90vh,90dvh);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.65)"><div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-shrink:0"><span style="font-family:var(--sans);font-weight:700;font-size:13px;color:var(--text2);text-transform:uppercase;letter-spacing:.08em">User</span><span class="admin-detail-close" style="cursor:pointer;color:var(--text3);font-size:18px;line-height:1">✕</span></div><div id="admin-detail-body" style="padding:18px;overflow-y:auto;flex:1;-webkit-overflow-scrolling:touch"></div></div>';
+    ov.querySelector('.admin-detail-close').onclick=()=>closeUserDetail();
     document.body.appendChild(ov);
     // Delegated action handler — username on the body dataset, fixed data-act on buttons (#10).
     document.getElementById('admin-detail-body').addEventListener('click',ev=>{
@@ -21299,7 +21377,7 @@ function _botScopeHtml(key,def){
   if(!tree) tree=`<div class="bot-sc-empty">Connect to a network to pick channels.</div>`;
   return `
     <div class="adm-row"><span class="l">Channels</span>
-      <label class="bot-sc-all"><input type="checkbox" data-bot-allchans="${key}" ${isAll?'checked':''} onchange="_botToggleAllChans('${key}',this)"> All channels</label>
+      <label class="bot-sc-all"><input type="checkbox" data-bot-allchans="${key}" ${isAll?'checked':''}> All channels</label>
     </div>
     <div class="bot-sc" data-bot-scopewrap="${key}" style="${isAll?'display:none':''}">${tree}</div>`;
 }
@@ -21312,7 +21390,7 @@ function _botDefCard(key,title,emoji,def,dtrig,example){
   return `
    <div class="adm-card">
     <div class="adm-ct">${emoji} ${title}</div>
-    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${def.enabled?' on':''}" data-bot-enable="${key}" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${def.enabled?' on':''}" data-bot-enable="${key}" data-cryptirc-click="toggleBotSetting"></button></div>
     <div class="adm-row"><span class="l">Public trigger</span><input class="adm-in" data-bot-trigger="${key}" value="${esc(trig)}" placeholder="${dtrig}" style="width:120px;flex:0 0 auto;text-align:center"></div>
     <div class="adm-hint">Public: anyone allowed can type <b>${esc(trig)}${example?' '+esc(example):''}</b> in a channel. Private (just you): <b>${esc(_BOT_CMDS[key]||'—')}</b></div>
     <div class="adm-row"><span class="l">Who can use it</span>
@@ -21334,14 +21412,27 @@ function _renderBotPanel(cfg){
   const body=document.getElementById('bot-body'); if(!body) return;
   body.innerHTML=`
     <div class="adm-card">
-      <div class="adm-row"><span class="l" style="font-weight:700">Bots master switch</span><button class="appear-toggle${cfg.enabled?' on':''}" id="bot-master" onclick="this.classList.toggle('on')"></button></div>
+      <div class="adm-row"><span class="l" style="font-weight:700">Bots master switch</span><button class="appear-toggle${cfg.enabled?' on':''}" id="bot-master" data-cryptirc-click="toggleBotSetting"></button></div>
       <div class="adm-hint">Bots run on the server 24/7 — replies come from your nick even when your app is closed. Everything stays off until you turn it on. Your own private commands (<b>/w</b>, <b>/ud</b>) always work for you regardless of these settings.</div>
     </div>
     ${_aiCard(cfg.ai||{})}
     ${BOT_PANEL_DEFS.map(([id,label,icon,trigger,example])=>_botDefCard(id,label,icon,cfg[id],trigger,example)).join('')}
     ${_iplogCard(cfg.iplog||{})}
     ${_enforceCard(cfg.enforce||{})}
-    <button class="adm-save" style="width:100%;margin-top:4px" onclick="saveBotConfig()">Save bots</button>`;
+    <button class="adm-save" style="width:100%;margin-top:4px" data-cryptirc-click="saveBots">Save bots</button>`;
+  bindControls(body,{
+    click:{
+      toggleBotSetting:function(){this.classList.toggle('on');},
+      saveBots:()=>saveBotConfig(),
+      saveAiKey:()=>saveAiKey(),
+      clearAiHistory:()=>{wsend({type:'clear_ai_history'});showToast('AI history cleared');},
+      insertAiSample:()=>_aiInsertSample()
+    },
+    change:{changeAiProvider:()=>_aiProviderChange()}
+  });
+  for(const checkbox of body.querySelectorAll('[data-bot-allchans]')){
+    checkbox.onchange=()=>_botToggleAllChans(checkbox.dataset.botAllchans,checkbox);
+  }
   setTimeout(_aiProviderChange,0);   // sync custom-URL row + key status to the selected provider
 }
 function _aiModelHint(p){return ({openai:'gpt-4o-mini',anthropic:'claude-sonnet-4-5',xai:'grok-2-latest',google:'gemini-2.0-flash',perplexity:'sonar',openrouter:'openai/gpt-4o-mini',groq:'llama-3.3-70b-versatile',mistral:'mistral-small-latest','openai-codex':'gpt-5',custom:'model-name'})[p]||'model-name';}
@@ -21762,11 +21853,11 @@ function _aiCard(ai){
   return `
    <div class="adm-card">
     <div class="adm-ct">🤖 AI Chatbot</div>
-    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${ai.enabled?' on':''}" data-ai="enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${ai.enabled?' on':''}" data-ai="enabled" data-cryptirc-click="toggleBotSetting"></button></div>
     <div class="adm-hint">Talk to it with the trigger in a channel, or DM you. Private command: <b>/ai &lt;message&gt;</b>. The API key is stored <b>encrypted in your vault</b>, so the AI bot only works while your vault is unlocked.</div>
     <div class="adm-row"><span class="l">Public trigger</span><input class="adm-in" data-ai="trigger" value="${esc(ai.trigger||'!ai')}" placeholder="!ai" style="width:120px;flex:0 0 auto;text-align:center"></div>
     <div class="adm-row"><span class="l">Provider</span>
-      <select class="adm-sel" data-ai="provider" onchange="_aiProviderChange()">
+      <select class="adm-sel" data-ai="provider" data-cryptirc-change="changeAiProvider">
         ${provs.map(([v,l])=>`<option value="${v}"${prov===v?' selected':''}>${esc(l)}</option>`).join('')}
       </select>
     </div>
@@ -21774,22 +21865,22 @@ function _aiCard(ai){
     <div class="adm-row"><span class="l">Model</span><input class="adm-in" data-ai="model" value="${esc(ai.model||'')}" placeholder="${esc(_aiModelHint(prov))}"></div>
     <div class="adm-row" data-ai-keyrow style="${prov==='openai-codex'?'display:none':''}"><span class="l">API key</span><input class="adm-in" type="password" id="ai-key-input" placeholder="paste your API key"></div>
     <div class="adm-row" data-ai-codexrow style="${prov==='openai-codex'?'align-items:flex-start':'display:none'}"><span class="l">ChatGPT token</span><textarea class="adm-in" id="ai-codex-input" rows="3" style="resize:vertical;font-family:var(--mono,monospace);font-size:11px" placeholder='Paste the JSON from ~/.codex/auth.json (run "codex login" or "npm i -g @openai/codex" first)'></textarea></div>
-    <div class="adm-row"><span class="l"></span><span style="display:flex;gap:8px;align-items:center;flex:0 0 auto"><button class="adm-save" style="padding:6px 12px" onclick="saveAiKey()">${prov==='openai-codex'?'Import token':'Save key'}</button><span id="ai-key-status" style="font-size:11px;color:var(--text3)">no key</span></span></div>
+    <div class="adm-row"><span class="l"></span><span style="display:flex;gap:8px;align-items:center;flex:0 0 auto"><button class="adm-save" style="padding:6px 12px" data-cryptirc-click="saveAiKey">${prov==='openai-codex'?'Import token':'Save key'}</button><span id="ai-key-status" style="font-size:11px;color:var(--text3)">no key</span></span></div>
     <div class="adm-hint" data-ai-codexhint style="${prov==='openai-codex'?'':'display:none'}">🔓 <b>Sign in with your ChatGPT subscription</b> instead of an API key. Install OpenAI's Codex CLI, run <b>codex login</b>, then paste the contents of <b>~/.codex/auth.json</b> here. It's encrypted in your vault. ⚠ This uses your ChatGPT plan outside the Codex app — it's unofficial and OpenAI may rate-limit or block it.</div>
     <div class="adm-hint" data-ai-keyhint style="${prov==='openai-codex'?'display:none':''}">Keys are per-provider and encrypted in your vault. Leave blank to keep the existing one.</div>
     <div class="adm-row"><span class="l">Max tokens</span><input class="adm-in" type="number" min="1" max="32000" data-ai="max_tokens" value="${(+ai.max_tokens||500)}" style="width:90px;flex:0 0 auto;text-align:center"></div>
-    <div class="adm-row"><span class="l">Reply in DMs too</span><button class="appear-toggle${ai.respond_pm!==false?' on':''}" data-ai="respond_pm" onclick="this.classList.toggle('on')"></button></div>
-    <div class="adm-row"><span class="l">Let the AI run IRC commands</span><button class="appear-toggle${ai.commands_enabled?' on':''}" data-ai="commands_enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Reply in DMs too</span><button class="appear-toggle${ai.respond_pm!==false?' on':''}" data-ai="respond_pm" data-cryptirc-click="toggleBotSetting"></button></div>
+    <div class="adm-row"><span class="l">Let the AI run IRC commands</span><button class="appear-toggle${ai.commands_enabled?' on':''}" data-ai="commands_enabled" data-cryptirc-click="toggleBotSetting"></button></div>
     <div class="adm-hint">⚠ Lets the AI op/voice/kick/ban/topic/invite. Only <b>you</b> (via <b>/aido</b> in a channel) or users on the allow-lists above can make it act — everyone else gets text only. It's limited to safe channel commands (never oper/kill/services/raw).</div>
-    <div class="adm-row"><span class="l" style="color:#f85149">🔥 YOLO — any raw command</span><button class="appear-toggle${ai.commands_yolo?' on':''}" data-ai="commands_yolo" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l" style="color:#f85149">🔥 YOLO — any raw command</span><button class="appear-toggle${ai.commands_yolo?' on':''}" data-ai="commands_yolo" data-cryptirc-click="toggleBotSetting"></button></div>
     <div class="adm-hint" style="color:#f85149">☠ Removes ALL restrictions — the AI can run <b>any raw IRC command</b> (including oper/kill/die/services if your account can). For safety this is honored <b>only when YOU drive it via /aido</b> — channel &amp; DM triggers stay on the safe allowlist no matter what, so nobody else can hijack it. Requires “run IRC commands” above. Use at your own risk.</div>
-    <div class="adm-row"><span class="l">Full context (channels + who's in them)</span><button class="appear-toggle${ai.full_context?' on':''}" data-ai="full_context" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Full context (channels + who's in them)</span><button class="appear-toggle${ai.full_context?' on':''}" data-ai="full_context" data-cryptirc-click="toggleBotSetting"></button></div>
     <div class="adm-hint">Tells the AI your channels, topics and members (sent to your provider) so it can answer “who’s in #dev?” or “kick the spammer”.</div>
     <div class="adm-row"><span class="l">Remember history (minutes)</span><input class="adm-in" type="number" min="0" max="1440" data-ai="history_minutes" value="${ai.history_minutes==null?60:(+ai.history_minutes)}" style="width:90px;flex:0 0 auto;text-align:center"></div>
     <div class="adm-hint">Per-person conversation memory, auto-cleared after this many minutes (0 = off). Anyone can reset theirs by saying “<b>!ai clear</b>”.</div>
-    <div class="adm-row"><span class="l"></span><button class="adm-save" style="padding:6px 12px;flex:0 0 auto;background:var(--bg3);color:var(--text)" onclick="wsend({type:'clear_ai_history'});showToast('AI history cleared')">Clear all AI history</button></div>
+    <div class="adm-row"><span class="l"></span><button class="adm-save" style="padding:6px 12px;flex:0 0 auto;background:var(--bg3);color:var(--text)" data-cryptirc-click="clearAiHistory">Clear all AI history</button></div>
     <div class="adm-row" style="align-items:flex-start"><span class="l">Context</span><textarea class="adm-in" data-ai="context" rows="3" style="resize:vertical;font-family:inherit" placeholder="System prompt — who the bot is and how it should behave">${esc(ai.context||'')}</textarea></div>
-    <div class="adm-row"><span class="l"></span><button class="adm-save" style="padding:6px 12px;flex:0 0 auto;background:var(--bg3);color:var(--text)" onclick="_aiInsertSample()">Insert sample context</button></div>
+    <div class="adm-row"><span class="l"></span><button class="adm-save" style="padding:6px 12px;flex:0 0 auto;background:var(--bg3);color:var(--text)" data-cryptirc-click="insertAiSample">Insert sample context</button></div>
     <div class="adm-row"><span class="l">Who can use it</span>
       <select class="adm-sel" data-ai="access">
         <option value="public"${(ai.access||'public')==='public'?' selected':''}>Everyone</option>
@@ -21865,16 +21956,16 @@ function _enforceCard(en){
   return `
    <div class="adm-card">
     <div class="adm-ct">🛡 Enforcement — auto-op / flood / word filter</div>
-    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${en.enabled?' on':''}" data-en="enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${en.enabled?' on':''}" data-en="enabled" data-cryptirc-click="toggleBotSetting"></button></div>
     <div class="adm-hint">When someone joins a channel where you hold ops, automatically give them status; and optionally police flooding &amp; banned words. Use <b>*!*@*</b> to op/voice everyone. Every action is written to your encrypted <b>*bot-audit*</b> log.</div>
     <div class="adm-row"><span class="l">Auto-op</span><input class="adm-in" data-en="autoop" value="${esc((en.autoop||[]).join(', '))}" placeholder="nick, *!*@*.trusted.host"></div>
     <div class="adm-row"><span class="l">Auto-voice</span><input class="adm-in" data-en="autovoice" value="${esc((en.autovoice||[]).join(', '))}" placeholder="nick, *!*@* for everyone"></div>
     <div class="adm-hint">Comma-separated. Each entry is an exact nick or a nick!user@host wildcard mask.</div>
     <div style="border-top:1px solid var(--bord,#333);margin:10px 0 4px"></div>
-    <div class="adm-row"><span class="l">Flood protection</span><button class="appear-toggle${en.flood_enabled?' on':''}" data-en="flood_enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Flood protection</span><button class="appear-toggle${en.flood_enabled?' on':''}" data-en="flood_enabled" data-cryptirc-click="toggleBotSetting"></button></div>
     <div class="adm-row"><span class="l">Max lines</span><input class="adm-in" type="number" min="2" max="50" data-en="flood_lines" value="${en.flood_lines==null?5:(+en.flood_lines)}" style="width:80px;flex:0 0 auto;text-align:center"> <span class="l" style="flex:0 0 auto">in</span> <input class="adm-in" type="number" min="1" max="120" data-en="flood_window" value="${en.flood_window==null?5:(+en.flood_window)}" style="width:80px;flex:0 0 auto;text-align:center"> <span class="l" style="flex:0 0 auto">sec</span></div>
     <div class="adm-hint">More than this many messages from one person in the window triggers the action below.</div>
-    <div class="adm-row"><span class="l">Bad-word filter</span><button class="appear-toggle${en.badword_enabled?' on':''}" data-en="badword_enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Bad-word filter</span><button class="appear-toggle${en.badword_enabled?' on':''}" data-en="badword_enabled" data-cryptirc-click="toggleBotSetting"></button></div>
     <div class="adm-row"><span class="l">Banned words</span><input class="adm-in" data-en="badwords" value="${esc((en.badwords||[]).join(', '))}" placeholder="word1, phrase two"></div>
     <div class="adm-hint">Case-insensitive substring match. Comma-separated.</div>
     <div class="adm-row"><span class="l">Action</span>
@@ -21894,7 +21985,7 @@ function _iplogCard(ip){
   return `
    <div class="adm-card">
     <div class="adm-ct">🌐 IP / Host logger</div>
-    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${ip.enabled?' on':''}" data-ip="enabled" onclick="this.classList.toggle('on')"></button></div>
+    <div class="adm-row"><span class="l">Enabled</span><button class="appear-toggle${ip.enabled?' on':''}" data-ip="enabled" data-cryptirc-click="toggleBotSetting"></button></div>
     <div class="adm-hint">Records every join's <b>nick!user@host</b> to your private, encrypted <b>*ip-log*</b> buffer (open it like any channel window). Only you can see it, and it needs your vault unlocked to write.</div>
     ${_botScopeHtml('ip',ip)}
    </div>`;
@@ -21993,13 +22084,12 @@ function saveBotConfig(){
 
 async function adminSaveSettings(){
   const open=document.getElementById('admin-reg-open').classList.contains('on');
-  const code=document.getElementById('admin-reg-code').value;
   const uploadEl=document.getElementById('admin-upload-mb');
   const uploadMb=uploadEl?Math.max(1,Math.min(500,parseInt(uploadEl.value)||25)):undefined;
   const emailReqEl=document.getElementById('admin-email-required');
   const captchaEl=document.getElementById('admin-captcha-enabled');
   try{
-    const payload={registration_open:open,registration_code:code};
+    const payload={registration_open:open};
     if(uploadMb!==undefined) payload.max_upload_mb=uploadMb;
     if(emailReqEl) payload.email_required=emailReqEl.classList.contains('on');
     if(captchaEl) payload.captcha_enabled=captchaEl.classList.contains('on');
@@ -22011,6 +22101,26 @@ async function adminSaveSettings(){
     // Check the status: a 4xx/5xx used to show "saved" anyway.
     showToast(r.ok?'Admin settings saved':await _adminFailMsg(r,'Admin settings not saved'));
   }catch(e){showToast('Admin settings not saved — network error');}
+}
+async function adminSaveRegistrationCode(clear){
+  const field=document.getElementById('admin-reg-code');
+  const setButton=document.getElementById('admin-reg-code-set');
+  const clearButton=document.getElementById('admin-reg-code-clear');
+  const code=field.value;
+  if(!clear&&!code.trim()){showToast('Enter a new invite code');return;}
+  field.disabled=setButton.disabled=clearButton.disabled=true;
+  try{
+    const r=await fetch('/cryptirc/admin/settings',{
+      method:'PUT',
+      headers:{'Authorization':'Bearer '+sessionToken,'Content-Type':'application/json'},
+      body:JSON.stringify(clear?{clear_registration_code:true}:{new_registration_code:code})
+    });
+    if(!r.ok){showToast(await _adminFailMsg(r,'Invite code not saved'));return;}
+    field.value='';
+    field.placeholder=clear?'No code set':'Code set';
+    showToast(clear?'Invite code cleared':'Invite code saved');
+  }catch(e){showToast('Invite code not saved — network error');}
+  finally{field.disabled=setButton.disabled=clearButton.disabled=false;}
 }
 // Readable failure toast text for an admin request (tolerates non-JSON bodies).
 async function _adminFailMsg(r,what){

@@ -124,6 +124,8 @@ async function chromium(profile='chrome') {
   await send('Network.setBypassServiceWorker',{bypass:true});
   await send('Network.setBlockedURLs',{urls:['https://*','wss://*']});
   await send('Page.enable');
+  await send('Page.addScriptToEvaluateOnNewDocument',{source:
+    "window.scriptPolicyViolations=[];document.addEventListener('securitypolicyviolation',e=>{if(e.effectiveDirective.startsWith('script-src'))window.scriptPolicyViolations.push(e.effectiveDirective);});"});
   await send('Page.navigate',{url:base+'/'});
   await waitFor(()=>evaluate("document.readyState==='complete' && typeof doPasskeyLogin==='function'"),'CryptIRC login page');
   await send('WebAuthn.enable');
@@ -172,6 +174,20 @@ try {
   }
   start(CRYPTIRC_BIN,[],env);
   await waitWeb();
+  const checkPagePolicy=async route=>{
+    const response=await fetch(base+route);
+    const scriptPolicy=response.headers.get('content-security-policy').split(';').map(v=>v.trim()).find(v=>v.startsWith('script-src '));
+    const nonce=scriptPolicy.match(/'nonce-([^']+)'/)[1];
+    const html=await response.text();
+    check('protected page has a nonce and disallows inline handlers '+route,
+      !scriptPolicy.includes("'unsafe-inline'") &&
+      response.headers.get('content-security-policy').includes("script-src-attr 'none'") &&
+      html.includes('<script nonce="'+nonce+'">'));
+    return nonce;
+  };
+  const mainNonce=await checkPagePolicy('/');
+  check('page script nonce changes across responses',mainNonce!==await checkPagePolicy('/'));
+  await checkPagePolicy('/auth/reset?token=fixture');
   if(legacy){
     const migrationBrowser=await chromium('e2e-migration');
     await checkLegacyMigration({browser:migrationBrowser,waitFor,check,tmp,user:legacyUser,password,vault,channel,legacy});
@@ -190,9 +206,23 @@ try {
   const fill=(id,value)=>ev('document.getElementById('+JSON.stringify(id)+').value='+JSON.stringify(value));
   await fill('l-user',owner);
   await fill('l-pass',password);
-  await ev('doLogin()');
+  check('all static page controls have native handlers',await ev(`Array.from(document.querySelectorAll('*')).every(control=>
+    control.getAttributeNames().every(attr=>!attr.startsWith('data-cryptirc-')||
+      typeof control['on'+attr.slice('data-cryptirc-'.length)]==='function'))`));
+  await ev("document.getElementById('login-btn').click()");
+  await waitFor(()=>ev('sessionToken'),'login button under script CSP');
   let ownerSession=await ev('sessionToken');
   check('normal login works alongside passkeys',!!ownerSession);
+  const fileName='download-fixture.txt';
+  await fs.writeFile(path.join(tmp,'uploads',fileName),'download fixture');
+  const fileUrl=base+'/files/'+fileName;
+  check('downloads refuse URL session tokens',
+    (await fetch(fileUrl+'?token='+encodeURIComponent(ownerSession))).status===401);
+  for(const headers of [{Authorization:'Bearer '+ownerSession},{Cookie:'cryptirc_token='+ownerSession}]){
+    const download=await fetch(fileUrl,{headers});
+    check('downloads accept '+Object.keys(headers)[0]+' authentication',
+      download.ok && await download.text()==='download fixture');
+  }
   check('passkey sign-in button is available',await ev("!document.getElementById('passkey-login-btn').hidden"));
   await ev("(()=>{const real=window.fetch.bind(window);window.testPasskeyRequests={};window.fetch=(url,opt)=>{const u=String(url);if(u.includes('/passkeys/')&&u.endsWith('/finish'))window.testPasskeyRequests[u.split('/').at(-2)]=JSON.parse(opt.body);return real(url,opt);};})()");
   await waitFor(()=>ev("_wsReady() && document.getElementById('vault-overlay').classList.contains('show')"),'initial WebSocket vault state');
@@ -258,8 +288,15 @@ try {
   await ev("localStorage.removeItem('cryptirc_token');localStorage.removeItem('cryptirc_user');document.cookie='cryptirc_token=;path=/cryptirc;max-age=0';");
   const originTime=await ev('performance.timeOrigin');
   await cdp('Page.reload',{ignoreCache:true});
-  await waitFor(()=>ev(`performance.timeOrigin>${originTime} && document.readyState==='complete' &&
-   typeof doPasskeyLogin==='function' && !document.getElementById('passkey-login-btn')?.hidden`),'passkey login page');
+  await waitFor(async()=>{
+    try{
+      return await ev(`performance.timeOrigin>${originTime} && document.readyState==='complete' &&
+        typeof doPasskeyLogin==='function' && !document.getElementById('passkey-login-btn')?.hidden`);
+    }catch(error){
+      if(/Inspected target navigated|Execution context was destroyed|Cannot find context/.test(error.message))return false;
+      throw error;
+    }
+  },'passkey login page');
   await ev("(()=>{const real=window.fetch.bind(window);window.fetch=(url,opt)=>{if(String(url).endsWith('/passkeys/login/finish'))window.lastAssertion=JSON.parse(opt.body);return real(url,opt);};})()");
   await ev("document.getElementById('passkey-login-btn').click()");
   ownerSession=await waitFor(()=>ev("typeof sessionToken!=='undefined' && sessionToken"),'resident passkey sign-in');
@@ -439,6 +476,44 @@ try {
   await tool(token,'cryptirc_settings',{section:'admin',settings:{max_upload_mb:17}});
   check('MCP admin changes are visible to the normal admin API',
     (await request('/admin/settings',{token:ownerSession})).data.max_upload_mb===17);
+  await ev('showAdminPanel()');
+  const invite='fixture-'+stamp;
+  await fill('admin-reg-code',invite);
+  await ev("document.getElementById('admin-reg-code-set').click()");
+  await waitFor(()=>ev("document.getElementById('admin-reg-code').placeholder==='Code set'"),'invite code saved by admin UI');
+  const {settings:inviteSettings}=await tool(token,'cryptirc_settings',{section:'admin'});
+  const httpInviteSettings=(await request('/admin/settings',{token:ownerSession})).data;
+  check('admin HTTP and MCP return only whether the invite code is set',
+    [inviteSettings,httpInviteSettings].every(s=>s.registration_code_set===true &&
+      !('registration_code' in s) && !JSON.stringify(s).includes(invite)));
+  for(const registration_code of ['', 'undefined']){
+    const legacyWrite=await request('/admin/settings',{method:'PUT',token:ownerSession,
+      body:{registration_open:false,captcha_enabled:true,registration_code}});
+    check('old admin clients get an explicit invite-code conflict',legacyWrite.status===409);
+  }
+  const signupPolicy=(await request('/auth/status')).data;
+  check('old admin clients can still close registration and enable captcha',
+    !signupPolicy.registration_open && signupPolicy.captcha_enabled && signupPolicy.requires_code);
+  assert.equal((await request('/admin/settings',{method:'PUT',token:ownerSession,
+    body:{registration_open:true,captcha_enabled:false}})).status,200);
+  for(const settings of [{registration_code:'legacy'},{new_registration_code:''},{new_registration_code:' '},
+    {new_registration_code:'replacement',clear_registration_code:true}]){
+    await tool(token,'cryptirc_settings',{section:'admin',settings},true);
+  }
+  const signup=await request('/auth/register',{method:'POST',
+    body:{username:'invite'+stamp,password,code:invite}});
+  check('invalid HTTP and MCP updates preserve the original invite code',signup.status===200);
+  await ev("document.getElementById('admin-reg-code-clear').click()");
+  await waitFor(()=>ev("document.getElementById('admin-reg-code').placeholder==='No code set'"),'invite code cleared explicitly');
+  check('admin UI can clear the invite code',
+    (await request('/admin/settings',{token:ownerSession})).data.registration_code_set===false);
+  await ev('closeAdminPanel()');
+  assert.equal((await request('/admin/settings',{method:'PUT',token:ownerSession,
+    body:{registration_open:false}})).status,200);
+  const closedSignup=await chromium('closed-signup');
+  await waitFor(()=>closedSignup.evaluate("document.getElementById('tab-register').style.display==='none'"),
+    'closed registration hides the signup tab');
+  check('closed registration hides the signup tab under strict CSP',true);
   const {settings:previewPolicy}=await tool(token,'cryptirc_settings',{section:'link_previews'});
   await tool(token,'cryptirc_settings',{section:'link_previews',settings:{...previewPolicy,mode:'off'}});
   check('MCP link-preview updates share the admin policy',
@@ -468,6 +543,21 @@ try {
     method:'POST',headers:ownHeaders,body:staleAssertion
   })).status===401);
   check('Chromium produced no unhandled JavaScript exceptions',browser.errors.length===0);
+  check('Chromium reported no script CSP violations during the UI checks',await ev('window.scriptPolicyViolations.length===0'));
+  const htmlPaste=await request('/paste',{method:'POST',token:ownerSession,
+    body:{content:'<p>Isolated HTML fixture</p>',language:'html',content_type:'html'}});
+  assert.equal(htmlPaste.status,200);
+  const pasteRoute='/paste/'+htmlPaste.data.id;
+  await checkPagePolicy(pasteRoute);
+  const appFrame=await fetch(base+pasteRoute+'/app');
+  const appPolicy=appFrame.headers.get('content-security-policy');
+  check('HTML paste frame still has an opaque script sandbox',
+    appFrame.ok && appPolicy.startsWith('sandbox allow-scripts ') && !appPolicy.includes('allow-same-origin'));
+  await cdp('Page.navigate',{url:base+pasteRoute});
+  await waitFor(()=>ev("!!document.getElementById('tab-src')"),'HTML paste shell rendered');
+  await ev("document.getElementById('tab-src').click()");
+  check('the HTML paste Source tab works with strict CSP',
+    await ev("getComputedStyle(document.getElementById('pane-src')).display==='block'"));
 } catch (error) {
   for(const child of children.slice(0,2))if(child.logs)console.error(child.logs);
   throw error;

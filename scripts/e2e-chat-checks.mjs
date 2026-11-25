@@ -163,6 +163,16 @@ export async function checkE2eChat({
   await compose(peer, networkB, owner, reply);
   await waitFor(() => row(browser, networkA, other, reply), 'initiator decrypted ratchet reply');
   check('Double Ratchet works in both directions on the linked IRC testnet', true);
+  const pinnedFingerprint=await browser.evaluate('E2E.trustStore['+q(other)+'].fingerprint');
+  check('confirmed peer can be marked verified on this device',
+    await browser.evaluate('e2eMarkVerified('+q(other)+')'));
+  await browser.evaluate('e2eSaveState()');
+  await waitFor(()=>browser.evaluate('E2E._txq.length===0'),'encrypted trust state sent');
+  check('peer trust is never sent or stored as a plaintext mirror',
+    [browser,peer].every(b=>!b.frames.some(frame=>frame.includes('"type":"e2e_update_trust"'))) &&
+    (await Promise.all([owner,other].map(async user=>
+      !(await fs.readdir(path.join(tmp,'e2e',user))).some(name=>name.startsWith('trust.json')))))
+      .every(Boolean));
 
   const words = await shareKey(browser, waitFor, 'keygen', networkA, channel);
   await peer.evaluate('handleEncryptCommand(' + q(['add', ...words.split(' ')]) + ',' + q(networkB) + ',' + q(channel) + ')');
@@ -239,6 +249,9 @@ export async function checkE2eChat({
   await fillPrompt(freshDevice, ownerCode);
   await waitFor(() => freshDevice.evaluate("E2E._bootPhase==='ready'&&E2E.identityReady"), 'new device recovered E2E keys');
   await waitFor(() => hasKey(freshDevice, channel), 'new device loaded channel PSK');
+  check('recovered device restores the verified peer pin from encrypted state',
+    await freshDevice.evaluate('E2E.trustStore['+q(other)+']?.verified===true && E2E.trustStore['+
+      q(other)+'].fingerprint==='+q(pinnedFingerprint)));
   check('new device recovers identity, DM ratchet and channel key without sending the code or a vault unlock',
     await freshDevice.evaluate('!!E2E.dmSessions[' + q(other) + ']') &&
     !freshDevice.frames.slice(freshCount).some(frame => frame.includes(ownerCode) || frame.includes('"type":"unlock_vault"')));

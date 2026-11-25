@@ -7,7 +7,7 @@
 <p align="center"><strong>IRC that stays connected.</strong><br>Self-hosted. Encrypted history. All your devices.</p>
 
 <p align="center">
-  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.14-00b894?style=flat-square" alt="Version 0.5.14"></a>
+  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.15-00b894?style=flat-square" alt="Version 0.5.15"></a>
   <img src="https://img.shields.io/badge/server-Linux-5a7085?style=flat-square" alt="Linux server">
   <img src="https://img.shields.io/badge/client-desktop%20%C2%B7%20mobile%20%C2%B7%20terminal-5a7085?style=flat-square" alt="Desktop, mobile, and terminal clients">
 </p>
@@ -76,7 +76,7 @@ Read IRC in your preferred language. Translate a message, website preview title 
 
 Your provider receives the text selected for translation. Automatic translation is disabled in end-to-end encrypted conversations. To translate encrypted text manually, confirm before sharing it with the provider. Reading and chat preferences are saved on the device. Translated text is kept in the open tab.
 
-[Latest changelog](docs/CHANGES.md#v0514-november-2026)
+[Latest changelog](docs/CHANGES.md#v0515-november-2026)
 
 ## Passkey sign-in
 
