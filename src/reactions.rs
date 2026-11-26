@@ -7,12 +7,13 @@ use crate::irc::{incoming_channel_target, IrcConnection};
 use crate::{AppState, ServerEvent};
 
 pub(crate) const CAP: &str = "cryptirc.com/reactions";
+pub(crate) const DISLIKE_CAP: &str = "cryptirc.com/reactions-dislike";
 const REPLY: &str = "+reply";
 const LEGACY_REPLY: &str = "+draft/reply";
 const ADD: &str = "+draft/react";
 const REMOVE: &str = "+draft/unreact";
 const SEALED: &str = "+cryptirc.com/sealed-reaction";
-const EMOJI: &[&str] = &["❤️", "👍", "😂", "🎉", "🔥", "👀", "✅", "🙏"];
+const EMOJI: &[&str] = &["❤️", "👍", "😂", "🎉", "🔥", "👀", "✅", "🙏", "👎"];
 const MAX_ANCHOR_TARGETS: usize = 48;
 const MAX_TARGET_ANCHORS: usize = 256;
 const MAX_PENDING: usize = 128;
@@ -21,6 +22,7 @@ const ECHO_LIFETIME: Duration = Duration::from_secs(15);
 #[derive(Default)]
 pub(crate) struct Reactions {
     pub(crate) advertised: bool,
+    pub(crate) dislike_advertised: bool,
     anchors: VecDeque<(String, VecDeque<Anchor>)>,
     local_echoes: VecDeque<PendingEcho<u64>>,
     wire_echoes: VecDeque<PendingEcho<String>>,
@@ -111,6 +113,36 @@ pub(crate) fn available(c: &IrcConnection) -> bool {
         && c.message_tags
         && c.echo_message_enabled
         && c.reactions.advertised
+}
+
+pub(crate) fn support(c: &IrcConnection) -> (bool, bool) {
+    let enabled = available(c);
+    (enabled, enabled && c.reactions.dislike_advertised)
+}
+
+pub(crate) fn note_capabilities(c: &mut IrcConnection, sub: &str, caps: &str) {
+    let has = |name| caps.split_ascii_whitespace().any(|cap| cap == name);
+    let reactions = &mut c.reactions;
+    match sub {
+        "LS" | "NEW" => {
+            reactions.advertised |= has(CAP);
+            reactions.dislike_advertised |= has(DISLIKE_CAP);
+        }
+        "DEL" => {
+            reactions.dislike_advertised &= !has(DISLIKE_CAP);
+            if has(CAP) {
+                *reactions = Reactions {
+                    dislike_advertised: reactions.dislike_advertised,
+                    ..Reactions::default()
+                };
+            }
+        }
+        _ => {}
+    }
+}
+
+fn plain_emoji(c: &IrcConnection, emoji: &str) -> bool {
+    EMOJI.contains(&emoji) && (emoji != "👎" || c.reactions.dislike_advertised)
 }
 
 pub(crate) fn remember(c: &mut IrcConnection, target: &str, reference: &str, encrypted: bool) {
@@ -243,7 +275,7 @@ pub(crate) fn receive(
             own,
         }),
         (Some(emoji), None, Some(reference), None) | (None, Some(emoji), Some(reference), None)
-            if EMOJI.contains(&emoji.as_str()) && has_plain_anchor(c, &target, reference) =>
+            if plain_emoji(c, emoji) && has_plain_anchor(c, &target, reference) =>
         {
             Some(ServerEvent::IrcReaction {
                 conn_id: c.conn_id.clone(),
@@ -316,7 +348,7 @@ pub(crate) async fn send(
             reference,
             emoji,
             remove,
-        } if !protected && EMOJI.contains(&emoji.as_str()) => {
+        } if !protected && plain_emoji(&c, &emoji) => {
             if !has_plain_anchor(&c, target, &reference) {
                 return Err(REFUSED);
             }

@@ -1,8 +1,11 @@
 const CHAT_REACTIONS = new Map([
   ['❤️', 'Love'], ['👍', 'Like'], ['😂', 'Laugh'], ['🎉', 'Celebrate'],
   ['🔥', 'Fire'], ['👀', 'Watching'], ['✅', 'Got it'], ['🙏', 'Thanks'],
+  ['👎', 'Dislike'],
 ]);
+// Existing positions are part of the encrypted reaction format.
 const CHAT_REACTION_EMOJI = [...CHAT_REACTIONS.keys()];
+const CHAT_MESSAGE_REACTIONS = new Map([['👍', 'Like'], ['👎', 'Dislike'], ['❤️', 'Heart']]);
 const reactionAnchors = new Map();
 const reactionAnchorTargets = new Map();
 const chatReactions = new Map();
@@ -10,6 +13,7 @@ const pendingChatReactions = new Map();
 const reactionReference = value => typeof value === 'string' && /^[A-Za-z0-9_+.\/-]{1,80}$/.test(value);
 const reactionConnection = id => networks.find(network => network.config.id === id);
 const reactionEnabled = id => reactionConnection(id)?.reactions === true;
+const reactionAllows = (id, emoji) => emoji !== '👎' || reactionConnection(id)?.reaction_dislike === true;
 const reactionFold = (id, target) => _chanKeyFold(id)(target);
 const reactionKey = (id, target, reference, encrypted) => JSON.stringify([id, reactionFold(id,target), reference, encrypted]);
 const reactionAnchorKey = (id, msgId) => `${id}/${msgId}`;
@@ -69,15 +73,26 @@ function clearEncryptedChatReactions() {
   for (const connId of changed) refreshReactionRows(connId);
 }
 
-function reactionSupport(connId, enabled) {
+function reactionSupport(connId, enabled, dislike = false) {
   const network = reactionConnection(connId);
-  if (network) network.reactions = enabled;
+  if (network) {
+    network.reactions = enabled;
+    network.reaction_dislike = enabled && dislike;
+  }
   if (!enabled) resetChatReactions(connId);
+  else if (!dislike) {
+    for (const [id,pending] of pendingChatReactions) {
+      if (pending.connId===connId && pending.emoji==='👎') pendingChatReactions.delete(id);
+    }
+    for (const [key,state] of chatReactions) {
+      if (state.connId===connId && state.entries.delete('👎') && !state.entries.size) chatReactions.delete(key);
+    }
+  }
   refreshReactionRows(connId);
 }
 
 function applyChatReaction(connId, target, reference, emoji, remove, sender, own, encrypted) {
-  if (!reactionEnabled(connId) || !reactionReference(reference) || !CHAT_REACTIONS.has(emoji)) return;
+  if (!reactionEnabled(connId) || !reactionAllows(connId,emoji) || !reactionReference(reference) || !CHAT_REACTIONS.has(emoji)) return;
   const key = reactionKey(connId,target,reference,encrypted);
   let state = chatReactions.get(key);
   if (!state) {
@@ -150,7 +165,7 @@ function reactionMode(connId, target) {
 }
 
 async function sendChatReaction(connId, target, reference, emoji, remove, encrypted) {
-  if (!reactionEnabled(connId) || !reactionReference(reference) || !CHAT_REACTIONS.has(emoji)) return;
+  if (!reactionEnabled(connId) || !reactionAllows(connId,emoji) || !reactionReference(reference) || !CHAT_REACTIONS.has(emoji)) return;
   if (!_wsReady()) { showToast('Connect to IRC to react.'); return; }
   const foldedTarget = reactionFold(connId,target);
   if (pendingChatReactions.size >= 64 || [...pendingChatReactions.values()].some(p =>
@@ -167,7 +182,7 @@ async function sendChatReaction(connId, target, reference, emoji, remove, encryp
       if (mode !== 'dm' && mode !== 'psk') { showToast('Unlock encrypted chat to react.'); return; }
       if (!encryptedReactionReference(reference)) return;
       const wire = await e2eEncryptReaction(target,JSON.stringify({v:1,ref:reference,emoji:CHAT_REACTION_EMOJI.indexOf(emoji),remove:remove?1:0}),connId,mode);
-      if (E2E._lockGen !== generation || reactionMode(connId,target) !== mode || !reactionEnabled(connId)) {
+      if (E2E._lockGen !== generation || reactionMode(connId,target) !== mode || !reactionEnabled(connId) || !reactionAllows(connId,emoji)) {
         showToast('Encrypted chat is unavailable.'); return;
       }
       const body = btoa(wire).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
@@ -191,10 +206,79 @@ function receiveReactionResult({request_id,error}) {
   showToast(error);
 }
 
-function mountChatReactions(row, message, conversation) {
-  if (!conversation || !['privmsg','action'].includes(message.kind)) return;
+let openMessageActions = null;
+
+function closeChatMessageActions(restoreFocus = false) {
+  if (!openMessageActions) return;
+  const {row, menu} = openMessageActions;
+  openMessageActions = null;
+  menu.remove();
+  if (restoreFocus && row.isConnected) row.focus({preventScroll:true});
+}
+
+document.addEventListener('click',event=>{
+  if (openMessageActions && !openMessageActions.row.contains(event.target)) closeChatMessageActions();
+});
+
+document.addEventListener('keydown',event=>{
+  if (event.key !== 'Escape' || !openMessageActions?.menu.isConnected) return;
+  if (!openMessageActions.row.contains(event.target)) { closeChatMessageActions(); return; }
+  closeChatMessageActions(true);
+  event.preventDefault();
+  event.stopImmediatePropagation();
+},true);
+
+document.addEventListener('focusin',event=>{
+  if (openMessageActions && !openMessageActions.row.contains(event.target)) closeChatMessageActions();
+});
+
+document.addEventListener('selectionchange',()=>{
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && openMessageActions?.row.contains(selection.anchorNode)) {
+    closeChatMessageActions();
+  }
+});
+
+function mountChatMessageActions(row, message, conversation) {
+  if (!conversation || message.from === '*' || !['privmsg','action'].includes(message.kind) ||
+      (message._dmHistoryState && message._dmHistoryState!=='ready')) return;
   row._chatReaction = {message, connId:conversation.conn_id||conversation.connId, target:message._tgt||conversation.target};
+  row.tabIndex = -1;
+  row.setAttribute('aria-keyshortcuts','Enter Space');
+  row.addEventListener('click',event=>{
+    if (event.button !== 0 || event.defaultPrevented || event.detail > 1 ||
+        event.target.closest('a,button,input,label,select,textarea,summary,audio,video,img,iframe,[contenteditable],[role="button"],[data-nick],[data-cryptirc-click],.msg-link-preview,.tweet-card') ||
+        window.getSelection()?.isCollapsed === false) return;
+    toggleChatMessageActions(row,event.detail === 0);
+  });
+  row.addEventListener('keydown',event=>{
+    if (event.target !== row || !['Enter',' '].includes(event.key) || event.repeat) return;
+    event.preventDefault();
+    toggleChatMessageActions(row,true);
+  });
   renderReactionRow(row);
+}
+
+for (const id of ['chat-area','split-chat-area']) {
+  const pane = document.getElementById(id);
+  pane?.addEventListener('keydown',event=>{
+    const focused = document.activeElement;
+    if (focused!==pane && !focused._chatReaction) return;
+    const key = event.key;
+    if (!['ArrowUp','ArrowDown','Home','End','Enter',' '].includes(key) || event.altKey || event.ctrlKey || event.metaKey) return;
+    const rows = [...pane.querySelectorAll('.msg-row[tabindex="-1"]')];
+    if (!rows.length) return;
+    const index = rows.indexOf(focused);
+    if (index>=0 && (key==='Enter'||key===' ')) return; // The row handles activation.
+    event.preventDefault();
+    if (index<0 && (key==='Enter'||key===' ')) {
+      toggleChatMessageActions(rows.at(-1),true);
+      return;
+    }
+    const next = key==='Home'?0:key==='End'?rows.length-1:key==='ArrowDown'?index+1:index<0?rows.length-1:index-1;
+    closeChatMessageActions();
+    rows[Math.max(0,Math.min(rows.length-1,next))].focus();
+  });
 }
 
 function refreshReactionRows(connId,target,reference,msgId) {
@@ -209,67 +293,97 @@ function refreshReactionRows(connId,target,reference,msgId) {
   }
 }
 
-function renderReactionRow(row) {
+function messageReactionFor(row) {
   const {message,connId,target} = row._chatReaction;
   const anchor = reactionAnchors.get(reactionAnchorKey(connId,message.id));
-  const old = row.querySelector('.message-reactions');
-  if (!reactionEnabled(connId) || !anchor || reactionFold(connId,anchor.target) !== reactionFold(connId,target)) {
-    old?.remove();
-    return;
-  }
+  if (!reactionEnabled(connId) || !anchor || reactionFold(connId,anchor.target) !== reactionFold(connId,target)) return null;
   const encrypted = message.encrypted === true;
   const reference = encrypted ? message.reactionRef : anchor.reference;
-  if (!reference) { old?.remove(); return; }
+  if (!reference) return null;
   const state = chatReactions.get(reactionKey(connId,target,reference,encrypted));
-  const counts = state?.encrypted === encrypted ? state.entries : new Map();
+  return {connId,target,reference,encrypted,counts:state?.entries};
+}
+
+function reactToMessage(row,emoji) {
+  const reaction = messageReactionFor(row);
+  if (!reaction) return;
+  const {connId,target,reference,encrypted,counts} = reaction;
+  void sendChatReaction(connId,target,reference,emoji,counts?.get(emoji)?.has('')===true,encrypted);
+}
+
+function toggleChatMessageActions(row,keyboard) {
+  const wasOpen = openMessageActions?.row === row;
+  closeChatMessageActions(wasOpen && keyboard);
+  if (wasOpen) return;
   const body = row.querySelector('.msg-body');
   if (!body) return;
-  const controls = document.createElement('span');
-  controls.className = 'message-reactions';
   const menu = document.createElement('span');
-  menu.className = 'reaction-choices';
-  menu.hidden = !old || old.querySelector('.reaction-choices')?.hidden !== false;
+  menu.className = 'message-actions';
   menu.setAttribute('role','group');
-  menu.setAttribute('aria-label','Choose a reaction');
-  const toggle = document.createElement('button');
-  toggle.type = 'button';
-  toggle.className = 'reaction-picker';
-  toggle.textContent = '☺';
-  toggle.title = 'React to message';
-  toggle.setAttribute('aria-label','React to message');
-  toggle.setAttribute('aria-expanded',String(!menu.hidden));
-  toggle.onclick = () => {
-    menu.hidden = !menu.hidden;
-    toggle.setAttribute('aria-expanded',String(!menu.hidden));
+  menu.setAttribute('aria-label','Message actions');
+  const reply = document.createElement('button');
+  reply.type = 'button';
+  reply.textContent = 'Reply';
+  reply.onclick = () => {
+    const {message,connId,target} = row._chatReaction;
+    closeChatMessageActions();
+    setReply(message.from,message.text,{conn_id:connId,target});
   };
-  for (const [emoji,label] of CHAT_REACTIONS) {
-    const names = counts.get(emoji);
-    const pressed = names?.has('') === true;
+  menu.append(reply);
+  syncMessageReactionChoices(row,menu,messageReactionFor(row));
+  openMessageActions = {row,menu};
+  body.append(menu);
+  if (keyboard) reply.focus({preventScroll:true});
+  menu.scrollIntoView({block:'nearest',inline:'nearest'});
+}
+
+function syncMessageReactionChoices(row,menu,reaction) {
+  for (const [emoji,label] of CHAT_MESSAGE_REACTIONS) {
+    const existing = [...menu.querySelectorAll('.reaction-choice')].find(button=>button.dataset.emoji===emoji);
+    if (!reaction || !reactionAllows(reaction.connId,emoji)) { existing?.remove(); continue; }
+    const pressed = String(reaction.counts?.get(emoji)?.has('')===true);
+    if (existing) { existing.setAttribute('aria-pressed',pressed); continue; }
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'reaction-choice';
-    button.textContent = emoji;
-    button.title = label;
+    button.dataset.emoji = emoji;
+    button.textContent = `${emoji} ${label}`;
     button.setAttribute('aria-label',label);
-    button.setAttribute('aria-pressed',String(pressed));
-    button.onclick = () => {
-      menu.hidden = true;
-      toggle.setAttribute('aria-expanded','false');
-      void sendChatReaction(connId,target,reference,emoji,pressed,encrypted);
+    button.setAttribute('aria-pressed',pressed);
+    button.onclick = event => {
+      closeChatMessageActions(event.detail===0);
+      reactToMessage(row,emoji);
     };
     menu.append(button);
-    if (names?.size) {
-      const chip = button.cloneNode(false);
-      chip.className = 'reaction-count';
-      chip.textContent = `${emoji} ${names.size}`;
-      const actors = [...names.values()].join(', ');
-      chip.title = actors;
-      chip.setAttribute('aria-label',`${label}, ${names.size}: ${actors}`);
-      chip.onclick = button.onclick;
-      controls.append(chip);
-    }
   }
-  controls.append(toggle,menu);
+}
+
+function renderReactionRow(row) {
+  const reaction = messageReactionFor(row);
+  if (openMessageActions?.row === row) {
+    syncMessageReactionChoices(row,openMessageActions.menu,reaction);
+  }
+  const old = row.querySelector('.message-reactions');
+  const body = row.querySelector('.msg-body');
+  if (!reaction?.counts?.size || !body) { old?.remove(); return; }
+  const controls = document.createElement('span');
+  controls.className = 'message-reactions';
+  for (const [emoji,names] of reaction.counts) {
+    if (!CHAT_REACTIONS.has(emoji)) continue;
+    const actionable = reactionAllows(reaction.connId,emoji) && (CHAT_MESSAGE_REACTIONS.has(emoji) || names.has(''));
+    const chip = document.createElement(actionable ? 'button' : 'span');
+    chip.className = 'reaction-count';
+    chip.textContent = `${emoji} ${names.size}`;
+    const actors = [...names.values()].join(', ');
+    chip.title = actors;
+    chip.setAttribute('aria-label',`${CHAT_REACTIONS.get(emoji)}, ${names.size}: ${actors}`);
+    if (actionable) {
+      chip.type = 'button';
+      chip.setAttribute('aria-pressed',String(names.has('')));
+      chip.onclick = ()=>{ closeChatMessageActions(); reactToMessage(row,emoji); };
+    }
+    controls.append(chip);
+  }
   if (old) old.replaceWith(controls); else body.append(controls);
 }
 

@@ -128,8 +128,8 @@ async function clickVisible(browser, selector) {
   await browser.send('Input.dispatchMouseEvent', {type:'mouseReleased', button:'left', clickCount:1, ...point});
 }
 
-const row = (browser, net, target, text) => browser.evaluate(
-  'getBuf(' + q(net) + ',' + q(target) + ').some(m=>m.text===' + q(text) + ')');
+const row = (browser, net, target, text, kind) => browser.evaluate(
+  `getBuf(${q(net)},${q(target)}).some(m=>m.text===${q(text)}${kind ? `&&m.kind===${q(kind)}` : ''})`);
 const hasKey = (browser, channel) => browser.evaluate('!!E2E.channelKeys[' + q(channel) + ']');
 
 async function acceptIdentity(browser, waitFor) {
@@ -252,7 +252,84 @@ export async function checkE2eChat({
   check('Double Ratchet works in both directions on the linked IRC testnet', true);
   if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
     await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:dm,target:'PM',emoji:'👍'});
+    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:dm,target:'PM thumbs-down',emoji:'👎'});
   }
+  const dmAction='ratchet action '+stamp;
+  await compose(peer,networkB,owner,'/me '+dmAction);
+  await waitFor(()=>row(browser,networkA,other,dmAction,'action'),'initiator decrypted a ratchet action');
+  await reopen(browser,waitFor,'window._appShown && E2E.keyReady && E2E.identityReady','same encrypted device reopened for history');
+  await browser.evaluate('setActive('+q(networkA)+','+q(other)+')');
+  check('remembered device reopens sent and received Signal DMs from history',await waitFor(()=>browser.evaluate(`(()=>{
+    const visible=document.getElementById('chat-area').textContent;
+    return visible.includes(${q(dm)})&&visible.includes(${q(reply)});
+  })()`),'visible decrypted DM history after reopen'));
+  check('reopened Signal history preserves an encrypted action',await waitFor(
+    ()=>row(browser,networkA,other,dmAction,'action'),'decrypted action after reopen'));
+  check('reopened Signal history uses no unlock popup or visible protocol frames',await browser.evaluate(`
+    !(${promptOpen}) && !/\\[e2e(?:dm|x3dh)/.test(document.getElementById('chat-area').textContent)
+  `));
+  check('Signal history is encrypted on disk, scoped to one conversation, and clearable',await browser.evaluate(`(async()=>{
+    const cid=${q(networkA)}, target='local-history-fixture', peer='fixture';
+    const wire='[e2edm2]archive-fixture', privateText='fixture local DM only';
+    const lines=[{from:peer,text:wire}];
+    await e2eRememberDmHistory(cid,target,peer,wire,privateText);
+    const key=await _e2eHistoryKey(_e2eUser(),E2E.e2eEncKey);
+    const id=await _e2eHistoryId(key,['message',_e2eHistoryScope(cid,target),peer,wire]);
+    const record=await _e2eIdbGet(['dm-history',_e2eUser(),id]);
+    const index=JSON.stringify(await _e2eIdbGet(['dm-history-index',_e2eUser()]));
+    const right=(await e2eReadDmHistory(cid,target,lines)).get(lines[0])===privateText;
+    const wrongNetwork=(await e2eReadDmHistory('other-network',target,lines)).size===0;
+    const wrongSender=(await e2eReadDmHistory(cid,target,[{from:'other',text:wire}])).size===0;
+    const oldWrite=e2eRememberDmHistory(cid,target,peer,wire,privateText);
+    const otherWrite=e2eRememberDmHistory(cid,'other-fixture',peer,wire,privateText);
+    await Promise.all([oldWrite,otherWrite,e2eClearDmHistory(cid,target)]);
+    const cleared=(await e2eReadDmHistory(cid,target,lines)).size===0;
+    const retained=(await e2eReadDmHistory(cid,'other-fixture',lines)).get(lines[0])===privateText;
+    await e2eClearDmHistory(cid,'other-fixture');
+    return record instanceof Uint8Array&&!new TextDecoder().decode(record).includes(privateText)&&
+      !index.includes(cid)&&!index.includes(target)&&right&&wrongNetwork&&wrongSender&&cleared&&retained;
+  })()`));
+  check('older Signal ciphertext without a local copy appears as an unavailable message',await browser.evaluate(`(async()=>{
+    const x=await _decryptLogLines(${q(other)},[{from:${q(other)},text:'[e2edm2]prior'}],${q(networkA)});
+    return x[0].encrypted&&x[0].text===DM_HISTORY_UNAVAILABLE;
+  })()`));
+  check('the optimistic Signal row can be masked before its IRC echo arrives',await browser.evaluate(`(()=>{
+    const cid=${q(networkA)}, target='history-pending-fixture', original=rateLimitedSend;
+    const m={from:getNick(cid),text:'optimistic fixture',kind:'action',encrypted:true};
+    rateLimitedSend=()=>{};
+    try {
+      _queueChatSend({conn_id:cid,raw:'PRIVMSG '+target+' :[e2edm2]pending'},m);
+      return m._dmHistoryWire==='[e2edm2]pending'&&m._dmHistoryState==='ready'&&!m.id;
+    } finally { rateLimitedSend=original; }
+  })()`));
+  check('encryption-like text in channel logs remains ordinary visible text',await browser.evaluate(`(async()=>{
+    const lines=['[e2edm2] ordinary channel text','[e2ex3dh] ordinary channel text'].map(text=>({text,from:'fixture',kind:'privmsg'}));
+    const processed=await _decryptLogLines(${q(channel)},lines,${q(networkA)});
+    return processed.length===2&&processed.every((row,i)=>row.text===lines[i].text&&!row.encrypted&&!row._e2eSetupLine);
+  })()`));
+  check('distinct encrypted rows in the same second survive sync while exact wire copies are deduplicated',await browser.evaluate(`(async()=>{
+    const cid=${q(networkA)}, target='history-replay-fixture', ts=Math.floor(Date.now()/1000);
+    const log=(id,text)=>({id,ts,from:'fixture',text,kind:'privmsg'});
+    try {
+      await appendSyncLines(cid,target,[log(101,'[e2edm2]one'),log(102,'[e2edm2]two'),log(103,'[e2edm2]one')]);
+      const buf=getBuf(cid,target);
+      return buf.map(m=>m.id).join(',')==='101,102'&&
+        applyHeldDmHistory(cid,target,'fixture','[e2edm2]one','authenticated fixture')&&
+        buf.length===2&&buf[0].id===101&&buf[0].text==='authenticated fixture';
+    } finally { delete buffers[bk(cid,target)]; delete _lastMsgId[bk(cid,target)]; }
+  })()`));
+  check('an obsolete wrapped history index key is replaced on first use',await browser.evaluate(`(async()=>{
+    const cid=${q(networkA)}, target='history-index-reset-fixture', user=_e2eUser();
+    const lines=[{from:'fixture',text:'[e2edm2]replacement-index'}];
+    const stale=crypto.getRandomValues(new Uint8Array(60));
+    if(!await _e2eIdbPut(['dm-history-id-key',user],stale)) return false;
+    _e2eHistoryKeys.delete(E2E.e2eEncKey);
+    try {
+      await e2eRememberDmHistory(cid,target,lines[0].from,lines[0].text,'new cache entry');
+      const active=await _e2eIdbGet(['dm-history-id-key',user]);
+      return _e2eCmpBytes(active,stale)!==0&&(await e2eReadDmHistory(cid,target,lines)).get(lines[0])==='new cache entry';
+    } finally { await e2eClearDmHistory(cid,target); }
+  })()`));
   const pinnedFingerprint=await browser.evaluate(`E2E.trustStore[${peerKey}].fingerprint`);
   check('confirmed peer can be marked verified on this device',
     await browser.evaluate(`e2eMarkVerified(${q(other)},${q(networkA)})`));
@@ -278,7 +355,8 @@ export async function checkE2eChat({
     !otherWs.events.some(ev => ev.text?.includes(channelText)));
   if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
     await peer.evaluate('setActive('+q(networkB)+','+q(channel)+')');
-    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:channelText,target:'channel',emoji:'🎉'});
+    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:channelText,target:'channel',emoji:'❤️'});
+    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:channelText,target:'channel thumbs-down',emoji:'👎'});
   }
   const action = 'encrypted action '+stamp;
   await compose(browser, networkA, channel, '/me '+action);
@@ -548,17 +626,28 @@ export async function checkCrossInstanceE2e({browser,peer,check,waitFor,owner,ow
   await compose(browser,networkA,remote,first);
   await waitFor(()=>browser.evaluate("!!document.querySelector('#e2e-id-accept:not(:disabled)')"),'cross-instance automatic identity prompt');
   check('the bridge holds the first DM for identity confirmation',!remoteWs.events.some(e=>e.text?.includes(first)));
+  check('a DM awaiting automatic encryption stays available in local input history without syncing',
+    await browser.evaluate(`inputHistory.includes(${q(first)})&&!gatherPreferences().inputHistory.includes(${q(first)})`));
+  const prefsAtStart=browser.frames.length;
+  await browser.evaluate("_prefsAckSig='';flushPrefsToServer()");
+  await waitFor(()=>browser.frames.slice(prefsAtStart).some(frame=>JSON.parse(frame).type==='save_preferences'),
+    'preferences sent during automatic encryption setup');
   await acceptIdentity(browser,waitFor);
   await acceptIdentity(peer,waitFor);
   await waitFor(()=>row(peer,remoteNetwork,owner,first),'cross-instance peer decrypted first message');
+  // The browser and the test observer each have their own WebSocket.
+  await remoteWs.wait(e=>e.type==='irc_message'&&e.from===owner&&e.text?.startsWith('[e2edm2]'),
+    'cross-instance observer received IRC ciphertext');
   check('linked UnrealIRCd servers carry ciphertext between independent CryptIRC instances',
-    remoteWs.events.some(e=>e.type==='irc_message'&&e.from===owner&&e.text?.startsWith('[e2edm2]')) &&
-    !remoteWs.events.some(e=>e.text?.includes(first)) && !browser.frames.slice(framesAtStart).some(frame=>frame.includes(first)));
+    !remoteWs.events.some(e=>e.text?.includes(first)));
+  const plaintextTypes=browser.frames.slice(framesAtStart).filter(frame=>frame.includes(first)).map(frame=>JSON.parse(frame).type);
+  check('the first cross-instance DM stays out of browser sends in plaintext'+
+    (plaintextTypes.length ? ' (seen in '+plaintextTypes.join(', ')+')' : ''),plaintextTypes.length===0);
   const reply = 'encrypted cross-instance reply '+stamp;
   await compose(peer,remoteNetwork,owner,reply);
   check('the cross-instance Double Ratchet decrypts the reply',await waitFor(()=>row(browser,networkA,remote,reply),'cross-instance reply'));
   if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
-    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:first,target:'cross-instance PM',emoji:'✅'});
+    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:first,target:'cross-instance PM',emoji:'❤️'});
   }
   check('bridge discovery is private to the intended IRC users',!otherWs.events.some(e=>e.type==='e2e_bundle'&&e.username===remote));
   const alternate = 'deadbeef-1234-4cce-8b52-555555555555';

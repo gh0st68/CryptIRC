@@ -821,7 +821,7 @@ pub enum ServerEvent {
     LagUpdate        { conn_id: String, ms: u64 },
     CtcpRequest      { conn_id: String, from: String, command: String, prefix: Option<String> },
     KeepNickUpdated  { conn_id: String, nick: Option<String>, imported: bool },
-    ReactionSupport  { conn_id: String, enabled: bool },
+    ReactionSupport  { conn_id: String, enabled: bool, dislike: bool },
     ReactionAnchor   { conn_id: String, target: String, msg_id: u64, reference: String },
     ReactionResult   { request_id: String, error: Option<String> },
     IrcReaction      { conn_id: String, target: String, reference: String, from: String, prefix: Option<String>, emoji: String, remove: bool, own: bool },
@@ -1003,6 +1003,8 @@ pub struct NetworkState {
     pub connected:    bool,
     #[serde(default)]
     pub reactions:    bool,
+    #[serde(default)]
+    pub reaction_dislike: bool,
     pub nick:         String,
     pub channels:     Vec<ChannelState>,
     pub lag_ms:       Option<u64>,
@@ -8621,7 +8623,7 @@ impl AppState {
             let conn = if self.owns_conn(username, &cfg.id) {
                 self.connections.get(&cfg.id).map(|c| c.clone())
             } else { None };
-            let (connected, nick, channels, lag_ms, reactions) = if let Some(conn) = conn {
+            let (connected, nick, channels, lag_ms, (reactions, reaction_dislike)) = if let Some(conn) = conn {
                 let c   = conn.lock().await;
                 // The channel's display spelling (as the server announced it), not the
                 // map key: that is a case FOLD (#92), which for `#Foo[Bar]` is
@@ -8631,8 +8633,8 @@ impl AppState {
                 let chs = c.channels.values().map(|cs| ChannelState {
                     name: cs.name.clone(), topic: cs.topic.clone(), names: cs.names.clone()
                 }).collect();
-                (c.connected, c.nick.clone(), chs, c.lag_ms, reactions::available(&c))
-            } else { (false, cfg.nick.clone(), vec![], None, false) };
+                (c.connected, c.nick.clone(), chs, c.lag_ms, reactions::support(&c))
+            } else { (false, cfg.nick.clone(), vec![], None, (false, false)) };
 
             // Include cert info (r4 C2-3: not another account's, see above)
             let has_cert = !held_by_other && self.certs.exists(&cfg.id).await;
@@ -8641,7 +8643,7 @@ impl AppState {
             } else { None };
 
             let casemapping = crate::irc::known_casemapping(&cfg.id).map(|m| m.token().to_string());
-            out.push(NetworkState { config: cfg, connected, reactions, nick, channels, lag_ms, has_cert, cert_fingerprint, casemapping });
+            out.push(NetworkState { config: cfg, connected, reactions, reaction_dislike, nick, channels, lag_ms, has_cert, cert_fingerprint, casemapping });
         }
         out
     }

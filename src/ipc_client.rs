@@ -376,6 +376,7 @@ pub(crate) fn apply_session_registration(c: &mut irc::IrcConnection, facts: Opti
     if let Some(facts) = facts { c.keepnick_retry.learn_limit(&facts.isupport); }
     if let Some(facts) = facts.filter(|f| !f.truncated && f.cap_ls_done) {
         c.reactions.advertised = facts.caps.iter().any(|cap| cap == crate::reactions::CAP);
+        c.reactions.dislike_advertised = facts.caps.iter().any(|cap| cap == crate::reactions::DISLIKE_CAP);
     }
     // Choose once: temporarily applying a stale, wider facts mapping can merge
     // distinct channels before the authoritative mapping has a chance to correct it.
@@ -537,7 +538,7 @@ async fn handle_message(
                 let reaction_change;
                 {
                     let mut c = conn.lock().await;
-                    let reaction_previous = crate::reactions::available(&c);
+                    let reaction_previous = crate::reactions::support(&c);
                     // Preserve the legacy registered→unregistered metadata reset,
                     // before merging the incoming session's retained facts.
                     if c.registered && !registered { c.avx.reset(); }
@@ -711,8 +712,8 @@ async fn handle_message(
                     }
                     if !resync.is_empty() { c.resync_busy = true; }
                     resync_gen = c.resync_gen;
-                    let enabled = crate::reactions::available(&c);
-                    reaction_change = (reaction_previous != enabled).then_some(enabled);
+                    let support = crate::reactions::support(&c);
+                    reaction_change = (reaction_previous != support).then_some(support);
                 }
                 // SyncSlot may move the enabling snapshot past its live ACK. Either
                 // arrival initializes once. Attach waits for continuity/record checks so
@@ -728,8 +729,8 @@ async fn handle_message(
                         conn_id: conn_id.clone(), server, nick: connected_nick,
                     });
                 }
-                if let Some(enabled) = reaction_change {
-                    state.send_to_user(&username, ServerEvent::ReactionSupport { conn_id: conn_id.clone(), enabled });
+                if let Some((enabled, dislike)) = reaction_change {
+                    state.send_to_user(&username, ServerEvent::ReactionSupport { conn_id: conn_id.clone(), enabled, dislike });
                 }
                 if let Some(ms) = lag_ms {
                     state.send_to_user(&username, ServerEvent::LagUpdate { conn_id: conn_id.clone(), ms });

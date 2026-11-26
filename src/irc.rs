@@ -1459,12 +1459,12 @@ pub async fn dispatch_line(
                 if matches!(sub, "LS" | "NEW") { c.e2e_bridge.advertised = true; }
                 if sub == "DEL" { c.e2e_bridge = Default::default(); }
             }
-            let prior_reactions = crate::reactions::available(&*conn.lock().await);
-            if !replayed && caps.split_ascii_whitespace().any(|cap| cap == crate::reactions::CAP) {
+            let prior_reactions = {
                 let mut c = conn.lock().await;
-                if matches!(sub, "LS" | "NEW") { c.reactions.advertised = true; }
-                if sub == "DEL" { c.reactions = Default::default(); }
-            }
+                let prior = crate::reactions::support(&c);
+                if !replayed { crate::reactions::note_capabilities(&mut c, sub, &caps); }
+                prior
+            };
             match sub {
                 // Avatars: classify this connection from what it negotiated (behind a bouncer /
                 // CAP negotiation completed) — avatar::note_cap_line, discover rule 3.
@@ -1511,9 +1511,9 @@ pub async fn dispatch_line(
                 }
                 _ => {}
             }
-            let enabled = crate::reactions::available(&*conn.lock().await);
-            if !replayed && enabled != prior_reactions {
-                send(ServerEvent::ReactionSupport { conn_id: conn_id.to_string(), enabled });
+            let (enabled, dislike) = crate::reactions::support(&*conn.lock().await);
+            if !replayed && (enabled, dislike) != prior_reactions {
+                send(ServerEvent::ReactionSupport { conn_id: conn_id.to_string(), enabled, dislike });
             }
         }
 

@@ -425,7 +425,6 @@ function _histTargetsOf(raw,act){
   for(const x of tg.split(',')) if(x) out.push(x);
   return out;
 }
-function _histLineIsE2e(raw,act){ const cid=act&&act.conn_id; return !_e2eKnown() || _histTargetsOf(raw,act).some(t=>_isE2eConversation(t,cid)); }
 // r3 (codex-p3 HIGH app.js:13542): lines typed while a target WAS encrypted must stay
 // local for good — also after "/encrypt off" removes the last E2E conversation (the
 // "no E2E conversation at all" shortcut below used to upload them then). Two records:
@@ -1266,7 +1265,18 @@ const _sentChatRows=new WeakMap();      // IRC echo correlation on reaction-enab
 // each recipient's buffer — the first row is the tracked one, the others follow its state.
 const _rowTwins=new WeakMap();          // first row -> [the other recipients' rows]
 function _queueChatSend(payload,msg){
-  if(reactionEnabled(payload.conn_id)) _sentChatRows.set(payload,msg);
+  let firstDmWire=false;
+  if(msg.encrypted&&!msg._dmHistoryWire&&typeof e2eIsDmHistoryWire==='function'){
+    const separator=payload.raw.indexOf(' :');
+    const wire=separator>=0 ? payload.raw.slice(separator+2) : '';
+    if(e2eIsDmHistoryWire(wire)){
+      firstDmWire=true;
+      msg._dmHistoryWire=wire;
+      msg._dmHistoryState=E2E.keyReady?'ready':'locked';
+      if(!E2E.keyReady){msg.text=DM_HISTORY_LOCKED;if(msg.kind==='action')msg.kind='privmsg';}
+    }
+  }
+  if(firstDmWire||reactionEnabled(payload.conn_id)) _sentChatRows.set(payload,msg);
   _rateRows.set(payload,msg);
   rateLimitedSend(payload);
   if(_rateQueue.includes(payload) && !_wsReady()) msg.sendState='pending';
@@ -1943,7 +1953,11 @@ function handleEvent(ev) {
     case 'vault_locked': if(typeof e2eOnVaultLocked==='function') e2eOnVaultLocked(); _onVaultLocked(); break;
     case 'state':
       for(const net of networks){
-        if(net.reactions && !ev.networks?.some(next=>next.config.id===net.config.id && next.reactions)) reactionSupport(net.config.id,false);
+        const next=ev.networks?.find(item=>item.config.id===net.config.id);
+        if(net.reactions&&!next?.reactions) reactionSupport(net.config.id,false);
+        else if(net.reactions&&next?.reactions&&(net.reaction_dislike===true)!==(next.reaction_dislike===true)){
+          reactionSupport(net.config.id,true,next.reaction_dislike===true);
+        }
       }
       networks=ev.networks||[];
       importKeepNicks();
@@ -2085,7 +2099,7 @@ function handleEvent(ev) {
       if(ev.ms<ircLatencyRecoveryThreshold()) highLagNotified.delete(ev.conn_id);
       if(active&&active.conn_id===ev.conn_id) updateLagDisplay();
       break;
-    case 'reaction_support': reactionSupport(ev.conn_id,ev.enabled===true); break;
+    case 'reaction_support': reactionSupport(ev.conn_id,ev.enabled===true,ev.dislike===true); break;
     case 'reaction_anchor': rememberReactionAnchor(ev); break;
     case 'reaction_result': receiveReactionResult(ev); break;
     case 'irc_reaction': receiveChatReaction(ev); break;
@@ -2117,7 +2131,7 @@ function handleEvent(ev) {
       const idx=window._sentMsgs.findIndex(s=>s.conn===ev.conn_id&&s.target===ev.target&&s.text===ev.text);
       // An X3DH header precedes the first encrypted message. It never has a row
       // of its own, so it must not claim the optimistic row's ID.
-      if(typeof ev.text==='string' && ev.text.startsWith('[e2ex3dh]')){
+      if(_isDMTarget(ev.target)&&typeof ev.text==='string'&&ev.text.startsWith('[e2ex3dh]')){
         if(idx>=0) window._sentMsgs.splice(idx,1);
         break;
       }
@@ -2185,6 +2199,8 @@ function handleEvent(ev) {
         // iteration's body throws (e.g. a malformed event), the chain would stay
         // permanently rejected and silently drop ALL later messages. This resets it.
         _e2eEnqueue(_eConn,_eTarget,async()=>{
+          const echoBuf=getBuf(_eConn,_eTarget), generation=window.E2E?._lockGen;
+          const dmWire=_isDMTarget(_eTarget)&&typeof e2eIsDmHistoryWire==='function'&&e2eIsDmHistoryWire(_eText);
           let dtext=_eText, enc=false;
           if(typeof _eText==='string'&&_eText.startsWith('sd8~')&&typeof channelDecrypt==='function'){
             try{
@@ -2192,23 +2208,33 @@ function handleEvent(ev) {
               if(kn){ const pt=await channelDecrypt(kn,_eText,_eFrom); if(pt!==null){dtext=pt;enc=true;} }
             }catch(_){}
           }
-          if(enc&&typeof e2eSplitAction==='function'){ const _a=e2eSplitAction(dtext); if(_a.action){ dtext=_a.text; _eKind='Action'; } }
+          const dmHistory = dmWire ? (await _decryptLogLines(_eTarget,[{text:_eText,from:_eFrom,kind:_eKind==='Notice'?'notice':'privmsg'}],_eConn))[0] : null;
+          if(dmHistory){dtext=dmHistory.text;enc=true;_eKind=dmHistory.kind==='action'?'Action':dmHistory.kind==='notice'?'Notice':'Privmsg';}
+          if(enc&&!dmHistory&&typeof e2eSplitAction==='function'){ const _a=e2eSplitAction(dtext); if(_a.action){ dtext=_a.text; _eKind='Action'; } }
+          const reactionRef=enc&&reactionEnabled(_eConn)?await hashChatReactionReference(_eText):null;
+          if(buffers[bk(_eConn,_eTarget)]!==echoBuf) return;
+          if(dmHistory&&(!E2E.keyReady||E2E._lockGen!==generation)){
+            Object.assign(dmHistory,dmHistoryRow(dmHistory,undefined,false));
+            dtext=dmHistory.text; _eKind=dmHistory.kind==='notice'?'Notice':'Privmsg';
+          }
           if(_ePre) dtext=_ePre+dtext;
-          const echoBuf=getBuf(_eConn,_eTarget);
-          const echoKey=_eTs+'|'+_eFrom+'|'+(dtext||'').slice(0,50);
-          if(echoBuf.some(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)===echoKey)) return;
+          const echoKey=_historyRowKey({ts:_eTs,from:_eFrom,text:dtext,_dmHistoryWire:dmHistory?._dmHistoryWire});
+          if(echoBuf.some(m=>(_eId&&m.id===_eId)||_historyRowKey(m)===echoKey)) return;
           // A self-sent optimistic row (id 0, client-clock ts) that missed the
           // _sentMsgs window lands here; reconcile by stamping it rather than adding
           // a 2nd copy (the exact-ts key above can't catch the client/server skew).
-          if(_reconcileSelfRow(echoBuf,_eFrom,dtext,_eId,_eTs)) return;
+          if((!dmHistory||dmHistory._dmHistoryState==='ready')&&_reconcileSelfRow(echoBuf,_eFrom,dtext,_eId,_eTs)) return;
           // own:true — an IrcEcho is always THIS account's own send (from some
           // device); it must never bump unread or fire a PM sound/notification,
           // even if the local nick tracker is stale/case-mismatched (see _isOwnMsg).
           addMessage(_eConn,_eTarget,{
             id:_eId, ts:_eTs, from:_eFrom, text:dtext, encrypted:enc, own:true,
             kind:_eKind==='Action'?'action':_eKind==='Notice'?'notice':'privmsg',
-            reactionRef:enc && reactionEnabled(_eConn) ? await hashChatReactionReference(_eText) : null,
+            reactionRef,
+            _dmHistoryWire:dmHistory?._dmHistoryWire,
+            _dmHistoryState:dmHistory?._dmHistoryState,
           });
+          if(dmHistory?._dmHistoryState==='locked') void restoreCachedDmHistory(_eConn,_eTarget);
         });
       }
       break;
@@ -2334,12 +2360,20 @@ function handleEvent(ev) {
             }
           }
         }
+        const dmHistoryWire=(_dr.reactionReady||_dr.historyPending)&&e2eIsDmHistoryWire(_txt)&&ev.target===_realTarget?_txt:null;
+        const dmGeneration=window.E2E?._lockGen;
+        const dmBuffer=dmHistoryWire?getBuf(ev.conn_id,ev.target):null;
+        if(dmHistoryWire&&_dr.reactionReady) void e2eRememberDmHistory(ev.conn_id,_realTarget,ev.from,dmHistoryWire,plaintext);
+        const reactionRef=_dr.reactionReady&&reactionEnabled(ev.conn_id)?await hashChatReactionReference(_txt):null;
+        if(dmBuffer&&buffers[bk(ev.conn_id,ev.target)]!==dmBuffer) return;
+        const dmLocked=dmHistoryWire&&(!E2E.keyReady||dmGeneration!==E2E._lockGen);
+        if(dmLocked) displayText=DM_HISTORY_LOCKED;
         // Host-change announcements ("*** X has changed hostname to Y", sent by the
         // server as from '*') are status noise, not chat. Classify them as 'chghost'
         // so they get the same silent treatment as join/part (no unread/red/sound)
         // and condense, instead of landing as a chat notice.
         const _isHostChange = ev.from==='*' && /^\*\*\* \S+ has changed hostname to /.test(displayText);
-        const _msgKind = _isHostChange ? 'chghost' : ((ev.kind==='Action'||(_act&&_act.action))?'action':ev.kind==='Notice'?'notice':'privmsg');
+        const _msgKind = _isHostChange ? 'chghost' : ((!dmLocked&&(ev.kind==='Action'||(_act&&_act.action)))?'action':ev.kind==='Notice'?'notice':'privmsg');
         // Server/system notices (from '*') are never real mentions — skip detection so
         // they don't turn channels red or spam the Mentions panel.
         // B2: suppress the mentions-inbox/badge SIDE EFFECT only for DETERMINISTIC ring
@@ -2353,7 +2387,8 @@ function handleEvent(ev) {
         const _recordMention = !ev.replayed;
         const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts,_recordMention,ev.msg_id,encrypted);
         // ZNC playback detection — batch old messages silently
-        const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null,_tgt:ev.target};
+        const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null,_tgt:ev.target,
+          _dmHistoryWire:dmHistoryWire,_dmHistoryState:dmHistoryWire?(dmLocked?'locked':_dr.historyPending?'pending':'ready'):undefined};
         // Daemon ring-buffer replay (a cryptirc.service restart reattaching to the
         // live daemon) sets ev.replayed — a DETERMINISTIC signal to take the silent
         // path (render to scrollback, dedup, but no notification/unread/sound),
@@ -2446,12 +2481,14 @@ function handleEvent(ev) {
           encrypted: encrypted,
           mentioned: mentioned,
           prefix: ev.prefix||null,
-          reactionRef:_dr.reactionReady && reactionEnabled(ev.conn_id) ? await hashChatReactionReference(_txt) : null,
+          reactionRef,
+          _dmHistoryWire:zncMsg._dmHistoryWire,
+          _dmHistoryState:zncMsg._dmHistoryState,
         };
         markLiveTranslation(ev.conn_id,ev.target,liveMessage);
         addMessage(ev.conn_id,ev.target,liveMessage);
         if(_msgKind==='privmsg' && !ev.replayed && (encrypted ? plaintext!==null : !ev.text?.startsWith('[e2e'))){
-          playChatEffect(ev.conn_id,ev.target,displayText);
+          if(!dmLocked) playChatEffect(ev.conn_id,ev.target,displayText);
         }
         // Auto-open query for pending WHOIS
         if(window._pendingWhois&&window._pendingWhois[ev.conn_id]){
@@ -3019,6 +3056,7 @@ function handleEvent(ev) {
     case 'data_cleared':
       buffers={}; _historyView=null; conversationScroll.clear(); conversationHistory.clear();
       resetChatReactions();
+      if(typeof e2eClearDmHistory==='function') void e2eClearDmHistory();
       unread.clear();
       mentionUnread.clear();
       for(const k of Object.keys(_lastMsgId)) delete _lastMsgId[k];
@@ -3033,6 +3071,10 @@ function handleEvent(ev) {
       // buffer + sync state on every session so reload/resync can't bring
       // the conversation back.
       const k=bk(ev.conn_id,ev.target);
+      if(typeof e2eClearDmHistory==='function'){
+        void e2eClearDmHistory(ev.conn_id,ev.target);
+        if(ev.target==='status') void e2eClearDmHistory(ev.conn_id,_STATUS_NICK_Q);
+      }
       buffers[k]=[];
       conversationScroll.delete(k);
       conversationHistory.delete(k);
@@ -3588,13 +3630,23 @@ function _resolveChanKeyName(target,cid){
 }
 async function _decryptLogLines(target,lines,cid){
   if(!Array.isArray(lines)||!lines.length) return lines;
-  if(typeof channelDecrypt!=='function') return lines;
-  const keyName=_resolveChanKeyName(target,cid);
-  if(!keyName) return lines; // key not loaded yet — leave ciphertext for the re-decrypt pass on key arrival
+  const keyName=typeof channelDecrypt==='function' ? _resolveChanKeyName(target,cid) : null;
+  const dm=_isDMTarget(target)&&typeof e2eReadDmHistory==='function';
+  const generation=window.E2E?._lockGen;
+  const historyReady=dm&&window.E2E?.keyReady;
+  const dmText=historyReady ? await e2eReadDmHistory(cid,target,lines) : new Map();
   const out=new Array(lines.length);
   for(let i=0;i<lines.length;i++){
     const l=lines[i];
-    if(l&&typeof l.text==='string'&&l.text.startsWith('sd8~')){
+    if(dm&&e2eIsDmHistoryWire(l?.text)){
+      out[i]=dmHistoryRow(l,dmText.get(l),historyReady);
+      continue;
+    }
+    if(dm&&typeof l?.text==='string'&&l.text.startsWith('[e2ex3dh]')){
+      out[i]=Object.assign({},l,{text:'',_e2eSetupLine:true});
+      continue;
+    }
+    if(keyName&&l&&typeof l.text==='string'&&l.text.startsWith('sd8~')){
       try{
         const pt=await channelDecrypt(keyName,l.text,l.from);
         if(pt!==null){
@@ -3605,7 +3657,75 @@ async function _decryptLogLines(target,lines,cid){
     }
     out[i]=l;
   }
+  if(generation!==window.E2E?._lockGen) {
+    for(let i=0;i<out.length;i++) if(out[i]?._dmHistoryWire) out[i]=dmHistoryRow(out[i],undefined,false);
+  }
   return out;
+}
+
+const DM_HISTORY_LOCKED = '🔒 Encrypted message. Unlock encrypted chats to read it on this device.';
+const DM_HISTORY_UNAVAILABLE = '🔒 Encrypted message unavailable on this device.';
+
+function dmHistoryRow(line,plaintext,ready) {
+  const decoded = typeof plaintext==='string' ? e2eSplitAction(plaintext) : null;
+  return Object.assign({},line,{
+    _dmHistoryWire:line._dmHistoryWire||line.text,
+    _dmHistoryState:decoded?'ready':ready?'unavailable':'locked',
+    text:decoded ? decoded.text : ready ? DM_HISTORY_UNAVAILABLE : DM_HISTORY_LOCKED,
+    kind:decoded?.action?'action':line.kind==='notice'?'notice':'privmsg',
+    encrypted:true,
+  });
+}
+
+async function restoreCachedDmHistory(connId,target) {
+  if(!window.E2E?.keyReady) return;
+  const views=connId ? [[connId,target]] : Object.keys(buffers).map(_splitParse);
+  const generation=E2E._lockGen;
+  for(const [cid,tgt] of views){
+    if(!cid||!_isDMTarget(tgt)) continue;
+    const key=bk(cid,tgt), buffer=buffers[key];
+    const rows=buffer?.filter(m=>m._dmHistoryState==='locked');
+    if(!rows?.length) continue;
+    const lines=rows.map(m=>({from:m.from,text:m._dmHistoryWire,kind:m.kind}));
+    const cache=await e2eReadDmHistory(cid,tgt,lines);
+    if(!E2E.keyReady||E2E._lockGen!==generation) return;
+    if(buffers[key]!==buffer) continue; // The conversation was cleared while the cache was loading.
+    let changed=false;
+    for(let i=0;i<rows.length;i++){
+      if(rows[i]._dmHistoryState!=='locked'||!buffer.includes(rows[i])) continue;
+      const restored=dmHistoryRow(lines[i],cache.get(lines[i]),true);
+      rows[i].text=restored.text;
+      rows[i].kind=restored.kind;
+      rows[i]._dmHistoryState=restored._dmHistoryState;
+      changed=true;
+    }
+    if(!changed) continue;
+    if(isActive(cid,tgt)) renderChat();
+    if(_splitActive&&_splitTarget===key) renderSplitChat();
+  }
+}
+
+function lockCachedDmHistory(){
+  for(const buffer of Object.values(buffers)) {
+    for(const message of buffer) if(message._dmHistoryWire){
+      message.text=DM_HISTORY_LOCKED;
+      if(message.kind==='action') message.kind='privmsg';
+      message._dmHistoryState='locked';
+    }
+  }
+}
+
+function applyHeldDmHistory(connId,target,from,wire,plaintext){
+  const key=bk(connId,target);
+  const row=buffers[key]?.find(m=>m._dmHistoryWire===wire&&m.from.toLowerCase()===from.toLowerCase());
+  if(!row) return false;
+  const restored=dmHistoryRow(row,plaintext,true);
+  row.text=restored.text;
+  row.kind=restored.kind;
+  row._dmHistoryState=restored._dmHistoryState;
+  if(isActive(connId,target)) renderChat();
+  if(_splitActive&&_splitTarget===key) renderSplitChat();
+  return true;
 }
 // Re-decrypt already-buffered sd8~ lines once a channel PSK finally loads —
 // covers the race where get_logs returns before e2e_channel_key arrives.
@@ -3709,8 +3829,11 @@ function _splitStatusNickLines(conn_id,lines,sync){
 // (id'd lines are never fuzzy-matched against id'd rows: two "gg" in one second stay two.)
 function _idlessRowIndex(buf){
   const m=new Map();
-  for(const r of buf){ if(r&&!r.id){ const k=r.ts+'|'+r.from+'|'+(r.text||'').slice(0,50); const a=m.get(k); if(a) a.push(r); else m.set(k,[r]); } }
+  for(const r of buf){ if(r&&!r.id){ const k=_historyRowKey(r); const a=m.get(k); if(a) a.push(r); else m.set(k,[r]); } }
   return m;
+}
+function _historyRowKey(row){
+  return row._dmHistoryWire ? JSON.stringify([String(row.from||'').toLowerCase(),row._dmHistoryWire]) : row.ts+'|'+row.from+'|'+(row.text||'').slice(0,50);
 }
 function _stampIdlessRow(idx,key,id){
   const a=idx.get(key); if(!a||!a.length) return false;
@@ -3718,36 +3841,42 @@ function _stampIdlessRow(idx,key,id){
 }
 async function prependLogs(conn_id,target,lines){
   if(target==='status') lines=_splitStatusNickLines(conn_id,lines,false);
-  lines=await _decryptLogLines(target,lines,conn_id);
   const buf=getBuf(conn_id,target);
+  lines=await _decryptLogLines(target,lines,conn_id);
+  if(buf!==getBuf(conn_id,target)) return;
   const wasEmpty=buf.length===0;
   const _selfNick=getNick(conn_id);
-  const newMsgs=lines.map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target},conn_id));
   // Track highest msg_id from log lines
-  for(const m of newMsgs) trackMsgId(conn_id,target,m.id);
+  for(const l of lines) trackMsgId(conn_id,target,l.id||0);
+  const newMsgs=lines.filter(l=>!l._e2eSetupLine).map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState},conn_id));
   // A device that never saw this connection's live 005 (new browser, cleared data)
   // can still learn PREFIX/CHANMODES from the logged copy in the status history.
   if(target==='status'){ for(const m of newMsgs){ if(m.from==='*'&&_isIsupportLine(m.text)) _sniffIsupport(conn_id,m.text); } }
   // Deduplicate: use msg_id when available, fall back to ts+from+text
   const existingIds=new Set(buf.filter(m=>m.id>0).map(m=>m.id));
-  const existingKeys=new Set(buf.map(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)));
+  const existingKeys=new Set(buf.map(_historyRowKey));
   const idless=_idlessRowIndex(buf);
   const unique=newMsgs.filter(m=>{
     if(_isIgnoredLogLine(m)) return false;   // /ignore also hides history (log replay on reload/switch)
     if(m.id>0&&existingIds.has(m.id)) return false;
     // r4 (IRC-H2): an id-less row already shown for this exact line takes the id.
-    if(m.id>0&&!_isStatusKind(m.kind)&&_stampIdlessRow(idless,m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50),m.id)){ existingIds.add(m.id); return false; }
+    const rowKey=_historyRowKey(m);
+    if(m.id>0&&!_isStatusKind(m.kind)&&_stampIdlessRow(idless,rowKey,m.id)){ existingIds.add(m.id); return false; }
+    if(m._dmHistoryWire){
+      if(existingKeys.has(rowKey)) return false;
+      existingKeys.add(rowKey);
+    }
     // Clock-skew reconcile: stamp a self-sent optimistic row (id 0, client ts)
     // with this id'd server copy instead of duplicating it (mobile dropped-echo
     // recovered via get_logs — get_logs lacked any skew fallback before this).
     // Self-only: a received message can also be id-0 when the vault was locked at
     // receive time (logger.append returns 0), so gate on our own nick to never
     // collapse a genuinely-distinct same-text message from another user.
-    if(m.id>0&&m.from===_selfNick&&_reconcileSelfRow(buf,m.from,m.text,m.id,m.ts)) return false;
+    if(m.id>0&&m.from===_selfNick&&(!m._dmHistoryWire||m._dmHistoryState==='ready')&&_reconcileSelfRow(buf,m.from,m.text,m.id,m.ts)) return false;
     // Status lines: content-dedup even when id'd, so a replayed status copy doesn't
     // double an id-less live copy already in the buffer (see _isStatusKind).
     if(m.id>0 && !_isStatusKind(m.kind)) return true;
-    return !existingKeys.has(m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50));
+    return !!m._dmHistoryWire||!existingKeys.has(rowKey);
   });
   if(unique.length>0){
     buf.unshift(...unique);
@@ -3758,6 +3887,7 @@ async function prependLogs(conn_id,target,lines){
        higher than addMessage's 2000 so a single Load-older isn't immediately
        trimmed back out. */
     if(buf.length>5000) buf.splice(0,buf.length-5000);
+    if(unique.some(m=>m._dmHistoryState==='locked')) void restoreCachedDmHistory(conn_id,target);
   }
   if(isActive(conn_id,target)){
     const area=document.getElementById('chat-area');
@@ -3805,24 +3935,26 @@ async function appendSyncLines(conn_id,target,lines){
   const _histFrozen=()=>_historyView && _historyView.bk===bk(conn_id,target);
   if(_histFrozen()) return;
   if(target==='status') lines=_splitStatusNickLines(conn_id,lines,true);
+  const buf=getBuf(conn_id,target);
   lines=await _decryptLogLines(target,lines,conn_id);
   // Re-check after the await: decrypt can take seconds, and the user may have
   // jumped into a history window for this target meanwhile — the stale entry
   // check alone would then graft the live tail into the frozen window.
-  if(_histFrozen()) return;
-  const buf=getBuf(conn_id,target);
+  if(_histFrozen()||buf!==getBuf(conn_id,target)) return;
   const _selfNick=getNick(conn_id);
   const existingIds=new Set(buf.filter(m=>m.id>0).map(m=>m.id));
-  const existingKeys=new Set(buf.map(m=>m.ts+'|'+m.from+'|'+(m.text||'').slice(0,50)));
+  const existingKeys=new Set(buf.map(_historyRowKey));
   const idless=_idlessRowIndex(buf);
   let added=0;
+  let restoreDm=false;
   for(const l of lines){
     const id=l.id||0;
     trackMsgId(conn_id,target,id);
+    if(l._e2eSetupLine) continue;
     if(_isIgnoredLogLine(l)) continue;   // /ignore also hides synced tail lines
     if(id>0&&existingIds.has(id)) continue;
     // Exact fuzzy key — catches the common case where ts/from/text match.
-    const fk=l.ts+'|'+l.from+'|'+(l.text||'').slice(0,50);
+    const fk=_historyRowKey(l);
     // r4 (IRC-H2): an id-less row already shown for this exact line takes the id.
     if(id>0&&!_isStatusKind(l.kind)&&_stampIdlessRow(idless,fk,id)){ existingIds.add(id); continue; }
     // Only fuzzy-dedup UNSTAMPED lines (id===0) — EXCEPT status lines, which are
@@ -3831,7 +3963,7 @@ async function appendSyncLines(conn_id,target,lines){
     // running the ts|from|text(50) fuzzy check on it too would drop a genuinely-distinct
     // NEW-id message whose first-50 chars collide with an existing row (e.g. two "gg"
     // in the same second) — so that stays id-only.
-    if((id===0 || _isStatusKind(l.kind)) && existingKeys.has(fk)) continue;
+    if((l._dmHistoryWire || id===0 || _isStatusKind(l.kind)) && existingKeys.has(fk)) continue;
     // Clock-skew + E2E fuzzy match: an optimistic self-sent entry in the
     // buffer has m.ts = client clock (Date.now()/1000) while l.ts is the
     // server clock — they diverge by 1-2s commonly, breaking the strict
@@ -3841,7 +3973,7 @@ async function appendSyncLines(conn_id,target,lines){
     let _matched=false;
     // Self-only (see prependLogs): other users' messages can also be id-0 when the
     // vault was locked at receive time, so only skew-reconcile our OWN optimistic rows.
-    const _selfLine=(l.from===_selfNick);
+    const _selfLine=(l.from===_selfNick)&&(!l._dmHistoryWire||l._dmHistoryState==='ready');
     const _tailStart=Math.max(0,buf.length-_SELF_RECONCILE_TAIL);
     const _slice=(l.text||'').slice(0,50);
     for(let i=buf.length-1;_selfLine&&i>=_tailStart;i--){
@@ -3863,10 +3995,12 @@ async function appendSyncLines(conn_id,target,lines){
     // above, which were computed once before the loop.
     if(id>0) existingIds.add(id);
     existingKeys.add(fk);
-    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target},conn_id));
+    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState},conn_id));
+    restoreDm ||= l._dmHistoryState==='locked';
     added++;
   }
   if(added>0){
+    if(restoreDm) void restoreCachedDmHistory(conn_id,target);
     buf.sort((a,b)=>a.ts-b.ts);
     if(buf.length>2000) buf.splice(0,buf.length-2000);
     if(isActive(conn_id,target)){
@@ -4152,6 +4286,7 @@ function setActive(conn_id,target,options){
   const key=bk(conn_id,target);
   if(active&&bk(active.conn_id,active.target)!==key){
     clearChatEffect();
+    closeChatMessageActions();
     rememberChatPosition();
     _jumpAnchor=false;
   }
@@ -4159,6 +4294,7 @@ function setActive(conn_id,target,options){
   ++_messageJumpSerial;
   try{ _replyOnSwitch(conn_id,target); }catch(_){}   // r6: a reply quote stays with its conversation
   active={conn_id,target};
+  void restoreCachedDmHistory(conn_id,target);
   if(isChanListActive()){
     renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay(); updateInputPlaceholder();
     return;
@@ -4820,18 +4956,8 @@ function buildRow(msg,conv,tweetConv){
     if(isChat&&context) mountTranslation(msgBody,translationPlainText(msg.text),context,'message');
     mountMessageMedia(msg,tweetConv,msgBody,context);
   }
-  // Reply button on chat messages
-  if(isChat&&msg.from!=='*'){
-    const replyBtn=document.createElement('span');
-    replyBtn.className='msg-reply-btn';
-    replyBtn.title='Reply';
-    replyBtn.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 17H4V12"/><path d="M4 17L15 6"/><path d="M15 6H20V11"/></svg>';
-    // r11: the row's own conversation (msg._tgt) — not just the pane's: rows of a shared buffer can come from another.
-    replyBtn.onclick=(e)=>{e.stopPropagation();const base=conv||active;setReply(msg.from,msg.text,(msg._tgt&&base)?{conn_id:base.conn_id,target:msg._tgt}:conv);};
-    row.appendChild(replyBtn);
-  }
   row._msgRef=msg;
-  mountChatReactions(row,msg,tweetConv||conv||active);
+  mountChatMessageActions(row,msg,conv||tweetConv||active);
   if(msg.sendState) _applySendState(row,msg);
   return row;
 }
@@ -7293,8 +7419,12 @@ async function handleInput(raw){
   // (_histLocal), so it stays off the server after E2E is switched off again.
   try{
     _histE2eSeen();   // record E2E evidence BEFORE this line runs (it may be "/encrypt off")
-    if(_histTargetsOf(raw,active).some(t=>_isE2eConversation(t,active.conn_id))){ _histLocal.add(_hist); _histE2eSeen(); }
-    if(_histLineIsE2e(raw,active)) _histSyncOk.delete(_hist); else _histSyncOk.add(_hist);
+    // The first DM can trigger encryption discovery after this history save.
+    const mayAutoEncrypt=_lineSendsText(raw)&&typeof e2eMayAutoEncrypt==='function';
+    const localOnly=_histTargetsOf(raw,active).some(t=>_isE2eConversation(t,active.conn_id)||
+      (mayAutoEncrypt&&e2eMayAutoEncrypt(t,active.conn_id)));
+    if(localOnly){ _histLocal.add(_hist); _histE2eSeen(); }
+    if(localOnly||!_e2eKnown()) _histSyncOk.delete(_hist); else _histSyncOk.add(_hist);
   }catch(_){ _histSyncOk.delete(_hist); _histLocal.add(_hist); }
   inputHistory.push(_hist); if(inputHistory.length>500)inputHistory.splice(0,inputHistory.length-500); saveInputHistory();
   const{conn_id,target}=active;
@@ -10207,6 +10337,14 @@ function _wipeE2EMemory(){
 // after the unlock), the profile and certificate popups and any open modal.
 function _closeSecretPanels(){
   // r4 (C3-3)
+  closeChatMessageActions();
+  cancelReply();
+  window._searchReq=null;
+  closeSearchPanel();
+  const searchResults=document.getElementById('search-results');
+  if(searchResults) searchResults.replaceChildren();
+  const searchInput=document.getElementById('search-input');
+  if(searchInput) searchInput.value='';
   clearTranslationData();
   try{ clearTweetData(); }catch(_){}   // X previews: drop cards, pending work and cached results on every lock
   try{ const mv=document.getElementById('monitor-msg-overlay'); if(mv) mv.remove(); }catch(_){}
@@ -23361,7 +23499,7 @@ async function renderSearchResults(conn_id,target,query,results,opts){
   const note=()=>{ const n=document.createElement('div'); n.className='search-empty'; n.style.cssText='padding:6px 10px;color:var(--text3);font-size:11px;line-height:1.4';
     n.textContent=(local==='noengine'?'🔒 The encryption engine failed to load (reload the page), so this conversation':local==='unknown'?'🔒 Encryption status of this conversation is not known yet, so it':'🔒 End-to-end encrypted conversation: it')+' was searched on this device only, in the messages loaded here. Your search was not sent to the server (it cannot read encrypted messages). Load older messages to search further back.'; return n; };
   if(!results||!results.length){el.innerHTML=`<div class="search-empty">${local?'No results in the messages loaded on this device':'No results found'}</div>`; if(local) el.appendChild(note()); return;}
-  results=await _decryptLogLines(target,results,conn_id); // sd8~ search hits are ciphertext on disk — decrypt before display
+  if(!local) results=(await _decryptLogLines(target,results,conn_id)).filter(m=>!m._e2eSetupLine);
   // Drop stale results: if the user switched channel/query during the async decrypt,
   // a slower older response must not overwrite the current view.
   { const sr=window._searchReq; if(!sr||sr.conn_id!==conn_id||sr.target!==target||sr.query!==query) return; }
@@ -23399,7 +23537,9 @@ document.addEventListener('DOMContentLoaded',()=>{
     let searchTimer;
     sinp.addEventListener('input',()=>{
       clearTimeout(searchTimer);
-      searchTimer=setTimeout(()=>doSearch(sinp.value),200);
+      searchTimer=setTimeout(()=>{
+        if(document.getElementById('search-panel')?.classList.contains('show')) doSearch(sinp.value);
+      },200);
     });
     sinp.addEventListener('keydown',e=>{if(e.key==='Escape')closeSearchPanel();});
   }

@@ -12,7 +12,7 @@ import {checkSettingsSearch} from './settings-search-checks.mjs';
 import {checkTranslation, startTranslator} from './translation-checks.mjs';
 import {checkCrossInstanceE2e, checkE2eChat, checkLegacyMigration, seedLegacyE2e} from './e2e-chat-checks.mjs';
 import {checkChannelList} from './channel-list-checks.mjs';
-import {checkPlainReactions} from './reaction-checks.mjs';
+import {checkLegacyReactionMenu, checkOrdinaryClientReactions, checkPlainReactions} from './reaction-checks.mjs';
 
 const {CRYPTIRC_BIN, CRYPTIRC_CORE_BIN, IRC_PORT, IRC_LEAF_PORT, CHROMIUM} = process.env;
 assert(CRYPTIRC_BIN && CRYPTIRC_CORE_BIN && Number(IRC_PORT), 'Set the test binaries and local IRC testnet port');
@@ -86,6 +86,29 @@ async function connectWebsocket(token, endpoint=base) {
   const wait=(pred,name)=>waitFor(()=>events.find(pred),name);
   await wait(e=>e.type==='auth_ok','WebSocket authentication');
   return {events,send,wait};
+}
+
+async function ordinaryIrcClient(port, nick) {
+  const socket=net.createConnection(Number(port),'127.0.0.1');
+  tcpSockets.push(socket);
+  const lines=[];
+  const send=line=>socket.write(line+'\r\n');
+  let input='';
+  socket.setEncoding('utf8');
+  socket.on('data',chunk=>{
+    input+=chunk;
+    const received=input.split('\r\n');
+    input=received.pop();
+    for(const line of received){
+      lines.push(line);
+      if(line.startsWith('PING '))send('PONG '+line.slice(5));
+    }
+  });
+  await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);});
+  send('NICK '+nick);
+  send(`USER ${nick} 0 * :Ordinary IRC fixture`);
+  await waitFor(()=>lines.some(line=>line.includes(` 001 ${nick} `)),'ordinary IRC client registered');
+  return {lines,send,close:()=>socket.end('QUIT :Test complete\r\n')};
 }
 
 async function chromium(profile='chrome', endpoint=base) {
@@ -406,8 +429,39 @@ try {
     await tool(otherKey,'irc_network',{action:'connect',network:unsupportedSender});
     await ownerWs.wait(e=>e.type==='connected'&&e.conn_id===unsupportedNetwork,'unsupported reaction IRC server');
     await otherWs.wait(e=>e.type==='connected'&&e.conn_id===unsupportedSender,'unsupported reaction sender');
-    await waitFor(()=>ev(`reactionEnabled(${JSON.stringify(networkA)})&&networks.some(n=>n.config.id===${JSON.stringify(unsupportedNetwork)})`),'browser capability sync');
+    await waitFor(()=>ev(`reactionEnabled(${JSON.stringify(networkA)})&&reactionAllows(${JSON.stringify(networkA)},'👎')&&networks.some(n=>n.config.id===${JSON.stringify(unsupportedNetwork)})`),'browser capability sync');
     await checkPlainReactions({ev,cdp,check,waitFor,ownerWs,otherWs,owner,other,networkA,networkB,channel,stamp,unsupportedNetwork,unsupportedSender,unsupportedNick});
+    const plainNick='pkrx'+stamp;
+    const plain=await ordinaryIrcClient(IRC_LEAF_PORT||IRC_PORT,plainNick);
+    const reactionViewer=await chromium('reaction-viewer');
+    try {
+      const peer=reactionViewer.evaluate;
+      const q=JSON.stringify;
+      await peer(`document.getElementById('l-user').value=${q(other)};document.getElementById('l-pass').value=${q(password)};doLogin()`);
+      await waitFor(()=>peer('!!sessionToken&&_wsReady()'),'second CryptIRC reaction viewer signed in');
+      await peer(`document.getElementById('vault-pass').value=${q(vault)};doUnlock()`);
+      await waitFor(()=>peer(`reactionEnabled(${q(networkB)})&&!document.getElementById('vault-overlay').classList.contains('show')`),
+        'second CryptIRC reaction viewer ready');
+      await checkOrdinaryClientReactions({ev,peer,check,waitFor,plain,plainNick,owner,networkA,networkB,channel,stamp});
+      if(process.env.IRC_LEGACY_REACTIONS_PORT){
+        const legacyNick='pkrm'+stamp;
+        const legacyNetwork=await network(otherKey,legacyNick,process.env.IRC_LEGACY_REACTIONS_PORT,'Legacy reactions');
+        await tool(otherKey,'irc_network',{action:'connect',network:legacyNetwork});
+        await otherWs.wait(e=>e.type==='connected'&&e.conn_id===legacyNetwork,'legacy reaction fixture registration');
+        const legacyPlain='pkrn'+stamp;
+        const legacySender=await ordinaryIrcClient(process.env.IRC_LEGACY_REACTIONS_PORT,legacyPlain);
+        try {
+          await checkLegacyReactionMenu({ev:peer,check,waitFor,ownerWs:otherWs,legacyNetwork,legacyNick,legacyPlain,legacySender,stamp});
+        } finally {
+          legacySender.close();
+          await tool(otherKey,'irc_network',{action:'disconnect',network:legacyNetwork});
+          await tool(otherKey,'irc_network',{action:'remove',network:legacyNetwork});
+        }
+      }
+    } finally {
+      plain.close();
+      process.kill(-reactionViewer.chrome.pid,'SIGTERM');
+    }
     await tool(token,'irc_network',{action:'disconnect',network:unsupportedNetwork});
     await tool(otherKey,'irc_network',{action:'disconnect',network:unsupportedSender});
     await tool(token,'irc_network',{action:'remove',network:unsupportedNetwork});
@@ -639,26 +693,10 @@ try {
       remoteWs.send({type:'connect',id:remoteNetwork});
       await remoteWs.wait(e=>e.type==='connected'&&e.conn_id===remoteNetwork,'second instance linked IRC registration');
       const ordinary='pkn'+stamp;
-      const irc=net.createConnection(Number(IRC_LEAF_PORT),'127.0.0.1');
-      tcpSockets.push(irc);
-      let ordinaryInput='';
-      const ordinaryLines=[];
-      irc.setEncoding('utf8');
-      irc.on('data', chunk=>{
-        ordinaryInput+=chunk;
-        const lines=ordinaryInput.split('\r\n');
-        ordinaryInput=lines.pop();
-        for(const line of lines){
-          ordinaryLines.push(line);
-          if(line.startsWith('PING ')) irc.write('PONG '+line.slice(5)+'\r\n');
-        }
-      });
-      await new Promise((resolve,reject)=>{irc.once('connect',resolve);irc.once('error',reject);});
-      irc.write(`NICK ${ordinary}\r\nUSER ${ordinary} 0 * :Ordinary IRC fixture\r\n`);
-      await waitFor(()=>ordinaryLines.some(line=>line.includes(` 001 ${ordinary} `)),'ordinary IRC client registered');
+      const irc=await ordinaryIrcClient(IRC_LEAF_PORT,ordinary);
       await checkCrossInstanceE2e({browser,peer:await chromium('encrypted-bridge',endpoint),check,waitFor,
-        owner,ownerWs,remote,password,networkA,remoteNetwork,remoteWs,stamp,otherWs,remoteData,ordinary,ordinaryLines});
-      irc.end('QUIT :Test complete\r\n');
+        owner,ownerWs,remote,password,networkA,remoteNetwork,remoteWs,stamp,otherWs,remoteData,ordinary,ordinaryLines:irc.lines});
+      irc.close();
     }
   }
   await tool(token,'cryptirc_appearance',{settings:{theme:'arctic'}});

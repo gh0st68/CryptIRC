@@ -1239,9 +1239,6 @@ body.ts-custom .msg-ts { width:auto; min-width:72px; white-space:nowrap; }
 #reply-bar-close { cursor:pointer; color:var(--text3); font-size:14px; padding:2px 4px; flex-shrink:0; }
 #reply-bar-close:hover { color:var(--text); }
 .msg-reply-quote { font-size:10px; color:var(--text3); border-left:2px solid var(--accent); padding-left:6px; margin-bottom:2px; display:block; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; max-width:80%; }
-.msg-reply-btn { position:absolute; right:6px; top:2px; opacity:0; cursor:pointer; color:var(--text3); padding:2px; transition:opacity .15s; }
-.msg-row:hover .msg-reply-btn { opacity:1; }
-.msg-reply-btn:hover { color:var(--accent); }
 .msg-row { position:relative; }
 .nc0,.nick-entry.nc0{color:#e05a5a} .nc1,.nick-entry.nc1{color:#e0935a} .nc2,.nick-entry.nc2{color:#d4c850} .nc3,.nick-entry.nc3{color:#5adb7a}
 .nc4,.nick-entry.nc4{color:#5ab8e0} .nc5,.nick-entry.nc5{color:#8a70e0} .nc6,.nick-entry.nc6{color:#e05ab0} .nc7,.nick-entry.nc7{color:#5ae0d4}
@@ -1759,14 +1756,14 @@ html[data-theme='irssi'] #msg-input::placeholder { color:#999; }
 }
 .toggle input:checked ~ .toggle-track .toggle-thumb { transform:translateX(22px); }
 
-.message-reactions, .reaction-choices { display:inline-flex; align-items:center; flex-wrap:wrap; gap:4px; }
+.message-reactions, .message-actions { display:inline-flex; align-items:center; flex-wrap:wrap; gap:4px; }
 .message-reactions { margin-inline-start:7px; white-space:normal; vertical-align:middle; }
-.reaction-choices[hidden] { display:none; }
-.message-reactions button { background:var(--bg3); color:var(--control-text,var(--text)); border:1px solid var(--border2); border-radius:12px; min-height:26px; padding:1px 5px; cursor:pointer; font-size:12px; }
-.message-reactions button[aria-pressed="true"] { border-color:var(--accent); }
-.reaction-picker { opacity:0; }
-.msg-row:hover .reaction-picker, .message-reactions:focus-within .reaction-picker, .reaction-picker[aria-expanded="true"] { opacity:1; }
-@media (pointer:coarse) { .reaction-picker { opacity:1; } .message-reactions button { min-height:32px; min-width:32px; } }
+.message-actions { display:flex; margin-block:4px; gap:6px; }
+.message-reactions .reaction-count, .message-actions button { background:var(--bg3); color:var(--control-text,var(--text)); border:1px solid var(--border2); border-radius:12px; min-height:26px; padding:2px 7px; font-size:12px; }
+.message-actions button, .message-reactions button { cursor:pointer; }
+.message-actions button[aria-pressed="true"], .message-reactions button[aria-pressed="true"] { border-color:var(--accent); }
+.msg-row[tabindex]:focus-visible { outline:1px solid var(--accent); outline-offset:-1px; }
+@media (pointer:coarse) { .message-actions button { min-height:44px; min-width:44px; } .message-reactions button { min-height:32px; min-width:32px; } }
 .chat-effect-layer { position:fixed; z-index:40; pointer-events:none; overflow:hidden; isolation:isolate; }
 .chat-effect-layer i { position:absolute; font:normal 23px/1 sans-serif; }
 .chat-effect-layer .effect-spark { width:5px; height:5px; border-radius:50%; background:currentColor; box-shadow:0 0 6px currentColor; }
@@ -2165,8 +2162,6 @@ html[data-theme='irssi'] #msg-input::placeholder { color:#999; }
   .giphy-cell:hover { transform:none; box-shadow:none; }
   /* Per-message reply button: the hover-reveal at .msg-row:hover never triggers
      on touch, so keep it faintly visible with a real 44px hit area. */
-  .msg-reply-btn { opacity:.4; padding:8px; right:2px; top:0; min-width:44px; min-height:44px; display:inline-flex; align-items:center; justify-content:center; }
-  .msg-reply-btn:active { opacity:1; color:var(--accent); }
   /* Bump sub-44px touch targets */
   .nick-ctx-item { min-height:44px; }
   .appear-toggle { min-height:44px; }
@@ -3925,7 +3920,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
     <div class="unlock-strip" id="e2e-unlock-banner" hidden><span>This encrypted chat is locked on this device.</span><button type="button" data-cryptirc-click="unlockEncryptedChats">Unlock encrypted chat</button></div>
     <div class="unlock-strip" id="e2e-setup-offer" hidden><span>Set up a recovery code for your encrypted chats.</span><button type="button" data-cryptirc-click="unlockEncryptedChats">Set up</button><button type="button" data-cryptirc-click="ignoreEncryptionSetup">Ignore</button></div>
     <!-- a11y: log role + polite live region so screen readers announce incoming messages (audit #48) -->
-    <div id="chat-area" style="display:none" role="log" aria-live="polite" aria-label="Conversation"></div>
+    <div id="chat-area" style="display:none" role="log" aria-live="polite" aria-label="Conversation" tabindex="0" aria-description="Use Up and Down to select a message and Enter for its actions."></div>
     <section class="chanlist-box" id="chanlist-box" aria-label="Channel list" tabindex="-1" hidden>
       <div class="chanlist-header">
         <div class="chanlist-heading">
@@ -3954,7 +3949,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </div>
       </div>
     </section>
-    <div id="split-panel"><div class="split-header"><span>Split:</span><select id="split-chan-select" data-cryptirc-change="setSplitTarget"></select><button data-cryptirc-click="toggleSplitView" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px" title="Close split">✕</button></div><div class="split-chat" id="split-chat-area"></div></div>
+    <div id="split-panel"><div class="split-header"><span>Split:</span><select id="split-chan-select" data-cryptirc-change="setSplitTarget"></select><button data-cryptirc-click="toggleSplitView" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px" title="Close split">✕</button></div><div class="split-chat" id="split-chat-area" role="log" aria-label="Split conversation" tabindex="0" aria-description="Use Up and Down to select a message and Enter for its actions."></div></div>
     <button id="scroll-bottom-btn" data-cryptirc-click="scrollForce" title="Jump to latest" aria-label="Jump to latest message">↓</button>
     <div id="welcome">
       <div class="welcome-logo">CryptIRC</div>
