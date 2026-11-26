@@ -17,7 +17,10 @@ const server=http.createServer(async(req,res)=>{
   const file=path.resolve(staticRoot,u.pathname.replace(/^\/cryptirc\//,'')||'index.html');
   if(!file.startsWith(staticRoot+'/')){res.writeHead(403).end();return;}
   let data=await fs.readFile(file);
-  if(file.endsWith('app.js'))data=Buffer.from(data.toString().replaceAll('__CRYPTIRC_VERSION__','test').replaceAll('__CRYPTIRC_BUILD__','test'));
+  if(file.endsWith('/app.js')){
+   const controls=await fs.readFile(path.join(staticRoot,'page-controls.js'),'utf8');
+   data=Buffer.from((controls+'\n'+data.toString()).replaceAll('__CRYPTIRC_VERSION__','test').replaceAll('__CRYPTIRC_BUILD__','test'));
+  }
   res.setHeader('Content-Type',({'.html':'text/html','.js':'application/javascript','.svg':'image/svg+xml','.json':'application/json','.ttf':'font/ttf','.otf':'font/otf'})[path.extname(file)]||'application/octet-stream');res.end(data);
  }catch{res.writeHead(404).end();}
 });
@@ -63,9 +66,17 @@ const load=async(width,height,mobile,url='/cryptirc/')=>{
  await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});
  await send('Emulation.setTouchEmulationEnabled',{enabled:mobile,maxTouchPoints:1});
  await send('Emulation.setEmulatedMedia',{features:[{name:'hover',value:mobile?'none':'hover'},{name:'pointer',value:mobile?'coarse':'fine'},{name:'prefers-reduced-motion',value:'reduce'}]});
+ const previousDocument=await ev('performance.timeOrigin');
  await send('Page.navigate',{url:'http://127.0.0.1:'+port+url});
- for(let i=0;i<80;i++){await sleep(100);if(await ev(`typeof setActive==='function' && document.readyState==='complete'`))break;}
- await ev(fixture);await sleep(350);
+ // The async auth check shows the login screen after DOMContentLoaded.
+ for(let i=0;i<80;i++){
+  await sleep(100);
+  if(await ev(`performance.timeOrigin!==${previousDocument} && document.readyState==='complete' &&
+    document.getElementById('auth-screen')?.style.display==='flex'`)){
+   await ev(fixture);await sleep(350);return;
+  }
+ }
+ throw new Error('App did not finish its initial auth check');
 };
 const shot=async(name)=>{const r=await send('Page.captureScreenshot',{format:'png'});await fs.writeFile(path.join(out,name+'.png'),Buffer.from(r.data,'base64'));};
 const geometry=()=>ev(`(()=>{const rect=id=>{const r=document.getElementById(id).getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,right:r.right,bottom:r.bottom};};return {viewport:[innerWidth,innerHeight],pageWidth:document.documentElement.scrollWidth,input:rect('input-inner'),text:rect('msg-input'),send:rect('send-btn'),topbar:rect('topbar'),chat:rect('chat-area'),sidebar:rect('sidebar'),nick:rect('nick-panel')};})()`);
@@ -111,6 +122,89 @@ for(const [w,h] of [[320,640],[390,844],[768,1024]]){
  ok(w+'px: modal fields remain above app and scrim',await receives('#modal-overlay .form-input'));
  await ev('closeModal()');await sleep(100);
 }
+await load(320,640,true);
+await ev(`applyThemeCSS({...loadAppearance(),sidebarW:360,nickPanelW:320});openSidebar();`);
+await sleep(350);
+ok('phone drawer width is independent of the saved desktop width',await ev(`
+ Math.abs(document.getElementById('sidebar').getBoundingClientRect().width-innerWidth*.8)<1`));
+await ev('closeSidebar()');await sleep(350);
+const drawerState=()=>ev(`(()=>{const n=document.getElementById('sidebar');
+ return {open:n.classList.contains('open'),right:n.getBoundingClientRect().right};})()`);
+const beginPhoneSwipe=async(x1,x2,y=330)=>{
+ await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:x1,y}]});
+ await send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:x2,y}]});
+ await sleep(350);
+};
+const endPhoneSwipe=async()=>{
+ await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+ await sleep(350);
+};
+await beginPhoneSwipe(16,100);
+ok('dragging from the edge keeps the phone drawer in place until release',(await drawerState()).right<1);
+await send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});await sleep(350);
+ok('a cancelled swipe leaves the phone drawer fully closed',(await drawerState()).right<1);
+await swipe(16,330,-140);
+ok('vertical scrolling from the edge leaves the drawer closed',!(await drawerState()).open);
+// Put nicks in the edge zone, then select a visible nick by hit testing.
+await ev("document.querySelectorAll('#chat-area .msg-ts').forEach(n=>n.style.display='none')");
+const edgeNickPoint=()=>ev(`(()=>{
+ for(const nick of document.querySelectorAll('#chat-area .msg-nick[data-nick]')){
+  const rect=nick.getBoundingClientRect();
+  const x=Math.ceil(rect.left+2),y=Math.floor(rect.top+rect.height/2);
+  if(x>0&&x<40&&document.elementFromPoint(x,y)?.closest('.msg-nick')===nick)return {x,y};
+ }
+ return null;
+})()`);
+const swipeNick=await edgeNickPoint();
+if(!swipeNick)throw new Error('No visible message nick in the edge zone');
+await beginPhoneSwipe(swipeNick.x,swipeNick.x+84,swipeNick.y);await endPhoneSwipe();
+ok('a completed horizontal edge swipe still opens the phone drawer',(await drawerState()).open);
+ok('an edge swipe over a message does not open a nick menu',await ev("!document.querySelector('.nick-ctx-overlay')"));
+await beginPhoneSwipe(210,120);await endPhoneSwipe();
+ok('a completed swipe left still closes the phone drawer',!(await drawerState()).open);
+const nickDrawerOpen=()=>ev("document.getElementById('nick-panel').classList.contains('open')");
+await beginPhoneSwipe(304,220);await endPhoneSwipe();
+ok('a completed right-edge swipe still opens the user list',await nickDrawerOpen());
+ok('phone user-list width is independent of the saved desktop width',await ev(`
+ Math.abs(document.getElementById('nick-panel').getBoundingClientRect().width-innerWidth*.55)<1`));
+await beginPhoneSwipe(220,304);await endPhoneSwipe();
+ok('a completed swipe right still closes the user list',!await nickDrawerOpen());
+const tapNick=await edgeNickPoint();
+if(!tapNick)throw new Error('No visible message nick to tap');
+await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[tapNick]});
+await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+ok('a plain tap on that message nick still opens its menu',await ev("!!document.querySelector('.nick-ctx-overlay')"));
+
+const browserUserAgent=await ev('navigator.userAgent');
+await send('Emulation.setUserAgentOverride',{userAgent:'iPhone test'});
+await load(844,390,true);
+const landscapeResize=await ev(`(()=>{
+ const previous=loadAppearance(), cfg={...previous,sidebarW:320};
+ saveAppearance(cfg);applyThemeCSS(cfg);
+ const handle=document.getElementById('rz-sidebarW');
+ const drag=pointerType=>{
+  handle.dispatchEvent(new PointerEvent('pointerdown',{pointerType,pointerId:1,button:0,clientX:220}));
+  document.dispatchEvent(new PointerEvent('pointermove',{pointerType,pointerId:1,clientX:270}));
+  document.dispatchEvent(new PointerEvent('pointerup',{pointerType,pointerId:1,clientX:270}));
+ };
+ drag('touch');
+ const touchDragLocked=loadAppearance().sidebarW===cfg.sidebarW;
+ handle.dispatchEvent(new MouseEvent('dblclick'));
+ const touchResetLocked=loadAppearance().sidebarW===cfg.sidebarW;
+ drag('mouse');
+ const mouseDragWorks=loadAppearance().sidebarW!==cfg.sidebarW;
+ handle.dispatchEvent(new MouseEvent('dblclick'));
+ const defaultWidth=RZ_DEFS.find(d=>d.key==='sidebarW').def;
+ const mouseResetWorks=defaultWidth!==cfg.sidebarW&&loadAppearance().sidebarW===defaultWidth;
+ saveAppearance(previous);applyThemeCSS(previous);
+ return {landscape:_IS_IOS&&innerWidth>768,touchDragLocked,touchResetLocked,mouseDragWorks,mouseResetWorks};
+})()`);
+ok('landscape iPhone touch drag and double-tap leave the saved width alone',
+ landscapeResize.landscape&&landscapeResize.touchDragLocked&&landscapeResize.touchResetLocked);
+ok('a mouse can still drag and reset the width in a wide layout',
+ landscapeResize.mouseDragWorks&&landscapeResize.mouseResetWorks);
+await send('Emulation.setUserAgentOverride',{userAgent:browserUserAgent});
+
 for(const theme of ['light','arctic','mirc','hexchat','xchat','irssi','lightning_storm']){
  await load(390,844,true);await manyChannels();await ev(`applyThemeCSS({...loadAppearance(),theme:${JSON.stringify(theme)},mobileTheme:''});openSidebar();`);await sleep(350);
  const g=await ev(`(()=>{const r=document.getElementById('sidebar-scroll').getBoundingClientRect();return {x:r.x+100,y:r.bottom-40};})()`);await swipe(g.x,g.y,-180);

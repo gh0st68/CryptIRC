@@ -1151,6 +1151,7 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
         message_tags: false,
         self_userhost: String::new(),
         registered: false,
+        list_request: None,
         echo_message_enabled: false,
         names_buf: HashMap::new(),
         who_pending: HashSet::new(),

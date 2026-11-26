@@ -613,6 +613,7 @@ pub enum ClientMessage {
     // user's explicit Disconnect. See mark_lock_burst.
     Disconnect       { id: String, #[serde(default)] reason: Option<String>, #[serde(skip)] from_lock: bool },
     Send             { conn_id: String, raw: String },
+    ListChannels     { conn_id: String, request_id: String, pattern: String },
     JoinChannel      { conn_id: String, channel: String, key: Option<String> },
     PartChannel      { conn_id: String, channel: String },
     // `before_id` (optional, additive): id of the oldest line the client shows, an exact
@@ -807,8 +808,11 @@ pub enum ServerEvent {
     IrcChannelCreated { conn_id: String, channel: String, created: i64 },
     /// 322 — channel list entry
     IrcListEntry     { conn_id: String, channel: String, users: u32, topic: String },
+    /// Identified web requests receive bounded batches rather than one event per IRC line.
+    IrcListBatch     { conn_id: String, request_id: String, entries: Vec<irc::ChannelListEntry> },
     /// 323 — end of channel list
-    IrcListEnd       { conn_id: String },
+    IrcListEnd       { conn_id: String, #[serde(default, skip_serializing_if = "Option::is_none")] request_id: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] total: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<String> },
+    IrcListError     { conn_id: String, request_id: String, message: String },
     LagUpdate        { conn_id: String, ms: u64 },
     SaslStatus       { conn_id: String, success: bool, message: String },
     Connected        { conn_id: String, server: String, nick: String },
@@ -3924,6 +3928,9 @@ async fn route_paste_create(
     if state.auth.check_user_create_rate_limit(&user, "paste").is_err() {
         return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error":"Too many pastes — slow down"}))).into_response();
     }
+    if let Err(e) = body.validate_field_lengths() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e.to_string()}))).into_response();
+    }
     // codex P1 paste.rs:208: a password-protected paste hashes its password with Argon2
     // inside create(); run that on the blocking pool behind the process-wide auth-KDF
     // admission (like login and paste unlock), never on an async worker. Busy → 503.
@@ -4136,9 +4143,9 @@ const PASTE_APP_TOGGLE_JS: &str = "(function(){\
 /// auth-KDF cap (`run_auth_kdf`: bounded concurrency, so a burst of wrong unlocks from
 /// many IPs can't hold an unbounded number of Argon2 buffers or starve the workers).
 /// Some(ok) = checked; None = no slot within the queue timeout (caller answers 503).
-/// An empty password never matches (creation never hashes an empty one) — no derive.
+/// Reject empty or over-limit passwords before taking a KDF slot.
 async fn paste_password_ok(paste: &paste::Paste, pw: &str) -> Option<bool> {
-    if pw.is_empty() { return Some(false); }
+    if pw.is_empty() || !paste.allows_password_length(pw) { return Some(false); }
     let (paste, pw) = (paste.clone(), pw.to_string());
     run_auth_kdf(move || async move { paste::PasteStore::verify_password(&paste, &pw) }).await
 }
@@ -5619,6 +5626,7 @@ fn canonicalize_cmd_ids(mut cmd: ClientMessage) -> ClientMessage {
         | ClientMessage::Connect { id }
         | ClientMessage::Disconnect { id, .. } => *id = canonical_network_id(id),
         ClientMessage::Send { conn_id, .. }
+        | ClientMessage::ListChannels { conn_id, .. }
         | ClientMessage::JoinChannel { conn_id, .. }
         | ClientMessage::PartChannel { conn_id, .. }
         | ClientMessage::GetLogs { conn_id, .. }
@@ -6895,6 +6903,23 @@ async fn handle_command(
             if !from_lock && ownership == IdOwnership::Sole { set_user_disconnected(&id, true); }
             ipc_client::send_drop(&state, &id, reason).await;
         }
+        ClientMessage::ListChannels { conn_id, request_id, pattern } => {
+            if request_id.len() != 32 || !request_id.bytes().all(|c| c.is_ascii_hexdigit()) { return; }
+            let result = async {
+                anyhow::ensure!(pattern.len() <= 400 && !pattern.chars().any(|c| c.is_whitespace() || c.is_control()),
+                    "Invalid IRC channel list pattern.");
+                anyhow::ensure!(state.owns_conn(username, &conn_id), "This network is offline.");
+                let conn = state.connections.get(&conn_id).map(|entry| entry.clone())
+                    .ok_or_else(|| anyhow::anyhow!("This network is offline."))?;
+                let line = if pattern.is_empty() { "LIST\r\n".into() } else { format!("LIST {}\r\n", pattern) };
+                let result = conn.lock().await.send_list(&line, Some(request_id.clone())).await;
+                result
+            }.await;
+            if let Err(error) = result {
+                send_self(ServerEvent::IrcListError { conn_id, request_id, message: error.to_string() });
+            }
+        }
+
         ClientMessage::Send { conn_id, raw } => {
             if !state.owns_conn(username, &conn_id) {
                 if report_command_errors {

@@ -11,6 +11,7 @@ import {pathToFileURL} from 'node:url';
 import {checkSettingsSearch} from './settings-search-checks.mjs';
 import {checkTranslation, startTranslator} from './translation-checks.mjs';
 import {checkE2eChat, checkLegacyMigration, seedLegacyE2e} from './e2e-chat-checks.mjs';
+import {checkChannelList} from './channel-list-checks.mjs';
 
 const {CRYPTIRC_BIN, CRYPTIRC_CORE_BIN, IRC_PORT, IRC_LEAF_PORT, CHROMIUM} = process.env;
 assert(CRYPTIRC_BIN && CRYPTIRC_CORE_BIN && Number(IRC_PORT), 'Set the test binaries and local IRC testnet port');
@@ -225,7 +226,16 @@ try {
   }
   check('passkey sign-in button is available',await ev("!document.getElementById('passkey-login-btn').hidden"));
   await ev("(()=>{const real=window.fetch.bind(window);window.testPasskeyRequests={};window.fetch=(url,opt)=>{const u=String(url);if(u.includes('/passkeys/')&&u.endsWith('/finish'))window.testPasskeyRequests[u.split('/').at(-2)]=JSON.parse(opt.body);return real(url,opt);};})()");
-  await waitFor(()=>ev("_wsReady() && document.getElementById('vault-overlay').classList.contains('show')"),'initial WebSocket vault state');
+  await waitFor(()=>ev("_wsReady() && !document.getElementById('vault-unlock-banner').hidden"),'initial WebSocket vault state');
+  check('a cold vault shows an unlock button without opening a password prompt',
+    await ev("!document.getElementById('vault-overlay').classList.contains('show')"));
+  await ev("document.querySelector('[data-cryptirc-click=openEncryptionSettings]').click();"+
+    "document.querySelector('#encrypt-panel-body [data-encrypt-cmd=unlock]').click()");
+  check('Encryption settings can explicitly request a cold vault unlock',
+    await ev("document.getElementById('vault-overlay').classList.contains('show') && !document.getElementById('vault-unlock-later').hidden"));
+  await ev("document.getElementById('vault-unlock-later').click();closeEncryptPanel()");
+  check('choosing Later leaves the vault locked and returns to the app',
+    await ev("_vaultNeedsUnlock && !document.getElementById('vault-overlay').classList.contains('show')"));
   await ev('showProfilePanel()');
   await waitFor(()=>ev("!!document.getElementById('profile-passkey-add')"),'passkey profile card');
   const ownHeaders={Origin:origin};
@@ -363,6 +373,18 @@ try {
   await ev("closeProfilePanel();document.getElementById('vault-pass').value="+JSON.stringify(vault)+";doUnlock()");
   await waitFor(()=>ev(`networks.some(n=>n.config.id===${JSON.stringify(networkA)}&&n.connected) &&
     !document.getElementById('vault-overlay').classList.contains('show')`),'browser websocket and vault');
+  if(process.env.CRYPTIRC_TEST_CHANNEL_LIST==='1'){
+    const directoryChannel=channel+'-directory';
+    const directoryPeer=await network(otherKey,other+'d',IRC_PORT,'Directory peer');
+    await tool(otherKey,'irc_network',{action:'connect',network:directoryPeer});
+    await otherWs.wait(e=>e.type==='connected'&&e.conn_id===directoryPeer,'directory peer registration');
+    for(const id of [networkB,directoryPeer]){
+      await tool(otherKey,'irc_join',{network:id,channel:directoryChannel});
+      await otherWs.wait(e=>['irc_join','irc_join_ex'].includes(e.type)&&e.conn_id===id&&e.channel===directoryChannel,'directory fixture channel');
+    }
+    await checkChannelList({ev,cdp,waitFor,check,network:networkA,channel:directoryChannel});
+    await ev(`setActive(${JSON.stringify(networkA)},${JSON.stringify(channel)})`);
+  }
   if(process.env.CRYPTIRC_TEST_SETTINGS_SEARCH==='1'){
     const grantAdmin=async admin=>{
       const record=path.join(tmp,'users',owner+'.json');

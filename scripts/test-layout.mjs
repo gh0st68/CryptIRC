@@ -47,6 +47,7 @@ const fixture=`(()=>{
  ['boot-splash','vault-overlay'].forEach(id=>{const e=document.getElementById(id);if(e)e.remove();});
  document.getElementById('app').style.display='flex';
  currentUser='demo';
+ E2E._krReceived=true; // A plain channel with its encryption inventory loaded.
  networks.length=0;networks.push({config:{id:'preview',label:'TwistedNET',host:'irc.example.test',port:6697,nickname:'ghost',auto_join:['#dev','#lounge','#music']},nick:'ghost',connected:true,registered:true,channels:[{name:'#dev',names:['@ghost','@Alex','+sushi','Maya','nipsey','pr3dicament','river','Sam'],topic:'Development, ideas, and good company.'},{name:'#lounge',names:['Alex','river'],topic:'Take a seat.'},{name:'#music',names:['Maya'],topic:'What are you listening to?'}]});
  applyThemeCSS({...loadAppearance(),theme:'arctic'});
  setActive('preview','#dev');

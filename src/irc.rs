@@ -8,7 +8,7 @@
 //!   L3    — stale IrcConnection removed from map on run_loop exit
 
 use anyhow::Result;
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc, time::{Duration, Instant}};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
@@ -79,6 +79,32 @@ pub struct ChannelState {
     pub key:   Option<String>,
 }
 
+const LIST_REQUEST_IDLE: Duration = Duration::from_secs(60);
+// IRC can burst 1,024 lines into a 128-event WebSocket ring. Batch directory
+// rows so a large LIST does not displace earlier rows or unrelated chat events.
+const LIST_BATCH_ROWS: usize = 64;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChannelListEntry {
+    channel: String,
+    users: u32,
+    topic: String,
+}
+
+pub(crate) struct ChannelListRequest {
+    request_id: Option<String>,
+    last_activity: Instant,
+    entries: Vec<ChannelListEntry>,
+    total: usize,
+    incomplete: Option<&'static str>,
+}
+
+impl ChannelListRequest {
+    fn new(request_id: Option<String>) -> Self {
+        Self { request_id, last_activity: Instant::now(), entries: Vec::new(), total: 0, incomplete: None }
+    }
+}
+
 pub struct IrcConnection {
     pub conn_id:   String,
     pub nick:      String,
@@ -99,6 +125,8 @@ pub struct IrcConnection {
     /// run_loop-local `registered` bool, now persisted on the connection so it
     /// survives across separate `dispatch_line` calls).
     pub registered: bool,
+    /// One unlabelled IRC LIST stream per connection. Browser requests have an ID.
+    pub(crate) list_request: Option<ChannelListRequest>,
     /// Was a run_loop-local var; now persists across per-line calls.
     pub echo_message_enabled: bool,
     /// Was a run_loop-local var; accumulates 353 lines until 366 flushes.
@@ -196,6 +224,7 @@ impl IrcConnection {
     pub(crate) fn reset_irc_session(&mut self) {
         self.connected = false;
         self.registered = false;
+        self.list_request = None;
         self.who_pending.clear();
         self.whois_seen.clear();
         self.seen_userhosts.clear();
@@ -231,7 +260,7 @@ impl IrcConnection {
         IrcConnection {
             conn_id: conn_id.into(), nick: nick.into(), connected: true, lag_ms: None,
             channels: HashMap::new(), ipc_out: Arc::new(tokio::sync::Mutex::new(None)), message_tags: false,
-            self_userhost: String::new(), registered: true, echo_message_enabled: false,
+            self_userhost: String::new(), registered: true, list_request: None, echo_message_enabled: false,
             names_buf: HashMap::new(), who_pending: HashSet::new(), who_away: HashMap::new(),
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
             casemapping: CaseMapping::default(), server_casemapping: None,
@@ -351,7 +380,40 @@ impl IrcConnection {
     /// (Ok still can't promise delivery — the daemon may be reconnecting — which is why
     /// Send also checks connected/registered.)
     pub async fn send_raw(&mut self, line: &str) -> Result<()> {
+        let mut fields = line.split_ascii_whitespace().peekable();
+        if fields.peek().is_some_and(|f| f.starts_with('@')) { fields.next(); }
+        if fields.peek().is_some_and(|f| f.starts_with(':')) { fields.next(); }
+        if fields.next().is_some_and(|verb| verb.eq_ignore_ascii_case("LIST")) {
+            return self.send_list(line, None).await;
+        }
         self.note_user_join(line);
+        self.send_to_daemon(line).await
+    }
+
+    pub(crate) async fn send_list(&mut self, line: &str, request_id: Option<String>) -> Result<()> {
+        anyhow::ensure!(self.connected && self.registered, "This network is offline.");
+        // Some servers reject a request without sending a terminal numeric.
+        // Release an idle slot on retry, but keep it while replies are arriving.
+        anyhow::ensure!(self.list_request.as_ref().is_none_or(|list| list.last_activity.elapsed() >= LIST_REQUEST_IDLE),
+            "A channel list is already in progress on this connection.");
+        self.send_to_daemon(line).await?;
+        let mut list = ChannelListRequest::new(request_id);
+        if self.list_request.is_some() {
+            // An unlabelled server might still return the old reply after a stall.
+            // Show the received rows, but do not cache this ambiguous response.
+            list.incomplete = Some("An earlier IRC channel list did not finish. Refresh again to cache a fresh list.");
+        }
+        self.list_request = Some(list);
+        Ok(())
+    }
+
+    fn note_list_reply(&mut self) -> &mut ChannelListRequest {
+        let list = self.list_request.get_or_insert_with(|| ChannelListRequest::new(None));
+        list.last_activity = Instant::now();
+        list
+    }
+
+    async fn send_to_daemon(&self, line: &str) -> Result<()> {
         match self.ipc_out.lock().await.as_ref() {
             Some(tx) => tx
                 .send(IpcMessage::RawSend { conn_id: self.conn_id.clone(), line: line.to_string() })
@@ -2413,21 +2475,59 @@ pub async fn dispatch_line(
             let list = match p.command.as_str() { "349" => "e", "347" => "I", _ => "b" }.to_string();
             send(ServerEvent::IrcBanEnd { conn_id: conn_id.to_string(), channel, list });
         }
-        // 321 = RPL_LISTSTART — ignore
-        "321" => {}
+        "321" if !ui_replayed => { conn.lock().await.note_list_reply(); }
         // 322 = RPL_LIST — channel list entry
-        "322" => {
+        "322" if !ui_replayed => {
             let channel = p.params.get(1).cloned().unwrap_or_default();
+            if channel.is_empty() { return Ok(()); }
             let users: u32 = p.params.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
             let topic = p.params.get(3).cloned().unwrap_or_default();
-            send(ServerEvent::IrcListEntry {
-                conn_id: conn_id.to_string(), channel, users, topic,
-            });
+            let mut connection = conn.lock().await;
+            let list = connection.note_list_reply();
+            if let Some(request_id) = &list.request_id {
+                list.total += 1;
+                list.entries.push(ChannelListEntry { channel, users, topic });
+                if list.entries.len() == LIST_BATCH_ROWS {
+                    send(ServerEvent::IrcListBatch { conn_id: conn_id.to_string(), request_id: request_id.clone(),
+                        entries: std::mem::take(&mut list.entries) });
+                }
+            } else {
+                send(ServerEvent::IrcListEntry { conn_id: conn_id.to_string(), channel, users, topic });
+            }
         }
         // 323 = RPL_LISTEND
-        "323" => {
-            send(ServerEvent::IrcListEnd { conn_id: conn_id.to_string() });
+        "323" if !ui_replayed => {
+            let list = conn.lock().await.list_request.take();
+            let (request_id, total, message) = match list {
+                Some(ChannelListRequest { request_id: Some(request_id), entries, total, incomplete, .. }) => {
+                    if !entries.is_empty() {
+                        send(ServerEvent::IrcListBatch { conn_id: conn_id.to_string(), request_id: request_id.clone(), entries });
+                    }
+                    (Some(request_id), Some(total), incomplete.map(str::to_owned))
+                }
+                _ => (None, None, None),
+            };
+            send(ServerEvent::IrcListEnd { conn_id: conn_id.to_string(), request_id, total, message });
         }
+        "416" if !ui_replayed && p.params.get(1).is_some_and(|verb| verb.eq_ignore_ascii_case("LIST")) => {
+            if let Some(list) = conn.lock().await.list_request.as_mut() {
+                list.incomplete = Some("The IRC server stopped the channel list early. Try a narrower /list pattern.");
+            }
+            send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "server".into(),
+                target: "status".into(), text: p.params.last().cloned().unwrap_or_default(), ts,
+                kind: MessageKind::Notice, msg_id: 0, prefix: None });
+        }
+        "263" | "421" if !ui_replayed && p.params.get(1).is_some_and(|verb| verb.eq_ignore_ascii_case("LIST")) => {
+            if let Some(request_id) = conn.lock().await.list_request.take().and_then(|list| list.request_id) {
+                send(ServerEvent::IrcListError { conn_id: conn_id.to_string(), request_id,
+                    message: "The IRC server did not accept the channel list request.".into() });
+            } else {
+                send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: "server".into(),
+                    target: "status".into(), text: p.params.last().cloned().unwrap_or_default(), ts,
+                    kind: MessageKind::Notice, msg_id: 0, prefix: None });
+            }
+        }
+        "321" | "322" | "323" => {}
         // 364 = RPL_LINKS
         "364" => {
             let server = p.params.get(1).cloned().unwrap_or_default();
@@ -2867,13 +2967,32 @@ mod tests {
         IrcConnection {
             conn_id: "c0".into(), nick: "me".into(), connected: true, lag_ms: None,
             channels: HashMap::new(), ipc_out: Arc::new(Mutex::new(None)), message_tags: false,
-            self_userhost: String::new(), registered: true, echo_message_enabled: false,
+            self_userhost: String::new(), registered: true, list_request: None, echo_message_enabled: false,
             names_buf: HashMap::new(), who_pending: HashSet::new(), who_away: HashMap::new(),
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
             casemapping: CaseMapping::default(), server_casemapping: None, dial_endpoint: None,
             statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(), chanmodes: ChanModes::default(),
             whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, daemon_registration: false, registration_epoch: 0, live_registration_link: None, replay_view: None, avx: Default::default(), cfg: NetworkConfig::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn channel_lists_serialize_on_the_irc_connection() {
+        let mut conn = test_conn();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        *conn.ipc_out.lock().await = Some(tx);
+        conn.send_list("LIST #one\r\n", Some("first".into())).await.unwrap();
+        assert!(conn.send_list("LIST #two\r\n", Some("second".into())).await.is_err());
+        assert!(conn.send_raw("@label=other list #two\r\n").await.is_err());
+        assert_eq!(conn.list_request.as_ref().unwrap().request_id.as_deref(), Some("first"));
+        assert!(matches!(rx.try_recv(), Ok(IpcMessage::RawSend { line, .. }) if line == "LIST #one\r\n"));
+        assert!(rx.try_recv().is_err());
+        conn.list_request.as_mut().unwrap().last_activity -= LIST_REQUEST_IDLE;
+        conn.send_raw("list\r\n").await.unwrap();
+        assert!(conn.list_request.as_ref().unwrap().request_id.is_none());
+        assert!(conn.list_request.as_ref().unwrap().incomplete.is_some());
+        conn.reset_irc_session();
+        assert!(conn.list_request.is_none());
     }
 
     /// r4 (codex P1 irc.rs:591 / P2 irc.rs:591): a STATUSMSG line (`@#staff`) belongs to

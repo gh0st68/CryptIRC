@@ -3283,11 +3283,16 @@ mod r3_srv_a_auth_tests {
         for _ in 0..200 { if std::path::Path::new(&p).exists() { break; } tokio::time::sleep(Duration::from_millis(10)).await; }
         tok
     }
-    /// Hold flock(LOCK_EX) on the account lock file from another thread, like a script.
-    fn hold_ex(d: &str, ms: u64) -> std::thread::JoinHandle<()> {
+    /// Acquire flock(LOCK_EX) on the account lock file, like a script.
+    fn lock_ex(d: &str) -> std::fs::File {
         use std::os::unix::io::AsRawFd;
         let f = std::fs::OpenOptions::new().read(true).write(true).create(true).open(format!("{}/{}", d, ADMIN_LOCK_FILE)).unwrap();
         assert_eq!(unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) }, 0);
+        f
+    }
+
+    fn hold_ex(d: &str, ms: u64) -> std::thread::JoinHandle<()> {
+        let f = lock_ex(d);
         std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(ms)); drop(f); })
     }
 
@@ -3404,7 +3409,9 @@ mod r3_srv_a_auth_tests {
         let d = tmp("flockbusy"); let a = AuthManager::new(&d).unwrap();
         a.register("stuck", "stuck@example.com", PW, Some("1.1.1.1"), false).await.unwrap();
         let before = std::fs::read_to_string(format!("{}/users/stuck.json", d)).unwrap();
-        let held = hold_ex(&d, 8000);
+        // Registration and login hash passwords. Hold the lock through the
+        // assertions even when those operations are slow in a debug build.
+        let held = lock_ex(&d);
         let t0 = Instant::now();
         let e = a.set_admin("stuck", true).await.unwrap_err().to_string();
         assert_eq!(e, ADMIN_LOCK_BUSY);
@@ -3413,8 +3420,7 @@ mod r3_srv_a_auth_tests {
         assert!(er.contains("busy"), "{er}");
         assert!(a.login("stuck", PW, Some("1.1.1.2")).await.is_ok(), "login is not blocked by a script");
         assert_eq!(std::fs::read_to_string(format!("{}/users/stuck.json", d)).unwrap(), before, "no record rewrite while held");
-        assert!(t0.elapsed() < Duration::from_secs(8), "all of the above ran while the script held the lock");
-        held.join().unwrap();
+        drop(held);
         a.set_admin("stuck", true).await.unwrap();
         a.register("other", "o@example.com", PW, Some("1.1.1.4"), false).await.unwrap();
         let _ = std::fs::remove_dir_all(&d);

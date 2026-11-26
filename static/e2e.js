@@ -826,7 +826,7 @@ async function e2eOnVaultUnlocked(ev) {
     e2eNotePassphrase(null);
     E2E._devicePromptPending = false;
   }
-  return _e2eRun(() => _e2eBoot(pass, resumeSetup));
+  return resumeSetup ? _e2eRunInteractive(pass, true) : _e2eRun(() => _e2eBoot(null));
 }
 // Back-compat entry point (an app.js from before this change called e2eInit(key)).
 function e2eInit(e2eEncKeyB64) { return e2eOnVaultUnlocked({ e2e_enc_key: e2eEncKeyB64 || '' }); }
@@ -839,8 +839,8 @@ function e2eOnVaultStateUnlocked() {
   // for good when the vault was unlocked elsewhere ('locked' short-circuit) — no
   // prompt, and incoming E2E DMs were lost there. Now a tab locked BY THE VAULT retries:
   // it picks up the key another tab of this browser cached (that tab announces it on a
-  // BroadcastChannel; the short delay covers the race) and otherwise asks once for the
-  // passphrase. A tab whose user declined the prompt keeps quiet until /encrypt unlock.
+  // BroadcastChannel; the short delay covers the race) and otherwise stays locked
+  // until the user asks to unlock encrypted chats.
   if (E2E._bootPhase === 'locked' && E2E._lockReason !== 'vault') return E2E._bootChain;
   clearTimeout(E2E._stateBootTimer);
   E2E._stateBootTimer = setTimeout(() => {
@@ -963,7 +963,6 @@ async function e2eOnVaultLocked(opts) {
   _e2eWipeMemory();
   E2E._bootPhase = 'locked';
   E2E._lockReason = 'vault';
-  E2E._autoPrompted = false;          // one prompt again after the next unlock elsewhere
   E2E._lockedNoticeShown = false;
   if (had) { await e2eForgetDevice(); await _e2eDevSessWipe(user); }
   try { updateE2EIndicator(_e2eStatusTarget()); } catch (_) {}
@@ -995,7 +994,9 @@ function e2eOnSessionEnd() {
   clearTimeout(E2E._stateBootTimer);
   _e2eWipeMemory();
   E2E._bootPhase = undefined; E2E._krReceived = false; E2E._serverHints = null; E2E._migrated = false;
-  E2E._autoPrompted = false; E2E._lockedNoticeShown = false; E2E._lockedHold = [];
+  E2E._recoverySetup = false; E2E._offerRecoverySetup = false;
+  E2E._interactiveUnlock = null;
+  E2E._lockedNoticeShown = false; E2E._lockedHold = [];
 }
 function _e2eCancelPrompt() {
   if (!E2E._promptText) return;
@@ -1005,10 +1006,10 @@ function _e2eCancelPrompt() {
     if (msg && cancel && msg.textContent === E2E._promptText && typeof cancel.onclick === 'function') cancel.onclick();
   } catch (_) {}
 }
-async function _e2ePrompt(message, value = '', masked = true) {
+async function _e2ePrompt(message, value = '', masked = true, cancelLabel = 'Cancel', onCancelClick = null) {
   E2E._promptText = message;
   try {
-    return await customPrompt(message, value, masked, true);
+    return await customPrompt(message, value, masked, true, cancelLabel, onCancelClick);
   } finally { E2E._promptText = null; }
 }
 async function _e2eShowSharedKey(words) {
@@ -1019,26 +1020,47 @@ async function _e2eShowSharedKey(words) {
 function _e2eDiscardSetupCode() {
   _e2eSys(_e2eStatusTarget(), '🔐 The recovery code just shown was not saved. Discard it and run /encrypt unlock.');
 }
+function _e2eSetupPreference() { return 'cryptirc_e2e_setup_ignored_' + _e2eUser(); }
+function e2eIgnoreRecoverySetup() {
+  const user = _e2eUser();
+  if (!user) return;
+  E2E._setupIgnoredUser = user;
+  _e2eLsSet(_e2eSetupPreference(), true);
+  updateE2EIndicator();
+}
 async function _e2eSetupCode(gen) {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   const code = bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   bytes.fill(0);
-  const saved = await _e2ePrompt('Copy this E2E recovery code and save it somewhere safe. The app will confirm when it is active. You’ll need it on other devices and after clearing browser data.', code, false);
+  const ignore = () => { if (!_e2eBootStale(gen)) e2eIgnoreRecoverySetup(); };
+  const saved = await _e2ePrompt('Copy this E2E recovery code and save it somewhere safe. The app will confirm when it is active. You’ll need it on other devices and after clearing browser data.', code, false, 'Ignore', ignore);
   if (saved === code && !_e2eBootStale(gen)) {
-    const confirm = await _e2ePrompt('Paste your saved E2E recovery code to confirm.');
+    const confirm = await _e2ePrompt('Paste your saved E2E recovery code to confirm.', '', true, 'Ignore', ignore);
     if (!_e2eBootStale(gen) && confirm?.trim() === code) return code;
   }
   _e2eDiscardSetupCode();
   return null;
 }
 async function e2ePromptDeviceUnlock() {
+  if (typeof encryptionDeviceLocked === 'function' && encryptionDeviceLocked()) return;
+  if (E2E._interactiveUnlock) return E2E._interactiveUnlock;
   if (E2E.keyReady || E2E._promptText || E2E._devicePromptPending) return;
   if (E2E._vaultUp !== true) {
-    _e2eSys(_e2eStatusTarget(), '🔐 Unlock the vault before unlocking encrypted chats.');
+    if (typeof showVaultForEncryptedChat === 'function') showVaultForEncryptedChat();
     return;
   }
-  E2E._autoPrompted = true;
-  return _e2eRun(() => _e2eBoot(null, true));
+  return _e2eRunInteractive(null);
+}
+async function _e2eRunInteractive(pass, continuation = false) {
+  if (!continuation && E2E._interactiveUnlock) return E2E._interactiveUnlock;
+  const gen = E2E._lockGen;
+  const run = _e2eRun(() => {
+    if (!_e2eBootStale(gen) && E2E._vaultUp &&
+        !(typeof encryptionDeviceLocked === 'function' && encryptionDeviceLocked())) return _e2eBoot(pass, true);
+  });
+  E2E._interactiveUnlock = run;
+  try { return await run; }
+  finally { if (E2E._interactiveUnlock === run) E2E._interactiveUnlock = null; }
 }
 
 // r2: server 'error' events about E2E (app.js routes them here first). Returns true
@@ -1111,13 +1133,14 @@ async function _e2eOpenKeys(kr, user, gen, vaultPass, interactive) {
     catch (_) { _e2eSys(_e2eStatusTarget(), '🔐 That recovery code did not open your E2E keyring. Run /encrypt unlock to retry.'); return null; }
   }
 
+  // A normal vault unlock can return legacy material. Only an explicit encryption
+  // action may open the migration or recovery-code setup prompts.
+  if (!interactive) return null;
   const upgrade = !!kr.blob;
   if (upgrade && !vaultPass) {
-    if (!interactive) return null;
     await _e2eProveVault(gen, 'Enter your vault passphrase to upgrade your existing E2E keyring.');
     return null;
   }
-  if (!upgrade && !interactive) return null;
 
   return _e2eXLock('keyring-setup', async () => {
     let previous = null;
@@ -1159,6 +1182,8 @@ async function _e2eOpenKeys(kr, user, gen, vaultPass, interactive) {
         return null;
       }
       if (!result.ok) { _e2eDiscardSetupCode(); return null; }
+      E2E._setupIgnoredUser = null;
+      _e2eLsDel(_e2eSetupPreference());
       _e2eSys(_e2eStatusTarget(), '🔐 Your saved E2E recovery code is now active.');
       kr.blob = blob;
       kr.migrated = !!result.migrated;
@@ -1193,11 +1218,11 @@ async function _e2eBoot(vaultPass, interactive = false) {
     if (!kr) { E2E._bootPhase = 'failed'; return; }
     kr.peers = Array.isArray(kr.peers) ? kr.peers : [];
     kr.channels = Array.isArray(kr.channels) ? kr.channels : [];
-    if (vaultPass) E2E._autoPrompted = true;
     E2E._krReceived = true;
     E2E._lockReason = null;
     if (kr.migrated) { E2E._migrated = true; E2E._legacyKey = null; }
     E2E._serverHints = { peers: (kr.peers || []).map(_e2eK), channels: (kr.channels || []).map(_e2eK), hasIdentity: !!kr.has_identity, migrated: !!kr.migrated };
+    E2E._recoverySetup = false; E2E._offerRecoverySetup = false;
     if (kr.blob && !_e2eKringValid(kr.blob)) {
       // r2: a malformed / tampered keyring is never unwrapped (no KDF run on server-chosen
       // parameters), never replaced, and does not cost this browser its cached key.
@@ -1208,6 +1233,8 @@ async function _e2eBoot(vaultPass, interactive = false) {
       try { updateE2EIndicator(_e2eStatusTarget()); } catch (_) {}
       return;
     }
+    E2E._recoverySetup = !kr.blob?.startsWith(E2E_KEYRING_PREFIX);
+    E2E._offerRecoverySetup = E2E._recoverySetup && !!(kr.blob || kr.has_identity || kr.peers.length || kr.channels.length);
     const opened = E2E.e2eEncKey
       ? { keys: { k: E2E.e2eEncKey, previous: E2E._previousKey, finalized: E2E._finalKeyring }, remember: false }
       : await _e2eOpenKeys(kr, user, gen, vaultPass, interactive);
@@ -1215,12 +1242,7 @@ async function _e2eBoot(vaultPass, interactive = false) {
     if (!opened) {
       E2E._bootPhase = 'locked';
       if (!E2E._lockReason) E2E._lockReason = 'nokey';
-      const h = E2E._serverHints;
-      const inUse = kr.blob || h.hasIdentity || h.migrated || h.peers.length || h.channels.length || _e2eHints().dm.length || _e2eHints().ch.length;
-      if (inUse && !E2E._autoPrompted && !vaultPass) {
-        E2E._autoPrompted = true;
-        setTimeout(() => { if (!E2E.keyReady && E2E._vaultUp !== false) e2ePromptDeviceUnlock(); }, 1200);
-      } else if ((h.hasIdentity || kr.blob) && !E2E._lockedNoticeShown) {
+      if (interactive && (kr.has_identity || kr.blob) && !E2E._lockedNoticeShown) {
         E2E._lockedNoticeShown = true;
         _e2eSys(_e2eStatusTarget(), '🔐 E2E is locked on this device — run /encrypt unlock to enable it');
       }
@@ -1233,6 +1255,7 @@ async function _e2eBoot(vaultPass, interactive = false) {
     E2E._finalKeyring = opened.keys.finalized;
     E2E._pepper = null;
     E2E.keyReady = true;
+    E2E._recoverySetup = false; E2E._offerRecoverySetup = false;
     if (opened.remember) {
       await _e2eIdbPutKey(user, opened.keys);
       // A lock during the write: the lock's forget may have run before it — remove it.
@@ -4318,6 +4341,7 @@ async function _e2eFetchBundleQueued(nick, k, cid) {
 
 async function handleEncryptCommand(args, conn_id, target) {
   const sub = (args[0] || '').toLowerCase();
+  const commandGen = E2E._lockGen;
   const dmTarget = !_e2eIsChan(target) && target !== 'status' ? target : null;
   // r5 (agy-flash app.js:9205 + security review): the key a window's PSK operations
   // (keygen / add / share / rotate / off) act on is resolved under the network's REAL
@@ -4349,7 +4373,8 @@ async function handleEncryptCommand(args, conn_id, target) {
     case 'on': case 'start': {
       const nick = args[1] || target;
       if (!nick || _e2eIsChan(nick) || nick === 'status') { e2eSysMsg(target,'Usage: /encrypt on <nick>'); return; }
-      if (!E2E.keyReady) { e2eSysMsg(target,'🔐 E2E is locked on this device — /encrypt unlock first'); return; }
+      if (!E2E.keyReady) await e2ePromptDeviceUnlock();
+      if (!E2E.keyReady || _e2eBootStale(commandGen)) return;
       if (!E2E.identityReady) { e2eSysMsg(target,'🔐 E2E identity not loaded yet — try again in a moment'); return; }
       const k = _e2eK(nick);
       const cur = E2E.dmSessions[k];
@@ -4370,7 +4395,8 @@ async function handleEncryptCommand(args, conn_id, target) {
       break;
     }
     case 'keygen': {
-      if (!E2E.keyReady) { e2eSysMsg(target,'🔐 E2E is locked on this device — /encrypt unlock first'); return; }
+      if (!E2E.keyReady) await e2ePromptDeviceUnlock();
+      if (!E2E.keyReady || _e2eBootStale(commandGen)) return;
       const kn = await keyName(target, 'Replace'); if (kn === null) return;
       const { keyWords, keyB64, key } = await generateChannelKey();
       if (!E2E.keyReady) { e2eSysMsg(target, '🔐 E2E was locked meanwhile — nothing was changed'); return; }   // r5: locked during the key generation
@@ -4384,7 +4410,8 @@ async function handleEncryptCommand(args, conn_id, target) {
     case 'add': {
       const words = args.slice(1);
       if (words.length !== 32) { e2eSysMsg(target,'Usage: /encrypt add <word1> … <word32>  (32 words)'); return; }
-      if (!E2E.keyReady) { e2eSysMsg(target,'🔐 E2E is locked on this device — /encrypt unlock first'); return; }
+      if (!E2E.keyReady) await e2ePromptDeviceUnlock();
+      if (!E2E.keyReady || _e2eBootStale(commandGen)) return;
       const kn = await keyName(target, 'Replace'); if (kn === null) return;
       try {
         const { key, keyB64 } = await importChannelKeyFromWords(words.join(' '));
@@ -4647,6 +4674,14 @@ function _e2eFlushSysQueue() {
 
 function updateE2EIndicator(target) {
   try { _e2eFlushSysQueue(); } catch (_) {}
+  const banner = document.getElementById('e2e-unlock-banner');
+  const offer = document.getElementById('e2e-setup-offer');
+  const activeTarget = active?.target;
+  const protectedChat = !!(activeTarget && activeTarget !== 'status' &&
+    typeof _isE2eConversation === 'function' && _isE2eConversation(activeTarget, active.conn_id));
+  if (banner) banner.hidden = E2E.keyReady || !protectedChat;
+  if (offer) offer.hidden = E2E.keyReady || protectedChat || !E2E._vaultUp || !E2E._offerRecoverySetup ||
+    E2E._setupIgnoredUser === _e2eUser() || !!_e2eLsGet(_e2eSetupPreference());
   // Always update lock icon based on current active view
   const lock = document.getElementById('e2e-lock');
   if (lock && active) {

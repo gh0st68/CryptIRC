@@ -176,6 +176,12 @@ body > style, body > script { visibility:hidden; }
   #vault-overlay { background:rgba(0,0,0,.85); backdrop-filter:blur(4px); -webkit-backdrop-filter:blur(4px); }
 }
 #vault-overlay.show { display:flex; }
+#vault-overlay.on-demand { z-index:10002; }
+.vault-later { background:none; border:0; color:var(--text2); cursor:pointer; padding:10px; width:100%; margin-top:4px; }
+.unlock-strip { display:flex; align-items:center; flex-wrap:wrap; gap:6px 10px; width:100%; flex:none; padding:6px 12px; background:var(--bg2); border-bottom:1px solid var(--border); color:var(--text2); font-size:12px; }
+.unlock-strip[hidden] { display:none; }
+.unlock-strip span { flex:1 1 auto; }
+.unlock-strip button { background:var(--bg3); border:1px solid var(--border); border-radius:6px; color:var(--text); padding:5px 9px; cursor:pointer; min-height:32px; }
 .vault-box {
   background:var(--bg2); border:1px solid var(--border2); border-radius:12px;
   padding:clamp(20px,5vw,28px) clamp(16px,6vw,32px);
@@ -594,22 +600,20 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .nick-ctx-item:first-child { border-radius:8px 8px 0 0; }
 .nick-ctx-item:last-child { border-radius:0 0 8px 8px; }
 .nick-ctx-sep { height:1px; background:var(--border); margin:2px 0; pointer-events:none; }
-/* channel list modal */
-#chanlist-overlay {
-  position:fixed; inset:0; background:rgba(0,0,0,.7); display:none; align-items:center; justify-content:center;
-  z-index:160; padding:20px;
-}
-#chanlist-overlay.show { display:flex; }
+/* Channel list conversation tab */
 .chanlist-box {
-  background:var(--bg2); border:1px solid var(--border2); border-radius:12px;
-  width:100%; max-width:700px; max-height:min(80vh, 80dvh); display:flex; flex-direction:column;
-  box-shadow:0 20px 60px rgba(0,0,0,.6); overflow:hidden;
+  background:var(--bg2); flex:1; min-height:0; min-width:0; display:flex; flex-direction:column; overflow:hidden;
 }
+.chanlist-box[hidden], #chanlist-tab[hidden] { display:none; }
+#chanlist-tab { padding:0 4px 0 14px; }
+#chanlist-tab button { border:0; background:none; color:inherit; font:inherit; cursor:pointer; min-height:44px; }
+#chanlist-tab-open { flex:1; min-width:0; text-align:left; }
+#chanlist-tab-close { min-width:36px; border-radius:4px; }
+#chanlist-tab-close:hover { background:var(--bg3); color:var(--text); }
+#main.chanlist-active.split-active { flex-wrap:nowrap; }
+#main.chanlist-active :is(#chat-area,#welcome,#split-panel,#scroll-bottom-btn,#reply-bar,#typing-indicator,#input-wrap,#emoji-picker,#e2e-unlock-banner,#search-btn,#e2e-lock) { display:none!important; }
 .chanlist-header {
   padding:16px 20px 12px; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; flex-shrink:0;
-}
-.chanlist-title {
-  font-family:var(--sans); font-weight:700; font-size:16px; color:var(--text); flex:1;
 }
 .chanlist-count { font-size:12px; color:var(--text3); }
 .chanlist-close {
@@ -636,13 +640,24 @@ body.force-no-select * { -webkit-user-select:none!important; user-select:none!im
 .chanlist-users { color:var(--text2); font-size:12px; text-align:right; }
 .chanlist-topic { color:var(--text3); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .chanlist-empty { padding:40px 20px; text-align:center; color:var(--text3); font-size:13px; }
-.chanlist-loading { padding:40px 20px; text-align:center; color:var(--text3); font-size:13px; }
 .chanlist-head-row {
   display:grid; grid-template-columns:minmax(120px,1fr) 60px minmax(0,2fr); gap:10px;
   padding:8px 20px 6px; font-size:10px; color:var(--text3); text-transform:uppercase; letter-spacing:.06em;
   border-bottom:1px solid var(--border); flex-shrink:0;
 }
 .chanlist-head-row span:nth-child(2) { text-align:right; }
+.chanlist-heading { flex:1; min-width:0; }
+.chanlist-network { display:block; color:var(--text3); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chanlist-options, .chanlist-footer, .chanlist-pager { display:flex; align-items:center; gap:6px; }
+.chanlist-options { flex-wrap:wrap; padding:8px 20px; font-size:12px; color:var(--text2); }
+.chanlist-options label { display:flex; align-items:center; gap:4px; }
+.chanlist-options select, .chanlist-footer button { border:1px solid var(--border); border-radius:6px; background:var(--bg1); color:var(--text); font:inherit; padding:4px 6px; min-height:32px; }
+.chanlist-footer { justify-content:space-between; padding:6px 20px; border-top:1px solid var(--border); color:var(--text2); font-size:12px; flex-shrink:0; }
+.chanlist-footer button { cursor:pointer; }
+.chanlist-footer button:disabled { cursor:default; opacity:.45; }
+.chanlist-row { width:100%; text-align:left; font:inherit; color:inherit; background:none; border:0; border-bottom:1px solid var(--bg3); }
+.chanlist-row:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.chanlist-body { min-height:0; }
 /* appearance modal */
 #appearance-overlay {
   position:fixed; inset:0; background:rgba(0,0,0,.7); display:none; align-items:center; justify-content:center;
@@ -2034,7 +2049,8 @@ html[data-theme='irssi'] ::-webkit-scrollbar-thumb{background:#333333}
   #nick-panel.open { transform:translateX(0); }
   #sidebar {
     position:fixed; left:0; top:0; bottom:0; z-index:50;
-    width:min(280px, 80vw);
+    width:min(280px, 80vw); min-width:0;
+    transition:transform .28s cubic-bezier(.4,0,.2,1);
     transform:translateX(-100%);
     padding-left:var(--sal);
   }
@@ -2085,8 +2101,6 @@ html[data-theme='irssi'] ::-webkit-scrollbar-thumb{background:#333333}
 }
 /* Mobile tightening for wide modals — prevents horizontal overflow + wasted chrome on phones */
 @media(max-width:600px) {
-  #chanlist-overlay { padding:8px; }
-  .chanlist-box { max-width:100%; max-height:min(92vh, 92dvh); }
   .chanlist-header { padding:12px 14px 10px; gap:8px; }
   .chanlist-body { padding:4px 8px; }
   .chanlist-row { padding:8px 4px; font-size:12px; }
@@ -2157,8 +2171,8 @@ html[data-theme='irssi'] ::-webkit-scrollbar-thumb{background:#333333}
   #topbar { padding-top:max(var(--sat),2px); min-height:34px; }
   #welcome { padding:16px 24px; gap:8px; }
   .welcome-logo { font-size:26px; }
-  .encrypt-box, .appear-box, .chanlist-box { max-height:94dvh; }
-  #sidebar { width:min(280px,70vw); }
+  .encrypt-box, .appear-box { max-height:94dvh; }
+  #sidebar { width:min(280px,70vw); min-width:0; }
   #nick-panel { width:min(180px,40vw); }
 }
 
@@ -2675,6 +2689,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <input class="auth-input" type="password" id="vault-pass" placeholder="Enter passphrase…" autocomplete="current-password"></div>
     <div class="auth-err" id="vault-err"></div>
     <button class="auth-btn" data-cryptirc-click="doUnlock">Unlock</button>
+    <button type="button" class="vault-later" id="vault-unlock-later" data-cryptirc-click="deferVaultUnlock" hidden>Later</button>
     <div style="font-size:10px;color:var(--text3);text-align:center;margin-top:10px;line-height:1.6;">
       AES-256-GCM · Argon2id KDF · Logs encrypted at rest · Non-E2E messages pass through the server in plaintext
     </div>
@@ -3524,22 +3539,6 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
   </div>
 </div>
 
-<!-- ── CHANNEL LIST MODAL ──────── -->
-<div id="chanlist-overlay">
-  <div class="chanlist-box">
-    <div class="chanlist-header">
-      <span class="chanlist-title">Channel List</span>
-      <span class="chanlist-count" id="chanlist-count"></span>
-      <button class="chanlist-close" data-cryptirc-click="closeChanList">&times;</button>
-    </div>
-    <input class="chanlist-search" id="chanlist-search" placeholder="Search channels..." data-cryptirc-input="filterChanList">
-    <div class="chanlist-head-row"><span>Channel</span><span>Users</span><span>Topic</span></div>
-    <div class="chanlist-body" id="chanlist-body">
-      <div class="chanlist-loading" id="chanlist-loading">Waiting for server response...</div>
-    </div>
-  </div>
-</div>
-
 <!-- ── NEW MESSAGE MODAL ──────── -->
 <div id="newmsg-overlay">
   <div class="newmsg-box">
@@ -3755,6 +3754,10 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
       <div id="favorites-list"></div>
       <div id="pm-list" style="padding:0"></div>
       <div id="network-list"></div>
+      <div class="chan-item" id="chanlist-tab" hidden>
+        <button type="button" id="chanlist-tab-open" data-cryptirc-click="showChanListTab" aria-controls="chanlist-box">Channel list</button>
+        <button type="button" id="chanlist-tab-close" data-cryptirc-click="closeChanList" aria-label="Close channel list">&times;</button>
+      </div>
       <!-- Upload Status pseudo-channel sits in its own container so
            favorites-only mode (which hides #network-list) doesn't hide it. -->
       <div id="uploads-pin"></div>
@@ -3784,6 +3787,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           <button class="settings-menu-item" data-cryptirc-click="settingsMonitor"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/></svg>Monitor</button>
           <div class="settings-menu-sect">Privacy</div>
           <button class="settings-menu-item" data-cryptirc-click="showSecurityPanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Security</button>
+          <button class="settings-menu-item" data-cryptirc-click="openEncryptionSettings">End-to-end encryption</button>
           <button class="settings-menu-item" data-cryptirc-click="showIgnorePanel"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="18" y1="8" x2="23" y2="13"/><line x1="23" y1="8" x2="18" y2="13"/></svg>Ignored Users</button>
           <div class="settings-menu-sect">Tools</div>
           <button class="settings-menu-item" data-cryptirc-click="showTranslation"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h12m-6-2v2m3 0c-1 5-4 8-8 10m2-6c2 3 4 4 7 5m1 7 4-10 4 10m-6-4h4"/></svg>Translation</button>
@@ -3842,8 +3846,39 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         <div id="search-results"><div class="search-empty">Type to search current conversation</div></div>
       </div>
     </div>
+    <div class="unlock-strip" id="vault-unlock-banner" hidden><span>Unlock the vault to use saved connections and history.</span><button type="button" data-cryptirc-click="reopenVault">Unlock vault</button></div>
+    <div class="unlock-strip" id="e2e-unlock-banner" hidden><span>This encrypted chat is locked on this device.</span><button type="button" data-cryptirc-click="unlockEncryptedChats">Unlock encrypted chat</button></div>
+    <div class="unlock-strip" id="e2e-setup-offer" hidden><span>Set up a recovery code for your encrypted chats.</span><button type="button" data-cryptirc-click="unlockEncryptedChats">Set up</button><button type="button" data-cryptirc-click="ignoreEncryptionSetup">Ignore</button></div>
     <!-- a11y: log role + polite live region so screen readers announce incoming messages (audit #48) -->
     <div id="chat-area" style="display:none" role="log" aria-live="polite" aria-label="Conversation"></div>
+    <section class="chanlist-box" id="chanlist-box" aria-label="Channel list" tabindex="-1" hidden>
+      <div class="chanlist-header">
+        <div class="chanlist-heading">
+          <span class="chanlist-network" id="chanlist-network"></span>
+          <span class="chanlist-count" id="chanlist-count" role="status"></span>
+        </div>
+        <button type="button" class="chanlist-close" data-cryptirc-click="closeChanList" aria-label="Close channel list">&times;</button>
+      </div>
+      <input type="search" class="chanlist-search" id="chanlist-search" placeholder="Search channels…" aria-label="Search channels and topics" autocomplete="off" spellcheck="false" data-cryptirc-input="filterChanList">
+      <div class="chanlist-options">
+        <label>Per page <select id="chanlist-limit" data-cryptirc-change="filterChanList">
+          <option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="250">250</option><option value="500">500</option><option value="1000">1,000</option>
+        </select></label>
+        <label>Cache <select id="chanlist-cache" data-cryptirc-change="setChanListCacheTime" title="Keep results in this tab">
+          <option value="0">Off</option><option value="5">5 min</option><option value="15" selected>15 min</option><option value="60">1 hr</option><option value="360">6 hr</option><option value="1440">24 hr</option>
+        </select></label>
+      </div>
+      <div class="chanlist-head-row"><span>Channel</span><span>Users</span><span>Topic</span></div>
+      <div class="chanlist-body" id="chanlist-body"></div>
+      <div class="chanlist-footer">
+        <button type="button" id="chanlist-refresh" data-cryptirc-click="refreshChanList">Refresh</button>
+        <div class="chanlist-pager">
+          <button type="button" id="chanlist-prev" data-cryptirc-click="prevChanListPage" aria-label="Previous page">‹</button>
+          <span id="chanlist-page"></span>
+          <button type="button" id="chanlist-next" data-cryptirc-click="nextChanListPage" aria-label="Next page">›</button>
+        </div>
+      </div>
+    </section>
     <div id="split-panel"><div class="split-header"><span>Split:</span><select id="split-chan-select" data-cryptirc-change="setSplitTarget"></select><button data-cryptirc-click="toggleSplitView" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px" title="Close split">✕</button></div><div class="split-chat" id="split-chat-area"></div></div>
     <button id="scroll-bottom-btn" data-cryptirc-click="scrollForce" title="Jump to latest" aria-label="Jump to latest message">↓</button>
     <div id="welcome">

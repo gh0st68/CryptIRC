@@ -6,6 +6,9 @@ const promptOpen = "document.getElementById('custom-prompt-overlay').classList.c
 const promptText = "document.getElementById('custom-prompt-msg').textContent";
 const input = "document.getElementById('custom-prompt-input')";
 const acceptPrompt = "document.getElementById('custom-prompt-ok').click()";
+const cancelPrompt = "document.getElementById('custom-prompt-cancel').click()";
+const openEncryptionSettings = "document.querySelector('[data-cryptirc-click=openEncryptionSettings]').click();"+
+  "document.querySelector('#encrypt-panel-body [data-encrypt-cmd=unlock]').click()";
 const setupText = 'Copy this E2E recovery code';
 const unlockText = 'Enter your E2E recovery code';
 
@@ -21,6 +24,13 @@ async function login(browser, user, password, waitFor) {
   await browser.evaluate("document.getElementById('l-user').value=" + q(user) +
     ";document.getElementById('l-pass').value=" + q(password) + ';doLogin()');
   await waitFor(() => browser.evaluate('!!sessionToken&&_wsReady()'), 'browser connected for '+user);
+}
+
+async function reopen(browser, waitFor, ready, description) {
+  const oldDocument = await browser.evaluate('performance.timeOrigin');
+  await browser.send('Page.reload');
+  await waitFor(() => browser.evaluate(`performance.timeOrigin!==${oldDocument} &&
+    document.readyState==='complete' && (${ready})`).catch(()=>false), description);
 }
 
 async function setUpRecovery(browser, waitFor, check) {
@@ -62,6 +72,17 @@ export async function seedLegacyE2e({browser, waitFor, check, tmp, user, passwor
 export async function checkLegacyMigration({browser, waitFor, check, tmp, user, password, vault, channel, legacy}) {
   await login(browser, user, password, waitFor);
   await unlockVault(browser, vault);
+  await waitFor(() => browser.evaluate('!document.getElementById("e2e-setup-offer").hidden'), 'legacy recovery offer');
+  check('legacy recovery setup is offered without a passphrase popup', !await browser.evaluate(promptOpen));
+  await browser.evaluate("document.querySelector('[data-cryptirc-click=ignoreEncryptionSetup]').click()");
+  check('ignoring the offer hides it', await browser.evaluate('document.getElementById("e2e-setup-offer").hidden'));
+  await browser.evaluate(openEncryptionSettings);
+  await waitPrompt(browser, waitFor, 'Enter your vault passphrase');
+  await fillPrompt(browser, vault+'-incorrect');
+  await waitFor(() => browser.evaluate('!E2E._devicePromptPending && !('+promptOpen+')'), 'a wrong vault passphrase frees the unlock request');
+  await browser.evaluate(openEncryptionSettings);
+  await waitPrompt(browser, waitFor, 'Enter your vault passphrase');
+  await fillPrompt(browser, vault);
   const code = await setUpRecovery(browser, waitFor, check);
   check('legacy account migrated to a finalized v3 keyring', await waitFor(async () => {
     const stored = await keyringOnDisk(tmp, user);
@@ -122,14 +143,34 @@ export async function checkE2eChat({
   await waitFor(() => peer.evaluate('E2E._vaultUp === true && E2E._krReceived'), 'peer vault ready');
   check('public chat sharing is available before setting up E2E',
     await browser.evaluate('_chatAllowsPublicContent({conn_id:' + q(networkA) + ',target:"#public-check"})'));
+  await browser.evaluate('void handleEncryptCommand(["on",'+q(other)+'],'+q(networkA)+','+q(channel)+');void e2ePromptDeviceUnlock()');
+  await waitPrompt(browser, waitFor, setupText);
+  await browser.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await browser.send('Input.dispatchKeyEvent',{type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+  await waitFor(() => browser.evaluate('!E2E._interactiveUnlock && !('+promptOpen+')'), 'setup dismissed with Escape');
+  check('Escape dismisses setup without saving Ignore', !await browser.evaluate('_e2eLsGet(_e2eSetupPreference())'));
+  await browser.evaluate('void handleEncryptCommand(["on",'+q(other)+'],'+q(networkA)+','+q(channel)+')');
+  await waitPrompt(browser, waitFor, setupText);
+  check('recovery setup can be ignored when starting encryption', await browser.evaluate(
+    "document.getElementById('custom-prompt-cancel').textContent==='Ignore'"));
+  const declinedAt = browser.frames.length;
+  await browser.evaluate(cancelPrompt);
+  await waitFor(() => browser.evaluate('!E2E._interactiveUnlock && !E2E._booting'), 'ignored recovery setup');
+  check('ignoring setup leaves encryption unchanged and clears the displayed code',
+    await browser.evaluate('!E2E.keyReady && '+input+".value==='' && _e2eLsGet(_e2eSetupPreference())===true") &&
+    !browser.frames.slice(declinedAt).some(frame=>frame.includes('"type":"e2e_store_keyring"')));
+  await reopen(browser, waitFor, 'window._appShown && E2E._krReceived && !E2E._booting', 'reopened after ignoring setup');
+  await pause(1450);
+  check('reopening after Ignore leaves setup deferred', await browser.evaluate('!('+promptOpen+') && _e2eLsGet(_e2eSetupPreference())===true'));
   const competitor = await chromium('encrypted-setup-race');
   await login(competitor, owner, password, waitFor);
   await waitFor(() => competitor.evaluate('E2E._vaultUp === true && E2E._krReceived'), 'second setup device ready');
   await competitor.evaluate('setActive(' + q(networkA) + ',' + q(channel) + ');void e2ePromptDeviceUnlock()');
   await waitPrompt(competitor, waitFor, setupText);
   const losingCode = await competitor.evaluate(input + '.value');
-  await browser.evaluate('void handleEncryptCommand(["unlock"],' + q(networkA) + ',' + q(channel) + ')');
+  await browser.evaluate(openEncryptionSettings);
   const ownerCode = await setUpRecovery(browser, waitFor, check);
+  await browser.evaluate('closeEncryptPanel()');
   await competitor.evaluate(acceptPrompt);
   await waitPrompt(competitor, waitFor, 'Paste your saved E2E recovery code');
   await fillPrompt(competitor, losingCode);
@@ -239,16 +280,36 @@ export async function checkE2eChat({
 
   const freshDevice = await chromium('encrypted-recovery');
   await login(freshDevice, owner, password, waitFor);
+  await waitFor(() => freshDevice.evaluate('E2E._bootPhase==="locked" && E2E._krReceived'), 'new device stays locked');
+  await pause(1450);
+  check('a new device does not automatically ask for the recovery code', !await freshDevice.evaluate(promptOpen));
+  const lockedDraft = 'draft held until explicitly unlocked '+stamp;
+  const lockedAt = freshDevice.frames.length;
+  await compose(freshDevice, networkA, channel, lockedDraft);
   await waitPrompt(freshDevice, waitFor, unlockText);
   await fillPrompt(freshDevice, losingCode);
   await waitFor(() => freshDevice.evaluate("E2E._bootPhase==='locked'&& !("+promptOpen+")"), 'incorrect code rejected');
   check('a recovery code from the losing setup cannot unlock the keyring', !await freshDevice.evaluate('E2E.keyReady'));
-  await freshDevice.evaluate('void e2ePromptDeviceUnlock()');
+  check('send on a locked encrypted chat keeps the draft and sends no plaintext',
+    await freshDevice.evaluate('document.getElementById("msg-input").value==='+q(lockedDraft)) &&
+    !freshDevice.frames.slice(lockedAt).some(frame=>frame.includes(lockedDraft)));
+  const actionDraft='/me held behind encryption '+stamp;
+  await compose(freshDevice, networkA, channel, actionDraft);
+  await waitPrompt(freshDevice, waitFor, unlockText);
+  await freshDevice.evaluate(cancelPrompt);
+  await waitFor(() => freshDevice.evaluate('!E2E._interactiveUnlock && !('+promptOpen+')'), 'locked action prompt dismissed');
+  check('encrypted slash commands also keep their draft while locked',
+    await freshDevice.evaluate('document.getElementById("msg-input").value==='+q(actionDraft)) &&
+    !freshDevice.frames.slice(lockedAt).some(frame=>frame.includes(actionDraft.slice(4))));
+  await freshDevice.evaluate("document.querySelector('#e2e-unlock-banner button').click()");
   await waitPrompt(freshDevice, waitFor, unlockText);
   const freshCount = freshDevice.frames.length;
   await fillPrompt(freshDevice, ownerCode);
   await waitFor(() => freshDevice.evaluate("E2E._bootPhase==='ready'&&E2E.identityReady"), 'new device recovered E2E keys');
   await waitFor(() => hasKey(freshDevice, channel), 'new device loaded channel PSK');
+  check('unlocking does not send an earlier encrypted slash-command draft',
+    !freshDevice.frames.slice(lockedAt).some(frame=>frame.includes(actionDraft.slice(4))) &&
+    await freshDevice.evaluate('document.getElementById("msg-input").value==='+q(actionDraft)));
   check('recovered device restores the verified peer pin from encrypted state',
     await freshDevice.evaluate('E2E.trustStore['+q(other)+']?.verified===true && E2E.trustStore['+
       q(other)+'].fingerprint==='+q(pinnedFingerprint)));
@@ -259,15 +320,21 @@ export async function checkE2eChat({
   await compose(freshDevice, networkA, other, afterRestore);
   await waitFor(() => row(peer, networkB, owner, afterRestore), 'ratchet resumed on recovered device');
   check('recovered device sends through the restored DM ratchet', true);
+  await reopen(freshDevice, waitFor, 'window._appShown && E2E._bootPhase==="ready" && E2E.identityReady', 'cached device reopened');
+  check('reopening a remembered device restores keys without a popup', !await freshDevice.evaluate(promptOpen));
 
   await freshDevice.evaluate('_deviceLockNow(false)');
   await waitFor(() => freshDevice.evaluate('!E2E.keyReady'), 'device lock erased E2E keys from memory');
+  check('intentional device lock requires a passphrase and has no Later action', await freshDevice.evaluate(`
+    document.getElementById('vault-overlay').classList.contains('show') && document.getElementById('vault-unlock-later').hidden`));
   const blocked = 'must not reach IRC '+stamp;
   const sentBefore = freshDevice.frames.length;
   await compose(freshDevice, networkA, channel, blocked);
+  await freshDevice.evaluate('void e2ePromptDeviceUnlock()');
   await pause(300);
   check('locked browser does not put protected chat on the wire',
-    !freshDevice.frames.slice(sentBefore).some(frame => frame.includes(blocked)));
+    !freshDevice.frames.slice(sentBefore).some(frame => frame.includes(blocked)) &&
+    await freshDevice.evaluate('!E2E.keyReady && !('+promptOpen+')'));
   await freshDevice.evaluate('handleEncryptCommand(["off"],' + q(networkA) + ',' + q(channel) + ')');
   check('a locked device preserves the encryption hint and sends no delete',
     await freshDevice.evaluate('e2eTargetState(' + q(channel) + ').mode==="blocked"') &&

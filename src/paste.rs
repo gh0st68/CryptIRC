@@ -36,6 +36,8 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const MAX_PASTE_SIZE: usize = 500_000; // 500KB max
+const MAX_LANGUAGE_BYTES: usize = 64;
+const MAX_PASSWORD_BYTES: usize = 1024;
 
 /// r5 (codex P1 paste.rs:230): per-account paste quota — pastes on disk (expired ones count
 /// until they are swept) and their bytes. Defaults 500 pastes / 200 MiB; override with
@@ -107,7 +109,16 @@ pub struct Paste {
     pub created_at: i64,
     pub expires_at: Option<i64>,     // Unix timestamp, None = no expiry
     pub password_hash: Option<String>, // Argon2id hash if password-protected
+    // Older files omit this field and may have been created with longer passwords.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password_max_bytes: Option<usize>,
     pub author: String,
+}
+
+impl Paste {
+    pub(crate) fn allows_password_length(&self, password: &str) -> bool {
+        self.password_max_bytes.is_none_or(|limit| password.len() <= limit)
+    }
 }
 
 #[derive(Deserialize)]
@@ -119,6 +130,18 @@ pub struct CreatePasteRequest {
     pub content_type: Option<String>,
     pub expires_in: Option<i64>,  // seconds from now, 0 or None = no expiry
     pub password: Option<String>,
+}
+
+impl CreatePasteRequest {
+    pub(crate) fn validate_field_lengths(&self) -> Result<()> {
+        if self.language.as_ref().is_some_and(|s| s.len() > MAX_LANGUAGE_BYTES) {
+            anyhow::bail!("Paste language cannot exceed {} bytes", MAX_LANGUAGE_BYTES);
+        }
+        if self.password.as_ref().is_some_and(|s| s.len() > MAX_PASSWORD_BYTES) {
+            anyhow::bail!("Paste password cannot exceed {} bytes", MAX_PASSWORD_BYTES);
+        }
+        Ok(())
+    }
 }
 
 pub struct PasteStore {
@@ -188,6 +211,7 @@ impl PasteStore {
     }
 
     pub async fn create(&self, req: &CreatePasteRequest, author: &str) -> Result<Paste> {
+        req.validate_field_lengths()?;
         if req.content.len() > MAX_PASTE_SIZE {
             anyhow::bail!("Paste too large (max 500KB)");
         }
@@ -243,6 +267,7 @@ impl PasteStore {
             content_type,
             created_at: now,
             expires_at,
+            password_max_bytes: password_hash.as_ref().map(|_| MAX_PASSWORD_BYTES),
             password_hash,
             author: author.to_string(),
         };
@@ -407,6 +432,9 @@ impl PasteStore {
 
     pub fn verify_password(paste: &Paste, password: &str) -> bool {
         if let Some(ref hash) = paste.password_hash {
+            if !paste.allows_password_length(password) {
+                return false;
+            }
             match PasswordHash::new(hash) {
                 Ok(h) => Argon2::default().verify_password(password.as_bytes(), &h).is_ok(),
                 Err(_) => false,
@@ -532,6 +560,7 @@ mod tests {
             created_at: 1,
             expires_at: None,
             password_hash: None,
+            password_max_bytes: None,
             author: "tester".into(),
         }
     }
@@ -712,5 +741,47 @@ mod tests {
         let exact = "a".repeat(MAX_PASTE_SIZE);
         assert!(store.create(&req(exact, Some("html")), "tester").await.is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn new_paste_field_limits_are_in_bytes_and_survive_reload() {
+        let (store, dir) = test_store();
+        let mut request = req("hello".into(), None);
+        let language = "é".repeat(MAX_LANGUAGE_BYTES / 2);
+        request.language = Some(format!("{language}x"));
+        let error = store.create(&request, "tester").await.err().unwrap();
+        assert!(error.to_string().contains("Paste language"));
+
+        request.language = Some(language);
+        let password = "é".repeat(MAX_PASSWORD_BYTES / 2);
+        let over_limit = format!("{password}x");
+        request.password = Some(over_limit.clone());
+        let error = store.create(&request, "tester").await.err().unwrap();
+        assert!(error.to_string().contains("Paste password"));
+
+        request.password = Some(password.clone());
+        let created = store.create(&request, "tester").await.unwrap();
+        let loaded = store.get(&created.id).await.unwrap().unwrap();
+        assert_eq!(loaded.language, request.language.unwrap());
+        assert!(!loaded.allows_password_length(&over_limit));
+        assert_eq!(crate::paste_password_ok(&loaded, &over_limit).await, Some(false));
+        assert_eq!(crate::paste_password_ok(&loaded, &password).await, Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn legacy_paste_can_still_unlock_with_its_long_password() {
+        let password = "x".repeat(MAX_PASSWORD_BYTES + 1);
+        let salt = SaltString::generate(&mut OsRng);
+        let mut stored = full_paste(PasteKind::Text);
+        stored.password_hash = Some(Argon2::default().hash_password(password.as_bytes(), &salt)
+            .unwrap().to_string());
+        let json = serde_json::to_string(&stored).unwrap();
+        assert!(!json.contains("password_max_bytes"));
+        let loaded: Paste = serde_json::from_str(&json).unwrap();
+        assert_eq!(crate::paste_password_ok(&loaded, &password).await, Some(true));
+
+        stored.password_max_bytes = Some(MAX_PASSWORD_BYTES);
+        assert!(!PasteStore::verify_password(&stored, &password));
     }
 }

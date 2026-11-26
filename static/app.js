@@ -421,7 +421,7 @@ function _histTargetsOf(raw,act){
   if(cur && !_HIST_NO_TEXT_CMDS.has(cmd)) out.push(cur);
   let tg='';
   if(_HIST_TARGET_CMDS.has(cmd)) tg=p[1]||'';
-  else if((cmd==='QUOTE'||cmd==='RAW') && /^(privmsg|notice)$/i.test(p[1]||'')) tg=p[2]||'';
+  else if(cmd==='QUOTE'||cmd==='RAW') tg=/^(?:@\S+\s+)?(?::\S+\s+)?(?:privmsg|notice)\s+(\S+)/i.exec(p.slice(1).join(' '))?.[1]||'';
   for(const x of tg.split(',')) if(x) out.push(x);
   return out;
 }
@@ -640,52 +640,51 @@ function initViewportFix() {
 // ─── M6: Swipe gesture for sidebar ───────────────────────────────────────────
 function initSwipeGesture() {
   if(_detMode) return; // no sidebar in detached mode — gesture makes no sense
-  let startX=0, startY=0, swiping=false;
-  const THRESHOLD=60, EDGE_ZONE=40;
+  let start=null;
+  const THRESHOLD=40, EDGE_ZONE=40;
   const sidebar=document.getElementById('sidebar');
+  const nickPanel=document.getElementById('nick-panel');
   const app=document.getElementById('app');
+  if(!sidebar || !app) return;
 
   app.addEventListener('touchstart', e=>{
-    if(e.touches.length!==1) return;
+    start=null;
+    if(!isMobileView() || e.touches.length!==1) return;
     // Ignore swipes that start inside a horizontal scroller — those are meant
-    // to scroll the picker/list, not drag the sidebar. Otherwise swipes on
-    // the leftmost Giphy thumb would open the sidebar instead of scrolling.
+    // to scroll the picker/list.
     if(e.target.closest && e.target.closest('#giphy-picker')) return;
-    startX=e.touches[0].clientX; startY=e.touches[0].clientY; swiping=true;
+    const touch=e.touches[0];
+    start={id:touch.identifier,x:touch.clientX,y:touch.clientY};
   }, {passive:true});
 
   app.addEventListener('touchmove', e=>{
-    if(!swiping||e.touches.length!==1) return;
-    const dx=e.touches[0].clientX-startX;
-    const dy=Math.abs(e.touches[0].clientY-startY);
-    // Only handle horizontal swipes
-    if(dy>Math.abs(dx)*1.5) { swiping=false; return; }
-    // Open: swipe right from left edge
-    if(!sidebar.classList.contains('open') && startX<EDGE_ZONE && dx>0) {
-      const pct=Math.min(dx/THRESHOLD,1);
-      sidebar.style.transform=`translateX(${-100+pct*100}%)`;
-    }
-    // Close: swipe left when sidebar open
-    if(sidebar.classList.contains('open') && dx<0) {
-      const pct=Math.min(Math.abs(dx)/THRESHOLD,1);
-      sidebar.style.transform=`translateX(${-pct*100}%)`;
-    }
+    if(!start) return;
+    const touch=e.touches[0];
+    if(e.touches.length!==1 || touch.identifier!==start.id){start=null;return;}
+    const dx=Math.abs(touch.clientX-start.x);
+    const dy=Math.abs(touch.clientY-start.y);
+    if(dy>=10 && dy>dx) start=null;
   }, {passive:true});
 
+  app.addEventListener('touchcancel', ()=>{start=null;}, {passive:true});
   app.addEventListener('touchend', e=>{
-    if(!swiping) return; swiping=false;
-    const dx=e.changedTouches[0].clientX-startX;
-    const np=document.getElementById('nick-panel');
-    sidebar.style.transform=''; // let CSS transition take over
-    if(np) np.style.transform='';
-    if(!sidebar.classList.contains('open') && startX<EDGE_ZONE && dx>THRESHOLD/2) openSidebar();
-    else if(sidebar.classList.contains('open') && dx<-THRESHOLD/2) closeSidebar();
-    // Nick panel: swipe left from right edge to open, swipe right to close
-    else if(np && !np.classList.contains('open') && startX>window.innerWidth-EDGE_ZONE && dx<-THRESHOLD/2) {
-      closeSidebar(); np.classList.add('open'); document.getElementById('sidebar-backdrop').classList.add('show');
-    }
-    else if(np && np.classList.contains('open') && dx>THRESHOLD/2) {
-      np.classList.remove('open'); document.getElementById('sidebar-backdrop').classList.remove('show');
+    const origin=start;
+    start=null;
+    const touch=e.changedTouches[0];
+    if(!origin || !touch || touch.identifier!==origin.id || !isMobileView()) return;
+    const dx=touch.clientX-origin.x;
+    const dy=Math.abs(touch.clientY-origin.y);
+    if(Math.abs(dx)<THRESHOLD || Math.abs(dx)<dy*1.5) return;
+
+    // Commit a completed swipe without moving the drawers under the finger.
+    if(sidebar.classList.contains('open')){
+      if(dx<0) closeSidebar();
+    }else if(nickPanel?.classList.contains('open')){
+      if(dx>0) closeNickPanelMobile();
+    }else if(dx>0 && origin.x<EDGE_ZONE){
+      openSidebar();
+    }else if(nickPanel && dx<0 && origin.x>window.innerWidth-EDGE_ZONE){
+      toggleNickPanel();
     }
   }, {passive:true});
 }
@@ -1224,7 +1223,10 @@ function connectWs() {
   if(!sessionToken) return;
   _wsAuthed=false;
   // Close any existing connection to prevent duplicate event streams
-  if(ws){try{ws.onclose=null;ws.onerror=null;ws.onmessage=null;ws.close();}catch(e){}}
+  if(ws){
+    failPendingChanLists('The web connection closed before the channel list finished.');
+    try{ws.onclose=null;ws.onerror=null;ws.onmessage=null;ws.close();}catch(e){}
+  }
   const proto=location.protocol==='https:'?'wss':'ws';
   ws=new WebSocket(`${proto}://${location.host}/cryptirc/ws`);
   ws.onopen=()=>{_wsRetries=0;_lastWsActivity=Date.now();
@@ -1242,7 +1244,7 @@ function connectWs() {
   // The outgoing queue SURVIVES a close (it used to be wiped here, silently losing
   // lines typed during an outage that were already shown as sent). Stop the drain
   // poll, flag the still-queued rows as pending, and flush once auth_ok arrives.
-  ws.onclose=()=>{_wsAuthed=false;if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}_markRateQueuePending();const d=Math.min(1000*Math.pow(2,_wsRetries),60000);setTimeout(connectWs,d+Math.random()*1000);_wsRetries++;};
+  ws.onclose=()=>{_wsAuthed=false;failPendingChanLists('The web connection closed before the channel list finished.');if(_rateTimer){clearTimeout(_rateTimer);_rateTimer=null;}_markRateQueuePending();const d=Math.min(1000*Math.pow(2,_wsRetries),60000);setTimeout(connectWs,d+Math.random()*1000);_wsRetries++;};
   ws.onerror=()=>ws.close();
 }
 // ── Outgoing chat lines vs. the rate queue ──
@@ -1450,7 +1452,7 @@ function _onResume(){
     // Sync active channel with full fallback if no lastId. Pseudo-views (Messages
     // inbox / Uploads) are skipped: they're not IRC buffers, and their get_logs is
     // silently dropped server-side (no reply), stranding a junk _pendingLogs key.
-    if(active?.conn_id && active?.target && !isMessagesConn(active.conn_id) && !isUploadsConn(active.conn_id)){
+    if(active?.conn_id && active?.target && !isMessagesConn(active.conn_id) && !isUploadsConn(active.conn_id) && !isChanListActive()){
       const k=bk(active.conn_id,active.target);
       const lastId=_lastMsgId[k];
       if(!lastId){
@@ -1816,7 +1818,7 @@ function wsend(obj){
   // Allowlist over denylist: only clearly user-initiated operational commands
   // get a toast; background/auto-save/query traffic stays silent.
   const _toastTypes = new Set([
-    'send','join_channel','part_channel',
+    'send','list_channels','join_channel','part_channel',
     'connect','disconnect','add_network','remove_network','update_network',
     'lock_vault','unlock_vault','change_passphrase',
     'generate_cert','delete_cert',
@@ -1901,7 +1903,7 @@ function handleEvent(ev) {
     // mark them "not sent"; hide the previous account's UI behind the login screen;
     // and only drop the stored token if it is the one that failed (another tab may
     // already hold a newer one, e.g. after a password change).
-    case 'auth_failed': { clearTranslationData(); clearTweetData(); hideBootSplash(); try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){} const _ft=sessionToken; sessionToken=null; _wsAuthed=false; _failRateQueue(); try{ if(localStorage.getItem('cryptirc_token')===_ft){ localStorage.removeItem('cryptirc_token'); document.cookie='cryptirc_token=;max-age=0;path=/cryptirc'; } }catch(_){} document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break; }
+    case 'auth_failed': { clearTranslationData(); clearTweetData(); resetChanLists(); hideBootSplash(); try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){} const _ft=sessionToken; sessionToken=null; _wsAuthed=false; _failRateQueue(); try{ if(localStorage.getItem('cryptirc_token')===_ft){ localStorage.removeItem('cryptirc_token'); document.cookie='cryptirc_token=;max-age=0;path=/cryptirc'; } }catch(_){} document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break; }
     case 'vault_unlocked': {
       // Locked→unlocked transition (overlay still up ⇒ we were locked): Messages
       // preview get_logs sent while locked got EMPTY log_lines replies (read_logs
@@ -1911,11 +1913,11 @@ function handleEvent(ev) {
       // unlocks arrive as State{vault_unlocked:true} instead (vault_unlocked goes
       // only to the unlocking socket) — the 'state' case has the same reset.
       const _vo=document.getElementById('vault-overlay');
-      const _wasLocked=_vo.classList.contains('show');
+      const _wasLocked=_vaultNeedsUnlock||_vo.classList.contains('show');
+      setVaultUnlockNeeded(false);
       if(_wasLocked){ _msgsPreviewAsked.clear(); if(isMessagesActive()) _scheduleMessagesRender(); }
       _vo.classList.remove('show'); renderSidebar();
       if(_wasLocked) tweetVaultUnlocked();   // X previews were torn down at the lock
-      {const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}}
       // C1: E2E derives its own key (client-held keyring); the event only carries the
       // pepper/legacy key for a passphrase-proven unlock. Always hand it to e2e.js.
       if(typeof e2eOnVaultUnlocked==='function') e2eOnVaultUnlocked(ev); else if(ev.e2e_enc_key) e2eInit(ev.e2e_enc_key);
@@ -1933,8 +1935,18 @@ function handleEvent(ev) {
     case 'vault_locked': if(typeof e2eOnVaultLocked==='function') e2eOnVaultLocked(); _onVaultLocked(); break;
     case 'state':
       networks=ev.networks||[];
+      if(ev.vault_unlocked&&chanList&&!networks.some(net=>net.config.id===chanList.connId)){
+        invalidateChanListNetwork(chanList.connId,'This IRC network was removed.');
+      }
       try{ _runPendingCycles(ev); }catch(_){}   // r3: /cycle waits for a fresh State (key)
-      if(!ev.vault_unlocked){ clearTweetData(); const _vo0=document.getElementById('vault-overlay'); if(!_vo0.classList.contains('show')) _closeSecretPanels(); _vo0.classList.add('show'); if(typeof e2eOnVaultLocked==='function'&&window.E2E&&(E2E.keyReady||E2E.identityReady)) e2eOnVaultLocked(); }
+      if(!ev.vault_unlocked){
+        if(!_vaultNeedsUnlock){
+          clearTweetData();_closeSecretPanels();
+          if(_vaultWasUnlocked) _showVaultLockedUi();
+        }
+        setVaultUnlockNeeded(true);
+        if(typeof e2eOnVaultLocked==='function'&&window.E2E&&E2E._vaultUp) e2eOnVaultLocked();
+      }
       else {
         // C1: vault unlocked (maybe by another device) — let E2E start from this
         // browser's cached key (or ask for the passphrase). Idempotent.
@@ -1945,18 +1957,18 @@ function handleEvent(ev) {
         // the 'vault_unlocked' case: attempts burned by empty replies while locked
         // must retry now that logs decrypt. On the unlocking socket vault_unlocked
         // already ran and removed .show, so this doesn't double-fire.
-        const _wasLocked=_vo.classList.contains('show');
+        const _wasLocked=_vaultNeedsUnlock||_vo.classList.contains('show');
+        setVaultUnlockNeeded(false);
         if(_wasLocked){ _msgsPreviewAsked.clear(); if(isMessagesActive()) _scheduleMessagesRender(); }
         _vo.classList.remove('show');
         if(_wasLocked) tweetVaultUnlocked();
-        const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔓';vb.title='Lock vault';}
         if(!_chanStatsLoaded)loadStatsFromServer();
       }
       renderSidebar();
       try{ _onNetworksState(ev); }catch(_){}   // app2: #7 Add&Connect target + H2 TLS-verify offer
       // Detached-mode auto-activation: force the requested target; ignore any
       // saved last-active so the popup always lands on the chat it was opened for.
-      if(_detMode && _detConn && _detTarget){
+      if(_detMode && _detConn && _detTarget && !isChanListActive()){
         const dNet=networks.find(n=>n.config.id===_detConn);
         if(dNet){
           active={conn_id:_detConn,target:_detTarget};
@@ -2000,15 +2012,17 @@ function handleEvent(ev) {
         // (Messages inbox / Uploads) are skipped: their buffer is always empty, and
         // the server drops their get_logs without replying (owns_network fails), so
         // every state event would strand a junk _pendingLogs key until reconnect.
-        if(active&&!isMessagesConn(active.conn_id)&&!isUploadsConn(active.conn_id)&&getBuf(active.conn_id,active.target).length===0)
+        if(active&&!isMessagesConn(active.conn_id)&&!isUploadsConn(active.conn_id)&&!isChanListActive()&&getBuf(active.conn_id,active.target).length===0)
           wsend({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:200});
       }
       // Drain any pending notification-click nav now that networks are loaded
       _drainPendingNotifNav();
+      if(typeof updateE2EIndicator==='function') updateE2EIndicator();
       break;
     case 'connecting':   avatarForgetConn(ev.conn_id); sysMsg(ev.conn_id,'status',`Connecting to ${ev.server}…`,'system'); setNetDot(ev.conn_id,'connecting'); break;
     case 'connected':    avatarForgetConn(ev.conn_id); sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); keepnickStartPoll(ev.conn_id); break;
     case 'disconnected':
+      invalidateChanListNetwork(ev.conn_id,'The IRC network disconnected. Refresh the list after reconnecting.');
       avatarForgetConn(ev.conn_id);
       sysMsg(ev.conn_id,'status',`Disconnected: ${ev.reason}`,'error'); setNetDot(ev.conn_id,'offline'); lagMap[ev.conn_id]=null; if(active&&active.conn_id===ev.conn_id) updateLagDisplay();
       if(ev.reason&&ev.reason.includes('certificate verify failed')&&!window._certWarnShown?.[ev.conn_id]){
@@ -2018,6 +2032,7 @@ function handleEvent(ev) {
       }
       break;
     case 'reconnecting': {
+      invalidateChanListNetwork(ev.conn_id,'The IRC network disconnected. Refresh the list after reconnecting.');
       avatarForgetConn(ev.conn_id);
       sysMsg(ev.conn_id,'status',`↻ Reconnecting in ${ev.delay_secs}s (attempt ${ev.attempt})…`,'system');
       // Detect self-signed cert error and show helpful popup (once per network)
@@ -2752,8 +2767,8 @@ function handleEvent(ev) {
       sysMsg(ev.conn_id,'status',`○ ${ev.nick} is now offline`,'part');
       break;
     }
-    case 'irc_list_entry': handleListEntry(ev); break;
-    case 'irc_list_end': handleListEnd(); break;
+    case 'irc_list_batch': handleListBatch(ev); break;
+    case 'irc_list_end': case 'irc_list_error': handleListEnd(ev); break;
     case 'irc_channel_modes': {
       // Current channel modes (324). Feed the dialog if open for this channel;
       // otherwise show it for manual /mode users.
@@ -3954,6 +3969,7 @@ function _renderSidebarNow(){
     const mEntry=_renderMessagesSidebarEntry();
     if(mEntry) mpin.appendChild(mEntry);
   }
+  renderChanListTab();
   updateCertBtn();
   renderFavorites();
   renderPMList();
@@ -3963,6 +3979,7 @@ function updateInputPlaceholder(){
   const inp=document.getElementById('msg-input');
   if(!inp)return;
   if(!active){inp.placeholder='Select a channel…';inp.disabled=true;return;}
+  if(isChanListActive()){inp.disabled=true;return;}
   if(isUploadsConn(active.conn_id)){
     inp.placeholder='Upload Status — pick a chat to send messages';
     inp.disabled=true;
@@ -4073,6 +4090,10 @@ function setActive(conn_id,target,options){
   ++_messageJumpSerial;
   try{ _replyOnSwitch(conn_id,target); }catch(_){}   // r6: a reply quote stays with its conversation
   active={conn_id,target};
+  if(isChanListActive()){
+    renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay(); updateInputPlaceholder();
+    return;
+  }
   // Uploads pseudo-channel doesn't live in IRC space — skip unread/sync/E2E
   // bookkeeping entirely. It still uses the same active/render plumbing.
   if(isUploadsConn(conn_id)){
@@ -4131,6 +4152,10 @@ function renderChat(position){
   const area=document.getElementById('chat-area');
   ++_tweetViewGeneration;
   const welcome=document.getElementById('welcome');
+  const isList=isChanListActive();
+  document.getElementById('main').classList.toggle('chanlist-active',isList);
+  chanListEl('box').hidden=!isList;
+  if(isList){renderedChatKey=null;return;}
   if(!active){renderedChatKey=null;area.style.display='none';welcome.style.display='flex';return;}
   // Uploads pseudo-channel uses its own renderer; bail before IRC paths run.
   if(isUploadsActive()){ renderedChatKey=null; welcome.style.display='none'; renderUploadsView(); updateTopbar(); updateInputPlaceholder(); return; }
@@ -4791,11 +4816,19 @@ function buildRow(msg,conv,tweetConv){
 (function(){
   if(document._nickBodyDelegated)return;
   document._nickBodyDelegated=true;
-  let _touchHandledBody=false;
+  let _touchHandledBody=false, touchStart=null;
   const _findNick=(el)=>{const n=el.closest('.msg-nick[data-nick],.nick-mention[data-nick]');return n&&n.dataset.nick?n:null;};
+  document.addEventListener('touchstart',function(e){
+    const t=e.touches[0];
+    touchStart=e.touches.length===1&&_findNick(e.target)?[t.clientX,t.clientY]:null;
+  },{passive:true});
+  document.addEventListener('touchcancel',()=>{touchStart=null;},{passive:true});
   document.addEventListener('touchend',function(e){
     const n=_findNick(e.target);
-    if(n){
+    const t=e.changedTouches[0];
+    const tapped=touchStart&&t&&_distPts(touchStart,[t.clientX,t.clientY])<=10;
+    touchStart=null;
+    if(n&&tapped){
       e.preventDefault();
       e.stopPropagation();
       _touchHandledBody=true;
@@ -5389,18 +5422,8 @@ function updateTopbar(){
   const topicSep=document.getElementById('topic-sep');
   const topicMenuBtn=document.getElementById('topic-menu-btn');
   const topbarSpacer=document.getElementById('topbar-spacer');
-  if(isUploadsConn(active.conn_id)){
-    document.getElementById('chan-title').textContent='Upload Status';
-    document.getElementById('chan-title').style.color='var(--text)';
-    topicInline.style.display='none';
-    topicSep.style.display='none';
-    topicMenuBtn.style.display='none';
-    topbarSpacer.style.display='';
-    document.getElementById('usercount').textContent='';
-    return;
-  }
-  if(isMessagesConn(active.conn_id)){
-    document.getElementById('chan-title').textContent='Messages';
+  if(isUploadsConn(active.conn_id)||isMessagesConn(active.conn_id)||isChanListActive()){
+    document.getElementById('chan-title').textContent=isChanListActive()?'Channel list':isMessagesConn(active.conn_id)?'Messages':'Upload Status';
     document.getElementById('chan-title').style.color='var(--text)';
     topicInline.style.display='none';
     topicSep.style.display='none';
@@ -5633,6 +5656,7 @@ async function refreshTweetCapabilities(){
 // or fetched behind a lock; tweetVaultUnlocked rebuilds after the unlock.
 function tweetVaultLocked(){
   try{ if(typeof _deviceLocked!=='undefined'&&_deviceLocked)return true; }catch(_){}
+  if(typeof _vaultNeedsUnlock!=='undefined'&&_vaultNeedsUnlock)return true;
   const overlay=typeof document!=='undefined'&&document.getElementById?document.getElementById('vault-overlay'):null;
   return !!overlay&&!!overlay.classList&&overlay.classList.contains('show');
 }
@@ -7172,6 +7196,14 @@ function _statusWinRefuse(conn_id){
 }
 async function handleInput(raw){
   raw=raw.trim(); if(!raw||!active)return;
+  if(encryptionDeviceLocked()||isChanListActive()) return 'keep';
+  if(window.E2E && !E2E.keyReady && _lineSendsText(raw)){
+    const targets=_statusWinSendsText(raw)?[active.target]:_histTargetsOf(raw,null);
+    if(targets.some(t=>_isE2eConversation(t,active.conn_id))){
+      void e2ePromptDeviceUnlock();
+      return 'keep';
+    }
+  }
   // Mask credentials in the STORED history copy. redactSensitive handles slash-prefixed
   // forms; additionally, a BARE line typed directly into a services query window (e.g.
   // open a query with NickServ/UserServ and type `IDENTIFY pw` / `LOGIN acct pw` with no
@@ -7254,13 +7286,7 @@ async function handleInput(raw){
         break;
       }
       case 'LIST':
-        chanListData=[]; chanListConnId=conn_id;
-        document.getElementById('chanlist-body').innerHTML='<div class="chanlist-loading">Waiting for server response...</div>';
-        document.getElementById('chanlist-count').textContent='';
-        document.getElementById('chanlist-search').value='';
-        document.getElementById('chanlist-overlay').classList.add('show');
-        _overlayOpen('chanlist', closeChanList);
-        wsend({type:'send',conn_id,raw:args[0]?`LIST ${args[0]}`:'LIST'}); break;
+        openChanList(conn_id,args[0]||''); break;
 
       case 'LINKS': {
         window._linksData=[];window._linksConnId=conn_id;
@@ -8282,6 +8308,7 @@ function insertNick(nick){const inp=document.getElementById('msg-input');if(!inp
 
 // ─── Upload ───────────────────────────────────────────────────────────────────
 function _chatAllowsPublicContent(chat){
+  if(chat?.conn_id===CHAN_LIST_CONN) return false;
   if(!chat||chat.target==='status') return true;
   return _e2eKnown()&&e2eTargetState(chat.target,{conn_id:chat.conn_id}).mode==='none';
 }
@@ -9987,22 +10014,46 @@ document.addEventListener('click',e=>{const m=document.getElementById('settings-
 // (the later same-name function declaration wins) and is now removed entirely.
 
 // ─── Vault ────────────────────────────────────────────────────────────────────
+let _vaultNeedsUnlock=false, _vaultWasUnlocked=false, _vaultUnlockForEncryption=false;
+function setVaultUnlockNeeded(needed){
+  _vaultNeedsUnlock=needed;
+  const banner=document.getElementById('vault-unlock-banner');
+  if(banner) banner.hidden=!needed;
+  const btn=document.getElementById('vault-lock-btn');
+  if(btn){btn.textContent=needed?'🔒':'🔓';btn.title=needed?'Unlock vault':'Lock vault';}
+  if(!needed){_vaultWasUnlocked=true;_vaultUnlockForEncryption=false;}
+}
+function showVaultForEncryptedChat(){
+  if(!ws||ws.readyState!==1){showToast('Connect to CryptIRC before unlocking encrypted chats.');return;}
+  if(_vaultUnlockForEncryption&&document.getElementById('vault-overlay').classList.contains('show')) return;
+  _vaultUnlockForEncryption=true;
+  _showVaultLockedUi(!_deviceLocked&&!_devLockFlag());
+}
+function deferVaultUnlock(){
+  if(document.getElementById('vault-unlock-later').hidden) return;
+  document.getElementById('vault-pass').value='';
+  document.getElementById('vault-overlay').classList.remove('show');
+  _vaultUnlockForEncryption=false;
+  if(window.E2E) E2E._devicePromptPending=false;
+  if(typeof e2eNotePassphrase==='function') e2eNotePassphrase(null);
+}
 function doUnlock(){
   const vp=document.getElementById('vault-pass');
   const p=vp.value;
   if(!p){document.getElementById('vault-err').textContent='Passphrase required';return;}
   document.getElementById('vault-err').textContent='';
   // e2e: lets e2e.js derive its client-held key when the (passphrase-proven) reply arrives.
-  if(typeof e2eNotePassphrase==='function') e2eNotePassphrase(p);
+  if(typeof e2eNotePassphrase==='function') e2eNotePassphrase(_vaultUnlockForEncryption?p:null);
+  if(_vaultUnlockForEncryption&&window.E2E) E2E._devicePromptPending=true;
   if(_deviceLocked||_devLockFlag()) _devUnlockPending=Date.now();   // this reply may unlock the locked device
-  wsend({type:'unlock_vault',passphrase:p});
+  if(!wsend({type:'unlock_vault',passphrase:p})&&typeof e2eOnVaultError==='function') e2eOnVaultError('Connection unavailable');
   // #2: never leave the passphrase sitting in the DOM — a later Lock re-shows this
   // same overlay, and a pre-filled field made "Unlock" a one-click reopen for
   // anyone at the device (and readable by any script for the life of the tab).
   // A wrong passphrase just means typing it again, as on any login form.
   vp.value='';
 }
-async function lockVault(){if(!(await customConfirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.','Lock')))return;_lockVaultNow();}
+async function lockVault(){if(_vaultNeedsUnlock){_showVaultLockedUi(true);return;}if(!(await customConfirm('Lock the vault? This will disconnect you from all IRC networks. You will need to enter your passphrase again to reconnect.','Lock')))return;_lockVaultNow();}
 // Manual Lock (account-wide, as before): the server drops the vault key for every
 // session and IRC is disconnected. Auto-lock does NOT use this — see _deviceLockNow.
 // r3 (w-web INFO): work that was already in flight when the vault was locked (E2E
@@ -10011,7 +10062,7 @@ async function lockVault(){if(!(await customConfirm('Lock the vault? This will d
 let _vaultLockAt=0;
 function _lockRaceRefusal(m){
   if(!/^Vault (locked$|must be unlocked to )/.test(String(m||''))) return false;
-  try{ return Date.now()-_vaultLockAt<15000 || document.getElementById('vault-overlay').classList.contains('show'); }catch(_){ return false; }
+  try{ return _vaultNeedsUnlock || Date.now()-_vaultLockAt<15000 || document.getElementById('vault-overlay').classList.contains('show'); }catch(_){ return false; }
 }
 function _lockVaultNow(){
   _vaultLockAt=Date.now();
@@ -10020,17 +10071,32 @@ function _lockVaultNow(){
   flushPrefsToServer();wsend({type:'lock_vault'});for(const n of networks)wsend({type:'disconnect',id:n.config.id});
   _showVaultLockedUi();
 }
-function _showVaultLockedUi(){
+function _showVaultLockedUi(allowLater=false){
+  const overlay=document.getElementById('vault-overlay');
+  const later=document.getElementById('vault-unlock-later');
+  if(allowLater&&overlay.classList.contains('show')&&later.hidden) return;
+  allowLater=allowLater&&!_vaultWasUnlocked&&!encryptionDeviceLocked();
   const vp=document.getElementById('vault-pass'); if(vp) vp.value='';
   const ve=document.getElementById('vault-err'); if(ve) ve.textContent='';
   const dn=document.getElementById('vault-devlock-note'); if(dn) dn.style.display='none';
-  document.getElementById('vault-overlay').classList.add('show');
+  later.hidden=!allowLater;
+  overlay.classList.toggle('on-demand',allowLater);
+  overlay.classList.add('show');
   const vb=document.getElementById('vault-lock-btn');if(vb){vb.textContent='🔒';vb.title='Lock vault';}
 }
 // Server's VaultLocked broadcast: the vault is per-account, so a lock from another
 // session (manual or auto-lock) locks this one too — show the unlock screen instead
 // of carrying on with a vault the server can no longer decrypt.
-function _onVaultLocked(){ _vaultLockAt=Date.now(); _closeSecretPanels(); if(!document.getElementById('vault-overlay').classList.contains('show')) _showVaultLockedUi(); else { const dn=document.getElementById('vault-devlock-note'); if(dn) dn.style.display='none'; } }
+function _onVaultLocked(){
+  _vaultLockAt=Date.now(); setVaultUnlockNeeded(true); _vaultUnlockForEncryption=false; _closeSecretPanels();
+  const overlay=document.getElementById('vault-overlay');
+  if(!overlay.classList.contains('show')) _showVaultLockedUi();
+  else{
+    overlay.classList.remove('on-demand');
+    document.getElementById('vault-unlock-later').hidden=true;
+    const note=document.getElementById('vault-devlock-note'); if(note) note.style.display='none';
+  }
+}
 // ── Device-local lock (auto-lock, #3 follow-up) ─────────────────────────────────
 // The auto-lock setting is per device, so its lock must be too: it locks THIS browser
 // (every CryptIRC tab of it — the flag below is shared through localStorage) without
@@ -10045,6 +10111,7 @@ function _onVaultLocked(){ _vaultLockAt=Date.now(); _closeSecretPanels(); if(!do
 // unprompted VaultUnlocked (sent on every WS (re)connect) never unlocks the device.
 const _DEVLOCK_KEY='cryptirc_device_locked';
 let _deviceLocked=false, _devUnlockPending=0, _devLockMins=0;
+function encryptionDeviceLocked(){return _deviceLocked||_devLockFlag();}
 // Flag value: 'm<minutes>' (or 'm' when unknown) — any non-empty value means locked.
 function _devLockFlag(){ try{ return !!localStorage.getItem(_DEVLOCK_KEY); }catch(_){ return false; } }
 function _devLockFlagMins(){ try{ return parseFloat((localStorage.getItem(_DEVLOCK_KEY)||'').slice(1))||0; }catch(_){ return 0; } }
@@ -11388,7 +11455,7 @@ function _showTlsVerifyPopup(nets,fromBadge){
 let _tlsPromptDone=false, _tlsPromptWaitSince=0;
 function _tlsVerifyPromptOnce(){
   if(_tlsPromptDone || (typeof _detMode!=='undefined' && _detMode)) return;
-  if(document.getElementById('vault-overlay')?.classList.contains('show')) return; // wait for unlock
+  if(_vaultNeedsUnlock||document.getElementById('vault-overlay')?.classList.contains('show')) return; // wait for unlock
   // The "Not now" set is synced in the prefs blob: give its load reply (sent right
   // after the first State) a few seconds to arrive before deciding.
   if(!_prefsSeen){
@@ -11531,17 +11598,18 @@ function _e2eUiName(target,conn_id){
   return String(t).toLowerCase();
 }
 function showEncryptPanel(){
-  if(!active){return;}
   _bindEncryptDelegation();   // idempotent; binds the delegated button listener once
-  const target=active.target;
-  const conn_id=active.conn_id;
+  const current=active&&!isMessagesActive()&&!isUploadsActive()&&!isChanListActive()?active:null;
+  const target=current?.target||'status';
+  const conn_id=current?.conn_id;
   const isChan=target.startsWith('#')||target.startsWith('&');
   const body=document.getElementById('encrypt-panel-body');
   const title=document.getElementById('encrypt-panel-title');
   if (!window.E2E?.keyReady) {
-    title.textContent=`Encryption — ${target}`;
-    body.innerHTML=`<div class="encrypt-status">🔒 Encrypted chats are locked on this device</div>
-      <div class="encrypt-actions"><button class="encrypt-btn" data-encrypt-cmd="unlock">Unlock encrypted chats</button></div>`;
+    title.textContent=target==='status'?'Encryption':`Encryption — ${target}`;
+    const setup=window.E2E?._recoverySetup;
+    body.innerHTML=`<div class="encrypt-status">${setup?'Set up an encryption recovery code':'🔒 Encrypted chats are locked on this device'}</div>
+      <div class="encrypt-actions"><button class="encrypt-btn" data-encrypt-cmd="unlock">${setup?'Set up recovery code':'Unlock encrypted chats'}</button></div>`;
     const overlay=document.getElementById('encrypt-overlay');
     _overlayOpen('encryptPanel', closeEncryptPanel);
     overlay.classList.add('show');
@@ -11697,7 +11765,8 @@ function _bindEncryptDelegation(){
   });
 }
 async function encryptAction(cmd,arg){
-  if(!active)return;
+  if(cmd==='unlock'){await e2ePromptDeviceUnlock();return;}
+  if(!active||isMessagesActive()||isUploadsActive())return;
   const args=arg?[cmd,arg]:[cmd];
   await handleEncryptCommand(args,active.conn_id,active.target);
   // Refresh panel after command completes
@@ -13557,8 +13626,12 @@ function _rzBuild(){
     h.className='rz'; h.id='rz-'+d.key;
     h.title='Drag to resize · double-click to reset';
     h.style.display='none';
-    h.addEventListener('pointerdown',e=>_rzStart(e,d));
-    h.addEventListener('dblclick',()=>_rzApply(d,d.def,true));
+    let iosTouch=false;
+    h.addEventListener('pointerdown',e=>{
+      iosTouch=_IS_IOS && e.pointerType==='touch';
+      _rzStart(e,d);
+    });
+    h.addEventListener('dblclick',()=>{if(!isMobileView() && !iosTouch) _rzApply(d,d.def,true);});
     host.appendChild(h);
   }
   _rzBuilt=true;
@@ -13592,7 +13665,7 @@ function _rzApply(d,val,commit){
   _layoutResizeHandles();
 }
 function _rzStart(e,d){
-  if(_rzDragging) return;                       // one drag at a time
+  if(_rzDragging || isMobileView() || (_IS_IOS && e.pointerType==='touch')) return;
   if(e.button!==0 && e.pointerType==='mouse') return;
   const t=d.el(); if(!t) return;
   const pid=e.pointerId;                        // ignore every other pointer
@@ -14410,7 +14483,7 @@ document.addEventListener('click',e=>{
     {cmd:'part',desc:'Leave channel',usage:'/part [#channel] [reason]'},
     {cmd:'cycle',desc:'Part and rejoin',usage:'/cycle [#channel]'},
     {cmd:'topic',desc:'View/set topic',usage:'/topic [text]'},
-    {cmd:'list',desc:'List all channels',usage:'/list'},
+    {cmd:'list',desc:'Browse and search channels',usage:'/list [pattern]'},
     {cmd:'links',desc:'Show server links',usage:'/links'},
     {cmd:'invite',desc:'Invite user to channel',usage:'/invite nick [#channel]'},
     {cmd:'names',desc:'Refresh nick list',usage:'/names'},
@@ -15639,7 +15712,7 @@ function _vaultAutoLockFire(){
   const mins=getVaultAutoLock(); if(!mins) return;
   const limit=mins*60000, idle=_vaultIdleMs();
   if(idle<limit){ _vaultAutoLockTimer=setTimeout(_vaultAutoLockFire,Math.min(limit-idle+250,_VAULT_MAX_DELAY)); return; } // another tab was active / long timeout
-  if(document.getElementById('vault-overlay')?.classList.contains('show')) return;           // already locked
+  if(_vaultNeedsUnlock||document.getElementById('vault-overlay')?.classList.contains('show')) return; // already locked
   if(!window._appShown) return;                                                             // not logged in
   _deviceLockNow(false,mins);   // device-local: no LockVault, no IRC disconnect
   showToast('This device was locked after '+mins+' minute'+(mins===1?'':'s')+' of inactivity');
@@ -15657,7 +15730,7 @@ function resetVaultAutoLock(){
 // the countdown: if we are already past the limit, lock instead.
 ['click','keydown','touchstart','mousemove'].forEach(ev=>document.addEventListener(ev,()=>{
   const mins=getVaultAutoLock(); if(!mins) return;
-  if(_vaultIdleMs()>=mins*60000 && !document.getElementById('vault-overlay')?.classList.contains('show')){ _vaultAutoLockFire(); return; }
+  if(_vaultIdleMs()>=mins*60000 && !_vaultNeedsUnlock && !document.getElementById('vault-overlay')?.classList.contains('show')){ _vaultAutoLockFire(); return; }
   resetVaultAutoLock();
 },{passive:true}));
 // Start the countdown at load too (an untouched tab used to never arm the timer).
@@ -17632,19 +17705,148 @@ document.addEventListener('DOMContentLoaded',()=>{
 });
 
 // ─── Channel list ─────────────────────────────────────────────────────────────
-let chanListData=[];
-let chanListConnId=null;
-function openChanList(){
-  chanListData=[];
-  chanListConnId=active?.conn_id||null;
-  if(!chanListConnId)return;
-  document.getElementById('chanlist-body').innerHTML='<div class="chanlist-loading">Waiting for server response...</div>';
-  document.getElementById('chanlist-count').textContent='';
-  document.getElementById('chanlist-search').value='';
-  document.getElementById('chanlist-overlay').classList.add('show');
-  wsend({type:'send',conn_id:chanListConnId,raw:'LIST'});
+let chanList=null;
+let chanListBackTo=null;
+const CHAN_LIST_CONN='__chanlist';
+const pendingChanLists=new Map();
+const chanListCache=new Map();
+const CHAN_LIST_IDLE_MS=65000;
+const CHAN_LIST_CACHE_KEY='cryptirc_chanlist_cache_minutes';
+const chanListEl=id=>document.getElementById('chanlist-'+id);
+function isChanListActive(){return active?.conn_id===CHAN_LIST_CONN;}
+function chanListCacheTime(){return Number(chanListEl('cache').value)*60000;}
+function pruneChanListCache(){
+  const ttl=chanListCacheTime();
+  if(!ttl){chanListCache.clear();return;}
+  const oldest=Date.now()-ttl;
+  for(const [key,entry] of chanListCache){if(entry.fetchedAt<=oldest) chanListCache.delete(key);}
 }
-function closeChanList(){_overlayClose('chanlist');document.getElementById('chanlist-overlay').classList.remove('show');chanListData=[];}
+function setChanListCacheTime(){
+  try{localStorage.setItem(CHAN_LIST_CACHE_KEY,chanListEl('cache').value);}catch(_){}
+  pruneChanListCache();
+}
+function renderChanListTab(){
+  const tab=chanListEl('tab');
+  tab.hidden=!chanList;
+  tab.classList.toggle('active',isChanListActive());
+  chanListEl('tab-open').setAttribute('aria-current',isChanListActive()?'page':'false');
+}
+function showChanListTab(){
+  if(!chanList) return;
+  if(!isChanListActive()){
+    chanListBackTo=active;
+    closeSearchPanel();
+    setActive(CHAN_LIST_CONN,'status');
+  }
+  renderChanListTab();
+  closeSidebar();
+  const control=isMobileView()?chanListEl('box'):chanListEl('search');
+  control.focus();
+}
+function openChanList(connId=isChanListActive()?chanList?.connId:active?.conn_id,pattern=''){
+  const net=networks.find(n=>n.config.id===connId);
+  if(!net) return;
+  const key=JSON.stringify([connId,net.config.server,net.config.port,net.config.tls,pattern]);
+  const pending=pendingChanLists.get(connId);
+  if(pending && pending.key!==key){showToast('A channel list is already loading for this network.');return;}
+  const cache=chanListEl('cache');
+  try{
+    const saved=localStorage.getItem(CHAN_LIST_CACHE_KEY);
+    if([...cache.options].some(option=>option.value===saved)) cache.value=saved;
+  }catch(_){}
+  pruneChanListCache();
+  const cached=chanListCache.get(key);
+  const sameList=chanList?.key===key;
+  chanList=pending||{connId,pattern,key,entries:cached?.entries||[],cached:!!cached,page:sameList?chanList.page:0};
+  if(!sameList){chanListEl('search').value='';chanList.page=0;}
+  chanList.page??=0;
+  chanListEl('network').textContent=net.config.label||net.config.server||'';
+  showChanListTab();
+  if(!pending&&!cached) requestChanList(chanList);
+  else renderChanList();
+}
+function requestChanList(list){
+  if(pendingChanLists.has(list.connId)) return;
+  const net=networks.find(n=>n.config.id===list.connId);
+  if(!net?.connected){
+    list.error=net?'Connect to the IRC network before refreshing the channel list.':'This IRC network was removed.';
+    renderChanList(true);
+    return;
+  }
+  list.entries=[];
+  list.loading=true;
+  list.cached=false;
+  list.error='';
+  list.page=0;
+  list.lastEntry=Date.now();
+  list.requestId=Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
+  pendingChanLists.set(list.connId,list);
+  function checkIdle(){
+    const remaining=CHAN_LIST_IDLE_MS-(Date.now()-list.lastEntry);
+    if(remaining>0) list.timer=setTimeout(checkIdle,remaining);
+    else finishChanList(list,'The server did not finish sending the channel list.');
+  }
+  list.timer=setTimeout(checkIdle,CHAN_LIST_IDLE_MS);
+  if(!wsend({type:'list_channels',conn_id:list.connId,request_id:list.requestId,pattern:list.pattern})){
+    finishChanList(list,'Could not request the channel list.');
+  }else renderChanList();
+}
+function refreshChanList(){if(chanList&&!chanList.loading) requestChanList(chanList);}
+function closeChanList(){
+  if(!chanList) return;
+  const {connId}=chanList;
+  const back=chanListBackTo;
+  chanListEl('body').replaceChildren();
+  chanList=null;
+  chanListBackTo=null;
+  if(isChanListActive()){
+    const previousNet=networks.find(n=>n.config.id===back?.conn_id);
+    const previousChatOpen=previousNet&&(back.target==='status'||
+      previousNet.channels?.some(ch=>_sameChan(ch.name,back.target))||queryBufs[back.conn_id]?.has(back.target.toLowerCase()));
+    if(previousChatOpen||(back&&(isUploadsConn(back.conn_id)||isMessagesConn(back.conn_id)))){
+      setActive(back.conn_id,back.target);
+    }else{
+      const net=previousNet||networks.find(n=>n.config.id===connId)||networks[0];
+      if(net) setActive(net.config.id,'status');
+      else{active=null;renderChat();updateInputPlaceholder();}
+    }
+    if(!isMobileView()) document.getElementById('msg-input').focus();
+  }
+  renderChanListTab();
+}
+function resetChanLists(){
+  for(const list of pendingChanLists.values()){
+    clearTimeout(list.timer);
+    clearTimeout(list.progressTimer);
+  }
+  pendingChanLists.clear();
+  chanListCache.clear();
+  chanList=null;
+  chanListBackTo=null;
+  chanListEl('body').replaceChildren();
+  renderChanListTab();
+  if(isChanListActive()){
+    active=null;
+    renderChat();
+    updateInputPlaceholder();
+  }
+}
+function failPendingChanLists(message){
+  for(const list of pendingChanLists.values()) finishChanList(list,message);
+}
+function invalidateChanListNetwork(connId,message){
+  for(const [key,entry] of chanListCache){
+    if(entry.connId===connId) chanListCache.delete(key);
+  }
+  const pending=pendingChanLists.get(connId);
+  if(chanList?.connId===connId){
+    chanList.entries=[];
+    chanList.cached=false;
+    chanList.error=message;
+    if(pending!==chanList) renderChanList();
+  }
+  if(pending) finishChanList(pending,message);
+}
 
 // ─── Links overlay ───────────────────────────────────────────────────────────
 function showLinksOverlay(){
@@ -17671,44 +17873,118 @@ function renderLinksOverlay(){
     body.appendChild(row);
   }
 }
-function handleListEntry(ev){
-  chanListData.push({channel:ev.channel,users:ev.users,topic:ev.topic});
-  // Live count update
-  document.getElementById('chanlist-count').textContent=`${chanListData.length} channels`;
-}
-function handleListEnd(){
-  chanListData.sort((a,b)=>b.users-a.users);
-  renderChanList(chanListData);
-}
-function renderChanList(data){
-  const body=document.getElementById('chanlist-body');
-  document.getElementById('chanlist-count').textContent=`${data.length} channels`;
-  if(!data.length){body.innerHTML='<div class="chanlist-empty">No channels found.</div>';return;}
-  body.innerHTML='';
-  // Render in batches for performance
-  const frag=document.createDocumentFragment();
-  for(const ch of data){
-    const row=document.createElement('div');
-    row.className='chanlist-row';
-    row.innerHTML=`<span class="chanlist-chan">${esc(ch.channel)}</span><span class="chanlist-users">${ch.users}</span><span class="chanlist-topic">${parseMircColors(ch.topic)}</span>`;
-    row.onclick=()=>{
-      if(chanListConnId){
-        markUserJoin(chanListConnId,ch.channel); wsend({type:'join_channel',conn_id:chanListConnId,channel:ch.channel,key:null});
-        closeChanList();
-        // View switch happens via consumeUserJoin() in the irc_join handler — only on a
-        // REAL join. (Removed the old unconditional setTimeout(setActive,500) which also
-        // switched into channels the server refused: +i/+k/+b/nonexistent.)
-      }
-    };
-    frag.appendChild(row);
+function handleListBatch(ev){
+  const list=pendingChanLists.get(ev.conn_id);
+  if(!list||ev.request_id!==list.requestId) return;
+  for(const entry of ev.entries){
+    list.entries.push({channel:entry.channel,users:Number(entry.users)||0,topic:entry.topic||''});
   }
-  body.appendChild(frag);
+  list.lastEntry=Date.now();
+  if(list===chanList&&!list.progressTimer){
+    list.progressTimer=setTimeout(()=>{
+      list.progressTimer=0;
+      if(list!==chanList||!list.loading) return;
+      // Keep visible buttons stable during the stream. Searching or paging
+      // uses everything received so far, and completion shows the final order.
+      if(!chanListEl('body').querySelector('.chanlist-row')){sortChanList(list);renderChanList(true);}
+      else updateChanListSummary(list,matchingChannels(list));
+    },1000);
+  }
+}
+function sortChanList(list){list.entries.sort((a,b)=>b.users-a.users||a.channel.localeCompare(b.channel));}
+function finishChanList(list,error=''){
+  clearTimeout(list.timer);
+  clearTimeout(list.progressTimer);
+  list.progressTimer=0;
+  pendingChanLists.delete(list.connId);
+  list.loading=false;
+  list.error=error;
+  sortChanList(list);
+  if(!error&&chanListCacheTime()){
+    pruneChanListCache();
+    chanListCache.delete(list.key);
+    chanListCache.set(list.key,{connId:list.connId,entries:list.entries,fetchedAt:Date.now()});
+    if(chanListCache.size>6) chanListCache.delete(chanListCache.keys().next().value);
+  }
+  if(list===chanList) renderChanList(true);
+}
+function handleListEnd(ev){
+  const list=pendingChanLists.get(ev.conn_id);
+  if(!list||ev.request_id!==list.requestId) return;
+  const error=ev.message||(ev.total!==list.entries.length?'Some channel results were not received. Refresh to try again.':'');
+  finishChanList(list,error);
+}
+function changeChanListPage(step){
+  if(!chanList) return;
+  if(chanList.loading) sortChanList(chanList);
+  chanList.page+=step;
+  renderChanList();
 }
 function filterChanList(){
-  const q=document.getElementById('chanlist-search').value.toLowerCase().trim();
-  if(!q){renderChanList(chanListData);return;}
-  const filtered=chanListData.filter(ch=>ch.channel.toLowerCase().includes(q)||ch.topic.toLowerCase().includes(q));
-  renderChanList(filtered);
+  if(!chanList) return;
+  if(chanList.loading) sortChanList(chanList);
+  chanList.page=0;
+  renderChanList();
+}
+function matchingChannels(list){
+  const query=chanListEl('search').value.trim().toLowerCase();
+  return query?list.entries.filter(ch=>ch.channel.toLowerCase().includes(query)||ch.topic.toLowerCase().includes(query)):list.entries;
+}
+function updateChanListSummary(list,matches){
+  const limit=Number(chanListEl('limit').value);
+  const pages=Math.max(1,Math.ceil(matches.length/limit));
+  list.page=Math.min(Math.max(0,list.page),pages-1);
+  chanListEl('prev').disabled=list.page===0;
+  chanListEl('next').disabled=list.page===pages-1;
+  chanListEl('page').textContent=pages>1?`${list.page+1} / ${pages}`:'';
+  const count=chanListEl('count');
+  count.setAttribute('aria-live',list.loading?'off':'polite');
+  const total=list.entries.length.toLocaleString();
+  const matched=matches===list.entries?total:`${matches.length.toLocaleString()} of ${total}`;
+  count.textContent=`${matched} channels`+(list.loading?' · Loading…':list.cached?' · Cached':'');
+  return limit;
+}
+function renderChanList(keepScroll=false){
+  const list=chanList;
+  if(!list) return;
+  const body=chanListEl('body');
+  chanListEl('refresh').disabled=list.loading===true;
+  const matches=matchingChannels(list);
+  const limit=updateChanListSummary(list,matches);
+  const scrollTop=keepScroll?body.scrollTop:0;
+  const frag=document.createDocumentFragment();
+  const focusedChannel=body.contains(document.activeElement)?document.activeElement.dataset.channel:null;
+  let focusedRow;
+  if(list.error||!matches.length){
+    const message=document.createElement('div');
+    message.className='chanlist-empty';
+    message.textContent=list.error||(list.loading?'Waiting for the server…':'No channels found.');
+    frag.append(message);
+  }
+  for(const ch of matches.slice(list.page*limit,(list.page+1)*limit)){
+    const row=document.createElement('button');
+    row.type='button';
+    row.className='chanlist-row';
+    row.dataset.channel=ch.channel;
+    if(ch.channel===focusedChannel) focusedRow=row;
+    row.innerHTML=`<span class="chanlist-chan">${esc(ch.channel)}</span><span class="chanlist-users">${ch.users}</span><span class="chanlist-topic">${parseMircColors(ch.topic)}</span>`;
+    row.onclick=()=>selectChanListChannel(list,ch.channel);
+    frag.appendChild(row);
+  }
+  body.replaceChildren(frag);
+  body.scrollTop=scrollTop;
+  if(focusedChannel) (focusedRow||chanListEl('search')).focus({preventScroll:true});
+}
+function selectChanListChannel(list,channel){
+  const net=networks.find(n=>n.config.id===list.connId);
+  const joined=net?.channels?.find(ch=>_sameChan(ch.name,channel));
+  if(joined){setActive(list.connId,joined.name);}
+  else{
+    if(!net?.connected){showToast('Connect to this IRC network before joining a channel.');return;}
+    if(!wsend({type:'join_channel',conn_id:list.connId,channel,key:null})){showToast('Could not send the join request. Try again when connected.');return;}
+    markUserJoin(list.connId,channel);
+  }
+  if(!isMobileView()&&!_IS_IOS) document.getElementById('msg-input').focus();
 }
 
 // ─── Remove network ───────────────────────────────────────────────────────────
@@ -18290,6 +18566,7 @@ window.addEventListener('resize',()=>closeFloatDd());
 async function removeNetwork(id,label){
   if(!(await customConfirm(`Remove server "${label}"? This will disconnect and delete its config and its saved chat history on the server.`,'Remove')))return;
   wsend({type:'remove_network',id});
+  invalidateChanListNetwork(id,'This IRC network was removed.');
   // Clean up favorites for this network
   let favs=loadFavorites().filter(f=>!f.key.startsWith(id+'/'));
   saveFavorites(favs);
@@ -18477,16 +18754,6 @@ function showTopicMenu(e){
     m.appendChild(b);
     return b;
   };
-  // Open the channel-list overlay for a given connection (same behavior as the
-  // former inline handler, just without string-built JS).
-  const _openChanList=(cid)=>{
-    chanListData=[];chanListConnId=cid;
-    document.getElementById('chanlist-body').innerHTML='<div class=chanlist-loading>Waiting...</div>';
-    document.getElementById('chanlist-count').textContent='';
-    document.getElementById('chanlist-search').value='';
-    document.getElementById('chanlist-overlay').classList.add('show');
-    wsend({type:'send',conn_id:cid,raw:'LIST'});
-  };
   if(isChan){
     _mkItem('👁 View topic',()=>viewFullTopic());
     _mkItem('✏️ Edit topic',()=>editTopic());
@@ -18497,7 +18764,7 @@ function showTopicMenu(e){
     const muted=isMuted(muteKey);
     _mkItem(muted?'🔔 Unmute':'🔇 Mute',()=>toggleMute(muteKey));
     _mkItem('⚙ Channel Modes',()=>openChanModes(conn_id,target));
-    _mkItem('📋 Channel list',()=>_openChanList(conn_id));
+    _mkItem('📋 Channel list',()=>openChanList(conn_id));
     _mkItem('🗑 Clear History',()=>clearBufHistory(conn_id,target));
     _mkItem('🚪 Leave channel',()=>leaveCurrentChannel(),true);
   } else if(isPM){
@@ -18514,7 +18781,7 @@ function showTopicMenu(e){
     _mkItem(muted?'🔔 Unmute':'🔇 Mute conversation',()=>toggleMute(muteKey));
     const fav=isFavorite(conn_id,target);
     _mkItem(fav?'★ Unfavorite':'☆ Favorite',()=>toggleFavorite(conn_id,target));
-    _mkItem('📋 Channel list',()=>_openChanList(conn_id));
+    _mkItem('📋 Channel list',()=>openChanList(conn_id));
     _mkItem('🗑 Clear History',()=>clearBufHistory(conn_id,target));
     _mkItem('✕ Close PM',()=>leaveCurrentChannel(),true);
   } else if(target==='status'){
@@ -18525,7 +18792,7 @@ function showTopicMenu(e){
     // Join-channel button opened the prompt AFTER closing the menu; preserve order
     // by closing first then prompting (closeTopicMenu also runs again harmlessly).
     _mkItem('📺 Join channel',()=>{closeTopicMenu();promptJoinChannel(conn_id);});
-    _mkItem('📋 List channels',()=>_openChanList(conn_id));
+    _mkItem('📋 List channels',()=>openChanList(conn_id));
     _mkItem('🚫 Ignored users',()=>showIgnorePanel());
     const netMuted=isMuted('net:'+conn_id);
     _mkItem(netMuted?'🔔 Unmute network':'🔇 Mute network',()=>toggleMute('net:'+conn_id));
@@ -18576,13 +18843,14 @@ function viewFullTopic(){
   box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Topic — ${esc(active.target)}</div>${parseMircColors(topic)}`;
   ov.innerHTML='';ov.appendChild(box);
 }
-function customPrompt(message,defaultValue,isPassword,clearOnClose=isPassword){
+function customPrompt(message,defaultValue,isPassword,clearOnClose=isPassword,cancelLabel='Cancel',onCancelClick=null){
   return new Promise(resolve=>{
     const ov=document.getElementById('custom-prompt-overlay');
     const msg=document.getElementById('custom-prompt-msg');
     const inp=document.getElementById('custom-prompt-input');
     const ok=document.getElementById('custom-prompt-ok');
     const cancel=document.getElementById('custom-prompt-cancel');
+    cancel.textContent=cancelLabel;
     msg.textContent=message||'';
     // Honor the (previously ignored) isPassword flag so credentials — vault passphrase,
     // login password, password-safe entries — are MASKED, not shown in cleartext. Reset
@@ -18594,9 +18862,9 @@ function customPrompt(message,defaultValue,isPassword,clearOnClose=isPassword){
     inp.select();
     // For password prompts, clear the shared input's value on close so the secret
     // doesn't linger in the live DOM for later scripts/inspection to read.
-    function finish(val){ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;inp.onkeydown=null;if(clearOnClose)inp.value='';resolve(val);}
+    function finish(val){ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;cancel.textContent='Cancel';inp.onkeydown=null;if(clearOnClose)inp.value='';resolve(val);}
     ok.onclick=()=>finish(inp.value);
-    cancel.onclick=()=>finish(null);
+    cancel.onclick=event=>{finish(null);if(event&&onCancelClick) onCancelClick();};
     inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();e.stopPropagation();finish(inp.value);}else if(e.key==='Escape'){e.preventDefault();e.stopPropagation();finish(null);}};
   });
 }
@@ -18723,8 +18991,7 @@ function toggleNickPanel(){
   const np=document.getElementById('nick-panel');
   const bd=document.getElementById('sidebar-backdrop');
   const btn=document.getElementById('nick-toggle');
-  const isMobile=window.innerWidth<=768;
-  if(isMobile){
+  if(isMobileView()){
     if(np.classList.contains('open')){np.classList.remove('open');bd.classList.remove('show');}
     else{closeSidebar();np.classList.add('open');bd.classList.add('show');}
   } else {
@@ -22769,6 +23036,7 @@ function updateMentionsBadge(){
 }
 // ─── Search ───────────────────────────────────────────────────────────────────
 function toggleSearchPanel(){
+  if(isChanListActive()) return;
   const p=document.getElementById('search-panel');
   // Close mentions if open
   // Transfer the existing Back entry when swapping popovers. Calling
