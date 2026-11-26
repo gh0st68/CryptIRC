@@ -1,6 +1,6 @@
 {
   "name": "cryptirc",
-  "version": "0.5.23",
+  "version": "0.5.24",
   "description": "CryptIRC — Encrypted IRC Client",
   "main": "main.js",
   "author": "gh0st",

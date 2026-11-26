@@ -1,11 +1,11 @@
 const CHAT_REACTIONS = new Map([
-  ['❤️', 'Love'], ['👍', 'Like'], ['😂', 'Laugh'], ['🎉', 'Celebrate'],
+  ['❤️', 'Love'], ['👍', 'Like'], ['😂', 'Haha'], ['🎉', 'Celebrate'],
   ['🔥', 'Fire'], ['👀', 'Watching'], ['✅', 'Got it'], ['🙏', 'Thanks'],
   ['👎', 'Dislike'],
 ]);
 // Existing positions are part of the encrypted reaction format.
 const CHAT_REACTION_EMOJI = [...CHAT_REACTIONS.keys()];
-const CHAT_MESSAGE_REACTIONS = new Map([['👍', 'Like'], ['👎', 'Dislike'], ['❤️', 'Heart']]);
+const CHAT_MESSAGE_REACTIONS = new Map([['👍', 'Like'], ['👎', 'Dislike'], ['❤️', 'Heart'], ['😂', 'Haha']]);
 const reactionAnchors = new Map();
 const reactionAnchorTargets = new Map();
 const chatReactions = new Map();

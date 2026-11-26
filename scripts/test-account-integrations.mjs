@@ -32,6 +32,7 @@ const translationEnabled=process.env.CRYPTIRC_TEST_TRANSLATION==='1';
 const e2eEnabled=process.env.CRYPTIRC_TEST_E2E==='1';
 const legacyBin=process.env.CRYPTIRC_LEGACY_BIN;
 let translator;
+let reactionWindowEnds=0;
 
 async function waitFor(checkFn, name, timeout=20000) {
   const stop=Date.now()+timeout;
@@ -442,7 +443,8 @@ try {
       await peer(`document.getElementById('vault-pass').value=${q(vault)};doUnlock()`);
       await waitFor(()=>peer(`reactionEnabled(${q(networkB)})&&!document.getElementById('vault-overlay').classList.contains('show')`),
         'second CryptIRC reaction viewer ready');
-      await checkOrdinaryClientReactions({ev,peer,check,waitFor,plain,plainNick,owner,networkA,networkB,channel,stamp});
+      await checkOrdinaryClientReactions({ev:peer,peer:ev,check,waitFor,plain,plainNick,owner:other,
+        networkA:networkB,networkB:networkA,channel,stamp});
       if(process.env.IRC_LEGACY_REACTIONS_PORT){
         const legacyNick='pkrm'+stamp;
         const legacyNetwork=await network(otherKey,legacyNick,process.env.IRC_LEGACY_REACTIONS_PORT,'Legacy reactions');
@@ -466,6 +468,7 @@ try {
     await tool(otherKey,'irc_network',{action:'disconnect',network:unsupportedSender});
     await tool(token,'irc_network',{action:'remove',network:unsupportedNetwork});
     await tool(otherKey,'irc_network',{action:'remove',network:unsupportedSender});
+    reactionWindowEnds=Date.now()+61000;
   }
   const sendLag=ms=>ev(`handleEvent({type:'lag_update',conn_id:${JSON.stringify(networkA)},ms:${ms}})`);
   await ev(`setActive(${JSON.stringify(noticeNetwork)},'status')`);
@@ -659,6 +662,9 @@ try {
   },true)));
   await fs.rm(brokenSlot);
   if(e2eEnabled){
+    // Plain and sealed reactions share the per-account budget. Start the
+    // sealed checks in a fresh window with the normal limit in effect.
+    if(reactionWindowEnds>Date.now()) await pause(reactionWindowEnds-Date.now());
     ownerWs.send({type:'e2e_delete_channel_key',channel,v:2});
     await waitFor(async()=>{
       const files=await fs.readdir(path.join(tmp,'e2e',owner,'channels'));

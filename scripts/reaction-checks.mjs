@@ -21,9 +21,9 @@ export async function checkLegacyReactionMenu({ev,check,waitFor,ownerWs,legacyNe
   legacySender.send(`PRIVMSG ${legacyNick} :${text}`);
   const anchor=await waitFor(()=>ev(`(()=>{const row=${reactionRow(text)};return row&&messageReactionFor(row)?.reference;})()`),
     'old module still supplies real message anchors');
-  check('the legacy module still offers Reply, Like and Heart',await ev(`(()=>{
+  check('the legacy module offers Reply, Like, Heart and Haha',await ev(`(()=>{
     const row=${reactionRow(text)};row.querySelector('.msg-body').click();
-    return [...row.querySelectorAll('.message-actions button')].map(b=>b.getAttribute('aria-label')||b.textContent).join(',')==='Reply,Like,Heart';
+    return [...row.querySelectorAll('.message-actions button')].map(b=>b.getAttribute('aria-label')||b.textContent).join(',')==='Reply,Like,Heart,Haha';
   })()`));
   const request_id=crypto.randomUUID();
   ownerWs.send({type:'react',conn_id:legacyNetwork,target:legacyPlain,request_id,
@@ -32,6 +32,9 @@ export async function checkLegacyReactionMenu({ev,check,waitFor,ownerWs,legacyNe
     e=>e.type==='reaction_result'&&e.request_id===request_id&&e.error,'unsupported thumbs-down refusal')));
   check('Like still works with the old module',await ev(reactionButton(text,'👍'))&&await waitFor(
     ()=>ev(`(${reactionRow(text)})?.querySelector('.reaction-count')?.textContent==='👍 1'`),'old module reaction echo'));
+  check('the old module carries Haha using the existing emoji',await ev(reactionButton(text,'😂'))&&await waitFor(
+    ()=>ev(`Array.from((${reactionRow(text)})?.querySelectorAll('.reaction-count')||[]).some(chip=>chip.textContent==='😂 1')`),
+    'old module Haha echo'));
 }
 
 export async function checkOrdinaryClientReactions({ev,peer,check,waitFor,plain,plainNick,owner,networkA,networkB,channel,stamp}){
@@ -48,7 +51,7 @@ export async function checkOrdinaryClientReactions({ev,peer,check,waitFor,plain,
   await waitFor(async()=>await ev(hasAnchor(channelText))&&await peer(hasAnchor(channelText)),'ordinary message anchor in both clients');
   const before=plain.lines.length;
   const count=(text,emoji)=>`[...(${reactionRow(text)})?.querySelectorAll('.reaction-count')||[]].some(b=>b.textContent===${q(emoji+' 1')})`;
-  for(const emoji of ['👍','👎','❤️']){
+  for(const emoji of ['👍','👎','❤️','😂']){
     check('CryptIRC can react '+emoji+' to a plain IRC channel message',await ev(reactionButton(channelText,emoji)));
     check('another CryptIRC viewer renders '+emoji+' on the plain IRC message',await waitFor(
       ()=>peer(count(channelText,emoji)),'reaction on ordinary sender in second browser'));
@@ -63,7 +66,7 @@ export async function checkOrdinaryClientReactions({ev,peer,check,waitFor,plain,
   await waitFor(()=>plain.lines.slice(before).some(line=>line.includes(' PONG ')&&line.endsWith('reaction-fixture-finished')),
     'plain client received the final test marker');
   check('reaction adds no IRC lines visible to the ordinary client',!plain.lines.slice(before).some(line=>
-    /\bTAGMSG\b|cryptirc\.com\/react|\+draft\/react|👍|👎|❤️/.test(line)));
+    /\bTAGMSG\b|cryptirc\.com\/react|\+draft\/react|👍|👎|❤️|😂/.test(line)));
   await peer(`setActive(${q(networkB)},${q(plainNick)})`);
   check('another CryptIRC account cannot see the private message or its reaction',await peer(
     `!(${reactionRow(directText)})&&!document.querySelector('#chat-area .reaction-count')`));
@@ -78,10 +81,10 @@ export async function checkPlainReactions({ev,cdp,check,waitFor,ownerWs,otherWs,
     await ev(`setActive(${q(networkA)},${q(conversation)})`);
     send(target,parent);
     await waitFor(()=>ev(`(()=>{const row=${reactionRow(parent)};return !!row&&!!messageReactionFor(row);})()`),'reaction anchor for real IRC message');
-    check('tapping the message shows Reply, Like, Dislike and Heart',await ev(`(()=>{
+    check('tapping the message shows Reply, Like, Dislike, Heart and Haha',await ev(`(()=>{
       const row=${reactionRow(parent)};row.querySelector('.msg-body').click();
       const names=[...row.querySelectorAll('.message-actions button')].map(b=>b.getAttribute('aria-label')||b.textContent);
-      return names.join(',')==='Reply,Like,Dislike,Heart'&&!row.querySelector('.reaction-picker');
+      return names.join(',')==='Reply,Like,Dislike,Heart,Haha'&&!row.querySelector('.reaction-picker');
     })()`));
     for(const emoji of target===channel?['❤️','👎']:['👎']){
       const before=otherWs.events.length;
@@ -96,6 +99,27 @@ export async function checkPlainReactions({ev,cdp,check,waitFor,ownerWs,otherWs,
         `!(${reactionRow(parent)})?.querySelector('.reaction-count')`),'own reaction removal confirmed'));
     }
   }
+  const secondChannel=channel+'-second';
+  for(const [ws,connId,nick] of [[ownerWs,networkA,owner],[otherWs,networkB,other]]){
+    ws.send({type:'send',conn_id:connId,raw:`JOIN ${secondChannel}`});
+    await ws.wait(e=>['irc_join','irc_join_ex'].includes(e.type)&&e.channel===secondChannel&&e.nick===nick,
+      'both reaction clients join the second channel');
+  }
+  const repeated=`same text in two channels ${stamp}`;
+  for(const room of [channel,secondChannel]){
+    await ev(`_sidebarActivate(${q(networkA)},${q(room)})`);
+    send(room,repeated);
+    await waitFor(()=>ev(`(()=>{const row=${reactionRow(repeated)};return !!row&&!!messageReactionFor(row);})()`),
+      'same-text message is anchored in '+room);
+  }
+  const at=otherWs.events.length;
+  check('the second channel can send a Haha reaction',await ev(reactionButton(repeated,'😂')));
+  await waitFor(()=>otherWs.events.slice(at).some(e=>e.type==='irc_reaction'&&e.target===secondChannel&&e.emoji==='😂'),
+    'the second channel receives Haha');
+  await ev(`_sidebarActivate(${q(networkA)},${q(channel)})`);
+  check('a reaction never appears beside identical text in the other channel',
+    await ev(`(()=>{const row=${reactionRow(repeated)};return !!row&&!row.querySelector('.reaction-count');})()`)&&
+      !otherWs.events.slice(at).some(e=>e.type==='irc_reaction'&&e.target===channel&&e.emoji==='😂'));
   await ev(`setActive(${q(networkA)},${q(channel)})`);
   const mobileParent='mobile actions '+stamp;
   const [desktopWidth,desktopHeight]=await ev('[innerWidth,innerHeight]');
@@ -113,7 +137,7 @@ export async function checkPlainReactions({ev,cdp,check,waitFor,ownerWs,otherWs,
     await cdp('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point]});
     await cdp('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
     check('a phone-width touch opens 44px message actions',await waitFor(()=>ev(`
-      [...(${reactionRow(mobileParent)}).querySelectorAll('.message-actions button')].filter(b=>b.getBoundingClientRect().height>=44).length===4
+      [...(${reactionRow(mobileParent)}).querySelectorAll('.message-actions button')].filter(b=>b.getBoundingClientRect().height>=44).length===5
     `),'mobile message actions'));
   } finally {
     await cdp('Emulation.setTouchEmulationEnabled',{enabled:false});

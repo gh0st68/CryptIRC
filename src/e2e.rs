@@ -276,6 +276,18 @@ impl E2EStore {
         tokio::fs::read_to_string(self.user_dir(username).join("identity.enc")).await.ok()
     }
 
+    /// An existing or unreadable identity/bundle is an unavailable-key case,
+    /// since asking a configured contact to start over can disrupt their sessions.
+    pub async fn needs_bundle_setup(&self, username: &str) -> bool {
+        let dir = self.user_dir(username);
+        for file in ["identity.enc", "bundle.json"] {
+            if !matches!(tokio::fs::metadata(dir.join(file)).await, Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+                return false;
+            }
+        }
+        true
+    }
+
     // The browser wraps its E2E master key with its own recovery code. The
     // server holds the wrapped keyring and the migration status for v1 blobs.
     fn keyring_path(&self, username: &str) -> PathBuf {

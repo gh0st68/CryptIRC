@@ -844,6 +844,8 @@ pub enum ServerEvent {
                        #[serde(default, skip_serializing_if = "std::ops::Not::not")] bridge: bool },
     #[serde(rename = "e2e_bundle_missing")]
     E2EBundleMissing { conn_id: String, req: String, reason: &'static str },
+    #[serde(rename = "e2e_setup_needed")]
+    E2ESetupNeeded { conn_id: String, from: String, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String> },
     #[serde(rename = "e2e_identity_blob")]
     E2EIdentityBlob  { blob: String },
     #[serde(rename = "e2e_session")]
@@ -7607,21 +7609,24 @@ async fn handle_command(
                 // compatibility, minus the username-first preference: the live holder of
                 // the nick (any network, ambiguity refused), else a username match.
                 None => match state.resolve_nick_to_username(&nick).await {
-                    Some(real_user) => Some(real_user),
+                    Some(real_user) => Some((real_user, String::new())),
                     None if state.e2e_nick_is_held(&nick).await => {
                         send_self(ServerEvent::Error { message: format!("No E2E key bundle for {} (nick is ambiguous on this server)", nick) });
                         return;
                     }
-                    None => Some(safe),
+                    None => Some((safe, String::new())),
                 },
             };
             // F17: no INFO log of who fetches whose bundle (E2E contact metadata).
             tracing::debug!("[E2E] fetch_bundle resolved");
             let local_peer = resolved.is_some();
-            if let Some(resolved) = resolved {
-                // Charge actual bundle lookups, which can consume a prekey. Ordinary
-                // IRC DMs on a network without discovery never use this quota.
-                if state.auth.check_ws_kdf_rate_limit(username, "e2e_bundle").is_err() {
+            let mut needs_setup = false;
+            if let Some((resolved, peer_conn)) = resolved {
+                // Missing identities have no one-time key to fetch. Keep separate
+                // budgets so setup probes don't block an established peer's keys.
+                needs_setup = state.e2e_store.needs_bundle_setup(&resolved).await;
+                let action = if needs_setup { "e2e_setup_probe" } else { "e2e_bundle" };
+                if state.auth.check_ws_kdf_rate_limit(username, action).is_err() {
                     if let (Some(conn_id), Some(req)) = (conn_id, req) {
                         send_self(ServerEvent::E2EBundleMissing { conn_id, req, reason: "rate-limited" });
                     } else {
@@ -7629,7 +7634,8 @@ async fn handle_command(
                     }
                     return;
                 }
-                if let Some(bundle) = state.e2e_store.fetch_bundle(&resolved, username).await {
+                let bundle = if needs_setup { None } else { state.e2e_store.fetch_bundle(&resolved, username).await };
+                if let Some(bundle) = bundle {
                     send_self(ServerEvent::E2EBundle { username: nick.clone(), bundle, conn_id, req, bridge: false });
                     // Check if the target user's prekeys are running low and notify them.
                     // #58: debounce so a fetch flood can't spam the victim's channel.
@@ -7639,9 +7645,36 @@ async fn handle_command(
                     }
                     return;
                 }
+                if needs_setup && resolved != username && state.e2e_store.bundle_identity_keys(username).await.is_some() {
+                    if let (Some(cid), Some(_)) = (conn_id.as_deref(), req.as_ref()) {
+                        let sender = if state.owns_conn(username,cid) { state.connections.get(cid).map(|c| c.clone()) } else { None };
+                        let recipient = state.connections.get(&peer_conn).map(|c| c.clone());
+                        if let (Some(sender), Some(recipient)) = (sender, recipient) {
+                            let identity = {
+                                let c = sender.lock().await;
+                                (c.connected && c.registered).then(|| {
+                                    let prefix = (!c.self_userhost.is_empty()).then(|| format!("{}!{}", c.nick, c.self_userhost));
+                                    let cm = c.server_casemapping.or_else(|| crate::irc::known_casemapping(cid));
+                                    (c.nick.clone(), prefix, cm)
+                                })
+                            };
+                            if let Some((from, prefix, cm)) = identity {
+                                let rfc8265 = e2e::utf8mapping_is_rfc8265(cid);
+                                let fold = |n| e2e_nick_fold(cm, rfc8265, n);
+                                let mut c = recipient.lock().await;
+                                if fold(&c.nick) == fold(&nick)
+                                    && state.owns_conn(&resolved, &peer_conn)
+                                {
+                                    e2e_bridge::notify_setup(&state, &resolved, &mut c, &from, prefix.as_deref());
+                                }
+                            }
+                        }
+                    }
+                }
             }
             if let (Some(cid), Some(id)) = (conn_id, req) {
-                let reason = if local_peer { "peer-setup" }
+                let reason = if needs_setup { "peer-setup" }
+                    else if local_peer { "unavailable" }
                     else if let Some(conn) = state.connections.get(&cid).map(|c| c.clone()) {
                         match e2e_bridge::request(state, username, conn, &nick, &id).await {
                             Ok(true) => return,
@@ -8550,10 +8583,10 @@ impl AppState {
     ///    can neither be preferred over nor make ambiguous the real holder on the
     ///    caller's own server. Within that tier: exactly one distinct owner, or None.
     async fn resolve_nick_on_network(&self, nick: &str, caller: &str, caller_conn: &str) -> Option<String> {
-        self.resolve_e2e_peer(nick, caller, caller_conn).await.ok().flatten()
+        self.resolve_e2e_peer(nick, caller, caller_conn).await.ok().flatten().map(|(owner, _)| owner)
     }
 
-    async fn resolve_e2e_peer(&self, nick: &str, caller: &str, caller_conn: &str) -> Result<Option<String>, ()> {
+    async fn resolve_e2e_peer(&self, nick: &str, caller: &str, caller_conn: &str) -> Result<Option<(String, String)>, ()> {
         if nick.is_empty() || !self.owns_conn(caller, caller_conn) { return Err(()); }
         let scope = self.e2e_conn_ident(caller_conn, caller).await.ok_or(())?;
         // r5 (codex P1 main.rs:7399): nicks compared the way the caller's network compares
@@ -8571,7 +8604,7 @@ impl AppState {
         let nick_lower = fold(nick);
         let conn_ids: Vec<String> = self.connections.iter().map(|e| e.key().clone()).collect();
         // best tier seen so far, its single owner, and whether that tier is ambiguous
-        let mut best: (u8, Option<String>, bool) = (0, None, false);
+        let mut best: (u8, Option<(String, String)>, bool) = (0, None, false);
         for conn_id in conn_ids {
             if conn_id == caller_conn { continue; }
             let conn = self.connections.get(&conn_id).map(|c| c.clone());
@@ -8582,8 +8615,8 @@ impl AppState {
             let Some(ident) = self.e2e_conn_ident(&conn_id, &o).await else { continue };
             let tier = e2e::network_match_tier(&scope, &ident);
             if tier == 0 || tier < best.0 { continue; }
-            if tier > best.0 { best = (tier, Some(o), false); continue; }
-            if best.1.as_deref() != Some(o.as_str()) { best.2 = true; }
+            if tier > best.0 { best = (tier, Some((o, conn_id)), false); continue; }
+            if best.1.as_ref().is_some_and(|(owner, _)| owner != &o) { best.2 = true; }
         }
         if best.2 {
             warn!("[E2E] refusing ambiguous nick resolution — multiple accounts hold it on one network");

@@ -43,6 +43,49 @@ const E2E_DM_PREFIX     = '[e2edm2]';   // ASCII-only — safe through all IRC s
 const E2E_CHAN_PREFIX    = 'sd8~';       // ASCII-only
 const E2E_SHARED_KEY_CONFLICT = '🔐 This message uses Signal encryption, but this chat is configured with a shared key. Agree on one encryption method with this contact.';
 const E2E_RESTART_RECEIVE_MS = 5 * 60 * 1000;
+const E2E_SETUP_NOTICE_MS = 60 * 1000;
+const _e2eSetupNotices = new Map();
+
+function _e2eSetupRow(connId,nick,text,action,prefix = null) {
+  if (!connId || !_e2eSetupNick(nick) || !networks.some(net => net.config.id === connId && net.connected)) return;
+  const incoming = action !== 'send';
+  if (incoming && (E2E.keyReady || isIgnored(nick,prefix) ||
+      (getPmSettings(connId).enabled && !isPmAllowedFor(connId,nick)))) return;
+  const now = Date.now();
+  let incomingCount=0;
+  for (const [key,at] of _e2eSetupNotices) {
+    if (now - at >= E2E_SETUP_NOTICE_MS) _e2eSetupNotices.delete(key);
+    else if (key.startsWith('["incoming",')) incomingCount++;
+  }
+  const key = JSON.stringify([incoming?'incoming':'send',connId,_e2eRecvFold(nick,_e2eCaseMap(connId))]);
+  if (_e2eSetupNotices.has(key) || (incoming && incomingCount >= 8)) return;
+  if (_e2eSetupNotices.size >= 128) _e2eSetupNotices.delete(_e2eSetupNotices.keys().next().value);
+  _e2eSetupNotices.set(key,now);
+  sysMsg(connId,nick,text,'system',{e2eSetupAction:action,e2eSetupConn:connId,e2eSetupNick:nick});
+}
+
+function _e2eSetupNick(nick) {
+  return /^[A-Za-z\[\]\\\x60_^{}|][A-Za-z0-9\[\]\\\x60_^{}|-]{0,63}$/.test(nick) &&
+    nick.toLowerCase() !== 'status' && !_e2eReservedNamespace(nick) && !_isServiceNick(nick);
+}
+
+function e2eSendSetupInstructions(connId,nick) {
+  if (!E2E.keyReady) return 'Unlock encryption to send setup instructions.';
+  if (E2E._bootPhase !== 'ready' || E2E._resyncPending) return 'Wait for encryption to finish loading, then try again.';
+  if (!_e2eSetupNick(nick) || !_wsReady() ||
+      !networks.some(net => net.config.id === connId && net.connected)) return 'Reconnect to send setup instructions.';
+  const st = e2eTargetState(nick,{conn_id:connId});
+  const canonical = _e2eCanon(nick,connId) || nick;
+  if (st.mode !== 'none' || E2E.trustStore[_e2eDmKey(canonical,connId)]) return 'Check this chat’s encryption and try your message again.';
+  const key = JSON.stringify(['sent',connId,_e2eRecvFold(nick,_e2eCaseMap(connId))]);
+  const now = Date.now();
+  if (now - (_e2eSetupNotices.get(key)||0) < E2E_SETUP_NOTICE_MS) return 'Setup instructions were sent recently.';
+  const text = 'I’d like to send you an encrypted DM. Open CryptIRC (https://cryptirc.com/), join this IRC network, and run /encrypt unlock. For Signal chats, use my CryptIRC service or a network with the CryptIRC bridge.';
+  if (wsend({type:'send',conn_id:connId,raw:`NOTICE ${nick} :${text}`}) === false) return 'Could not send setup instructions.';
+  if (_e2eSetupNotices.size >= 128) _e2eSetupNotices.delete(_e2eSetupNotices.keys().next().value);
+  _e2eSetupNotices.set(key,now);
+  return null;
+}
 const E2E_REACTION_DM_PREFIX = 'e2r1:';
 const E2E_REACTION_PSK_PREFIX = 'e2r1p:';
 const E2E_REACTION_AD = new TextEncoder().encode('\nCryptIRC-Reaction-v1');
@@ -311,9 +354,10 @@ function _e2eKeyCmdName(target, cid) {
   return { name: t };
 }
 // The question for { ask } above (the in-app dialog when app.js is there).
-async function _e2eKeyCmdConfirm(msg, okLabel) {
+async function _e2eKeyCmdConfirm(msg, okLabel, explicitApproval = false) {
   try {
-    if (typeof customConfirm === 'function' && typeof document !== 'undefined' && document && document.body) return !!(await customConfirm(msg, okLabel || 'Continue', 'Cancel'));
+    if (explicitApproval && (typeof customConfirm !== 'function' || !customConfirm.supportsExplicitApproval)) return false;
+    if (typeof customConfirm === 'function' && typeof document !== 'undefined' && document && document.body) return !!(await customConfirm(msg, okLabel || 'Continue', 'Cancel', explicitApproval));
     if (typeof confirm === 'function') return !!confirm(msg);
   } catch (_) {}
   return false;
@@ -1089,6 +1133,8 @@ function e2eOnVaultStateUnlocked() {
 // or kept the old key. Now every reconnect re-runs discovery, and until it completed
 // every outgoing target is BLOCKED (like a fresh load: _krReceived / the r5 F1 guard).
 function e2eOnSocketAuthed() {
+  _e2ePlainConnections.clear();
+  _e2eDiscoveryMiss.clear();
   E2E._krReceived = false;                 // locked device: its hints may be stale too
   if (E2E.keyReady) E2E._resyncPending = true;
 }
@@ -1218,8 +1264,9 @@ function _e2eWipeMemory() {
   E2E._spkBlob = null; E2E._sessionCache = Object.create(null); E2E._glareAlt = Object.create(null);
   for (const pending of Object.values(E2E._pendingOn || {})) pending.done?.('blocked');
   E2E._pendingOn = Object.create(null); E2E._moved = Object.create(null); E2E._maybeMoved = Object.create(null); E2E._devIdx = new Set();
-  _e2eAutoMiss.clear();
   _e2eAutoBusy.clear();
+  _e2eDiscoveryMiss.clear();
+  _e2ePlainConnections.clear();
   E2E._orphans = Object.create(null); E2E._hdrWait = Object.create(null); E2E._lazyTried = Object.create(null);   // r8
 }
 // r2 (v-fe-a NEW-1): the session ended (auth_failed / sign-out): close our passphrase
@@ -3708,6 +3755,11 @@ async function e2eHandleEvent(ev) {
       break;
     }
 
+    case 'e2e_setup_needed': {
+      const nick = String(ev.from || '');
+      _e2eSetupRow(ev.conn_id,nick,`🔐 ${nick} would like to send you an encrypted DM. Set up encryption, then ask them to try again. You can also run /encrypt unlock.`,'setup',ev.prefix);
+      break;
+    }
     case 'e2e_bundle_missing': {
       const connId = String(ev.conn_id || '').toLowerCase();
       const found = Object.entries(E2E._pendingOn || {}).find(([, pending]) => pending.req === ev.req && String(pending.cid).toLowerCase() === connId);
@@ -3724,6 +3776,9 @@ async function e2eHandleEvent(ev) {
         delete E2E._pendingOn[k];
         const nick = _e2eDmNick(k);
         _e2eSys(pending.target, '🔐 ' + _e2eBundleFailure(nick, ev.reason), pending.cid);
+        if (['unsupported','unconfirmed'].includes(ev.reason) && !E2E.trustStore[k]) {
+          _e2eSetupRow(pending.cid,pending.nick||nick,'You can send them a private note with setup instructions.','send');
+        }
       }
       updateE2EIndicator(pending.target);
       break;
@@ -3751,6 +3806,7 @@ async function e2eHandleEvent(ev) {
         }
         break;
       }
+      _e2eDiscoveryMiss.delete(String(pend.cid).toLowerCase() + '\n' + k);
       // r6 (codex-p3 e2e.js:3042): the pending entry is what keeps sends to `nick` BLOCKED
       // — it used to be deleted here, BEFORE the awaits below (ratchet lock, fingerprint,
       // the first-contact identity question, session creation), so a previously plain peer
@@ -4395,9 +4451,13 @@ async function e2eEncryptOutgoing(target, plaintext, connId, opts) {
     if (isDM && E2E.dmSessions[k]) { try { await _e2eSessFp(E2E.dmSessions[k]); } catch (_) {} }
     st = e2eTargetState(target, { conn_id: cid });
   }
-  if (st.mode === 'none' && isDM && opts?.auto && (!String(plaintext).startsWith('\x01') || String(plaintext).startsWith('\x01ACTION '))) {
+  const approvedPart = opts?.approval?.plain;
+  if (approvedPart && !_e2ePlainApprovalValid(approvedPart,cid,target)) {
+    return _e2eBlock('Encryption changed while preparing this message. Try sending it again.');
+  }
+  if (!approvedPart && st.mode === 'none' && isDM && opts?.auto && (!String(plaintext).startsWith('\x01') || String(plaintext).startsWith('\x01ACTION '))) {
     const gen = E2E._lockGen;
-    const result = await _e2eAutoStart(target, k, cid);
+    const result = await _e2eAutoStart(target, k, cid, opts.approval);
     if (result === 'unlock') {
       void e2ePromptDeviceUnlock();
       return _e2eBlock('Unlock encrypted chats, then send this message again.');
@@ -4597,6 +4657,9 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
     }
     if (!E2E.identityReady || !E2E.identityKeys) {
       if (!opts.held) _e2eHoldLocked({ kind: 'dm', from, target, text, conn_id: opts.conn_id, prefix:opts.prefix });
+      if (opts.live && !opts.held && !E2E.keyReady) {
+        _e2eSetupRow(opts.conn_id,from,`🔐 ${from} sent an encrypted DM. Unlock encryption to read it. You can also run /encrypt unlock.`,'unlock',opts.prefix);
+      }
       return { plaintext: E2E.keyReady ? '🔐 [E2E identity not loaded on this device — it will be shown when it is]' : '🔐 [encrypted — E2E is locked on this device: /encrypt unlock (it will be shown then)]', encrypted:true, historyPending:true };
     }
     _e2eDmHistoryWires.set(envelope,{from,target,text,prefix:opts.prefix});
@@ -4855,15 +4918,24 @@ async function _e2eFetchBundleQueued(nick, k, cid) {
   }, Math.max(1000, 30000 - (Date.now() - sentAt)));
 }
 
-const _e2eAutoMiss = new Map();
 const _e2eAutoBusy = new Map();
+const _e2eDiscoveryMiss = new Map();
+const _e2ePlainConnections = new Map();
+function e2eOnNetworkTransition(connId) {
+  const id = String(connId).toLowerCase();
+  _e2ePlainConnections.delete(id);
+  for (const key of _e2eDiscoveryMiss.keys()) if (key.startsWith(id + '\n')) _e2eDiscoveryMiss.delete(key);
+}
 const _e2eRestartRequested = new Map();
-const E2E_PLAINTEXT_WINDOW = 60000;
 const E2E_BRIDGE_RETRY_WINDOW = 60000;
 function _e2eBundleFailure(nick, reason) {
   if (reason === 'rate-limited') return 'Pause a moment before trying encryption again.';
   if (reason === 'peer-busy') return `${nick}'s encryption is temporarily busy. Try again in a moment.`;
-  if (reason === 'peer-setup') return `${nick} needs to set up encrypted chats first.`;
+  if (reason === 'peer-setup') return `${nick} needs to set up encryption. Send your message when they’re ready.`;
+  if (reason === 'unavailable') return `Encryption with ${nick} is unavailable right now. Ask them to check their encryption settings, then try again.`;
+  if (reason === 'loading') return 'Wait for encryption to finish loading, then try your message again.';
+  if (reason === 'approval-expired') return 'The approval is no longer current. Try sending your draft again.';
+  if (reason === 'declined') return 'Message held. Your draft is still here.';
   if (reason === 'ambiguous') return `CryptIRC found more than one possible match for ${nick}.`;
   return `Could not establish encryption with ${nick}.`;
 }
@@ -4873,8 +4945,7 @@ function _e2eBundleRequestId() {
 
 function _e2eAutoEligible(nick, k, cid) {
   const peer = _e2eDmNick(k);
-  return !!cid && /^[A-Za-z\[\]\\\x60_^{}|][A-Za-z0-9\[\]\\\x60_^{}|-]{0,63}$/.test(nick) &&
-    nick.toLowerCase() !== 'status' && !_e2eReservedNamespace(peer) && !_isServiceNick(nick) &&
+  return !!cid && _e2eSetupNick(nick) && !_e2eReservedNamespace(peer) &&
     _e2eK(getNick(cid)) !== peer && E2E.state?.dm[k]?.on !== 0;
 }
 
@@ -4883,18 +4954,44 @@ function e2eMayAutoEncrypt(nick, cid) {
   return _e2eAutoEligible(nick,_e2eDmKey(canonical,cid),cid);
 }
 
-async function _e2eAutoStart(nick, k, cid) {
+function _e2ePlainConsentCurrent(approval) {
+  return E2E.keyReady === approval.keyReady && !E2E.trustStore[approval.key] && !_e2eBootStale(approval.generation) &&
+    _e2ePlainConnections.get(String(approval.conn_id).toLowerCase()) === approval.connection &&
+    Date.now() < approval.expires && approval.view &&
+    active?.conn_id === approval.view.conn_id && active?.target === approval.view.target &&
+    networks.some(net => net.config.id === approval.conn_id && net.connected);
+}
+
+function _e2eCanAllowPlain() {
+  // An existing identity must load its pins before it can authorize plaintext.
+  return E2E.keyReady ? E2E._bootPhase === 'ready' && !E2E._resyncPending :
+    E2E._recoverySetup && !E2E._offerRecoverySetup && E2E._serverHints?.hasIdentity === false;
+}
+
+function _e2ePlainApprovalValid(approval,cid,target) {
+  const k = _e2eDmKey(_e2eCanon(target,cid) || _e2eK(target),cid);
+  return approval.conn_id === cid && approval.key === k && _e2ePlainConsentCurrent(approval) && _e2eCanAllowPlain() &&
+    e2eTargetState(target,{conn_id:cid}).mode === 'none';
+}
+
+async function _e2eAutoStart(nick, k, cid, approval = null) {
   if (!_e2eAutoEligible(nick,k,cid)) return 'missing';
-  const cacheKey = String(cid).toLowerCase() + '\n' + k;
+  const netId = String(cid).toLowerCase();
+  const cacheKey = netId + '\n' + k;
   if ((_e2eAutoBusy.get(cacheKey) || 0) > Date.now()) return 'peer-busy';
-  const miss = _e2eAutoMiss.get(cacheKey);
-  if (miss > Date.now() && !E2E.trustStore[k]) {
-    _e2eAutoMiss.set(cacheKey, Date.now() + E2E_PLAINTEXT_WINDOW);
-    return 'missing';
-  }
   E2E._pendingOn ||= Object.create(null);
   if (E2E._pendingOn[k]) return 'blocked';
-  const pending = { t: Date.now(), target:nick, cid, req:_e2eBundleRequestId() };
+  const now = Date.now();
+  const saved = _e2eDiscoveryMiss.get(cacheKey);
+  const cached = saved?.until > now && saved.generation === E2E._lockGen && !E2E.trustStore[k] ? saved.reason : null;
+  if (!cached) _e2eDiscoveryMiss.delete(cacheKey);
+  const pending = { t:now, target:nick, nick, cid, req:cached ? null : _e2eBundleRequestId() };
+  if (!_e2ePlainConnections.has(netId)) _e2ePlainConnections.set(netId,{});
+  const consent = {conn_id:cid,key:k,keyReady:E2E.keyReady,generation:E2E._lockGen,expires:now+60000,
+    connection:_e2ePlainConnections.get(netId),
+    view:approval ? approval.view : active && {conn_id:active.conn_id,target:active.target}};
+  // The caller's discovery is still pending, so check the mode after it finishes.
+  const canApprove = () => E2E._pendingOn?.[k] === pending && _e2ePlainConsentCurrent(consent);
   const result = new Promise(resolve => { pending.done = resolve; });
   E2E._pendingOn[k] = pending;
   const expire = () => {
@@ -4903,34 +5000,51 @@ async function _e2eAutoStart(nick, k, cid) {
       pending.done('blocked');
     }
   };
-  let timer = setTimeout(expire, 8000);
+  let timer;
   try {
-    void _e2eWs({ type:'e2e_fetch_bundle', username:nick, conn_id:cid, req:pending.req },
-      () => E2E._pendingOn[k] === pending).then(ok => {
-      if (!ok) pending.done('blocked');
-      else if (E2E._pendingOn[k] === pending && !pending.answered) {
-        pending.sentAt = Date.now();
-        clearTimeout(timer);
-        timer = setTimeout(expire, 8000);
-      }
-    });
-    let outcome = await result;
+    if (!cached) {
+      timer = setTimeout(expire, 8000);
+      void _e2eWs({ type:'e2e_fetch_bundle', username:nick, conn_id:cid, req:pending.req },
+        () => E2E._pendingOn[k] === pending).then(ok => {
+        if (!ok) pending.done('blocked');
+        else if (E2E._pendingOn[k] === pending && !pending.answered) {
+          pending.sentAt = Date.now();
+          clearTimeout(timer);
+          timer = setTimeout(expire, 8000);
+        }
+      });
+    }
+    const outcome = cached || await result;
     clearTimeout(timer);
     if (outcome === 'missing') return 'blocked';
-    const allowPlain = outcome === 'unsupported' || outcome === 'unconfirmed' || outcome === 'peer-setup';
-    if (allowPlain && E2E.trustStore[k]) return 'blocked';
+    const needsSetup = outcome === 'peer-setup';
+    const allowPlain = needsSetup || outcome === 'unsupported' || outcome === 'unconfirmed';
+    if (allowPlain && !canApprove()) return 'blocked';
     if (allowPlain) {
+      if (!_e2eCanAllowPlain()) return E2E.keyReady ? 'loading' : 'unlock';
       let why = `CryptIRC couldn't confirm encryption with ${nick}.`;
-      if (outcome === 'peer-setup') why = `${nick} needs to set up encrypted chats.`;
+      if (needsSetup) why = `${nick} needs to set up encryption. They can tap Set up encryption in the chat or run /encrypt unlock.`;
       if (outcome === 'unsupported') why = `No local encryption key was found for ${nick}, and the IRC server doesn't advertise the CryptIRC bridge.`;
       const network = typeof networks !== 'undefined' && networks.find(net => net.config.id === cid);
       const where = network ? `on ${network.config.label || network.config.server}` : 'on this network';
-      const approved = await _e2eKeyCmdConfirm(`${why}\n\nAllow unencrypted messages to ${nick} ${where} until this chat has been idle for one minute?`, 'Allow unencrypted');
-      outcome = approved && E2E._pendingOn[k] === pending && !E2E.trustStore[k] ? 'missing' : 'blocked';
-    }
-    if (outcome === 'missing') {
-      if (_e2eAutoMiss.size >= 128) _e2eAutoMiss.delete(_e2eAutoMiss.keys().next().value);
-      _e2eAutoMiss.set(cacheKey, Date.now() + E2E_PLAINTEXT_WINDOW);
+      const approved = await _e2eKeyCmdConfirm(`${why}\n\nSend this message${approval?.quoted?' and its quote':''} to ${nick} ${where} unencrypted?`,
+        needsSetup?'Send unencrypted':'Allow unencrypted',true);
+      const valid = canApprove() && _e2eCanAllowPlain();
+      if (!approved || !valid) _e2eDiscoveryMiss.delete(cacheKey);
+      if (!approved && valid && E2E.keyReady) {
+        _e2eSetupRow(cid,nick,needsSetup?'If they didn’t see the setup button, you can send a private note with the command.':
+          'You can send them a private note with setup instructions.','send');
+      }
+      if (!valid) return 'approval-expired';
+      if (!approved) return needsSetup ? 'peer-setup' : 'declined';
+      // Cache discovery only. The next draft always needs its own approval,
+      // and Cancel or /encrypt on triggers a fresh discovery on the next try.
+      if (!cached) {
+        if (_e2eDiscoveryMiss.size >= 128) _e2eDiscoveryMiss.delete(_e2eDiscoveryMiss.keys().next().value);
+        _e2eDiscoveryMiss.set(cacheKey,{reason:outcome,generation:consent.generation,until:Date.now()+(needsSetup ? 10000 : 30000)});
+      }
+      if (approval) approval.plain = consent;
+      return 'missing';
     }
     return outcome;
   } finally {
@@ -4984,6 +5098,7 @@ async function handleEncryptCommand(args, conn_id, target) {
         return;
       }
       const k = _e2eDmKey(canonical, cid);
+      _e2eDiscoveryMiss.delete(String(cid).toLowerCase() + '\n' + k);
       const cur = E2E.dmSessions[k];
       const restart = sub === 'restart';
       // r7: a session bound to a replaced identity (accepted on another device) is replaced.
@@ -5019,7 +5134,7 @@ async function handleEncryptCommand(args, conn_id, target) {
         if (_e2eRestartRequested.size >= 128) _e2eRestartRequested.delete(_e2eRestartRequested.keys().next().value);
         _e2eRestartRequested.set(restartKey,now);
       }
-      E2E._pendingOn[k] = { t:now, target, cid, restart, restartFrom:_e2eRestartFrom(cur), req:cid ? _e2eBundleRequestId() : undefined };
+      E2E._pendingOn[k] = { t:now, target, nick, cid, restart, restartFrom:_e2eRestartFrom(cur), req:cid ? _e2eBundleRequestId() : undefined };
       updateE2EIndicator(target);
       e2eSysMsg(target,`🔐 Fetching key bundle for ${nick}… (messages to ${nick} are held back until encryption is set up)`,cid);
       _e2eFetchBundleQueued(nick, k, cid);
@@ -5314,6 +5429,10 @@ function _e2eFlushSysQueue() {
 }
 
 function updateE2EIndicator(target) {
+  for (const button of document.querySelectorAll?.('[data-e2e-unlock]') || []) {
+    button.disabled = E2E.keyReady;
+    button.textContent = E2E.keyReady ? 'Encryption ready' : button.dataset.e2eUnlock;
+  }
   try { _e2eFlushSysQueue(); } catch (_) {}
   const banner = document.getElementById('e2e-unlock-banner');
   const offer = document.getElementById('e2e-setup-offer');

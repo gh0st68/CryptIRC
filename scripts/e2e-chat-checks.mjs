@@ -13,6 +13,8 @@ const openEncryptionSettings = "document.querySelector('[data-cryptirc-click=ope
 const setupText = 'Copy this E2E recovery code';
 const unlockText = 'Enter your E2E recovery code';
 const panelUnlock = '#encrypt-panel-body [data-encrypt-cmd=unlock]';
+const setupButton = '#chat-area .e2e-setup-button';
+const sendUnencrypted = "Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Send unencrypted')";
 
 const fillPrompt = (browser, value) => browser.evaluate(input + '.value=' + q(value) + ';' + acceptPrompt);
 const waitPrompt = (browser, waitFor, text) => waitFor(
@@ -121,7 +123,8 @@ async function clickVisible(browser, selector, touch = false) {
     const el = document.querySelector(${q(selector)});
     const r = el.getBoundingClientRect();
     const x = r.left + r.width / 2, y = r.top + r.height / 2;
-    if (!el.contains(document.elementFromPoint(x, y))) throw new Error('Control is covered: ' + ${q(selector)});
+    const top = document.elementFromPoint(x, y);
+    if (!el.contains(top)) throw new Error('Control is covered: ' + ${q(selector)} + ' by ' + (top?.id || top?.className || top?.tagName || 'viewport'));
     return {x, y};
   })()`);
   if (touch) {
@@ -136,6 +139,25 @@ async function clickVisible(browser, selector, touch = false) {
 const row = (browser, net, target, text, kind) => browser.evaluate(
   `getBuf(${q(net)},${q(target)}).some(m=>m.text===${q(text)}${kind ? `&&m.kind===${q(kind)}` : ''})`);
 const hasKey = (browser, channel) => browser.evaluate('!!E2E.channelKeys[' + q(channel) + ']');
+
+async function openSetupInvite(device, cid, nick, waitFor, touch = false) {
+  await device.evaluate(`_sidebarActivate(${q(cid)},${q(nick)})`);
+  await waitFor(()=>device.evaluate(`['Set up encryption','Unlock encryption'].includes(document.querySelector(${q(setupButton)})?.textContent)`),
+    'private encryption setup button is visible');
+  await device.evaluate(`document.querySelector(${q(setupButton)}).scrollIntoView({block:'nearest'})`);
+  if (touch) await waitFor(()=>device.evaluate(`(() => {
+    const el=document.querySelector(${q(setupButton)});
+    if(!el) return false;
+    const r=el.getBoundingClientRect();
+    return el.contains(document.elementFromPoint(r.left+r.width/2,r.top+r.height/2));
+  })()`),'private encryption setup button can receive a touch');
+  await clickVisible(device,setupButton,touch);
+}
+
+async function chooseSetupFallback(device, waitFor, approve = false) {
+  await waitFor(()=>device.evaluate(`!!(${sendUnencrypted})`),'sender can choose whether to send the draft unencrypted');
+  await device.evaluate(`(${sendUnencrypted})${approve?'':'.previousElementSibling'}.click()`);
+}
 
 async function acceptIdentity(browser, waitFor) {
   await waitFor(() => browser.evaluate("!!document.querySelector('#e2e-id-accept:not(:disabled)')"), 'identity confirmation');
@@ -225,7 +247,94 @@ export async function checkE2eChat({
   check('only the winning concurrent setup creates a valid recovery code',
     !await competitor.evaluate('E2E.keyReady') &&
     await competitor.evaluate('(()=>{return !E2E.identityReady})()'));
-  await peer.evaluate('void handleEncryptCommand(["unlock"],' + q(networkB) + ',' + q(channel) + ')');
+  await waitFor(() => browser.evaluate('E2E._txq.length===0'), 'initiator prekeys sent');
+  await waitFor(()=>fs.stat(path.join(tmp,'e2e',owner,'bundle.json')).catch(()=>null),'initiator key bundle is available on the server');
+  const peerBundle=path.join(tmp,'e2e',other,'bundle.json');
+  await fs.mkdir(path.dirname(peerBundle),{recursive:true});
+  await fs.writeFile(peerBundle,'{',{flag:'wx'});
+  const unavailableDraft='held for an unavailable key bundle '+stamp;
+  try {
+    await compose(browser,networkA,other,unavailableDraft);
+    check('an unreadable existing peer bundle does not invite a plaintext send or new identity setup',
+      await waitFor(()=>browser.evaluate(`E2E.lastBlockReason?.includes('is unavailable right now')&&
+        document.getElementById('msg-input').value===${q(unavailableDraft)}&&! (${sendUnencrypted})`),'unreadable bundle fails closed')&&
+      !otherWs.events.some(e=>e.type==='e2e_setup_needed'||e.text?.includes(unavailableDraft)));
+  } finally {await fs.unlink(peerBundle);}
+  const setupDraft='held for same-server encryption setup '+stamp;
+  await compose(browser,networkA,other,setupDraft);
+  await otherWs.wait(e=>e.type==='e2e_setup_needed'&&e.conn_id===networkB&&e.from===owner,'targeted local setup notice');
+  await waitFor(()=>browser.evaluate(`!!(${sendUnencrypted})`),'plaintext confirmation is shown after the setup guidance');
+  check('the plaintext dialog starts on Cancel and ignores a repeated Enter',
+    await browser.evaluate(`(() => {
+      const button=(${sendUnencrypted}), dialog=button.closest('[role=alertdialog]');
+      if(document.activeElement!==button.previousElementSibling||!dialog?.textContent.includes('/encrypt unlock'))return false;
+      window.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',repeat:true,bubbles:true,cancelable:true}));
+      return dialog.isConnected;
+    })()`)&&!otherWs.events.some(e=>e.text?.includes(setupDraft)));
+  await chooseSetupFallback(browser,waitFor);
+  check('declining the plaintext choice preserves the draft and identifies the unconfigured peer',
+    await waitFor(()=>browser.evaluate(`E2E.lastBlockReason?.includes(${q(other+' needs to set up encryption')})&&
+      document.getElementById('msg-input').value===${q(setupDraft)}`),'unconfigured same-server contact blocks send')&&
+    !await browser.evaluate(promptOpen)&&!otherWs.events.some(e=>e.text?.includes(setupDraft)));
+  check('the local setup invitation goes only to the recipient',
+    !ownerWs.events.some(e=>e.type==='e2e_setup_needed'&&e.from===owner));
+  check('a setup invitation never opens a prompt on its own',!await peer.evaluate(promptOpen));
+  check('setup notices respect ignores, PM protection, and IRC network scope',await peer.evaluate(`(async () => {
+    const cid=${q(networkB)}, ignored='ignorefixture', protectedNick='protectedfixture', wrong='wrong-network';
+    const oldSettings=getPmSettings, mask='*!*@ignored.example';
+    ignoreList.add(ignored);
+    ignoreList.add(mask);
+    try {
+      await e2eHandleEvent({type:'e2e_setup_needed',conn_id:cid,from:ignored});
+      await e2eHandleEvent({type:'e2e_setup_needed',conn_id:cid,from:'maskfixture',prefix:'maskfixture!user@ignored.example'});
+      await e2eHandleEvent({type:'e2e_setup_needed',conn_id:wrong,from:protectedNick});
+      getPmSettings=()=>({enabled:true});
+      await e2eHandleEvent({type:'e2e_setup_needed',conn_id:cid,from:protectedNick});
+      return !getBuf(cid,ignored).length&&!getBuf(cid,'maskfixture').length&&!getBuf(cid,protectedNick).length&&!getBuf(wrong,protectedNick).length;
+    } finally {getPmSettings=oldSettings;ignoreList.delete(ignored);ignoreList.delete(mask);}
+  })()`));
+  await compose(browser,networkA,other,setupDraft);
+  await chooseSetupFallback(browser,waitFor);
+  await waitFor(()=>browser.evaluate(`getBuf(${q(networkA)},${q(other)}).filter(
+    m=>m.text.includes('needs to set up encryption')).length>=2`),'same-server setup retry completes');
+  check('repeated setup attempts do not flood the recipient',
+    otherWs.events.filter(e=>e.type==='e2e_setup_needed'&&e.conn_id===networkB&&e.from===owner).length===1);
+  const approvedPlain='approved plain DM '+stamp;
+  await compose(browser,networkA,other,approvedPlain);
+  await chooseSetupFallback(browser,waitFor,true);
+  await otherWs.wait(e=>e.type==='irc_message'&&e.text===approvedPlain,'only the approved draft is sent as plaintext');
+  const nextDraft='another held DM '+stamp;
+  const framesAfterApproval=browser.frames.length;
+  await compose(browser,networkA,other,nextDraft);
+  await chooseSetupFallback(browser,waitFor);
+  check('one-draft approval does not authorize the next unencrypted message',
+    await waitFor(()=>browser.evaluate(`document.getElementById('msg-input').value===${q(nextDraft)}`),'next draft is still held')&&
+    !otherWs.events.some(e=>e.text?.includes(nextDraft)));
+  check('the second draft asks for new consent without repeating recent discovery',
+    !browser.frames.slice(framesAfterApproval).some(frame=>JSON.parse(frame).type==='e2e_fetch_bundle'));
+  const quote='test quote '+stamp;
+  const approvedReply='approved reply '+stamp;
+  await browser.evaluate(`setReply(${q(other)},${q(quote)},{conn_id:${q(networkA)},target:${q(other)}})`);
+  await compose(browser,networkA,other,approvedReply);
+  await waitFor(()=>browser.evaluate(`(${sendUnencrypted})?.closest('[role=alertdialog]')?.textContent.includes('and its quote')`),
+    'quoted reply and its quote share one confirmation');
+  await chooseSetupFallback(browser,waitFor,true);
+  await otherWs.wait(e=>e.type==='irc_message'&&e.text===approvedReply,'approved reply is delivered');
+  const quoteIndex=otherWs.events.findIndex(e=>e.type==='irc_message'&&e.text===`> <${other}> ${quote}`);
+  check('one approval sends the quoted reply together and in order',quoteIndex>=0&&
+    quoteIndex<otherWs.events.findIndex(e=>e.type==='irc_message'&&e.text===approvedReply)&&
+    !await browser.evaluate(`!!(${sendUnencrypted})`));
+  const pinnedKey=`_e2eDmKey(${q(other)},${q(networkA)})`;
+  await browser.evaluate(`E2E.trustStore[${pinnedKey}]={fingerprint:'test pin',verified:true}`);
+  const pinBlocked='known peer must remain protected '+stamp;
+  try {
+    await compose(browser,networkA,other,pinBlocked);
+    check('a trusted peer gets no plaintext override when their bundle becomes unavailable',
+      await waitFor(()=>browser.evaluate(`!E2E._pendingOn?.[${pinnedKey}]&&
+        document.getElementById('msg-input').value===${q(pinBlocked)}&&! (${sendUnencrypted})`),'known peer remains blocked')&&
+      !otherWs.events.some(e=>e.text?.includes(pinBlocked)));
+  } finally {await browser.evaluate(`delete E2E.trustStore[${pinnedKey}]`);}
+  await openSetupInvite(peer,networkB,owner,waitFor);
   await setUpRecovery(peer, waitFor, check);
   const keyring = await keyringOnDisk(tmp, owner);
   check('new account stores only a wrapped v3 keyring',
@@ -234,9 +343,7 @@ export async function checkE2eChat({
     ownerWs.events.some(ev => ev.type === 'vault_unlocked' && ev.vault_verified &&
       !ev.e2e_pepper && !ev.e2e_legacy_key && !ev.e2e_enc_key));
 
-  await waitFor(() => browser.evaluate('E2E._txq.length===0'), 'initiator prekeys sent');
   await waitFor(() => peer.evaluate('E2E._txq.length===0'), 'responder prekeys sent');
-  await browser.evaluate('_e2eAutoMiss.clear()');
   const dm = 'encrypted DM '+stamp;
   const peerKey = `_e2eDmKey(${q(other)},${q(networkA)})`;
   await compose(browser, networkA, other, dm);
@@ -417,6 +524,15 @@ export async function checkE2eChat({
   const freshDevice = await chromium('encrypted-recovery');
   await login(freshDevice, owner, password, waitFor);
   await waitFor(() => freshDevice.evaluate('E2E._bootPhase==="locked" && E2E._krReceived'), 'new device stays locked');
+  const lockedIncoming='encrypted DM arrives while locked '+stamp;
+  await compose(peer,networkB,owner,lockedIncoming);
+  await waitFor(()=>freshDevice.evaluate(`getBuf(${q(networkA)},${q(other)}).some(m=>m.e2eSetupAction==='unlock')`),
+    'an incoming encrypted DM offers an unlock button on the locked device');
+  check('an incoming encrypted DM leaves the device locked until the unlock action is chosen',!await freshDevice.evaluate(promptOpen));
+  await openSetupInvite(freshDevice,networkA,other,waitFor);
+  await waitPrompt(freshDevice,waitFor,unlockText);
+  await freshDevice.evaluate(cancelPrompt);
+  await waitFor(()=>freshDevice.evaluate('!E2E._interactiveUnlock'),'cancelled inline unlock settles');
   await pause(1450);
   check('a new device does not automatically ask for the recovery code', !await freshDevice.evaluate(promptOpen));
   await freshDevice.evaluate('setActive(' + q(networkA) + ',' + q(channel) + ')');
@@ -635,8 +751,43 @@ export async function checkE2eChat({
 export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,check,waitFor,owner,ownerWs,remote,password,networkA,remoteNetwork,remoteWs,stamp,otherWs,remoteData,ordinary,ordinaryLines}) {
   await login(peer,remote,password,waitFor);
   await waitFor(() => peer.evaluate('E2E._vaultUp && E2E._krReceived'), 'bridge peer discovery');
-  await peer.evaluate(openEncryptionSettings);
+  const updatedPeer=await peer.evaluate("typeof _e2eSetupRow==='function'");
+  let onboardingWindowEnds=0;
+  if(updatedPeer){
+    const setupDraft='held for bridged encryption setup '+stamp;
+    const otherEventsBeforeSetup=otherWs.events.length;
+    await compose(browser,networkA,remote,setupDraft);
+    await remoteWs.wait(e=>e.type==='e2e_setup_needed'&&e.conn_id===remoteNetwork&&e.from===owner,'targeted bridged setup notice');
+    onboardingWindowEnds=Date.now()+61000;
+    await chooseSetupFallback(browser,waitFor);
+    check('the bridge tells the sender who needs setup and keeps their DM private',
+      await waitFor(()=>browser.evaluate(`E2E.lastBlockReason?.includes(${q(remote+' needs to set up encryption')})&&
+        document.getElementById('msg-input').value===${q(setupDraft)}`),'bridged peer setup response')&&
+      !remoteWs.events.some(e=>e.text?.includes(setupDraft)));
+    check('the bridged recipient gets no popup and no other account gets the notice',
+      !await peer.evaluate(promptOpen)&&!otherWs.events.slice(otherEventsBeforeSetup).some(e=>e.type==='e2e_setup_needed'&&e.from===owner));
+    await peer.send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:3,mobile:true});
+    await peer.send('Emulation.setTouchEmulationEnabled',{enabled:true});
+    await openSetupInvite(peer,remoteNetwork,owner,waitFor,true);
+  } else {
+    const setupDraft='held for a legacy bridged peer '+stamp;
+    const allowPlain="Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Allow unencrypted')";
+    await compose(browser,networkA,remote,setupDraft);
+    await waitFor(()=>browser.evaluate(`!!(${allowPlain})`),'older bridge peer falls back to explicit plaintext consent');
+    await browser.evaluate(`(${allowPlain}).previousElementSibling.click()`);
+    await waitFor(()=>browser.evaluate(`document.querySelector(${q(setupButton)})?.textContent==='Send setup instructions'`),
+      'older bridge peer can receive setup instructions');
+    check('an older bridge client cannot cause the draft to be sent in plaintext',
+      !remoteWs.events.some(e=>e.text?.includes(setupDraft))&&
+      await browser.evaluate(`document.getElementById('msg-input').value===${q(setupDraft)}`));
+    onboardingWindowEnds=Date.now()+61000;
+    await peer.evaluate(openEncryptionSettings);
+  }
   await setUpRecovery(peer,waitFor,check);
+  if(updatedPeer){
+    await peer.send('Emulation.clearDeviceMetricsOverride');
+    await peer.send('Emulation.setTouchEmulationEnabled',{enabled:false});
+  }
   await peer.evaluate('closeEncryptPanel()');
   await waitFor(()=>fs.stat(path.join(remoteData,'e2e',remote,'bundle.json')).catch(()=>null),'remote prekey bundle stored');
 
@@ -724,6 +875,8 @@ export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,che
 
   await browser.send('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:3,mobile:true});
   await browser.send('Emulation.setTouchEmulationEnabled', {enabled:true});
+  // The setup probe counted toward the bridge's rolling lookup limit.
+  if(onboardingWindowEnds>Date.now())await new Promise(resolve=>setTimeout(resolve,onboardingWindowEnds-Date.now()));
   const readyToRestart=await browser.evaluate(`(async () => {
     const target=${remoteTarget}, cid=${localConn}, key=_e2eDmKey(target,cid);
     window.testBeforeRestart={
@@ -817,6 +970,18 @@ export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,che
   const allow = `Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Allow unencrypted')`;
   await waitFor(()=>browser.evaluate(`!!(${allow})`),'plaintext confirmation for a client without bridge support');
   check('the ordinary IRC client receives no message before plaintext consent',!ordinaryLines.some(line=>line.endsWith(' :'+plain)));
+  await browser.evaluate(`(${allow}).previousElementSibling.click()`);
+  await waitFor(()=>browser.evaluate(`document.querySelector(${q(setupButton)})?.textContent==='Send setup instructions'`),
+    'ordinary IRC gets a manual setup instructions option');
+  check('no ordinary IRC setup note leaves until the sender chooses it',
+    !ordinaryLines.some(line=>line.includes('/encrypt unlock')));
+  await clickVisible(browser,setupButton);
+  check('the ordinary IRC peer receives private instructions with the setup command and no held draft',
+    await waitFor(()=>ordinaryLines.some(line=>line.includes(' NOTICE '+ordinary+' :')&&line.includes('/encrypt unlock')),
+      'ordinary IRC receives the explicit private notice')&&
+    !ordinaryLines.some(line=>line.includes(plain)));
+  await compose(browser,networkA,ordinary,plain);
+  await waitFor(()=>browser.evaluate(`!!(${allow})`),'ordinary IRC plaintext remains a separate choice');
   await browser.evaluate(`(${allow}).click()`);
   check('ordinary IRC DMs work on the bridge network after explicit consent',await waitFor(
     ()=>ordinaryLines.some(line=>line.endsWith(' :'+plain)),'ordinary IRC client received the authorized plaintext'));

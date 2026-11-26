@@ -2505,6 +2505,7 @@ function handleEvent(ev) {
     case 'e2e_session':
     case 'e2e_bundle':
     case 'e2e_bundle_missing':
+    case 'e2e_setup_needed':
     case 'e2e_channel_key':
     case 'e2e_channel_list':
     case 'e2e_otpk_low':
@@ -3419,6 +3420,13 @@ function _notifyChatMessage(conn_id,target,msg,isDM){
   }
 }
 
+const _pendingE2eSetupRows=new Map();
+function _flushE2eSetupRow(connId,target){
+  const key=bk(connId,target),msg=_pendingE2eSetupRows.get(key);
+  if(!msg||_historyView?.bk===key)return;
+  _pendingE2eSetupRows.delete(key);
+  if(Date.now()/1000-msg.ts<=600)addMessage(connId,target,msg);
+}
 function addMessage(conn_id,target,msg){
   // r11: the conversation the line really belongs to (bk() lowercases with Unicode, so e.g.
   // #Ä and #ä share one buffer on an ASCII-casemapping network): Reply binds to it.
@@ -3431,7 +3439,13 @@ function addMessage(conn_id,target,msg){
   // persisted server-side and shows when the user taps "jump to present".
   if(_historyView && _historyView.bk===bk(conn_id,target)){
     if(_isOwnMsg(conn_id,msg)){ _exitHistoryView(); }
-    else { return; }
+    else {
+      if(msg.e2eSetupAction){
+        if(_pendingE2eSetupRows.size>=32)_pendingE2eSetupRows.delete(_pendingE2eSetupRows.keys().next().value);
+        _pendingE2eSetupRows.set(bk(conn_id,target),msg);
+      }
+      return;
+    }
   }
   // Dedup by msg_id only. Server-delivered messages carry a unique ID — if
   // we see the same ID twice it's a genuine duplicate (multiple delivery paths,
@@ -4185,6 +4199,7 @@ function updateInputPlaceholder(){
   inp.placeholder=`Message ${active.target} as ${nick}…`;
 }
 function setNetDot(conn_id,state){
+  if(typeof e2eOnNetworkTransition==='function') e2eOnNetworkTransition(conn_id);
   const net=networks.find(n=>n.config.id===conn_id);
   if(net)net.connected=state==='online';
   renderSidebar();
@@ -4344,6 +4359,7 @@ function setActive(conn_id,target,options){
     const _sk=bk(conn_id,target),_lid=_lastMsgId[_sk];
     if(_lid>0) wsend({type:'sync',conn_id,target,after_id:_lid});
   }
+  _flushE2eSetupRow(conn_id,target);
   renderSidebar(); renderChat(renderedChatKey===key?null:conversationScroll.get(key)); updateTopbar(); updateLagDisplay();
   if(typeof updateE2EIndicator==='function') updateE2EIndicator(target);
   updateInputPlaceholder();
@@ -4944,6 +4960,34 @@ function buildRow(msg,conv,tweetConv){
   if(msg.from==='*') _avWhoisRow(row,msg,conv);
   // Small lock badge on encrypted messages
   const msgBody=row.querySelector('.msg-body');
+  const setupConversation=conv||active;
+  if(msgBody&&msg.e2eSetupAction&&setupConversation?.conn_id===msg.e2eSetupConn&&
+      _isDMTarget(setupConversation.target)&&bk(setupConversation.conn_id,setupConversation.target)===bk(msg.e2eSetupConn,msg.e2eSetupNick)){
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='e2e-setup-button';
+    if(msg.e2eSetupAction==='setup'||msg.e2eSetupAction==='unlock'){
+      button.dataset.e2eUnlock=msg.e2eSetupAction==='setup'?'Set up encryption':'Unlock encryption';
+      button.disabled=!!window.E2E?.keyReady;
+      button.textContent=button.disabled?'Encryption ready':button.dataset.e2eUnlock;
+      button.onclick=()=>e2ePromptDeviceUnlock();
+    } else if(msg.e2eSetupAction==='send'){
+      button.textContent='Send setup instructions';
+      button.onclick=()=>{
+        const age=Date.now()/1000-msg.ts;
+        const error=!(age>=0&&age<=600) ? 'Try the DM again to refresh the setup instructions.' :
+          e2eSendSetupInstructions(msg.e2eSetupConn,msg.e2eSetupNick);
+        if(error){showToast(error);return;}
+        msg.e2eSetupAction='sent';
+        button.textContent='Setup instructions sent';
+        button.disabled=true;
+      };
+    } else {
+      button.textContent='Setup instructions sent';
+      button.disabled=true;
+    }
+    msgBody.append(document.createTextNode(' '),button);
+  }
   if (msg.encrypted && msgBody) {
     const lock = document.createElement('span');
     lock.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2"/></svg>';
@@ -7247,7 +7291,7 @@ function _replyOnSwitch(conn_id,target){
 // r8 (agy-flash app.js:6320): null = the reply belongs to ANOTHER conversation (picked in
 // the split pane) — the caller sends nothing (it used to drop the quote but still send
 // the reply text to the main pane's conversation). The reply stays armed.
-function getReplyPrefix(conn_id,target){
+function getReplyPrefix(conn_id,target,clear=true){
   if(!_replyTo) return '';
   if(!_sameConvAt(_replyTo.conn_id,_replyTo.target,conn_id,target)){
     try{ showToast(`Not sent — this reply belongs to ${_replyTo.target}: open it to send there, or cancel the reply`); }catch(_){}
@@ -7255,7 +7299,7 @@ function getReplyPrefix(conn_id,target){
   }
   const quote=_replyTo.text.slice(0,80).replace(/\n/g,' ');
   const prefix=`> <${_replyTo.nick}> ${quote}\n`;
-  cancelReply();
+  if(clear) cancelReply();
   return prefix;
 }
 
@@ -8265,6 +8309,7 @@ async function handleInput(raw){
         wsend({type:'send',conn_id,raw:raw.slice(1)});
     }
   } else {
+    const approval={view:active&&{conn_id:active.conn_id,target:active.target}};
     const outgoing=await translateOutgoing(raw,conn_id,target);
     if(outgoing===null) return 'keep';
     // Translate visible caret-notation formatting tokens (^B/^I/^U/^O/^R/^Cnn[,nn]) to real mIRC control chars,
@@ -8275,18 +8320,22 @@ async function handleInput(raw){
     // r7 (agy-flash app.js:6305): the reply quote and the reply itself are prepared (and
     // encrypted) BOTH before anything is queued — a body that is refused (too long, E2E
     // blocked, encryption failed) used to leave its quote already sent on its own.
-    const replyPrefix=getReplyPrefix(conn_id,target);
+    const reply=_replyTo;
+    const replyPrefix=getReplyPrefix(conn_id,target,false);
     if(replyPrefix===null) return 'keep';   // r8: reply for another conversation → nothing sent, text kept
     const parts=[];
+    approval.quoted=!!replyPrefix;
     if(replyPrefix){
-      const q=await _prepChatPart(conn_id,target,replyPrefix.trim(),'PRIVMSG');
+      const q=await _prepChatPart(conn_id,target,replyPrefix.trim(),'PRIVMSG',approval);
       if(!q) return 'keep';
       parts.push(q);
     }
-    const body=await _prepChatPart(conn_id,target,raw2,'PRIVMSG');
+    const body=await _prepChatPart(conn_id,target,raw2,'PRIVMSG',approval);
     if(!body) return 'keep';
     parts.push(body);
+    if(!_chatApprovalStillValid(approval,conn_id,target)) return 'keep';
     _queueChatParts(conn_id,target,parts,'privmsg');
+    if(reply&&_replyTo===reply) cancelReply();
   }
 }
 function insertAtCursor(inp,text){
@@ -10917,6 +10966,7 @@ function _markRefusedSend(){
 async function _e2eSendToTargets(conn_id,verb,to,text,opts){
   const list=_splitTargets(to);
   const kindOf=verb==='NOTICE'?'notice':'privmsg';
+  const approval={view:active&&{conn_id:active.conn_id,target:active.target}};
   // r9 (astra-p3 app.js:8450): queued and tracked like typed lines (_queueChatSend): each
   // payload is tied to its row(s) — ⏳ while offline or waiting for E2E, "not sent" when it is
   // refused or the session ends (these rows used to look sent while the queue dropped them).
@@ -10941,9 +10991,9 @@ async function _e2eSendToTargets(conn_id,verb,to,text,opts){
     let wire=null; const tails=[];
     if(list.length<=1){
       // r7: the continuation pieces come back (defer) and are queued right behind the first.
-      try{ wire=(window.E2E?.ready||window.E2E?.channelKeys?.[to])?await e2eEncryptOutgoing(to,text,conn_id,{verb,defer:tails,auto:true}):null; }
+      try{ wire=(window.E2E?.ready||window.E2E?.channelKeys?.[to])?await e2eEncryptOutgoing(to,text,conn_id,{verb,defer:tails,auto:true,approval}):null; }
       catch(_){ showToast('🔒 Encryption failed — message not sent.'); return false; }
-      if(_e2eBlockedWarn(wire)) return false;
+      if(_e2eBlockedWarn(wire)||!_chatApprovalStillValid(approval,conn_id,to)) return false;
     }
     // r4 (IRC-H1): plaintext → the pieces the server will send (≤ 4), one row each.
     const pcs=wire?[wire]:_plainChatPieces(conn_id,verb,to,text);
@@ -10999,10 +11049,10 @@ async function _e2eSendToTargets(conn_id,verb,to,text,opts){
 // fall behind the next message; the commands wrote to the socket directly (dropped while
 // reconnecting); a reply quote went out before its body was checked.
 // → a part {encrypted, payloads, rows} or null (refused; the reason was shown).
-async function _prepChatPart(conn_id,target,text,verb){
+async function _prepChatPart(conn_id,target,text,verb,approval){
   verb=verb||'PRIVMSG';
   let first=null; const tails=[];
-  try{ first=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,text,conn_id,{verb,defer:tails,auto:true}):null; }
+  try{ first=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,text,conn_id,{verb,defer:tails,auto:true,approval}):null; }
   catch(_){ showToast('🔒 Encryption failed — message not sent.'); return null; }
   if(_e2eBlockedWarn(first)) return null;
   if(first) return {encrypted:true,payloads:[{type:'send',conn_id,raw:`${verb} ${target} :${first}`},...tails.map(t=>({type:'send',conn_id:t.cid||conn_id,raw:t.raw}))],rows:[text]};
@@ -11012,6 +11062,11 @@ async function _prepChatPart(conn_id,target,text,verb){
 }
 // The row text for a piece: a /me shows without its CTCP ACTION wrapper.
 function _chatRowText(t,kind){ return kind==='action'?String(t).replace(/^\x01ACTION /,'').replace(/\x01$/,''):t; }
+function _chatApprovalStillValid(approval,conn_id,target){
+  if(!approval.plain || _e2ePlainApprovalValid(approval.plain,conn_id,target)) return true;
+  showToast('Encryption changed while preparing this message. Try sending it again.');
+  return false;
+}
 function _queueChatParts(conn_id,target,parts,kind){
   kind=kind||'privmsg';
   for(const part of parts){
@@ -11032,8 +11087,9 @@ function _queueChatParts(conn_id,target,parts,kind){
 }
 async function _sendChat(conn_id,target,text,o){
   const verb=(o&&o.verb)||'PRIVMSG', kind=(o&&o.kind)||'privmsg';
-  const part=await _prepChatPart(conn_id,target,text,verb);
-  if(!part) return false;
+  const approval={view:active&&{conn_id:active.conn_id,target:active.target}};
+  const part=await _prepChatPart(conn_id,target,text,verb,approval);
+  if(!part||!_chatApprovalStillValid(approval,conn_id,target)) return false;
   _queueChatParts(conn_id,target,[part],kind);
   return true;
 }
@@ -19161,7 +19217,8 @@ function customPrompt(message,defaultValue,isPassword,clearOnClose=isPassword,ca
 }
 // customConfirm — Promise-based replacement for window.confirm(), which is
 // unreliable in Electron. Resolves true on OK, false on Cancel/Escape/backdrop click.
-function customConfirm(message, okLabel, cancelLabel){
+const _confirmDialogs=[];
+function customConfirm(message, okLabel, cancelLabel, explicitApproval=false){
   okLabel = okLabel || 'OK';
   cancelLabel = cancelLabel || 'Cancel';
   return new Promise(resolve=>{
@@ -19175,28 +19232,50 @@ function customConfirm(message, okLabel, cancelLabel){
     const btnRow=document.createElement('div');
     btnRow.style.cssText='display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;';
     const cancelBtn=document.createElement('button');
+    cancelBtn.type='button';
     cancelBtn.textContent=cancelLabel;
     cancelBtn.style.cssText='padding:8px 20px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:500;font-family:var(--mono);background:var(--bg4);color:var(--text2);min-height:36px;';
     const okBtn=document.createElement('button');
+    okBtn.type='button';
     okBtn.textContent=okLabel;
     okBtn.style.cssText='padding:8px 20px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:500;font-family:var(--mono);background:var(--accent);color:#000;min-height:36px;';
     btnRow.appendChild(cancelBtn); btnRow.appendChild(okBtn);
     box.appendChild(msgDiv); box.appendChild(btnRow);
+    if(explicitApproval){
+      box.setAttribute('role','alertdialog');
+      box.setAttribute('aria-modal','true');
+      box.setAttribute('aria-label','Send unencrypted message');
+    }
     ov.appendChild(box); document.body.appendChild(ov);
+    _confirmDialogs.push(ov);
     const keyH=(e)=>{
+      if(_confirmDialogs.at(-1)!==ov||e.defaultPrevented) return;
       if(e.key==='Escape'){e.preventDefault();e.stopPropagation();done(false);}
+      else if(explicitApproval&&e.key==='Tab'){
+        e.preventDefault();e.stopImmediatePropagation();
+        (document.activeElement===cancelBtn?okBtn:cancelBtn).focus();
+      }
       // Enter activates the FOCUSED button: with Cancel focused (Tab/Shift+Tab) it
       // used to confirm anyway — including the admin "DELETE user" double confirm.
-      else if(e.key==='Enter'){e.preventDefault();e.stopPropagation();done(document.activeElement!==cancelBtn);}
+      else if(explicitApproval&&(e.key==='Enter'||e.key===' ')){
+        e.preventDefault();e.stopImmediatePropagation();
+        if(e.repeat) return;
+        if(document.activeElement===okBtn||document.activeElement===cancelBtn) done(document.activeElement===okBtn);
+      } else if(e.key==='Enter'){e.preventDefault();e.stopPropagation();done(document.activeElement!==cancelBtn);}
     };
-    function done(val){document.removeEventListener('keydown',keyH,true);ov.remove();resolve(val);}
+    function done(val){
+      if(_confirmDialogs.at(-1)!==ov) return;
+      _confirmDialogs.pop();document.removeEventListener('keydown',keyH,true);ov.remove();resolve(val);
+    }
     cancelBtn.onclick=()=>done(false);
     okBtn.onclick=()=>done(true);
     ov.onclick=(e)=>{if(e.target===ov)done(false);};
     document.addEventListener('keydown',keyH,true);
-    setTimeout(()=>okBtn.focus(),50);
+    if(explicitApproval) cancelBtn.focus();
+    else setTimeout(()=>{if(_confirmDialogs.at(-1)===ov)okBtn.focus();},50);
   });
 }
+customConfirm.supportsExplicitApproval=true;
 // customAlert — Promise-based replacement for window.alert(). Non-blocking to
 // outside callers but awaitable if they want to wait for dismissal.
 function customAlert(message){
@@ -20099,6 +20178,7 @@ function _exitHistoryView(){
     wsend({type:'get_logs', conn_id, target, limit:200}); // prependLogs scrolls to bottom
     showPrivateNetworkNotices();
   }
+  _flushE2eSetupRow(conn_id,target);
 }
 
 // Called by the state handler once networks are loaded, to drain any pending nav.

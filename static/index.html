@@ -1761,6 +1761,8 @@ html[data-theme='irssi'] #msg-input::placeholder { color:#999; }
 .message-actions { display:flex; margin-block:4px; gap:6px; }
 .message-reactions .reaction-count, .message-actions button { background:var(--bg3); color:var(--control-text,var(--text)); border:1px solid var(--border2); border-radius:12px; min-height:26px; padding:2px 7px; font-size:12px; }
 .message-actions button, .message-reactions button { cursor:pointer; }
+.e2e-setup-button { background:var(--bg3); color:var(--control-text,var(--text)); border:1px solid var(--border2); border-radius:8px; min-height:34px; padding:4px 10px; margin-block:3px; font:inherit; cursor:pointer; }
+@media (pointer:coarse) { .e2e-setup-button { min-height:44px; } }
 .message-actions button[aria-pressed="true"], .message-reactions button[aria-pressed="true"] { border-color:var(--accent); }
 .msg-row[tabindex]:focus-visible { outline:1px solid var(--accent); outline-offset:-1px; }
 @media (pointer:coarse) { .message-actions button { min-height:44px; min-width:44px; } .message-reactions button { min-height:32px; min-width:32px; } }
