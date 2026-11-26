@@ -120,6 +120,9 @@ pub struct IrcConnection {
     /// `Daemon::forward_live` looks up "whatever's current" fresh each call.
     pub ipc_out: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<IpcMessage>>>>,
     pub message_tags: bool,
+    pub(crate) e2e_bridge: crate::e2e_bridge::Bridge,
+    pub(crate) reactions: crate::reactions::Reactions,
+    pub(crate) keepnick_retry: crate::keepnick::Retry,
     pub self_userhost: String,
     /// Web-side idempotency guard for a replayed/duplicate 001 (mirrors the old
     /// run_loop-local `registered` bool, now persisted on the connection so it
@@ -225,6 +228,9 @@ impl IrcConnection {
         self.connected = false;
         self.registered = false;
         self.list_request = None;
+        self.e2e_bridge = Default::default();
+        self.reactions = Default::default();
+        self.keepnick_retry = Default::default();
         self.who_pending.clear();
         self.whois_seen.clear();
         self.seen_userhosts.clear();
@@ -259,7 +265,7 @@ impl IrcConnection {
     pub(crate) fn for_test(conn_id: &str, nick: &str, server: &str, port: u16) -> IrcConnection {
         IrcConnection {
             conn_id: conn_id.into(), nick: nick.into(), connected: true, lag_ms: None,
-            channels: HashMap::new(), ipc_out: Arc::new(tokio::sync::Mutex::new(None)), message_tags: false,
+            channels: HashMap::new(), ipc_out: Arc::new(tokio::sync::Mutex::new(None)), message_tags: false, e2e_bridge: Default::default(), reactions: Default::default(), keepnick_retry: Default::default(),
             self_userhost: String::new(), registered: true, list_request: None, echo_message_enabled: false,
             names_buf: HashMap::new(), who_pending: HashSet::new(), who_away: HashMap::new(),
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
@@ -285,6 +291,7 @@ impl IrcConnection {
             return false;
         }
         self.nick = strip_crlf(new);
+        self.keepnick_retry.clear_pending();
         if !src_userhost.is_empty() { self.self_userhost = src_userhost.to_string(); }
         true
     }
@@ -383,9 +390,11 @@ impl IrcConnection {
         let mut fields = line.split_ascii_whitespace().peekable();
         if fields.peek().is_some_and(|f| f.starts_with('@')) { fields.next(); }
         if fields.peek().is_some_and(|f| f.starts_with(':')) { fields.next(); }
-        if fields.next().is_some_and(|verb| verb.eq_ignore_ascii_case("LIST")) {
+        let verb = fields.next().unwrap_or("");
+        if verb.eq_ignore_ascii_case("LIST") {
             return self.send_list(line, None).await;
         }
+        if verb.eq_ignore_ascii_case("NICK") { self.keepnick_retry.clear_pending(); }
         self.note_user_join(line);
         self.send_to_daemon(line).await
     }
@@ -1234,13 +1243,19 @@ async fn prune_remote_avatars(send: &impl Fn(ServerEvent), conn: &Arc<Mutex<IrcC
     }
 }
 
-/// Where an incoming NOTICE is shown: None = an echo-message echo of our own NOTICE
-/// (suppressed, as for PRIVMSG), else the buffer — a channel (incl. a STATUSMSG `@#chan`
-/// target, r4), "status" for the server, the recipient for our own outgoing NOTICE, the
-/// sender's nick otherwise. "Our own" is decided like PRIVMSG: on a replayed line, the
-/// nick we had when it arrived (IrcConnection::echo_nick — the replay-only view), on a live
-/// line the real nick. Match on the nick only — ZNC echoes self-messages with a bare
-/// `:nick` prefix. Batch (playback) NOTICEs are never treated as echoes.
+fn ctcp_request(text: &str) -> Option<String> {
+    let body = text.strip_prefix('\x01')?;
+    let body = body.strip_suffix('\x01').unwrap_or(body);
+    let command = body.split(' ').next()?;
+    if body.contains('\x01') || command.is_empty() || command.len() > 32
+        || !command.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || command.eq_ignore_ascii_case("ACTION")
+    { return None; }
+    Some(command.to_ascii_uppercase())
+}
+
+/// Route incoming NOTICEs to a channel, the server view, the recipient for an
+/// outgoing NOTICE, or the sender. Ignore live echoes of our own NOTICEs.
 pub(crate) fn notice_display_target(c: &IrcConnection, from: &str, target: &str, has_prefix: bool, replayed: bool, in_batch: bool) -> Option<String> {
     let user_nick = c.echo_nick(replayed);
     if c.echo_message_enabled && same_nick(from, &user_nick) && !in_batch { return None; }
@@ -1315,6 +1330,18 @@ pub async fn dispatch_line(
     recv_ts: i64,
 ) -> anyhow::Result<()> {
     let p = parse_irc(line);
+    // Correlate live nick failures with this connection's automatic attempt.
+    // Only dedicated nick-change numerics can be correlated without a nick.
+    if !replayed && matches!(p.command.as_str(), "432" | "433" | "435" | "436" | "437" | "438" | "447" | "484") {
+        let nickless = p.command == "447" || (matches!(p.command.as_str(), "435" | "438") && p.params.len() <= 2);
+        let mut c = conn.lock().await;
+        let mapping = c.casemapping;
+        if c.registered && c.keepnick_retry.matches_refusal(&p.params, mapping, nickless) {
+            if p.command != "432" { return Ok(()); }
+            // A permanent bad-nick refusal is surfaced once in the status tab.
+            c.keepnick_retry.pause();
+        }
+    }
     // Avatars: what this Attach replay says about the irc-core session (avatar::restorable).
     if replayed { crate::avatar::note_replayed_line(conn_id, backlog, recv_ts, &p.command, &p.params); }
     // The channel-name fold for this connection (adopting a CASEMAPPING announced now).
@@ -1326,7 +1353,13 @@ pub async fn dispatch_line(
     let promoted: Vec<String>;
     let cm = {
         let mut c = conn.lock().await;
+        if !replayed && matches!(p.command.as_str(), "401" | "403" | "404" | "439" | "531") {
+            if let Some(target) = p.params.get(1) {
+                crate::reactions::refuse_echo(&mut c, target);
+            }
+        }
         if p.command == "005" {
+            if !replayed { c.keepnick_retry.learn_limit(&p.params); }
             if let Some(n) = CaseMapping::from_isupport(&p.params) {
                 c.note_server_casemapping(n);
                 if recv_ts > 0 { c.set_casemapping(n); }
@@ -1421,6 +1454,17 @@ pub async fn dispatch_line(
             } else {
                 p.params.last().cloned().unwrap_or_default()
             };
+            if !replayed && caps.split_ascii_whitespace().any(|cap| cap == crate::e2e_bridge::CAP) {
+                let mut c = conn.lock().await;
+                if matches!(sub, "LS" | "NEW") { c.e2e_bridge.advertised = true; }
+                if sub == "DEL" { c.e2e_bridge = Default::default(); }
+            }
+            let prior_reactions = crate::reactions::available(&*conn.lock().await);
+            if !replayed && caps.split_ascii_whitespace().any(|cap| cap == crate::reactions::CAP) {
+                let mut c = conn.lock().await;
+                if matches!(sub, "LS" | "NEW") { c.reactions.advertised = true; }
+                if sub == "DEL" { c.reactions = Default::default(); }
+            }
             match sub {
                 // Avatars: classify this connection from what it negotiated (behind a bouncer /
                 // CAP negotiation completed) — avatar::note_cap_line, discover rule 3.
@@ -1459,12 +1503,17 @@ pub async fn dispatch_line(
                 "DEL" => {
                     if caps.contains("echo-message") { conn.lock().await.echo_message_enabled = false; }
                     let mut c = conn.lock().await;
+                    if !replayed && caps.split_ascii_whitespace().any(|cap| cap == "message-tags") { c.message_tags = false; }
                     crate::avatar::remote::note_meta2_cap(&mut c, sub, &caps, replayed);
                     if !replayed && crate::avatar::remote::cap_list_has(&caps, crate::avatar::remote::META_CAP) {
                         state.avatars.set_session_meta2(conn_id, false);
                     }
                 }
                 _ => {}
+            }
+            let enabled = crate::reactions::available(&*conn.lock().await);
+            if !replayed && enabled != prior_reactions {
+                send(ServerEvent::ReactionSupport { conn_id: conn_id.to_string(), enabled });
             }
         }
 
@@ -1557,23 +1606,34 @@ pub async fn dispatch_line(
             let in_batch = p.tags.contains_key("batch");
             let echo_message_enabled = { conn.lock().await.echo_message_enabled };
             if echo_message_enabled && same_nick(&from, &user_nick) && !in_batch {
-                return Ok(());
-            }
-            // CTCP AVATAR (remote avatars, KVIrc's query): answered only when addressed to us
-            // directly on a live line that is not playback (no batch, a fresh stamp — codex
-            // astra L irc.rs:1486), and only for an owner who shares; never shown.
-            if crate::avatar::remote::ctcp_avatar(&text).is_some() {
-                let direct = { let c = conn.lock().await; incoming_channel_target(&c, &target).is_none() };
-                if crate::avatar::remote::may_answer_ctcp(replayed, announce_fresh, direct, same_nick(&from, &user_nick), arrival.restricted) {
-                    crate::avatar::remote::answer_ctcp(state, username, conn, conn_id, p.prefix.as_deref()).await;
+                if !replayed {
+                    if let Some(reference) = p.tags.get("msgid") {
+                        let mut c = conn.lock().await;
+                        if !incoming_channel_target(&c, &target).is_some_and(|(_, restricted)| restricted) {
+                            let clean = text.strip_prefix("\x01ACTION ").and_then(|s| s.strip_suffix('\x01')).unwrap_or(&text);
+                            if let Some(event) = crate::reactions::own_wire(&mut c, &target, clean, reference)
+                                .and_then(|id| crate::reactions::anchor_event(conn_id, &target, id, reference)) {
+                                send(event);
+                            }
+                        }
+                    }
                 }
                 return Ok(());
             }
-            // Reply to CTCP VERSION
-            if text == "\x01VERSION\x01" {
-                // The daemon already sends the NOTICE reply (with its own rate
-                // limit) — this side just needs to recognize and silently skip
-                // displaying the request, not reply to it again.
+            // Requests become private UI events. Replies still use the NOTICE path,
+            // and the daemon continues to handle the VERSION reply.
+            if let Some(command) = ctcp_request(&text) {
+                let from_self = same_nick(&from, &user_nick);
+                if !replayed && !in_batch && ts >= received - 60 && !from_self && from != "*" && !from.contains('.')
+                    && state.auth.check_ws_kdf_rate_limit(username, &format!("ctcp_notice:{conn_id}")).is_ok() {
+                    send(ServerEvent::CtcpRequest { conn_id: conn_id.to_string(), from: from.clone(), command, prefix: p.prefix.clone() });
+                }
+                if crate::avatar::remote::ctcp_avatar(&text).is_some() {
+                    let direct = { let c = conn.lock().await; incoming_channel_target(&c, &target).is_none() };
+                    if crate::avatar::remote::may_answer_ctcp(replayed, announce_fresh, direct, from_self, arrival.restricted) {
+                        crate::avatar::remote::answer_ctcp(state, username, conn, conn_id, p.prefix.as_deref()).await;
+                    }
+                }
                 return Ok(());
             }
             let (kind, clean) = if text.starts_with("\x01ACTION ") && text.ends_with('\x01') {
@@ -1590,6 +1650,15 @@ pub async fn dispatch_line(
             // msg_id 0 (the frontend routes replayed events through its silent/dedup path).
             let msg_id = if first_seen { log_line(state, username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await } else { 0 };
             send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind, msg_id, prefix: p.prefix.clone() });
+            if first_seen && !in_batch && !is_statusmsg && !from.contains('.') && from != "*" && crate::reactions::anchorable_wire(&clean) {
+                if let Some(reference) = p.tags.get("msgid") {
+                    let mut c = conn.lock().await;
+                    if crate::reactions::available(&c) {
+                        crate::reactions::remember(&mut c, &display_target, reference, crate::reactions::encrypted_wire(&clean));
+                        if let Some(event) = crate::reactions::anchor_event(conn_id, &display_target, msg_id, reference) { send(event); }
+                    }
+                }
+            }
             // Push notification for DMs and mentions — only if no active (non-idle) sessions
             // Fires when: no WS connected at all, OR all connected sessions are idle (20m timeout)
             if push_ok && !same_nick(&from, &user_nick) && (state.user_events.get(username).map_or(true, |tx| tx.receiver_count() == 0) || state.user_is_idle(username)) {
@@ -2033,8 +2102,14 @@ pub async fn dispatch_line(
         }
         // ── IRCv3: TAGMSG (typing indicators, reactions) ─
         "TAGMSG" => {
+            if p.tags.contains_key(crate::e2e_bridge::TAG) {
+                if !replayed && ts >= received - 60 { crate::e2e_bridge::receive(state, username, conn, &p).await; }
+            }
             let from = nick_from_prefix(&p.prefix);
             let target = p.params.get(0).cloned().unwrap_or_default();
+            if let Some(event) = crate::reactions::receive(&*conn.lock().await, &p, &from, replayed || p.tags.contains_key("batch")) {
+                send(event);
+            }
             // Remote avatars: an invisible announce (a join announce to a channel, or a
             // welcome to us) — learned like the tag on PRIVMSG.
             if let Some(v) = p.tags.get(crate::avatar::remote::TAG_KEY).filter(|_| announce_fresh) {
@@ -2966,7 +3041,7 @@ mod tests {
     fn test_conn() -> IrcConnection {
         IrcConnection {
             conn_id: "c0".into(), nick: "me".into(), connected: true, lag_ms: None,
-            channels: HashMap::new(), ipc_out: Arc::new(Mutex::new(None)), message_tags: false,
+            channels: HashMap::new(), ipc_out: Arc::new(Mutex::new(None)), message_tags: false, e2e_bridge: Default::default(), reactions: Default::default(), keepnick_retry: Default::default(),
             self_userhost: String::new(), registered: true, list_request: None, echo_message_enabled: false,
             names_buf: HashMap::new(), who_pending: HashSet::new(), who_away: HashMap::new(),
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),

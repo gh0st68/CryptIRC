@@ -10,14 +10,16 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {checkSettingsSearch} from './settings-search-checks.mjs';
 import {checkTranslation, startTranslator} from './translation-checks.mjs';
-import {checkE2eChat, checkLegacyMigration, seedLegacyE2e} from './e2e-chat-checks.mjs';
+import {checkCrossInstanceE2e, checkE2eChat, checkLegacyMigration, seedLegacyE2e} from './e2e-chat-checks.mjs';
 import {checkChannelList} from './channel-list-checks.mjs';
+import {checkPlainReactions} from './reaction-checks.mjs';
 
 const {CRYPTIRC_BIN, CRYPTIRC_CORE_BIN, IRC_PORT, IRC_LEAF_PORT, CHROMIUM} = process.env;
 assert(CRYPTIRC_BIN && CRYPTIRC_CORE_BIN && Number(IRC_PORT), 'Set the test binaries and local IRC testnet port');
 const tmp=await fs.mkdtemp(path.join(os.tmpdir(),'cryptirc-integrations-'));
 const children=[];
 const sockets=[];
+const tcpSockets=[];
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const check=(message,value)=>{assert(value,message);console.log('ok '+message);};
 const stamp=randomBytes(3).toString('hex');
@@ -49,7 +51,7 @@ function start(file,args,env) {
   return child;
 }
 
-const port=await new Promise((resolve,reject)=>{
+const allocatePort=()=>new Promise((resolve,reject)=>{
   const server=net.createServer();
   server.once('error',reject);
   server.listen(0,'127.0.0.1',()=>{
@@ -57,14 +59,15 @@ const port=await new Promise((resolve,reject)=>{
     server.close(err=>err?reject(err):resolve(port));
   });
 });
+const port=await allocatePort();
 const origin='http://localhost:'+port;
 const base=origin+'/cryptirc';
 const env={...process.env,CRYPTIRC_DATA:tmp,CRYPTIRC_BASE_PATH:'/cryptirc',
   CRYPTIRC_BASE_URL:base,CRYPTIRC_PORT:String(port),CRYPTIRC_HSTS:'off',RUST_LOG:'warn'};
 if(translationEnabled)env.CRYPTIRC_AI_ALLOW_PRIVATE='1';
 
-async function request(route,{method='GET',body,token,headers={}}={}) {
-  const res=await fetch(base+route,{method,body:body===undefined?undefined:JSON.stringify(body),headers:{
+async function request(route,{method='GET',body,token,headers={},endpoint=base}={}) {
+  const res=await fetch(endpoint+route,{method,body:body===undefined?undefined:JSON.stringify(body),headers:{
     ...(body===undefined?{}:{'Content-Type':'application/json'}),
     ...(token?{Authorization:'Bearer '+token}:{}),...headers
   }});
@@ -72,8 +75,8 @@ async function request(route,{method='GET',body,token,headers={}}={}) {
   return {status:res.status,data,headers:res.headers};
 }
 
-async function connectWebsocket(token) {
-  const socket=new WebSocket(base.replace('http','ws')+'/ws');
+async function connectWebsocket(token, endpoint=base) {
+  const socket=new WebSocket(endpoint.replace('http','ws')+'/ws');
   sockets.push(socket);
   const events=[];
   socket.onmessage=e=>events.push(JSON.parse(e.data));
@@ -85,7 +88,7 @@ async function connectWebsocket(token) {
   return {events,send,wait};
 }
 
-async function chromium(profile='chrome') {
+async function chromium(profile='chrome', endpoint=base) {
   const chrome=start(CHROMIUM||'/usr/bin/chromium',[
     '--headless=new','--no-sandbox','--disable-gpu','--remote-debugging-port=0',
     '--user-data-dir='+tmp+'/'+profile,'--no-first-run','about:blank'
@@ -127,7 +130,7 @@ async function chromium(profile='chrome') {
   await send('Page.enable');
   await send('Page.addScriptToEvaluateOnNewDocument',{source:
     "window.scriptPolicyViolations=[];document.addEventListener('securitypolicyviolation',e=>{if(e.effectiveDirective.startsWith('script-src'))window.scriptPolicyViolations.push(e.effectiveDirective);});"});
-  await send('Page.navigate',{url:base+'/'});
+  await send('Page.navigate',{url:endpoint+'/'});
   await waitFor(()=>evaluate("document.readyState==='complete' && typeof doPasskeyLogin==='function'"),'CryptIRC login page');
   await send('WebAuthn.enable');
   const {authenticatorId}=await send('WebAuthn.addVirtualAuthenticator',{options:{
@@ -154,7 +157,7 @@ async function tool(token,name,args={},wantError=false) {
 try {
   if(translationEnabled)translator=await startTranslator();
   await fs.writeFile(path.join(tmp,'admin_settings.json'),JSON.stringify({registration_open:true,captcha_enabled:false}));
-  start(CRYPTIRC_CORE_BIN,[],env);
+  const core=start(CRYPTIRC_CORE_BIN,[],env);
   await waitFor(()=>fs.stat(path.join(tmp,'irc-core.sock')).catch(()=>null),'isolated IRC core');
   const waitWeb=()=>waitFor(()=>fetch(base+'/auth/status').then(r=>r.ok).catch(()=>false),'isolated web server');
   const legacyUser='pkl'+stamp;
@@ -173,7 +176,7 @@ try {
       children.splice(children.indexOf(child),1);
     }
   }
-  start(CRYPTIRC_BIN,[],env);
+  let web=start(CRYPTIRC_BIN,[],env);
   await waitWeb();
   const checkPagePolicy=async route=>{
     const response=await fetch(base+route);
@@ -236,6 +239,24 @@ try {
   await ev("document.getElementById('vault-unlock-later').click();closeEncryptPanel()");
   check('choosing Later leaves the vault locked and returns to the app',
     await ev("_vaultNeedsUnlock && !document.getElementById('vault-overlay').classList.contains('show')"));
+  check('an explicit vault unlock is in front of Encryption when Later is unavailable', await ev(`(() => {
+    const overlay = document.getElementById('vault-overlay');
+    const wasUnlocked = _vaultWasUnlocked;
+    try {
+      _vaultWasUnlocked = true;
+      document.querySelector('[data-cryptirc-click=openEncryptionSettings]').click();
+      document.querySelector('#encrypt-panel-body [data-encrypt-cmd=unlock]').click();
+      const input = document.getElementById('vault-pass');
+      const {x, y, width, height} = input.getBoundingClientRect();
+      return document.getElementById('vault-unlock-later').hidden &&
+        document.activeElement === input && document.elementFromPoint(x+width/2, y+height/2) === input;
+    } finally {
+      overlay.classList.remove('show', 'on-demand');
+      closeEncryptPanel();
+      _vaultWasUnlocked = wasUnlocked;
+      _vaultUnlockForEncryption = false;
+    }
+  })()`));
   await ev('showProfilePanel()');
   await waitFor(()=>ev("!!document.getElementById('profile-passkey-add')"),'passkey profile card');
   const ownHeaders={Origin:origin};
@@ -373,6 +394,138 @@ try {
   await ev("closeProfilePanel();document.getElementById('vault-pass').value="+JSON.stringify(vault)+";doUnlock()");
   await waitFor(()=>ev(`networks.some(n=>n.config.id===${JSON.stringify(networkA)}&&n.connected) &&
     !document.getElementById('vault-overlay').classList.contains('show')`),'browser websocket and vault');
+  const noticeNetwork=await network(token,'pkc'+stamp,IRC_PORT,'Other network');
+  await tool(token,'irc_network',{action:'connect',network:noticeNetwork});
+  await ownerWs.wait(e=>e.type==='connected'&&e.conn_id===noticeNetwork,'second viewer network');
+  await waitFor(()=>ev(`networks.some(n=>n.config.id===${JSON.stringify(noticeNetwork)})`),'browser second network');
+  if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
+    const unsupportedNick='pkr'+stamp;
+    const unsupportedNetwork=await network(token,unsupportedNick,process.env.IRC_UNSUPPORTED_PORT,'No reaction capability');
+    const unsupportedSender=await network(otherKey,other,process.env.IRC_UNSUPPORTED_PORT,'Compatibility test sender');
+    await tool(token,'irc_network',{action:'connect',network:unsupportedNetwork});
+    await tool(otherKey,'irc_network',{action:'connect',network:unsupportedSender});
+    await ownerWs.wait(e=>e.type==='connected'&&e.conn_id===unsupportedNetwork,'unsupported reaction IRC server');
+    await otherWs.wait(e=>e.type==='connected'&&e.conn_id===unsupportedSender,'unsupported reaction sender');
+    await waitFor(()=>ev(`reactionEnabled(${JSON.stringify(networkA)})&&networks.some(n=>n.config.id===${JSON.stringify(unsupportedNetwork)})`),'browser capability sync');
+    await checkPlainReactions({ev,cdp,check,waitFor,ownerWs,otherWs,owner,other,networkA,networkB,channel,stamp,unsupportedNetwork,unsupportedSender,unsupportedNick});
+    await tool(token,'irc_network',{action:'disconnect',network:unsupportedNetwork});
+    await tool(otherKey,'irc_network',{action:'disconnect',network:unsupportedSender});
+    await tool(token,'irc_network',{action:'remove',network:unsupportedNetwork});
+    await tool(otherKey,'irc_network',{action:'remove',network:unsupportedSender});
+  }
+  const sendLag=ms=>ev(`handleEvent({type:'lag_update',conn_id:${JSON.stringify(networkA)},ms:${ms}})`);
+  await ev(`setActive(${JSON.stringify(noticeNetwork)},'status')`);
+  await sendLag(463);
+  check('high latency never appears on the other network',await ev(`!document.getElementById('chat-area').textContent.includes('High latency on Renamed hub')`));
+  for(const command of ['VERSION','FINGER']){
+    otherWs.send({type:'send',conn_id:networkB,raw:`PRIVMSG ${owner} :\x01${command}\x01`});
+    await ownerWs.wait(e=>e.type==='ctcp_request'&&e.command===command&&e.conn_id===networkA,`${command} event`);
+    check(`private CTCP ${command} appears in the viewer's other network tab`,await waitFor(()=>ev(
+      `document.getElementById('chat-area').textContent.includes(${JSON.stringify(`CTCP ${command} detected from ${other} on Renamed hub.`)})`),`${command} notice`));
+  }
+  const leakedCtcp=otherWs.events.filter(e=>
+    (e.type==='ctcp_request'&&e.conn_id===networkA&&e.from===other&&['VERSION','FINGER'].includes(e.command))||
+    ['VERSION','FINGER'].some(command=>e.text?.includes(`CTCP ${command} detected from ${other}`)));
+  check('the IRC peer receives no private CTCP notices',!leakedCtcp.length);
+  check('CTCP alerts are absent from the viewer network history',!(await tool(token,'irc_history',{network:noticeNetwork,target:'status'})).lines.some(l=>l.text.includes('CTCP VERSION detected')));
+  await sendLag(463);
+  await ev(`setActive(${JSON.stringify(networkA)},${JSON.stringify(channel)})`);
+  check('latency appears when the affected network is viewed',await waitFor(()=>ev(
+    `document.getElementById('chat-area').textContent.includes('High latency on Renamed hub (463 ms).')`),'network-local latency message'));
+  await sendLag(483);
+  check('repeated high latency is quiet until the connection recovers',await ev(`!document.getElementById('chat-area').textContent.includes('483 ms')`));
+  await sendLag(120);
+  await sendLag(523);
+  check('a later latency spike is reported after recovery',await ev(`document.getElementById('chat-area').textContent.includes('High latency on Renamed hub (523 ms).')`));
+  check('latency alerts are absent from shared IRC traffic and server history',!otherWs.events.some(e=>e.text?.includes('High latency on Renamed hub')) &&
+    !(await tool(token,'irc_history',{network:networkA,target:channel})).lines.some(l=>l.text.includes('High latency on Renamed hub')));
+  const alertControls=await ev(`(async()=>{
+    await showNotifModal();
+    return ['notif-ctcp-version','notif-ctcp-finger','notif-latency'].every(id=>document.getElementById(id).checked)
+      && document.getElementById('notif-latency-threshold').value==='300';
+  })()`);
+  check('private alert settings default to VERSION, FINGER, and 300 ms latency alerts',alertControls);
+  const clickAlert=id=>ev(`document.getElementById(${JSON.stringify(id)}).click()`);
+  const setAlertThreshold=value=>ev(`(()=>{const input=document.getElementById('notif-latency-threshold');input.value=${JSON.stringify(value)};input.dispatchEvent(new Event('change',{bubbles:true}));return input.value;})()`);
+  const noticeCount=(id,target,text)=>ev(`getBuf(${JSON.stringify(id)},${JSON.stringify(target)}).filter(m=>m.text?.includes(${JSON.stringify(text)})).length`);
+  const sendCtcp=async command=>{
+    const from=ownerWs.events.length;
+    otherWs.send({type:'send',conn_id:networkB,raw:`PRIVMSG ${owner} :\x01${command}\x01`});
+    await waitFor(()=>ownerWs.events.slice(from).some(e=>e.type==='ctcp_request'&&e.command===command&&e.conn_id===networkA),
+      `new ${command} event`);
+  };
+  await ev(`setActive(${JSON.stringify(noticeNetwork)},'status')`);
+  await clickAlert('notif-ctcp-version');
+  const beforeVersion=await noticeCount(noticeNetwork,'status','CTCP VERSION detected');
+  const beforeFinger=await noticeCount(noticeNetwork,'status','CTCP FINGER detected');
+  const replyFrom=otherWs.events.length;
+  await pause(2100);
+  await sendCtcp('VERSION');
+  await sendCtcp('FINGER');
+  await waitFor(async()=>await noticeCount(noticeNetwork,'status','CTCP FINGER detected')>beforeFinger,'FINGER still displays');
+  check('disabling VERSION only hides VERSION alerts',await noticeCount(noticeNetwork,'status','CTCP VERSION detected')===beforeVersion);
+  check('disabling the VERSION alert still allows the protocol reply',await waitFor(()=>otherWs.events.slice(replyFrom).some(e=>
+    e.type==='irc_message'&&e.kind==='Notice'&&e.text?.includes('VERSION CryptIRC v')),'VERSION protocol reply'));
+  await clickAlert('notif-ctcp-finger');
+  await clickAlert('notif-ctcp-version');
+  const fingerMutedAt=await noticeCount(noticeNetwork,'status','CTCP FINGER detected');
+  const timeBefore=await noticeCount(noticeNetwork,'status','CTCP TIME detected');
+  await sendCtcp('FINGER');
+  await sendCtcp('TIME');
+  await waitFor(async()=>await noticeCount(noticeNetwork,'status','CTCP TIME detected')>timeBefore,'TIME still displays');
+  check('disabling FINGER leaves other incoming CTCP alerts visible',await noticeCount(noticeNetwork,'status','CTCP FINGER detected')===fingerMutedAt);
+  await ev(`setActive(MSGS_CONN,MSGS_TARGET);handleEvent({type:'ctcp_request',conn_id:${JSON.stringify(networkA)},command:'VERSION',from:${JSON.stringify(other)}})`);
+  check('VERSION is queued while a non-chat tab is active',await ev("pendingCtcpNotices.some(n=>n.command==='VERSION')"));
+  await clickAlert('notif-ctcp-version');
+  check('turning off VERSION discards the already queued alert',await ev("!pendingCtcpNotices.some(n=>n.command==='VERSION')"));
+
+  await sendLag(100);
+  check('the threshold keeps the last valid value when an out-of-range value is entered',
+    await setAlertThreshold('450')==='450' && await setAlertThreshold('9000')==='450');
+  await ev(`setActive(${JSON.stringify(noticeNetwork)},'status')`);
+  await sendLag(470);
+  check('custom latency warnings stay on the affected connection',await noticeCount(noticeNetwork,'status','(470 ms)')===0);
+  await sendLag(430);
+  await ev(`setActive(${JSON.stringify(networkA)},${JSON.stringify(channel)})`);
+  check('latency below the custom threshold stays quiet',await noticeCount(networkA,channel,'(430 ms)')===0);
+  await sendLag(470);
+  check('latency above the custom threshold warns in chat',await noticeCount(networkA,channel,'(470 ms)')===1);
+  await setAlertThreshold('460');
+  await setAlertThreshold('450');
+  check('editing the threshold does not repeat an ongoing latency warning',await noticeCount(networkA,channel,'(470 ms)')===1);
+  await sendLag(420);
+  await sendLag(null);
+  await sendLag(480);
+  check('a small dip or missing sample does not duplicate latency warnings',await noticeCount(networkA,channel,'(480 ms)')===0);
+  await sendLag(365);
+  await sendLag(490);
+  check('custom latency warnings resume after recovery',await noticeCount(networkA,channel,'(490 ms)')===1);
+  await setAlertThreshold('100');
+  await sendLag(80);
+  await sendLag(120);
+  check('a low threshold re-arms after a proportional recovery',await noticeCount(networkA,channel,'(120 ms)')===1);
+  await ev("const thresholdForClose=document.getElementById('notif-latency-threshold');thresholdForClose.focus();thresholdForClose.value='450';closeNotifModal()");
+  await waitFor(()=>ev('_popSkipCount===0'),'settings history entry closed');
+  await ev('showNotifModal()');
+  check('closing the settings saves a valid unfinished threshold edit',await ev("loadIrcAlertPrefs().threshold===450"));
+  await clickAlert('notif-latency');
+  await sendLag(100);
+  await sendLag(800);
+  check('latency alerts can be disabled without hiding the latency indicator',
+    await noticeCount(networkA,channel,'(800 ms)')===0 && await ev("document.getElementById('lag-mobile-val').textContent==='800ms'"));
+  await ev('ircAlertPrefs=loadIrcAlertPrefs();renderIrcAlertPrefs()');
+  check('saved alert settings are restored from local storage',await ev(`
+    ['notif-ctcp-version','notif-ctcp-finger','notif-latency'].every(id=>!document.getElementById(id).checked)
+      && document.getElementById('notif-latency-threshold').disabled
+      && document.getElementById('notif-latency-threshold').value==='450'`));
+  await sendLag(100);
+  await clickAlert('notif-ctcp-version');
+  await clickAlert('notif-ctcp-finger');
+  await clickAlert('notif-latency');
+  await setAlertThreshold('300');
+  await ev('closeNotifModal()');
+  await tool(token,'irc_network',{action:'disconnect',network:noticeNetwork});
+  await tool(token,'irc_network',{action:'remove',network:noticeNetwork});
   if(process.env.CRYPTIRC_TEST_CHANNEL_LIST==='1'){
     const directoryChannel=channel+'-directory';
     const directoryPeer=await network(otherKey,other+'d',IRC_PORT,'Directory peer');
@@ -459,6 +612,54 @@ try {
     },'test plaintext policy fixture removed');
     await checkE2eChat({browser,chromium,check,waitFor,pause,owner,other,password,vault,tmp,ownerWs,otherWs,
       networkA,networkB,channel,stamp,request,ownerSession});
+    if(process.env.CRYPTIRC_TEST_E2E_BRIDGE==='1'){
+      const remote='pkx'+stamp;
+      const remotePort=await allocatePort();
+      const endpoint=`http://localhost:${remotePort}/cryptirc`;
+      const remoteData=await fs.mkdtemp(path.join(tmp,'remote-'));
+      const remoteEnv={...env,CRYPTIRC_DATA:remoteData,CRYPTIRC_PORT:String(remotePort),CRYPTIRC_BASE_URL:endpoint};
+      await fs.writeFile(path.join(remoteData,'admin_settings.json'),JSON.stringify({registration_open:true,captcha_enabled:false}));
+      start(CRYPTIRC_CORE_BIN,[],remoteEnv);
+      await waitFor(()=>fs.stat(path.join(remoteData,'irc-core.sock')).catch(()=>null),'separate IRC core');
+      start(CRYPTIRC_BIN,[],remoteEnv);
+      await waitFor(()=>fetch(endpoint+'/auth/status').then(r=>r.ok).catch(()=>false),'separate CryptIRC instance');
+      check('second CryptIRC instance registers its own account', (await request('/auth/register',{
+        method:'POST',endpoint,body:{username:remote,password}
+      })).status===200);
+      const login=await request('/auth/login',{method:'POST',endpoint,body:{username:remote,password}});
+      const remoteWs=await connectWebsocket(login.data.token,endpoint);
+      remoteWs.send({type:'unlock_vault',passphrase:vault});
+      await remoteWs.wait(e=>e.type==='vault_unlocked','second instance vault');
+      const label='Second CryptIRC instance';
+      remoteWs.send({type:'add_network',network:{id:crypto.randomUUID(),label,server:'127.0.0.1',port:Number(IRC_LEAF_PORT),
+        tls:false,tls_accept_invalid_certs:false,nick:remote,username:remote,realname:'CryptIRC bridge fixture',
+        auto_join:[],sasl_external:false,auto_reconnect:false}});
+      const state=await remoteWs.wait(e=>e.type==='state'&&e.networks.some(n=>n.config.label===label),'second instance network');
+      const remoteNetwork=state.networks.find(n=>n.config.label===label).config.id;
+      remoteWs.send({type:'connect',id:remoteNetwork});
+      await remoteWs.wait(e=>e.type==='connected'&&e.conn_id===remoteNetwork,'second instance linked IRC registration');
+      const ordinary='pkn'+stamp;
+      const irc=net.createConnection(Number(IRC_LEAF_PORT),'127.0.0.1');
+      tcpSockets.push(irc);
+      let ordinaryInput='';
+      const ordinaryLines=[];
+      irc.setEncoding('utf8');
+      irc.on('data', chunk=>{
+        ordinaryInput+=chunk;
+        const lines=ordinaryInput.split('\r\n');
+        ordinaryInput=lines.pop();
+        for(const line of lines){
+          ordinaryLines.push(line);
+          if(line.startsWith('PING ')) irc.write('PONG '+line.slice(5)+'\r\n');
+        }
+      });
+      await new Promise((resolve,reject)=>{irc.once('connect',resolve);irc.once('error',reject);});
+      irc.write(`NICK ${ordinary}\r\nUSER ${ordinary} 0 * :Ordinary IRC fixture\r\n`);
+      await waitFor(()=>ordinaryLines.some(line=>line.includes(` 001 ${ordinary} `)),'ordinary IRC client registered');
+      await checkCrossInstanceE2e({browser,peer:await chromium('encrypted-bridge',endpoint),check,waitFor,
+        owner,ownerWs,remote,password,networkA,remoteNetwork,remoteWs,stamp,otherWs,remoteData,ordinary,ordinaryLines});
+      irc.end('QUIT :Test complete\r\n');
+    }
   }
   await tool(token,'cryptirc_appearance',{settings:{theme:'arctic'}});
   check('MCP appearance can be updated and read',(await tool(token,'cryptirc_appearance')).settings.theme==='arctic');
@@ -564,6 +765,70 @@ try {
   check('removing a passkey invalidates an in-flight assertion',(await request('/auth/passkeys/login/finish',{
     method:'POST',headers:ownHeaders,body:staleAssertion
   })).status===401);
+  let keepNetwork, keepNick;
+  if(process.env.CRYPTIRC_TEST_KEEPNICK==='1'){
+    const fallback='pkf'+stamp, label='KeepNick fixture';
+    keepNick='pkk'+stamp;
+    const network={id:crypto.randomUUID(),label,server:'127.0.0.1',port:Number(IRC_PORT),
+      tls:false,tls_accept_invalid_certs:false,nick:fallback,username:fallback,realname:'KeepNick fixture',
+      auto_join:[],sasl_external:false,auto_reconnect:false};
+    ownerWs.send({type:'add_network',network});
+    const state=await ownerWs.wait(e=>e.type==='state'&&e.networks.some(n=>n.config.label===label),'KeepNick fixture network');
+    keepNetwork=state.networks.find(n=>n.config.label===label).config.id;
+    const waitOwner=(from,pred,name)=>waitFor(()=>ownerWs.events.slice(from).find(pred),name);
+    let from=ownerWs.events.length;
+    ownerWs.send({type:'connect',id:keepNetwork});
+    await waitOwner(from,e=>e.type==='connected'&&e.conn_id===keepNetwork,'KeepNick fallback registered');
+    const holdFrom=otherWs.events.length;
+    otherWs.send({type:'send',conn_id:networkB,raw:'NICK '+keepNick});
+    await waitFor(()=>otherWs.events.slice(holdFrom).find(e=>e.type==='irc_nick'&&e.new===keepNick),'other fixture holds desired nick');
+    await waitFor(()=>ev(`networks.some(n=>n.config.id===${JSON.stringify(keepNetwork)})`),'browser sees KeepNick network');
+    from=ownerWs.events.length;
+    ownerWs.send({type:'keep_nick',conn_id:keepNetwork,nick:'a'.repeat(64)});
+    check('KeepNick honors the testnet nickname length',
+      /^KeepNick: This network allows nicknames up to /.test((await waitOwner(from,e=>e.type==='error','server nick length validation')).message));
+    from=ownerWs.events.length;
+    await ev(`setActive(${JSON.stringify(keepNetwork)},'status');handleInput(${JSON.stringify('/keepnick '+keepNick)})`);
+    check('/keepnick saves the chosen nick even while another client holds it',
+      (await waitOwner(from,e=>e.type==='keep_nick_updated'&&e.conn_id===keepNetwork,'KeepNick saved')).nick===keepNick);
+    await ev(`handleInput(${JSON.stringify('/keepnick stop  '+fallback)})`);
+    await waitFor(()=>ev(`document.body.textContent.includes('That nickname is not being kept on this network.')`),'a mismatched KeepNick stop is explained');
+    from=ownerWs.events.length;
+    await ev(`handleInput(${JSON.stringify('/unkeepnick '+keepNick)})`);
+    check('/unkeepnick stops the chosen nick',
+      (await waitOwner(from,e=>e.type==='keep_nick_updated'&&e.conn_id===keepNetwork,'KeepNick removed')).nick===null);
+    from=ownerWs.events.length;
+    await ev(`handleInput(${JSON.stringify('/keepnick '+keepNick)})`);
+    await waitOwner(from,e=>e.type==='keep_nick_updated'&&e.conn_id===keepNetwork&&e.nick===keepNick,'KeepNick restored for restart');
+    from=ownerWs.events.length;
+    ownerWs.send({type:'update_network',network:{...network,id:keepNetwork,label:'Renamed KeepNick fixture'}});
+    const edited=await waitOwner(from,e=>e.type==='state'&&e.networks.some(n=>n.config.label==='Renamed KeepNick fixture'),'network edit');
+    check('an older network edit preserves KeepNick',edited.networks.find(n=>n.config.id===keepNetwork).config.keep_nick===keepNick);
+    from=ownerWs.events.length;
+    ownerWs.send({type:'disconnect',id:keepNetwork});
+    await waitOwner(from,e=>e.type==='disconnected'&&e.conn_id===keepNetwork,'KeepNick fixture disconnect');
+    from=ownerWs.events.length;
+    ownerWs.send({type:'connect',id:keepNetwork});
+    await waitOwner(from,e=>e.type==='connected'&&e.conn_id===keepNetwork,'KeepNick fallback reconnects');
+    ownerWs.send({type:'get_state'});
+    check('KeepNick survives disconnect and reconnect',
+      (await waitOwner(from,e=>e.type==='state'&&e.networks.some(n=>n.config.id===keepNetwork&&n.connected),'reconnected KeepNick state')).networks.find(n=>n.config.id===keepNetwork).config.keep_nick===keepNick);
+
+    const clearAt=Date.now();
+    const savePrefs=prefs=>ownerWs.send({type:'save_preferences',prefs:JSON.stringify(prefs)});
+    savePrefs({mentions:[],_mentionsTs:clearAt,_mentionsClearTs:clearAt});
+    await ownerWs.wait(e=>e.type==='preferences'&&JSON.parse(e.prefs||'{}')._mentionsClearTs===clearAt,'Clear saved');
+    const staleNotice={type:'mention',conn_id:keepNetwork,from:other,target:channel,text:'stale notice',ts:Math.floor(clearAt/1000)-1};
+    savePrefs({mentions:[staleNotice],_mentionsTs:clearAt+1,_saveTs:'older-tab',unrelatedFixtureSetting:true});
+    const repaired=await ownerWs.wait(e=>e.type==='preferences'&&JSON.parse(e.prefs||'{}').unrelatedFixtureSetting,'stale tab settings save');
+    const prefs=JSON.parse(repaired.prefs);
+    check('a stale preferences save preserves Clear and saves other settings',
+      prefs._mentionsClearTs===clearAt&&prefs.mentions.length===0&&!prefs._saveTs);
+    savePrefs({mentions:[staleNotice],_mentionsTs:clearAt-1,_mentionsClearTs:clearAt,earlierNoticeRevision:true});
+    const older=await ownerWs.wait(e=>e.type==='preferences'&&JSON.parse(e.prefs||'{}').earlierNoticeRevision,'older notice revision saved');
+    check('an older notice revision in the same Clear generation is ignored',
+      JSON.parse(older.prefs).mentions.length===0);
+  }
   check('Chromium produced no unhandled JavaScript exceptions',browser.errors.length===0);
   check('Chromium reported no script CSP violations during the UI checks',await ev('window.scriptPolicyViolations.length===0'));
   const htmlPaste=await request('/paste',{method:'POST',token:ownerSession,
@@ -580,12 +845,52 @@ try {
   await ev("document.getElementById('tab-src').click()");
   check('the HTML paste Source tab works with strict CSP',
     await ev("getComputedStyle(document.getElementById('pane-src')).display==='block'"));
+  if(keepNetwork){
+    process.kill(-web.pid,'SIGTERM');
+    await waitFor(()=>web.exitCode!==null||web.signalCode!==null,'fixture web exited');
+    children.splice(children.indexOf(web),1);
+    web=start(CRYPTIRC_BIN,[],env);
+    await waitWeb();
+    check('the original IRC core survived the CryptIRC web restart',core.exitCode===null&&core.signalCode===null);
+    const fixtureSession=async username=>{
+      const {status,data}=await request('/auth/login',{method:'POST',body:{username,password}});
+      assert.equal(status,200,'fixture login after web restart');
+      return connectWebsocket(data.token);
+    };
+    const reattached=async(ws,id)=>{
+      let requested=0;
+      return waitFor(()=>{
+        const state=ws.events.find(e=>e.type==='state'&&e.networks.some(n=>n.config.id===id&&n.connected));
+        if(!state&&Date.now()-requested>=500){ws.send({type:'get_state'});requested=Date.now();}
+        return state;
+      },'IRC session reattached');
+    };
+    const observer=await fixtureSession(other);
+    await reattached(observer,networkB);
+    const afterRestart=await fixtureSession(owner);
+    const state=await reattached(afterRestart,keepNetwork);
+    check('KeepNick survives a web restart and IRC core reattach',state.networks.find(n=>n.config.id===keepNetwork).config.keep_nick===keepNick);
+    observer.send({type:'send',conn_id:networkB,raw:'NICK '+other});
+    await observer.wait(e=>e.type==='irc_nick'&&e.old===keepNick&&e.new===other,'other client released desired nick');
+    await waitFor(()=>afterRestart.events.find(e=>e.type==='irc_nick'&&e.conn_id===keepNetwork&&e.new===keepNick),
+      'server reclaims KeepNick after release',75000);
+    check('KeepNick reclaimed the released nick with the browser closed',true);
+    afterRestart.send({type:'keep_nick',conn_id:keepNetwork,nick:keepNick.toUpperCase(),stop:true});
+    check('stopping KeepNick matches the configured nick case-insensitively',
+      (await afterRestart.wait(e=>e.type==='keep_nick_updated'&&e.conn_id===keepNetwork,'KeepNick stopped')).nick===null);
+    afterRestart.send({type:'keep_nick',conn_id:keepNetwork,nick:keepNick,import:true});
+    afterRestart.send({type:'get_state'});
+    const stopped=await waitFor(()=>afterRestart.events.slice(afterRestart.events.indexOf(state)+1).find(e=>e.type==='state'&&
+      e.networks.some(n=>n.config.id===keepNetwork&&n.config.keep_nick===null&&n.config.keep_nick_managed)), 'KeepNick stays stopped');
+    check('an old browser’s import cannot restore an explicitly stopped nick',!!stopped);
+  }
 } catch (error) {
   for(const child of children.slice(0,2))if(child.logs)console.error(child.logs);
   throw error;
 } finally {
   translator?.close();
   for(const socket of sockets)socket.close();
+  for(const socket of tcpSockets)socket.destroy();
   for(const child of children)try{ process.kill(-child.pid,'SIGTERM'); }catch {}
   await pause(500);
   await fs.rm(tmp,{recursive:true,force:true,maxRetries:4,retryDelay:100});

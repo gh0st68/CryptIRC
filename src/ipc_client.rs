@@ -373,6 +373,10 @@ async fn handle_connection(stream: UnixStream, state: &AppState, colocated: bool
 pub(crate) fn apply_session_registration(c: &mut irc::IrcConnection, facts: Option<&cryptirc::ipc::RegistrationFacts>, casemapping: &str) -> bool {
     c.daemon_registration = facts.is_some();
     let replaced = facts.map_or(false, |f| crate::avatar::apply_registration_facts(c, f));
+    if let Some(facts) = facts { c.keepnick_retry.learn_limit(&facts.isupport); }
+    if let Some(facts) = facts.filter(|f| !f.truncated && f.cap_ls_done) {
+        c.reactions.advertised = facts.caps.iter().any(|cap| cap == crate::reactions::CAP);
+    }
     // Choose once: temporarily applying a stale, wider facts mapping can merge
     // distinct channels before the authoritative mapping has a chance to correct it.
     let mapping = if !casemapping.is_empty() {
@@ -439,6 +443,8 @@ async fn handle_message(
                 // never re-fires ServerEvent::Connected — anything gated
                 // on "just (re)connected" goes stale until a manual reload.
                 c.registered = false;
+                c.e2e_bridge = Default::default();
+                c.reactions = Default::default();
                 c.avx.reset();
                 // Drop in-flight WHO bookkeeping: the socket that owed us a
                 // 315 ENDOFWHO is gone, so those entries would never clear
@@ -528,8 +534,10 @@ async fn handle_message(
                 let resync_gen: u64;
                 let mut newly_registered = None;
                 let mut deferred_stale: Option<Vec<String>> = None;
+                let reaction_change;
                 {
                     let mut c = conn.lock().await;
+                    let reaction_previous = crate::reactions::available(&c);
                     // Preserve the legacy registered→unregistered metadata reset,
                     // before merging the incoming session's retained facts.
                     if c.registered && !registered { c.avx.reset(); }
@@ -559,6 +567,7 @@ async fn handle_message(
                     // snapshot (a NICK line may have aged out of the ring meanwhile).
                     let adopt_identity = reports_endpoint || !registered || !c.registered || first_in_cycle;
                     if adopt_identity {
+                        if c.nick != nick { c.keepnick_retry.clear_pending(); }
                         c.nick = nick.clone();
                     }
                     // r8 (codex P2 ipc_client.rs:1101): the server's CHANMODES / PREFIX as the
@@ -702,6 +711,8 @@ async fn handle_message(
                     }
                     if !resync.is_empty() { c.resync_busy = true; }
                     resync_gen = c.resync_gen;
+                    let enabled = crate::reactions::available(&c);
+                    reaction_change = (reaction_previous != enabled).then_some(enabled);
                 }
                 // SyncSlot may move the enabling snapshot past its live ACK. Either
                 // arrival initializes once. Attach waits for continuity/record checks so
@@ -716,6 +727,9 @@ async fn handle_message(
                     state.send_to_user(&username, ServerEvent::Connected {
                         conn_id: conn_id.clone(), server, nick: connected_nick,
                     });
+                }
+                if let Some(enabled) = reaction_change {
+                    state.send_to_user(&username, ServerEvent::ReactionSupport { conn_id: conn_id.clone(), enabled });
                 }
                 if let Some(ms) = lag_ms {
                     state.send_to_user(&username, ServerEvent::LagUpdate { conn_id: conn_id.clone(), ms });
@@ -1123,6 +1137,9 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
         return Some((username, conn.clone()));
     }
     let username = state.conn_owners.get(conn_id)?.clone();
+    let cfg_lock = crate::network_config_lock(&username, conn_id);
+    let _cfg_guard = cfg_lock.lock().await;
+    if !state.owns_conn(&username, conn_id) { return None; }
     let cfg = state.get_network_config(conn_id, &username).await?;
     // What this process dialed; else (a reattached session) the config as first seen —
     // until the daemon's SessionSync reports the real endpoint.
@@ -1149,6 +1166,9 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
         // the very next SessionSync, corrects this before any PRIVMSG can
         // arrive. See SessionSync's field doc comment in ipc.rs.
         message_tags: false,
+        e2e_bridge: Default::default(),
+        reactions: Default::default(),
+        keepnick_retry: Default::default(),
         self_userhost: String::new(),
         registered: false,
         list_request: None,

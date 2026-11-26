@@ -7,27 +7,51 @@
 <p align="center"><strong>IRC that stays connected.</strong><br>Self-hosted. Encrypted history. All your devices.</p>
 
 <p align="center">
-  <a href="https://github.com/gh0st68/CryptIRC/releases/latest"><img src="https://img.shields.io/badge/version-0.5.16-00b894?style=flat-square" alt="Version 0.5.15"></a>
+  <a href="https://cryptirc.com/news/#v0-5-20"><img src="https://img.shields.io/badge/version-0.5.20-00b894?style=flat-square" alt="Version 0.5.20"></a>
   <img src="https://img.shields.io/badge/server-Linux-5a7085?style=flat-square" alt="Linux server">
   <img src="https://img.shields.io/badge/client-desktop%20%C2%B7%20mobile%20%C2%B7%20terminal-5a7085?style=flat-square" alt="Desktop, mobile, and terminal clients">
 </p>
 
 <p align="center">
-  <a href="https://client.twistednet.org/cryptirc"><strong>Open the web client</strong></a> &nbsp;·&nbsp;
+  <a href="https://client.twistednet.org/cryptirc/"><strong>Open the free hosted client</strong></a> &nbsp;·&nbsp;
+  <a href="#get-started">Install on Linux</a> &nbsp;·&nbsp;
   <a href="https://github.com/gh0st68/CryptIRC/releases/latest">Download an app</a> &nbsp;·&nbsp;
   <a href="https://cryptirc.com/">Website</a> &nbsp;·&nbsp;
   <a href="https://gh0st68.github.io/CryptIRC/">Theme gallery</a>
 </p>
 
+CryptIRC keeps your IRC networks connected on your server while you move between devices. Catch up on encrypted history, join the conversation from a browser or app, and make the interface your own.
+
+**[Get started](#get-started)** · **[Clients](#clients)** · **[Features](#features)** · **[Privacy](#privacy-and-encryption)** · **[CryptIRC MCP](#cryptirc-mcp)** · **[Translation](#translation)** · **[Passkeys](#passkey-sign-in)** · **[Commands](#commands-and-shortcuts)** · **[Configuration](#configuration)**
+
+<a id="quick-start"></a>
+<a id="deployment"></a>
+
+## Get started
+
+### Use the free hosted client
+
+Open [client.twistednet.org/cryptirc](https://client.twistednet.org/cryptirc/) and create an account. You can add TwistedNET or other IRC networks from the same browser client.
+
+### Install on your own Linux server
+
+On Debian 12 or Ubuntu 22.04 or later, run the interactive installer.
+
+```bash
+git clone https://github.com/gh0st68/CryptIRC.git
+cd CryptIRC
+sudo bash deploy/deploy.sh
+```
+
+On Arch Linux, run `sudo bash deploy/deploy-arch.sh` from the same checkout.
+
+The installer sets up both Rust services, Caddy, and systemd. It walks you through HTTPS, registration, and creating your first account. Email setup is optional. The web service and IRC daemon run separately, so routine web updates can keep IRC connections open.
+
+See the [installation guide](INSTALL.md) for requirements and manual setup, or follow the [web install and update guide](https://cryptirc.com/install/). The [deployment guide](deploy/README.md) covers prebuilt binaries and service updates.
+
 <p align="center">
   <img src="screenshots/desktop.png?v=20261016" width="960" alt="CryptIRC desktop interface preview with example conversations and a grouped user list">
 </p>
-
-CryptIRC keeps your IRC networks connected on your server while you move between devices. Catch up on encrypted history, join the conversation from a browser or app, and make the interface your own.
-
-The web server and IRC daemon run separately, so routine web updates can leave your IRC connections running.
-
-**[CryptIRC MCP](#cryptirc-mcp)** · **[Translation](#translation)** · **[Passkeys](#passkey-sign-in)** · **[Get started](#get-started)** · **[Clients](#clients)** · **[Features](#features)** · **[Privacy](#privacy-and-encryption)** · **[Commands](#commands-and-shortcuts)** · **[Configuration](#configuration)**
 
 ## CryptIRC MCP
 
@@ -76,7 +100,7 @@ Read IRC in your preferred language. Translate a message, website preview title 
 
 Your provider receives the text selected for translation. Automatic translation is disabled in end-to-end encrypted conversations. To translate encrypted text manually, confirm before sharing it with the provider. Reading and chat preferences are saved on the device. Translated text is kept in the open tab.
 
-[Latest changelog](docs/CHANGES.md#v0515-november-2026)
+[Translation changelog](docs/CHANGES.md#v0513-november-2026)
 
 ## Passkey sign-in
 
@@ -92,27 +116,6 @@ For self-hosters, MCP token setup and passkeys use the canonical HTTPS URL confi
 - **Keep your avatar visible.** CryptIRC handles long, colored vhosts and refreshes avatars for other eligible viewers when a verified hostmask changes.
 
 [Full v0.5.12 changelog](docs/CHANGES.md#v0512-november-2026)
-
-<a id="quick-start"></a>
-<a id="deployment"></a>
-
-## Get started
-
-**Use the hosted client:** open [client.twistednet.org/cryptirc](https://client.twistednet.org/cryptirc) and create an account. You can add TwistedNET and other IRC networks from the same client.
-
-**Run your own server:** on Debian or Ubuntu, clone the repository and run the interactive installer:
-
-```bash
-git clone https://github.com/gh0st68/CryptIRC.git
-cd CryptIRC
-sudo bash deploy/deploy.sh
-```
-
-The installer walks through the domain or IP address, HTTPS, registration options, and first-user setup. It installs the Rust services, Caddy, and systemd units. Email setup is optional.
-
-For Arch Linux, use `sudo bash deploy/deploy-arch.sh` instead.
-
-See the [installation guide](INSTALL.md), [deployment notes](deploy/README.md), or [web install and update guide](https://cryptirc.com/install/) for requirements, manual installation, and updates. For a source build, use the current stable Rust toolchain.
 
 <a id="available-everywhere"></a>
 <a id="terminal-client"></a>
@@ -168,13 +171,13 @@ cargo build --release
 | **Stay connected** | Multiple IRC networks, encrypted history, reconnect handling, and a separate IRC daemon that survives routine web-server updates. |
 | **Pick up anywhere** | Desktop apps, an installable mobile PWA, a terminal client, synced preferences, favorites, and unread markers. |
 | **Follow the conversation** | Unified Messages inbox, searchable history, Notices with message jumps, push alerts, custom highlights, mutes, and quiet hours. |
-| **Make it yours** | 227 themes, including 64 animated themes and classic IRC client skins, 140 font choices, editable palettes, backgrounds, and resizable columns. |
+| **Make it yours** | 257 themes, including 64 animated themes and classic IRC client skins, 140 font choices, editable palettes, backgrounds, and resizable columns. |
 | **Share more** | Inline images, video and audio, a GIF picker, link previews, file uploads, text / HTML / Markdown pastes, and a URL shortener. |
 | **Use familiar IRC tools** | SASL PLAIN/EXTERNAL, IRCv3 capabilities, nick monitoring, channel modes, moderation tools, and slash-command completion. |
 
 ### Your IRC, your look
 
-Choose from **227 themes**: 163 static and 64 animated. There are editor favorites such as Dracula and Nord, classic mIRC / HexChat / XChat / irssi skins, illustrated backgrounds, and quieter minimal palettes.
+Choose from **257 themes**, with 193 static and 64 animated designs. The 30 new static designs include Witness Mark, Sluice Gate, and Gauge Needle, each with an original pattern and palette. There are also classic IRC skins, illustrated backgrounds, and quieter minimal palettes.
 
 Customize a theme into your own saved copy, adjust fonts and column widths, or add a background image with opacity, blur, dim, and tiling controls. Mobile theme and layout overrides let your phone have its own setup. Optional desktop pets add a little company, with motion controls for quieter sessions.
 
@@ -513,7 +516,7 @@ Accessible from the sidebar gear menu:
 | Panel | Contents |
 |-------|----------|
 | Notifications | Push alerts, desktop popups, sounds, trigger rules, custom highlight words (tag UI), per-network mute |
-| Theme | 227 themes (64 animated), 140 fonts, customize any theme, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
+| Theme | 257 themes (64 animated), 140 fonts, customize any theme, font sizes, layout, display options, compact mode, colors, brightness, mobile overrides |
 | Security | Vault auto-lock timer, message expiry, rate limit, block PMs (+g), auto-rejoin, link previews, spellcheck |
 | Monitor | Nick online/offline tracking with push notifications |
 | Notepad | Private encrypted auto-saving notes |

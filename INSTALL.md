@@ -76,10 +76,14 @@ rustc --version  # Must be 1.88 or newer (the locked dependencies need it)
 ```bash
 git clone https://github.com/gh0st68/CryptIRC.git
 cd CryptIRC
-cargo build --release
+bash deploy/build-release.sh
 ```
 
-The build takes 3-5 minutes on first run. It produces two binaries: `target/release/cryptirc` (the web server) and `target/release/irc_core` (the IRC connection daemon — the web server hands every IRC connection to it, so you need both).
+The build produces `target/release/cryptirc` (the web server) and `target/release/irc_core` (the IRC connection daemon). The web server needs both to connect to IRC.
+
+The installers, updater, and manual build script automatically use fewer build resources when Linux reports 2 GiB or less of available memory, including container and service limits. This mode builds one job at a time and skips optimization for CryptIRC's own code. Dependencies keep their release optimizations. Set `CRYPTIRC_BUILD_MODE=low-memory` to force it or `CRYPTIRC_BUILD_MODE=normal` to use Cargo's usual release settings.
+
+The build was verified with a 1.5 GiB memory limit and swap disabled. At around 1 GiB, a build can still need swap. You can also [build the binaries elsewhere](deploy/README.md#updating) and install them with the updater. When overriding the mode under `sudo`, pass it to `sudo` directly, for example `sudo CRYPTIRC_BUILD_MODE=low-memory bash deploy/update.sh`.
 
 ### Step 4: Create Service User and Directories
 
@@ -602,7 +606,7 @@ By hand, the same steps are below. They assume the install already runs `irc-cor
 ```bash
 cd /path/to/CryptIRC
 git pull
-cargo build --release
+bash deploy/build-release.sh
 sudo install -m 755 target/release/cryptirc /opt/cryptirc/cryptirc.new
 sudo install -m 755 target/release/irc_core /opt/cryptirc/irc_core.new
 sudo systemctl stop cryptirc

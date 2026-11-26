@@ -31,6 +31,9 @@ mod captcha;
 mod certs;
 mod crypto;
 mod e2e;
+mod e2e_bridge;
+mod reactions;
+mod keepnick;
 mod email;
 mod ipc_client;
 mod irc;
@@ -600,6 +603,8 @@ pub enum ClientMessage {
     ChangePassphrase { old: String, new: String },
     AddNetwork       { network: NetworkConfig },
     UpdateNetwork    { network: NetworkConfig },
+    KeepNick         { conn_id: String, nick: Option<String>, #[serde(default)] stop: bool, #[serde(default)] import: bool },
+    React            { conn_id: String, target: String, request_id: String, reaction: reactions::ReactionSend },
     RemoveNetwork    { id: String },
     Connect          { id: String },
     // `reason` carries the reason typed with `/quit <msg>`. Additive and
@@ -648,7 +653,7 @@ pub enum ClientMessage {
     // conn_id (optional, F11): the connection the nick was seen on, so the lookup
     // prefers the account actually holding that nick on that network.
     #[serde(rename = "e2e_fetch_bundle")]
-    E2EFetchBundle    { username: String, #[serde(default)] conn_id: Option<String> },
+    E2EFetchBundle    { username: String, #[serde(default)] conn_id: Option<String>, #[serde(default)] req: Option<String> },
     #[serde(rename = "e2e_store_session")]
     E2EStoreSession   { partner: String, blob: String,
                         // r2 (NEW-7): sending device id + "this save follows a send".
@@ -814,6 +819,13 @@ pub enum ServerEvent {
     IrcListEnd       { conn_id: String, #[serde(default, skip_serializing_if = "Option::is_none")] request_id: Option<String>, #[serde(default, skip_serializing_if = "Option::is_none")] total: Option<usize>, #[serde(default, skip_serializing_if = "Option::is_none")] message: Option<String> },
     IrcListError     { conn_id: String, request_id: String, message: String },
     LagUpdate        { conn_id: String, ms: u64 },
+    CtcpRequest      { conn_id: String, from: String, command: String, prefix: Option<String> },
+    KeepNickUpdated  { conn_id: String, nick: Option<String>, imported: bool },
+    ReactionSupport  { conn_id: String, enabled: bool },
+    ReactionAnchor   { conn_id: String, target: String, msg_id: u64, reference: String },
+    ReactionResult   { request_id: String, error: Option<String> },
+    IrcReaction      { conn_id: String, target: String, reference: String, from: String, prefix: Option<String>, emoji: String, remove: bool, own: bool },
+    SealedReaction   { conn_id: String, target: String, from: String, prefix: Option<String>, body: String, own: bool },
     SaslStatus       { conn_id: String, success: bool, message: String },
     Connected        { conn_id: String, server: String, nick: String },
     Disconnected     { conn_id: String, reason: String },
@@ -826,7 +838,12 @@ pub enum ServerEvent {
     CertInfo         { conn_id: String, fingerprint: String, cert_pem: String },
     // ── E2E events — explicit renames because snake_case turns E2E into e2_e
     #[serde(rename = "e2e_bundle")]
-    E2EBundle        { username: String, bundle: FetchedBundle },
+    E2EBundle        { username: String, bundle: FetchedBundle,
+                       #[serde(default, skip_serializing_if = "Option::is_none")] conn_id: Option<String>,
+                       #[serde(default, skip_serializing_if = "Option::is_none")] req: Option<String>,
+                       #[serde(default, skip_serializing_if = "std::ops::Not::not")] bridge: bool },
+    #[serde(rename = "e2e_bundle_missing")]
+    E2EBundleMissing { conn_id: String, req: String, reason: &'static str },
     #[serde(rename = "e2e_identity_blob")]
     E2EIdentityBlob  { blob: String },
     #[serde(rename = "e2e_session")]
@@ -928,6 +945,11 @@ pub struct NetworkConfig {
     // own fixed reason and ignores this.
     #[serde(default)]
     pub quit_message:          Option<String>,
+    #[serde(default)]
+    pub keep_nick:             Option<String>,
+    /// Distinguishes an explicit stop from an old config awaiting import.
+    #[serde(default)]
+    pub keep_nick_managed:     bool,
 }
 
 /// Default QUIT reason sent when the user hasn't customized one. Doubles as
@@ -967,6 +989,7 @@ impl Default for NetworkConfig {
             disabled_caps: vec![],
             perform_commands: vec![],
             quit_message: None,
+            keep_nick: None, keep_nick_managed: false,
         }
     }
 }
@@ -978,6 +1001,8 @@ pub struct SaslConfig { pub account: String, pub password: String }
 pub struct NetworkState {
     pub config:       NetworkConfig,
     pub connected:    bool,
+    #[serde(default)]
+    pub reactions:    bool,
     pub nick:         String,
     pub channels:     Vec<ChannelState>,
     pub lag_ms:       Option<u64>,
@@ -1446,7 +1471,7 @@ async fn main() -> Result<()> {
     // Serve the controls with app.js so online and cached copies use the same wiring.
     // It contains /cryptirc asset/WS paths, so it needs the same base-path rewrite.
     let static_app_js   = Arc::new(render_app_js(
-        concat!(include_str!("../static/page-controls.js"), "\n", include_str!("../static/app.js")),
+        concat!(include_str!("../static/page-controls.js"), "\n", include_str!("../static/reactions.js"), "\n", include_str!("../static/app.js")),
         bp_trimmed,
         option_env!("CRYPTIRC_BUILD").unwrap_or("dev"),
         env!("CARGO_PKG_VERSION"),
@@ -1556,6 +1581,7 @@ async fn main() -> Result<()> {
         let sock_path = std::env::var("CRYPTIRC_IPC_SOCK").unwrap_or_else(|_| format!("{}/irc-core.sock", data_dir.trim_end_matches('/')));
         let s = state.clone();
         tokio::spawn(async move { ipc_client::run(sock_path, s).await; });
+        tokio::spawn(keepnick::poll(state.clone()));
     }
 
     // #31: sweep abandoned in-progress chunked uploads once at startup so a restart
@@ -3670,7 +3696,7 @@ async fn route_upload_init(
     let user = match upload_auth(&state, &headers).await { Ok(u) => u, Err(e) => return e.into_response() };
     if !body.source_target.is_empty() && body.source_target != "status" {
         let blocked = match state.e2e_store.protected_names(&user).await {
-            Ok((channels, peers)) => match_e2e_target(&body.source_target, channels, peers).is_some(),
+            Ok((channels, peers)) => match_e2e_target(&body.source_target, &body.source_conn_id, channels, peers).is_some(),
             Err(_) => true,
         };
         if blocked {
@@ -5626,6 +5652,8 @@ fn canonicalize_cmd_ids(mut cmd: ClientMessage) -> ClientMessage {
         | ClientMessage::Connect { id }
         | ClientMessage::Disconnect { id, .. } => *id = canonical_network_id(id),
         ClientMessage::Send { conn_id, .. }
+        | ClientMessage::React { conn_id, .. }
+        | ClientMessage::KeepNick { conn_id, .. }
         | ClientMessage::ListChannels { conn_id, .. }
         | ClientMessage::JoinChannel { conn_id, .. }
         | ClientMessage::PartChannel { conn_id, .. }
@@ -6378,7 +6406,7 @@ async fn e2e_send_blocked(
     let conn_id = &canonical_network_id(conn_id);
     if !state.owns_conn(username, conn_id) { return true; }
     let protected = match state.e2e_store.protected_names(username).await {
-        Ok((channels, peers)) => match_e2e_target(&targets, channels, peers),
+        Ok((channels, peers)) => match_e2e_target(&targets, conn_id, channels, peers),
         Err(_) => {
             let _ = socket_tx.try_send(ServerEvent::Error { message: "Unable to verify encryption for this conversation. Message blocked.".into() });
             return true;
@@ -6407,11 +6435,19 @@ async fn e2e_send_blocked(
     false
 }
 
-fn match_e2e_target(targets: &str, channels: Vec<String>, peers: Vec<String>) -> Option<String> {
+fn match_e2e_target(targets: &str, conn_id: &str, channels: Vec<String>, peers: Vec<String>) -> Option<String> {
     let channels: std::collections::HashSet<String> = channels.into_iter()
         .map(|c| e2e_fold_all(&c)).collect();
     let peers: std::collections::HashSet<String> = peers.into_iter()
-        .filter(|p| !p.starts_with("__")).map(|p| e2e_fold_all(&p)).collect();
+        .filter(|p| !p.starts_with("__"))
+        .filter_map(|p| {
+            if let Some((scope, nick)) = p.strip_prefix('@').and_then(|s| s.split_once(':')) {
+                if validate_uuid(scope).is_some() {
+                    return (conn_id.is_empty() || scope.eq_ignore_ascii_case(conn_id)).then(|| e2e_fold_all(nick));
+                }
+            }
+            Some(e2e_fold_all(&p))
+        }).collect();
     targets.split(',').flat_map(e2e_target_names)
         .find(|(_, key)| channels.contains(key) || peers.contains(key))
         .map(|(name, _)| name)
@@ -6497,22 +6533,46 @@ fn preferences_lock(username: &str) -> Arc<tokio::sync::Mutex<()>> {
 
 const PREFERENCES_VAULT_LOCKED: &str = "Unlock the vault in CryptIRC first.";
 
-async fn save_preferences(state: &AppState, username: &str, prefs: String) -> Result<(), String> {
+async fn save_preferences(state: &AppState, username: &str, mut prefs: String) -> Result<(), String> {
     if prefs.len() > 1_000_000 {
         return Err("Preferences too large (max 1MB) — not saved".into());
     }
-    serde_json::from_str::<serde_json::Value>(&prefs)
+    let mut incoming: serde_json::Value = serde_json::from_str(&prefs)
         .map_err(|_| "Preferences not valid JSON")?;
     if !state.crypto.is_unlocked(username).await {
         return Err(PREFERENCES_VAULT_LOCKED.into());
     }
-    let encrypted = state.crypto.encrypt(username, prefs.as_bytes()).await
-        .map_err(|e| format!("Prefs encrypt failed: {e}"))?;
     let dir = std::path::PathBuf::from(&state.data_dir)
         .join("users").join(safe_username(username));
+    let path = dir.join("preferences.enc");
+    // Callers hold the per-user preferences lock. Preserve a newer Clear when
+    // an older tab saves its whole preferences snapshot after that Clear.
+    if let Some(next) = incoming.as_object_mut() {
+        if let Ok(stored) = tokio::fs::read_to_string(&path).await {
+            if let Ok(previous) = state.crypto.decrypt(username, stored.trim()).await {
+                if let Ok(mut saved) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&previous) {
+                    let notices_version = |obj: &serde_json::Map<String, serde_json::Value>| {
+                        let read = |key| obj.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+                        (read("_mentionsClearTs"), read("_mentionsTs"))
+                    };
+                    if notices_version(&saved) > notices_version(next) {
+                        for field in ["mentions", "_mentionsTs", "_mentionsClearTs"] {
+                            if let Some(value) = saved.remove(field) { next.insert(field.into(), value); }
+                        }
+                        // A tab ignores its own unchanged save echo. It must see this correction.
+                        next.remove("_saveTs");
+                        prefs = incoming.to_string();
+                        if prefs.len() > 1_000_000 { return Err("Preferences too large (max 1MB) — not saved".into()); }
+                    }
+                }
+            }
+        }
+    }
+    let encrypted = state.crypto.encrypt(username, prefs.as_bytes()).await
+        .map_err(|e| format!("Prefs encrypt failed: {e}"))?;
     tokio::fs::create_dir_all(&dir).await
         .map_err(|e| format!("Prefs save failed: {e}"))?;
-    write_user_file_atomic(&dir.join("preferences.enc"), encrypted.as_bytes()).await
+    write_user_file_atomic(&path, encrypted.as_bytes()).await
         .map_err(|e| format!("Prefs save failed: {e}"))?;
     let _ = tokio::fs::remove_file(dir.join("preferences.json")).await;
     send_bulk_to_user(username, ServerEvent::Preferences { prefs });
@@ -6738,10 +6798,26 @@ async fn handle_command(
                 // Older clients omit these fields when editing a network.
                 if network.channel_keys.is_empty() { network.channel_keys.clone_from(&existing.channel_keys); }
                 if network.channel_order.is_empty() { network.channel_order.clone_from(&existing.channel_order); }
+                network.keep_nick.clone_from(&existing.keep_nick);
+                network.keep_nick_managed = existing.keep_nick_managed;
                 Ok(network)
             }, &send).await {
                 send(ServerEvent::Error { message });
             }
+        }
+        ClientMessage::KeepNick { conn_id, nick, stop, import } => {
+            if let Err(message) = keepnick::set(state, username, &conn_id, nick, stop, import).await {
+                send_self(ServerEvent::Error { message: format!("KeepNick: {message}") });
+            }
+        }
+        ClientMessage::React { conn_id, target, request_id, reaction } => {
+            if !reactions::valid_request_id(&request_id) { return; }
+            let result = if state.auth.check_ws_kdf_rate_limit(username, "reactions").is_ok() {
+                reactions::send(state, username, &conn_id, &target, reaction).await
+            } else {
+                Err("Too many reactions. Try again in a minute.")
+            };
+            send_self(ServerEvent::ReactionResult { request_id, error: result.err().map(str::to_owned) });
         }
         ClientMessage::RemoveNetwork { id } => {
             if !state.owns_network(username, &id).await { return; }
@@ -7109,12 +7185,18 @@ async fn handle_command(
                                 state.send_to_user(username, ServerEvent::IrcEcho {
                                     conn_id: conn_id.clone(),
                                     from: nick.clone(),
-                                    target: display_target,
+                                    target: display_target.clone(),
                                     text: clean.clone(),
                                     ts,
                                     kind: kind.clone(),
                                     msg_id,
                                 });
+                                if is_privmsg {
+                                    let reference = reactions::own_local(&mut *conn.lock().await, &display_target, &clean, msg_id);
+                                    if let Some(event) = reference.and_then(|r| reactions::anchor_event(&conn_id, &display_target, msg_id, &r)) {
+                                        state.send_to_user(username, event);
+                                    }
+                                }
                             }
                         }
                     }
@@ -7488,16 +7570,7 @@ async fn handle_command(
                 Err(e) => send(ServerEvent::Error { message: format!("E2E add OTPKs: {}", e) }),
             }
         }
-        ClientMessage::E2EFetchBundle { username: target_user, conn_id } => {
-            // #27: rate-limit bundle fetches per CALLER. Each fetch consumes one of the
-            // target's one-time prekeys, so without a cap a single account can loop this
-            // to drain a victim's OTPK pool on demand (silently downgrading future
-            // sessions to reduced forward secrecy). 10/60s per caller via the shared
-            // limiter is ample for legitimate use.
-            if state.auth.check_ws_kdf_rate_limit(username, "e2e_bundle").is_err() {
-                send_self(ServerEvent::Error { message: "Too many key-bundle requests — slow down".into() });
-                return;
-            }
+        ClientMessage::E2EFetchBundle { username: target_user, conn_id, req } => {
             // The IRC nick as typed (used only for an in-memory comparison against live
             // connection nicks, and echoed back so the client keys the session by the
             // same nick it is talking to — `[bob]` must not come back as `bob`).
@@ -7512,12 +7585,19 @@ async fn handle_command(
             // otherwise anyone could register username == a peer's nick and have their
             // bundle served for every fetch. Username lookup is only the fallback when no
             // live connection on this server holds the nick.
+            if let Some(id) = &req {
+                if !e2e_bridge::valid_id(id) || !conn_id.as_deref().is_some_and(|cid| state.owns_conn(username, cid)) { return; }
+            }
             let resolved = match conn_id.as_deref() {
                 // Current clients: strictly the holder of the nick on the caller's network.
-                Some(cid) => match state.resolve_nick_on_network(&nick, username, cid).await {
-                    Some(real_user) => real_user,
-                    None => {
-                        send_self(ServerEvent::Error { message: format!("No E2E key bundle for {} — no single CryptIRC user holds that nick on this network", nick) });
+                Some(cid) => match state.resolve_e2e_peer(&nick, username, cid).await {
+                    Ok(resolved) => resolved,
+                    Err(()) => {
+                        if let Some(req) = req {
+                            send_self(ServerEvent::E2EBundleMissing { conn_id: cid.to_owned(), req, reason: "ambiguous" });
+                        } else {
+                            send_self(ServerEvent::Error { message: format!("No E2E key bundle for {} (nick is ambiguous on this network)", nick) });
+                        }
                         return;
                     }
                 },
@@ -7525,28 +7605,52 @@ async fn handle_command(
                 // compatibility, minus the username-first preference: the live holder of
                 // the nick (any network, ambiguity refused), else a username match.
                 None => match state.resolve_nick_to_username(&nick).await {
-                    Some(real_user) => real_user,
+                    Some(real_user) => Some(real_user),
                     None if state.e2e_nick_is_held(&nick).await => {
                         send_self(ServerEvent::Error { message: format!("No E2E key bundle for {} (nick is ambiguous on this server)", nick) });
                         return;
                     }
-                    None => safe.clone(),
+                    None => Some(safe),
                 },
             };
             // F17: no INFO log of who fetches whose bundle (E2E contact metadata).
             tracing::debug!("[E2E] fetch_bundle resolved");
-            match state.e2e_store.fetch_bundle(&resolved, username).await {
-                Some(bundle) => {
-                    send_self(ServerEvent::E2EBundle { username: nick.clone(), bundle });
+            let local_peer = resolved.is_some();
+            if let Some(resolved) = resolved {
+                // Charge actual bundle lookups, which can consume a prekey. Ordinary
+                // IRC DMs on a network without discovery never use this quota.
+                if state.auth.check_ws_kdf_rate_limit(username, "e2e_bundle").is_err() {
+                    if let (Some(conn_id), Some(req)) = (conn_id, req) {
+                        send_self(ServerEvent::E2EBundleMissing { conn_id, req, reason: "rate-limited" });
+                    } else {
+                        send_self(ServerEvent::Error { message: "Too many key-bundle requests — slow down".into() });
+                    }
+                    return;
+                }
+                if let Some(bundle) = state.e2e_store.fetch_bundle(&resolved, username).await {
+                    send_self(ServerEvent::E2EBundle { username: nick.clone(), bundle, conn_id, req, bridge: false });
                     // Check if the target user's prekeys are running low and notify them.
                     // #58: debounce so a fetch flood can't spam the victim's channel.
                     let remaining = state.e2e_store.otpk_count(&resolved).await;
                     if remaining < 10 && otpk_low_should_notify(&resolved) {
                         state.send_to_user(&resolved, ServerEvent::E2EOTPKLow { remaining });
                     }
+                    return;
                 }
-                None => send_self(ServerEvent::Error { message: format!("No E2E key bundle for {} — they may need to unlock their vault first", nick) }),
             }
+            if let (Some(cid), Some(id)) = (conn_id, req) {
+                let reason = if local_peer { "peer-setup" }
+                    else if let Some(conn) = state.connections.get(&cid).map(|c| c.clone()) {
+                        match e2e_bridge::request(state, username, conn, &nick, &id).await {
+                            Ok(true) => return,
+                            Ok(false) => "unsupported",
+                            Err(reason) => reason,
+                        }
+                    } else { "unavailable" };
+                send_self(ServerEvent::E2EBundleMissing { conn_id: cid, req: id, reason });
+                return;
+            }
+            send_self(ServerEvent::Error { message: format!("No E2E key bundle for {} on this network", nick) });
         }
 
         // ── E2E: ratchet session state ────────────────────────────────────────
@@ -8444,8 +8548,12 @@ impl AppState {
     ///    can neither be preferred over nor make ambiguous the real holder on the
     ///    caller's own server. Within that tier: exactly one distinct owner, or None.
     async fn resolve_nick_on_network(&self, nick: &str, caller: &str, caller_conn: &str) -> Option<String> {
-        if nick.is_empty() || !self.owns_conn(caller, caller_conn) { return None; }
-        let scope = self.e2e_conn_ident(caller_conn, caller).await?;
+        self.resolve_e2e_peer(nick, caller, caller_conn).await.ok().flatten()
+    }
+
+    async fn resolve_e2e_peer(&self, nick: &str, caller: &str, caller_conn: &str) -> Result<Option<String>, ()> {
+        if nick.is_empty() || !self.owns_conn(caller, caller_conn) { return Err(()); }
+        let scope = self.e2e_conn_ident(caller_conn, caller).await.ok_or(())?;
         // r5 (codex P1 main.rs:7399): nicks compared the way the caller's network compares
         // them (its CASEMAPPING, + NFKC with UTF8MAPPING=rfc8265), never wider — Unicode
         // lowercase failed `Bob{Work}` vs the holder's `Bob[Work]` on an rfc1459 network
@@ -8477,9 +8585,9 @@ impl AppState {
         }
         if best.2 {
             warn!("[E2E] refusing ambiguous nick resolution — multiple accounts hold it on one network");
-            return None;
+            return Err(());
         }
-        best.1
+        Ok(best.1)
     }
 
     async fn owns_network(&self, username: &str, id: &str) -> bool {
@@ -8513,7 +8621,7 @@ impl AppState {
             let conn = if self.owns_conn(username, &cfg.id) {
                 self.connections.get(&cfg.id).map(|c| c.clone())
             } else { None };
-            let (connected, nick, channels, lag_ms) = if let Some(conn) = conn {
+            let (connected, nick, channels, lag_ms, reactions) = if let Some(conn) = conn {
                 let c   = conn.lock().await;
                 // The channel's display spelling (as the server announced it), not the
                 // map key: that is a case FOLD (#92), which for `#Foo[Bar]` is
@@ -8523,8 +8631,8 @@ impl AppState {
                 let chs = c.channels.values().map(|cs| ChannelState {
                     name: cs.name.clone(), topic: cs.topic.clone(), names: cs.names.clone()
                 }).collect();
-                (c.connected, c.nick.clone(), chs, c.lag_ms)
-            } else { (false, cfg.nick.clone(), vec![], None) };
+                (c.connected, c.nick.clone(), chs, c.lag_ms, reactions::available(&c))
+            } else { (false, cfg.nick.clone(), vec![], None, false) };
 
             // Include cert info (r4 C2-3: not another account's, see above)
             let has_cert = !held_by_other && self.certs.exists(&cfg.id).await;
@@ -8533,7 +8641,7 @@ impl AppState {
             } else { None };
 
             let casemapping = crate::irc::known_casemapping(&cfg.id).map(|m| m.token().to_string());
-            out.push(NetworkState { config: cfg, connected, nick, channels, lag_ms, has_cert, cert_fingerprint, casemapping });
+            out.push(NetworkState { config: cfg, connected, reactions, nick, channels, lag_ms, has_cert, cert_fingerprint, casemapping });
         }
         out
     }
@@ -9037,17 +9145,26 @@ fn otpk_low_should_notify(target: &str) -> bool {
 /// world-readable can't leak the secrets. Returns Err on serialize/write/rename failure
 /// so callers can surface a real error instead of silently writing an empty/partial file.
 async fn write_secret_json_atomic(path: &std::path::Path, value: &serde_json::Value) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::AsyncWriteExt;
     let body = serde_json::to_string_pretty(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let tmp = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-    tokio::fs::write(&tmp, body.as_bytes()).await?;
-    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
-    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).await?;
+        file.write_all(body.as_bytes()).await?;
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&tmp, path).await?;
+        if let Some(dir) = path.parent() {
+            if let Ok(file) = tokio::fs::File::open(dir).await { let _ = file.sync_all().await; }
+        }
+        Ok(())
+    }.await;
+    if let Err(e) = result {
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(e);
     }
-    let _ = tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await;
     Ok(())
 }
 
@@ -10039,11 +10156,11 @@ mod ws_fix_tests {
         assert!(checked >= 15, "found only {checked} conn_id variants — parser out of date?");
         let up = "13DAC991-6798-4923-9421-E6A174F9A8EF";
         let lo = "13dac991-6798-4923-9421-e6a174f9a8ef";
-        let c = canonicalize_cmd_ids(ClientMessage::E2EFetchBundle { username: "bob".into(), conn_id: Some(up.into()) });
+        let c = canonicalize_cmd_ids(ClientMessage::E2EFetchBundle { username: "bob".into(), conn_id: Some(up.into()), req: None });
         assert!(matches!(c, ClientMessage::E2EFetchBundle { conn_id: Some(ref id), .. } if id == lo));
         let c = canonicalize_cmd_ids(ClientMessage::E2ERelayX3DH { target_nick: "bob".into(), header: serde_json::json!({}), conn_id: Some(up.into()) });
         assert!(matches!(c, ClientMessage::E2ERelayX3DH { conn_id: Some(ref id), .. } if id == lo));
-        let c = canonicalize_cmd_ids(ClientMessage::E2EFetchBundle { username: "bob".into(), conn_id: None });
+        let c = canonicalize_cmd_ids(ClientMessage::E2EFetchBundle { username: "bob".into(), conn_id: None, req: None });
         assert!(matches!(c, ClientMessage::E2EFetchBundle { conn_id: None, .. }));
     }
 

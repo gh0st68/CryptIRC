@@ -726,10 +726,8 @@ if ! command -v cargo &>/dev/null; then
         || { echo -e "  ${RED}✗ Rust install failed — see https://rustup.rs${NC}"; exit 1; }
 fi
 BUILD_LOG=$(mktemp "${TMPDIR:-/tmp}/cryptirc-build.XXXXXX")   # mktemp: unpredictable name, no symlink-follow
-# GIT_OPTIONAL_LOCKS=0: build.rs runs `git status` for the version stamp, and as root that
-# rewrote .git/index as a root-owned file in the operator's checkout.
 _build_ok=true
-GIT_OPTIONAL_LOCKS=0 cargo build --release 2>&1 | tee "$BUILD_LOG" | tail -5 || _build_ok=false
+bash "$SCRIPT_DIR/build-release.sh" 2>&1 | tee "$BUILD_LOG" | tail -5 || _build_ok=false
 # The build runs as root (the toolchain may well be root's own), so hand target/ — and
 # anything else it created in the checkout, or in a cargo/rustup home that belongs to the
 # operator — back to them: their own next `cargo build` / `git pull` must keep working.

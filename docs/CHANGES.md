@@ -1,5 +1,21 @@
 # CryptIRC changelog
 
+## v0.5.20 (November 2026)
+
+- Add eight inline reactions in channels and PMs on supported IRC connections. Choose a reaction again to remove it, and keep counts for the current browser session.
+- Encrypt the emoji and message reference in protected chats. Confirm reactions via IRC echo and keep delayed echoes attached to the correct message.
+- Add fireworks, confetti, balloons, and floating hearts to the active chat. Respect reduced motion and add a Message effects switch in Notifications.
+- Start Signal-style encrypted DMs between compatible users on the same CryptIRC instance or through the TwistedNET IRCd bridge. Confirm new fingerprints.
+- Scope DM sessions and trust to the IRC connection. Keep the draft and ask for consent before sending a first PM in plaintext when encrypted discovery is unavailable.
+- Fix the channel and PM lock action so it opens encrypted chat unlock. Recover from stalled key lookups and offer retry or reload when needed.
+- Keep notices after reading them until Clear. Sync read and clear state across tabs and keep stale saves from bringing back cleared notices.
+- Add private in-chat latency alerts for the active network, with an adjustable threshold and an off switch. Add private CTCP alerts and separate VERSION and FINGER switches.
+- Store /keepnick per network so it can reclaim a nick after reconnects, service restarts, or while the browser is closed. Use /unkeepnick to stop.
+- Add 30 original static themes for a total of 257. Improve text and control contrast across the collection, including the encryption dialog.
+- Switch Linux installs, updates, and source builds to a lighter build at 2 GiB or less of available memory. Keep manual low-memory and normal build overrides.
+- Move the free hosted client and Linux installation steps to the top of the README. Update the installation guide and publish the release notes on CryptIRC News.
+- Bump the web and desktop versions to 0.5.20. Verify 381 Arch testnet checks, browser and theme checks, and repeat independent reviews with Claude and agy.
+
 ## v0.5.15 (November 2026)
 
 - Peer verification now uses encrypted state alone. The server removes old plaintext trust mirrors, and peers known only through those records prompt for confirmation again.

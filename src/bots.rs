@@ -4899,7 +4899,7 @@ mod r8_srv_a_bot_tests {
     fn conn_with(ipc: Option<tokio::sync::mpsc::UnboundedSender<cryptirc::ipc::IpcMessage>>, id: &str) -> Arc<Mutex<IrcConnection>> {
         Arc::new(Mutex::new(IrcConnection {
             conn_id: id.into(), nick: "me".into(), connected: true, lag_ms: None,
-            channels: HashMap::new(), ipc_out: Arc::new(Mutex::new(ipc)), message_tags: false,
+            channels: HashMap::new(), ipc_out: Arc::new(Mutex::new(ipc)), message_tags: false, e2e_bridge: Default::default(), reactions: Default::default(), keepnick_retry: Default::default(),
             self_userhost: String::new(), registered: true, list_request: None, echo_message_enabled: false,
             names_buf: HashMap::new(), who_pending: HashSet::new(), who_away: HashMap::new(),
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),

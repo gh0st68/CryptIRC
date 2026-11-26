@@ -153,6 +153,8 @@ document.addEventListener('DOMContentLoaded', () => bindControls(document, {
     filterChanList: ()=>filterChanList(),
     setChanListCacheTime: ()=>setChanListCacheTime(),
     saveNotifPrefs: ()=>saveNotifPrefs(),
+    saveIrcAlertPrefs: ()=>saveIrcAlertPrefs(),
+    saveChatEffectsPreference: function(){saveChatEffectsPreference(this)},
     onNotifToggle: ()=>onNotifToggle(),
     saveNotifSoundPrefs: ()=>saveNotifSoundPrefs(),
     pickNotifSoundFile: function(){pickNotifSoundFile(this)},

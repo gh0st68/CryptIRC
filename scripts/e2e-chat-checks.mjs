@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {checkSealedReaction} from './reaction-checks.mjs';
 
 const q = JSON.stringify;
 const promptOpen = "document.getElementById('custom-prompt-overlay').classList.contains('open')";
@@ -11,6 +12,7 @@ const openEncryptionSettings = "document.querySelector('[data-cryptirc-click=ope
   "document.querySelector('#encrypt-panel-body [data-encrypt-cmd=unlock]').click()";
 const setupText = 'Copy this E2E recovery code';
 const unlockText = 'Enter your E2E recovery code';
+const panelUnlock = '#encrypt-panel-body [data-encrypt-cmd=unlock]';
 
 const fillPrompt = (browser, value) => browser.evaluate(input + '.value=' + q(value) + ';' + acceptPrompt);
 const waitPrompt = (browser, waitFor, text) => waitFor(
@@ -114,6 +116,18 @@ async function compose(browser, network, target, text) {
   await browser.send('Input.dispatchKeyEvent', {type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
 }
 
+async function clickVisible(browser, selector) {
+  const point = await browser.evaluate(`(() => {
+    const el = document.querySelector(${q(selector)});
+    const r = el.getBoundingClientRect();
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    if (!el.contains(document.elementFromPoint(x, y))) throw new Error('Control is covered: ' + ${q(selector)});
+    return {x, y};
+  })()`);
+  await browser.send('Input.dispatchMouseEvent', {type:'mousePressed', button:'left', clickCount:1, ...point});
+  await browser.send('Input.dispatchMouseEvent', {type:'mouseReleased', button:'left', clickCount:1, ...point});
+}
+
 const row = (browser, net, target, text) => browser.evaluate(
   'getBuf(' + q(net) + ',' + q(target) + ').some(m=>m.text===' + q(text) + ')');
 const hasKey = (browser, channel) => browser.evaluate('!!E2E.channelKeys[' + q(channel) + ']');
@@ -151,6 +165,12 @@ export async function checkE2eChat({
   check('Escape dismisses setup without saving Ignore', !await browser.evaluate('_e2eLsGet(_e2eSetupPreference())'));
   await browser.evaluate('void handleEncryptCommand(["on",'+q(other)+'],'+q(networkA)+','+q(channel)+')');
   await waitPrompt(browser, waitFor, setupText);
+  await browser.evaluate('void customPrompt("Other setup-time dialog")');
+  check('replacing the setup prompt does not save Ignore', await waitFor(
+    () => browser.evaluate('!E2E._interactiveUnlock && !_e2eLsGet(_e2eSetupPreference())'), 'replaced setup prompt settled', 3000));
+  await browser.evaluate(cancelPrompt);
+  await browser.evaluate('void handleEncryptCommand(["on",'+q(other)+'],'+q(networkA)+','+q(channel)+')');
+  await waitPrompt(browser, waitFor, setupText);
   check('recovery setup can be ignored when starting encryption', await browser.evaluate(
     "document.getElementById('custom-prompt-cancel').textContent==='Ignore'"));
   const declinedAt = browser.frames.length;
@@ -162,6 +182,24 @@ export async function checkE2eChat({
   await reopen(browser, waitFor, 'window._appShown && E2E._krReceived && !E2E._booting', 'reopened after ignoring setup');
   await pause(1450);
   check('reopening after Ignore leaves setup deferred', await browser.evaluate('!('+promptOpen+') && _e2eLsGet(_e2eSetupPreference())===true'));
+  await browser.evaluate('setActive(' + q(networkA) + ',' + q(channel) + ')');
+  await browser.evaluate(`new Promise(resolve => {
+    void navigator.locks.request('cryptirc-e2e:' + _e2eUser() + ':keyring-setup', () => new Promise(release => {
+      window.releaseSetupLock = release;
+      resolve();
+    }));
+  })`);
+  try {
+    await clickVisible(browser, '#e2e-lock');
+    await clickVisible(browser, panelUnlock);
+    check('an older tab holding the setup lock cannot block the recovery prompt', await waitFor(
+      () => browser.evaluate(promptOpen + '&&' + promptText + '.includes(' + q(setupText) + ')'),
+      'setup prompt while the old browser lock is held', 6000));
+    await browser.evaluate(cancelPrompt + ';closeEncryptPanel()');
+    await waitFor(() => browser.evaluate('!E2E._interactiveUnlock'), 'contended setup prompt dismissed');
+  } finally {
+    await browser.evaluate('window.releaseSetupLock(); delete window.releaseSetupLock');
+  }
   const competitor = await chromium('encrypted-setup-race');
   await login(competitor, owner, password, waitFor);
   await waitFor(() => competitor.evaluate('E2E._vaultUp === true && E2E._krReceived'), 'second setup device ready');
@@ -176,6 +214,9 @@ export async function checkE2eChat({
   await fillPrompt(competitor, losingCode);
   await waitFor(() => competitor.evaluate('getBuf(' + q(networkA) + ',' + q(channel) +
     ').some(m=>m.text.includes("Discard it"))'), 'losing setup shows a discard message');
+  check('the losing setup shows a visible message to discard its recovery code', await competitor.evaluate(`
+    document.getElementById('generic-toast')?.textContent.includes('Discard the code shown here')
+  `));
   check('only the winning concurrent setup creates a valid recovery code',
     !await competitor.evaluate('E2E.keyReady') &&
     await competitor.evaluate('(()=>{return !E2E.identityReady})()'));
@@ -190,11 +231,16 @@ export async function checkE2eChat({
 
   await waitFor(() => browser.evaluate('E2E._txq.length===0'), 'initiator prekeys sent');
   await waitFor(() => peer.evaluate('E2E._txq.length===0'), 'responder prekeys sent');
-  await browser.evaluate('handleEncryptCommand(["on",' + q(other) + '],' + q(networkA) + ',' + q(other) + ')');
-  await acceptIdentity(browser, waitFor);
-  await waitFor(() => browser.evaluate('!!E2E.dmSessions[' + q(other) + ']'), 'initiator session');
+  await browser.evaluate('_e2eAutoMiss.clear()');
   const dm = 'encrypted DM '+stamp;
+  const peerKey = `_e2eDmKey(${q(other)},${q(networkA)})`;
   await compose(browser, networkA, other, dm);
+  await waitFor(() => browser.evaluate("!!document.querySelector('#e2e-id-accept:not(:disabled)')"), 'same-instance automatic identity prompt');
+  check('first same-instance PM starts encryption and holds the message for identity confirmation',
+    !otherWs.events.some(ev=>ev.text?.includes(dm)));
+  await acceptIdentity(browser, waitFor);
+  await waitFor(() => browser.evaluate(`!!E2E.dmSessions[${peerKey}]`), 'initiator session');
+  await waitFor(() => otherWs.events.some(ev => ev.text?.startsWith('[e2ex3dh]')), 'X3DH header reached the peer');
   await acceptIdentity(peer, waitFor);
   await waitFor(() => row(peer, networkB, owner, dm), 'recipient decrypted first DM');
   check('testnet receives authenticated DM ciphertext',
@@ -204,9 +250,12 @@ export async function checkE2eChat({
   await compose(peer, networkB, owner, reply);
   await waitFor(() => row(browser, networkA, other, reply), 'initiator decrypted ratchet reply');
   check('Double Ratchet works in both directions on the linked IRC testnet', true);
-  const pinnedFingerprint=await browser.evaluate('E2E.trustStore['+q(other)+'].fingerprint');
+  if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
+    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:dm,target:'PM',emoji:'👍'});
+  }
+  const pinnedFingerprint=await browser.evaluate(`E2E.trustStore[${peerKey}].fingerprint`);
   check('confirmed peer can be marked verified on this device',
-    await browser.evaluate('e2eMarkVerified('+q(other)+')'));
+    await browser.evaluate(`e2eMarkVerified(${q(other)},${q(networkA)})`));
   await browser.evaluate('e2eSaveState()');
   await waitFor(()=>browser.evaluate('E2E._txq.length===0'),'encrypted trust state sent');
   check('peer trust is never sent or stored as a plaintext mirror',
@@ -227,6 +276,10 @@ export async function checkE2eChat({
   check('testnet receives shared-key ciphertext',
     otherWs.events.some(ev => ev.type === 'irc_message' && ev.text?.startsWith('sd8~')) &&
     !otherWs.events.some(ev => ev.text?.includes(channelText)));
+  if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
+    await peer.evaluate('setActive('+q(networkB)+','+q(channel)+')');
+    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:channelText,target:'channel',emoji:'🎉'});
+  }
   const action = 'encrypted action '+stamp;
   await compose(browser, networkA, channel, '/me '+action);
   await waitFor(() => row(peer, networkB, channel, action), 'recipient decrypted action');
@@ -283,6 +336,126 @@ export async function checkE2eChat({
   await waitFor(() => freshDevice.evaluate('E2E._bootPhase==="locked" && E2E._krReceived'), 'new device stays locked');
   await pause(1450);
   check('a new device does not automatically ask for the recovery code', !await freshDevice.evaluate(promptOpen));
+  await freshDevice.evaluate('setActive(' + q(networkA) + ',' + q(channel) + ')');
+  await clickVisible(freshDevice, '#e2e-lock');
+  await freshDevice.evaluate(`
+    document.getElementById('generic-toast')?.remove();
+    window.testOriginalWsReady = _wsReady;
+    _wsReady = () => false;
+  `);
+  await clickVisible(freshDevice, panelUnlock);
+  const connectionNotice = await freshDevice.evaluate(`
+    document.getElementById('generic-toast')?.textContent.includes('Connect to CryptIRC') === true &&
+    !document.querySelector(${q(panelUnlock)}).disabled && !(${promptOpen}) &&
+    !document.getElementById('vault-overlay').classList.contains('show')
+  `);
+  await freshDevice.evaluate('_wsReady = window.testOriginalWsReady; delete window.testOriginalWsReady');
+  check('the channel lock explains when encrypted chats cannot be unlocked offline', connectionNotice);
+  await freshDevice.evaluate(`
+    window.testOriginalWsend = wsend;
+    wsend = msg => msg.type === 'e2e_load_keyring' ? false : window.testOriginalWsend(msg);
+  `);
+  await clickVisible(freshDevice, panelUnlock);
+  await waitFor(() => freshDevice.evaluate(`
+    document.getElementById('generic-toast')?.textContent.includes('Could not load your encryption keyring') &&
+    !document.querySelector(${q(panelUnlock)}).disabled
+  `), 'a failed keyring load reports an error and allows retry');
+  await freshDevice.evaluate('wsend = window.testOriginalWsend; delete window.testOriginalWsend');
+  check('a failed encryption keyring request gives retry feedback', true);
+  await freshDevice.evaluate(`
+    window.testOriginalIdbOpen = indexedDB.open;
+    indexedDB.open = () => (window.testStalledIdbOpen = {});
+  `);
+  try {
+    await clickVisible(freshDevice, panelUnlock);
+    check('a stalled browser key cache falls back to the recovery prompt', await waitFor(
+      () => freshDevice.evaluate(promptOpen + '&&' + promptText + '.includes(' + q(unlockText) + ')'),
+      'recovery prompt after browser key cache timeout', 8000));
+    check('a late cache open closes its database handle', await freshDevice.evaluate(`(() => {
+      const request = window.testStalledIdbOpen;
+      let closed = false;
+      request.result = { close() { closed = true; } };
+      request.onsuccess();
+      return closed;
+    })()`));
+  } finally {
+    await freshDevice.evaluate('indexedDB.open = window.testOriginalIdbOpen; delete window.testOriginalIdbOpen; delete window.testStalledIdbOpen');
+  }
+  check('a stalled remember-device write aborts its transaction and closes the database', await freshDevice.evaluate(`(async () => {
+    const open = indexedDB.open;
+    let aborted = false, closed = false;
+    indexedDB.open = () => {
+      const request = {};
+      queueMicrotask(() => {
+        request.result = {
+          objectStoreNames: { contains: () => true },
+          transaction: () => ({
+            objectStore: () => ({ put: () => ({}) }),
+            abort() { aborted = true; },
+          }),
+          close() { closed = true; },
+        };
+        request.onsuccess();
+      });
+      return request;
+    };
+    try { return !await _e2eIdbPutKey(_e2eUser(), {}) && aborted && closed; }
+    finally { indexedDB.open = open; }
+  })()`));
+  await freshDevice.evaluate('void customPrompt("Other local dialog")');
+  check('replacing the recovery prompt releases the original unlock attempt', await waitFor(
+    () => freshDevice.evaluate('!E2E._interactiveUnlock && !document.querySelector(' + q(panelUnlock) + ').disabled'),
+    'replaced recovery prompt released the unlock action', 3000));
+  await freshDevice.evaluate(cancelPrompt);
+
+  const beforeReload = await freshDevice.evaluate('performance.timeOrigin');
+  await freshDevice.evaluate(`
+    window.testOriginalSetTimeout = window.setTimeout;
+    window.testOriginalUnlock = e2ePromptDeviceUnlock;
+    window.stallChecks = 0;
+    window.setTimeout = (fn, delay, ...args) => window.testOriginalSetTimeout(
+      delay === 30000 ? () => { window.stallChecks++; fn(...args); } : fn,
+      delay === 30000 ? 300 : delay, ...args);
+    e2ePromptDeviceUnlock = () => new Promise(resolve => { window.finishStalledUnlock = resolve; });
+  `);
+  try {
+    await clickVisible(freshDevice, panelUnlock);
+    await freshDevice.evaluate('void customPrompt("Keep this dialog open")');
+    check('the reload fallback waits while a prompt is visible', await waitFor(
+      () => freshDevice.evaluate('window.stallChecks > 0 && !!document.querySelector(' + q(panelUnlock + ':disabled') + ')'),
+      'the open prompt paused the reload fallback', 3000));
+    await freshDevice.evaluate(cancelPrompt);
+    check('a prolonged unlock offers an explicit reload instead of a disabled button', await waitFor(
+      () => freshDevice.evaluate(`!!document.querySelector('#encrypt-panel-body [data-encrypt-cmd=reload]:not(:disabled)')`),
+      'reload action for a prolonged unlock', 3000));
+    await clickVisible(freshDevice, '#encrypt-panel-body [data-encrypt-cmd=reload]');
+    check('the stalled-unlock reload action reloads the page', await waitFor(
+      () => freshDevice.evaluate(`performance.timeOrigin !== ${beforeReload} && window._appShown &&
+        E2E._bootPhase === 'locked' && E2E._krReceived`).catch(() => false), 'reloaded after stalled unlock'));
+  } finally {
+    await freshDevice.evaluate(`
+      if (window.testOriginalUnlock) {
+        window.finishStalledUnlock?.();
+        window.setTimeout = window.testOriginalSetTimeout;
+        e2ePromptDeviceUnlock = window.testOriginalUnlock;
+        delete window.finishStalledUnlock;
+        delete window.testOriginalSetTimeout;
+        delete window.testOriginalUnlock;
+        delete window.stallChecks;
+      }
+    `).catch(() => {});
+  }
+  await freshDevice.evaluate('setActive(' + q(networkA) + ',' + q(channel) + ')');
+  await clickVisible(freshDevice, '#e2e-lock');
+  await clickVisible(freshDevice, panelUnlock);
+  await waitPrompt(freshDevice, waitFor, unlockText);
+  check('unlock from the channel lock opens a focused recovery prompt in front of Encryption',
+    await freshDevice.evaluate(`(() => {
+      const field = ${input}, r = field.getBoundingClientRect();
+      return document.activeElement === field && field === document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);
+    })()`));
+  await freshDevice.evaluate(cancelPrompt + ';closeEncryptPanel()');
+  await waitFor(() => freshDevice.evaluate('!E2E._interactiveUnlock'), 'channel lock recovery prompt dismissed');
   const lockedDraft = 'draft held until explicitly unlocked '+stamp;
   const lockedAt = freshDevice.frames.length;
   await compose(freshDevice, networkA, channel, lockedDraft);
@@ -290,6 +463,9 @@ export async function checkE2eChat({
   await fillPrompt(freshDevice, losingCode);
   await waitFor(() => freshDevice.evaluate("E2E._bootPhase==='locked'&& !("+promptOpen+")"), 'incorrect code rejected');
   check('a recovery code from the losing setup cannot unlock the keyring', !await freshDevice.evaluate('E2E.keyReady'));
+  check('an incorrect recovery code gives visible retry feedback', await freshDevice.evaluate(`
+    document.getElementById('generic-toast')?.textContent.includes('That recovery code did not unlock your encrypted chats')
+  `));
   check('send on a locked encrypted chat keeps the draft and sends no plaintext',
     await freshDevice.evaluate('document.getElementById("msg-input").value==='+q(lockedDraft)) &&
     !freshDevice.frames.slice(lockedAt).some(frame=>frame.includes(lockedDraft)));
@@ -311,10 +487,9 @@ export async function checkE2eChat({
     !freshDevice.frames.slice(lockedAt).some(frame=>frame.includes(actionDraft.slice(4))) &&
     await freshDevice.evaluate('document.getElementById("msg-input").value==='+q(actionDraft)));
   check('recovered device restores the verified peer pin from encrypted state',
-    await freshDevice.evaluate('E2E.trustStore['+q(other)+']?.verified===true && E2E.trustStore['+
-      q(other)+'].fingerprint==='+q(pinnedFingerprint)));
+    await freshDevice.evaluate(`E2E.trustStore[${peerKey}]?.verified===true && E2E.trustStore[${peerKey}].fingerprint===${q(pinnedFingerprint)}`));
   check('new device recovers identity, DM ratchet and channel key without sending the code or a vault unlock',
-    await freshDevice.evaluate('!!E2E.dmSessions[' + q(other) + ']') &&
+    await freshDevice.evaluate(`!!E2E.dmSessions[${peerKey}]`) &&
     !freshDevice.frames.slice(freshCount).some(frame => frame.includes(ownerCode) || frame.includes('"type":"unlock_vault"')));
   const afterRestore = 'DM after recovery '+stamp;
   await compose(freshDevice, networkA, other, afterRestore);
@@ -358,4 +533,107 @@ export async function checkE2eChat({
   await compose(browser, networkA, channel, afterOff);
   await otherWs.wait(ev => ev.type === 'irc_message' && ev.text === afterOff,'channel send after acknowledged disable');
   check('server permits ordinary chat after explicit, acknowledged disable', true);
+}
+
+export async function checkCrossInstanceE2e({browser,peer,check,waitFor,owner,ownerWs,remote,password,networkA,remoteNetwork,remoteWs,stamp,otherWs,remoteData,ordinary,ordinaryLines}) {
+  await login(peer,remote,password,waitFor);
+  await waitFor(() => peer.evaluate('E2E._vaultUp && E2E._krReceived'), 'bridge peer discovery');
+  await peer.evaluate(openEncryptionSettings);
+  await setUpRecovery(peer,waitFor,check);
+  await peer.evaluate('closeEncryptPanel()');
+  await waitFor(()=>fs.stat(path.join(remoteData,'e2e',remote,'bundle.json')).catch(()=>null),'remote prekey bundle stored');
+
+  const first = 'first encrypted cross-instance DM '+stamp;
+  const framesAtStart = browser.frames.length;
+  await compose(browser,networkA,remote,first);
+  await waitFor(()=>browser.evaluate("!!document.querySelector('#e2e-id-accept:not(:disabled)')"),'cross-instance automatic identity prompt');
+  check('the bridge holds the first DM for identity confirmation',!remoteWs.events.some(e=>e.text?.includes(first)));
+  await acceptIdentity(browser,waitFor);
+  await acceptIdentity(peer,waitFor);
+  await waitFor(()=>row(peer,remoteNetwork,owner,first),'cross-instance peer decrypted first message');
+  check('linked UnrealIRCd servers carry ciphertext between independent CryptIRC instances',
+    remoteWs.events.some(e=>e.type==='irc_message'&&e.from===owner&&e.text?.startsWith('[e2edm2]')) &&
+    !remoteWs.events.some(e=>e.text?.includes(first)) && !browser.frames.slice(framesAtStart).some(frame=>frame.includes(first)));
+  const reply = 'encrypted cross-instance reply '+stamp;
+  await compose(peer,remoteNetwork,owner,reply);
+  check('the cross-instance Double Ratchet decrypts the reply',await waitFor(()=>row(browser,networkA,remote,reply),'cross-instance reply'));
+  if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
+    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:first,target:'cross-instance PM',emoji:'✅'});
+  }
+  check('bridge discovery is private to the intended IRC users',!otherWs.events.some(e=>e.type==='e2e_bundle'&&e.username===remote));
+  const alternate = 'deadbeef-1234-4cce-8b52-555555555555';
+  check('a cross-instance session and pin are isolated from the same nick on another network',await browser.evaluate(`
+    e2eTargetState(${q(remote)},{conn_id:${q(networkA)}}).mode==='dm' &&
+    e2eTargetState(${q(remote)},{conn_id:${q(alternate)}}).mode==='none' &&
+    !E2E.trustStore[_e2eDmKey(${q(remote)},${q(alternate)})]`));
+  check('scoped encrypted chat fails closed without its network',await browser.evaluate(
+    `e2eTargetState(${q(remote)}).mode==='blocked'`));
+  check('a legacy pin alone does not turn a new conversation into a global session',await browser.evaluate(`(() => {
+    const nick=${q(remote)};
+    E2E.trustStore[nick]={fingerprint:'legacy test pin'};
+    try { return _e2eDmKey(nick,${q(alternate)})===${q('@'+alternate+':'+remote)}; }
+    finally { delete E2E.trustStore[nick]; }
+  })()`));
+  await browser.evaluate(`handleEncryptCommand(['off',${q(remote)}],${q(alternate)},${q(remote)})`);
+  check('disabling a same-nick conversation only affects its own network',await browser.evaluate(`
+    E2E.state.dm[_e2eDmKey(${q(remote)},${q(alternate)})]?.on===0 &&
+    e2eTargetState(${q(remote)},{conn_id:${q(networkA)}}).mode==='dm'`));
+  const plain = 'ordinary IRC DM '+stamp;
+  await compose(browser,networkA,ordinary,plain);
+  const allow = `Array.from(document.querySelectorAll('button')).find(button=>button.textContent==='Allow unencrypted')`;
+  await waitFor(()=>browser.evaluate(`!!(${allow})`),'plaintext confirmation for a client without bridge support');
+  check('the ordinary IRC client receives no message before plaintext consent',!ordinaryLines.some(line=>line.endsWith(' :'+plain)));
+  await browser.evaluate(`(${allow}).click()`);
+  check('ordinary IRC DMs work on the bridge network after explicit consent',await waitFor(
+    ()=>ordinaryLines.some(line=>line.endsWith(' :'+plain)),'ordinary IRC client received the authorized plaintext'));
+  const busyNick='pkq'+stamp;
+  const busyDraft='held during bridge throttling '+stamp;
+  const busyFrames=browser.frames.length;
+  const manualBusyNick='pkm'+stamp;
+  const unsupportedNick='pku'+stamp;
+  const unsupportedDraft='held pending plaintext consent '+stamp;
+  const fixtureReasons={ [busyNick]:'peer-busy', [manualBusyNick]:'peer-busy', [unsupportedNick]:'unsupported' };
+  await browser.evaluate(`(() => {
+    window.testBridgeWsend=wsend;
+    const fixture=${q(fixtureReasons)};
+    window.testBridgeRequests=[];
+    wsend=message=>{
+      if(message.type==='e2e_fetch_bundle' && Object.hasOwn(fixture,message.username)){
+        window.testBridgeRequests.push(message.username);
+        queueMicrotask(()=>e2eHandleEvent({type:'e2e_bundle_missing',conn_id:message.conn_id,req:message.req,reason:fixture[message.username]}));
+        return true;
+      }
+      return window.testBridgeWsend(message);
+    };
+  })()`);
+  try {
+    await compose(browser,networkA,busyNick,busyDraft);
+    await waitFor(()=>browser.evaluate(`E2E.lastBlockReason?.includes('temporarily busy')`),'busy bridge response');
+    check('bridge throttling keeps the draft and gives no plaintext prompt',
+      !browser.frames.slice(busyFrames).some(frame=>frame.includes(busyDraft)) && await browser.evaluate(
+        `!(${allow}) && document.getElementById('msg-input').value===${q(busyDraft)}`));
+    await new Promise(resolve=>setTimeout(resolve,250));
+    await compose(browser,networkA,busyNick,busyDraft);
+    await new Promise(resolve=>setTimeout(resolve,250));
+    check('retrying a busy bridge peer preserves the hold through the cooldown',await browser.evaluate(
+      `window.testBridgeRequests.filter(nick=>nick===${q(busyNick)}).length===1 && !(${allow}) &&
+       document.getElementById('msg-input').value===${q(busyDraft)}`));
+    await browser.evaluate(`handleEncryptCommand(['on',${q(manualBusyNick)}],${q(networkA)},${q(manualBusyNick)})`);
+    await waitFor(()=>browser.evaluate(`getBuf(${q(networkA)},${q(manualBusyNick)}).some(m=>m.text.includes('temporarily busy'))`),'busy reply to manual encryption');
+    await compose(browser,networkA,manualBusyNick,busyDraft);
+    await new Promise(resolve=>setTimeout(resolve,250));
+    check('a manual encryption request uses the same busy cooldown as the composer',await browser.evaluate(
+      `window.testBridgeRequests.filter(nick=>nick===${q(manualBusyNick)}).length===1 && !(${allow}) &&
+       document.getElementById('msg-input').value===${q(busyDraft)}`));
+    const unsupportedFrames=browser.frames.length;
+    await compose(browser,networkA,unsupportedNick,unsupportedDraft);
+    await waitFor(()=>browser.evaluate(`!!(${allow})`),'plaintext confirmation when no bridge is advertised');
+    await browser.evaluate(`(${allow}).previousElementSibling.click()`);
+    check('missing CAP cannot silently send a first DM in plaintext',
+      !browser.frames.slice(unsupportedFrames).some(frame=>frame.includes(unsupportedDraft)) && await browser.evaluate(
+        `document.getElementById('msg-input').value===${q(unsupportedDraft)}`));
+  } finally {
+    await browser.evaluate(`wsend=window.testBridgeWsend;delete window.testBridgeWsend;delete window.testBridgeRequests;document.getElementById('msg-input').value=''`);
+  }
+  check('the bridge browser reports no unhandled exceptions',peer.errors.length===0);
 }

@@ -19,7 +19,8 @@ const server=http.createServer(async(req,res)=>{
   let data=await fs.readFile(file);
   if(file.endsWith('/app.js')){
    const controls=await fs.readFile(path.join(staticRoot,'page-controls.js'),'utf8');
-   data=Buffer.from((controls+'\n'+data.toString()).replaceAll('__CRYPTIRC_VERSION__','test').replaceAll('__CRYPTIRC_BUILD__','test'));
+   const reactions=await fs.readFile(path.join(staticRoot,'reactions.js'),'utf8');
+   data=Buffer.from((controls+'\n'+reactions+'\n'+data.toString()).replaceAll('__CRYPTIRC_VERSION__','test').replaceAll('__CRYPTIRC_BUILD__','test'));
   }
   res.setHeader('Content-Type',({'.html':'text/html','.js':'application/javascript','.svg':'image/svg+xml','.json':'application/json','.ttf':'font/ttf','.otf':'font/otf'})[path.extname(file)]||'application/octet-stream');res.end(data);
  }catch{res.writeHead(404).end();}

@@ -1008,13 +1008,10 @@ fi
 
 # ── Step 5: build ─────────────────────────────────────────────────────────────
 step "[5/6] Building CryptIRC"
-echo -e "  ${DIM}First build takes 3-5 minutes. Please wait.${NC}\n"
+echo -e "  ${DIM}The first build can take several minutes, especially with low memory.${NC}\n"
 cd "$REPO_DIR"       # SCRIPT_DIR/REPO_DIR were resolved up top (the latest code was pulled there too)
-# GIT_OPTIONAL_LOCKS=0: build.rs runs `git status` for the version stamp. Under sudo, git
-# (>= 2.37) trusts the invoking user's repo, and as root a plain `git status` would rewrite
-# .git/index as a root-owned file in their checkout. This makes it read-only.
-if ! GIT_OPTIONAL_LOCKS=0 cargo build --release; then
-    die "Build failed (see output above). Common causes: low RAM (need ~1 GB free — add swap) or missing libssl-dev."
+if ! bash "$SCRIPT_DIR/build-release.sh"; then
+    die "Build failed (see output above). Check that libssl-dev is installed. If the compiler ran out of memory, add swap or build on a machine with more RAM."
 fi
 [[ -f target/release/cryptirc ]] || die "Build reported success but target/release/cryptirc is missing."
 
@@ -1116,7 +1113,7 @@ if [[ "$HAVE_IRC_CORE" == true ]]; then
 elif [[ -f "$REPO_DIR/src/bin/irc_core.rs" || -f src/bin/irc_core.rs ]]; then
     die "Build succeeded but the irc-core daemon binary (target/release/irc_core) is missing.
   This checkout expects the daemon — installing only the web binary would leave the
-  site up but every IRC connection dead. Aborting. Re-run 'cargo build --release' and
+  site up but every IRC connection dead. Aborting. Re-run 'bash deploy/build-release.sh' and
   check for a build error specific to the irc_core binary."
 fi
 # Building as root leaves a root-owned target/ (and possibly Cargo.lock / .git files) in the

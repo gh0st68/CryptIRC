@@ -550,6 +550,13 @@ function saveInputHistory(){
   savePrefsToServer();
 }
 let lagMap={};
+const highLagNotified=new Set();
+const pendingCtcpNotices=[];
+const IRC_ALERT_PREFS_KEY='cryptirc_irc_alerts';
+const IRC_LATENCY_DEFAULT=300;
+const IRC_LATENCY_MIN=100;
+const IRC_LATENCY_MAX=5000;
+let ircAlertPrefs=loadIrcAlertPrefs();
 let pushSubscription=null;
 let swRegistration=null;
 const IMG_EXTS=/\.(jpg|jpeg|png|gif|webp|avif|heic|heif|bmp|tiff?|ico)(\?.*)?$/i;
@@ -879,6 +886,7 @@ async function doLogout() {
   if(!(await customConfirm('Sign out?','Sign out'))) return;
   clearTranslationData();
   clearTweetData();
+  resetChatReactions();
   try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){}
   // #6/F25: unsubscribe push BEFORE the logout POST (and before dropping the token).
   // DELETE /cryptirc/push/subscribe needs the Bearer token to remove the server
@@ -1253,15 +1261,15 @@ function connectWs() {
 // never be sent (session ended) it is marked "not sent" instead of silently
 // pretending it went out.
 const _rateRows=new WeakMap();          // queued WS payload -> optimistic msg object
+const _sentChatRows=new WeakMap();      // IRC echo correlation on reaction-enabled connections
 // r9: a line to several recipients (/msg a,b text, unencrypted: ONE payload) has a row in
 // each recipient's buffer — the first row is the tracked one, the others follow its state.
 const _rowTwins=new WeakMap();          // first row -> [the other recipients' rows]
 function _queueChatSend(payload,msg){
+  if(reactionEnabled(payload.conn_id)) _sentChatRows.set(payload,msg);
+  _rateRows.set(payload,msg);
   rateLimitedSend(payload);
-  if(_rateQueue.includes(payload)){
-    _rateRows.set(payload,msg);
-    if(!_wsReady()) msg.sendState='pending';
-  }
+  if(_rateQueue.includes(payload) && !_wsReady()) msg.sendState='pending';
 }
 function _rateSent(payload){
   const m=_rateRows.get(payload); if(!m) return;
@@ -1698,7 +1706,7 @@ window.addEventListener('load',_installStatusNickE2eShims);
 function _statusNickLock(){
   const lock=document.getElementById('e2e-lock');
   if(!lock||!active||active.target!==_STATUS_NICK_Q||typeof e2eTargetState!=='function') return;
-  const st=e2eTargetState('status');
+  const st=e2eTargetState('status',{conn_id:active.conn_id});
   const tr=window.E2E&&E2E.trustStore?E2E.trustStore['status']:null;
   const enc=st.mode==='psk'||st.mode==='dm', blocked=st.mode==='blocked';
   lock.innerHTML=(enc||blocked)
@@ -1718,7 +1726,7 @@ function _statusNickPlainBlocked(raw){
   if(!txt||/^\x01(?!ACTION )/.test(txt)) return false;   // empty / CTCP request (not /me)
   if(/^(\[e2edm2\]|sd8~|\[e2ex3dh\])/.test(txt)) return false;   // already E2E wire format
   if(typeof e2eTargetState!=='function') return false;     // no E2E engine at all
-  try{ return e2eTargetState('status').mode!=='none'; }catch(_){ return true; }
+  try{ return e2eTargetState('status',{conn_id:typeof active!=='undefined'?active?.conn_id:undefined}).mode!=='none'; }catch(_){ return true; }
 }
 function _wireRaw(raw){
   const m=/^((?:@\S+ +)?(?::\S+ +)?(?:PRIVMSG|NOTICE|TAGMSG) +)(\S+)/i.exec(raw);
@@ -1802,7 +1810,7 @@ function wsend(obj){
           // Strip CTCP ACTION wrapper so it matches the server's cleaned text
           if(txt.startsWith('\x01ACTION ')&&txt.endsWith('\x01')) txt=txt.slice(8,-1);
           if(!window._sentMsgs) window._sentMsgs=[];
-          window._sentMsgs.push({t:Date.now(),conn:obj.conn_id,target:parts[1],text:txt});
+          window._sentMsgs.push({t:Date.now(),conn:obj.conn_id,target:parts[1],text:txt,row:_sentChatRows.get(obj)});
           // Remember CTCP requests so their NOTICE replies get past PM protection.
           if(upper.startsWith('PRIVMSG ')&&txt.charCodeAt(0)===1&&!txt.startsWith('\x01ACTION ')) _ctcpAsked[obj.conn_id+'|'+parts[1].toLowerCase()]=Date.now();
           // Bound the list: the TTL filter only runs when an echo arrives, so cap
@@ -1903,7 +1911,7 @@ function handleEvent(ev) {
     // mark them "not sent"; hide the previous account's UI behind the login screen;
     // and only drop the stored token if it is the one that failed (another tab may
     // already hold a newer one, e.g. after a password change).
-    case 'auth_failed': { clearTranslationData(); clearTweetData(); resetChanLists(); hideBootSplash(); try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){} const _ft=sessionToken; sessionToken=null; _wsAuthed=false; _failRateQueue(); try{ if(localStorage.getItem('cryptirc_token')===_ft){ localStorage.removeItem('cryptirc_token'); document.cookie='cryptirc_token=;max-age=0;path=/cryptirc'; } }catch(_){} document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break; }
+    case 'auth_failed': { pendingCtcpNotices.length=0; highLagNotified.clear(); lagMap={}; clearTranslationData(); clearTweetData(); resetChanLists(); resetChatReactions(); hideBootSplash(); try{ if(typeof e2eOnSessionEnd==='function') e2eOnSessionEnd(); }catch(_){} const _ft=sessionToken; sessionToken=null; _wsAuthed=false; _failRateQueue(); try{ if(localStorage.getItem('cryptirc_token')===_ft){ localStorage.removeItem('cryptirc_token'); document.cookie='cryptirc_token=;max-age=0;path=/cryptirc'; } }catch(_){} document.getElementById('auth-screen').style.display='flex'; document.getElementById('app').style.display='none'; window._appShown=false; try{_hidePwaBanner();}catch(_){} break; }
     case 'vault_unlocked': {
       // Locked→unlocked transition (overlay still up ⇒ we were locked): Messages
       // preview get_logs sent while locked got EMPTY log_lines replies (read_logs
@@ -1934,7 +1942,23 @@ function handleEvent(ev) {
     // Vault locked server-side (manual Lock on any session): E2E drops its keys + this browser's cached key (e2e), app2 shows the lock UI.
     case 'vault_locked': if(typeof e2eOnVaultLocked==='function') e2eOnVaultLocked(); _onVaultLocked(); break;
     case 'state':
+      for(const net of networks){
+        if(net.reactions && !ev.networks?.some(next=>next.config.id===net.config.id && next.reactions)) reactionSupport(net.config.id,false);
+      }
       networks=ev.networks||[];
+      importKeepNicks();
+      for(const net of networks){
+        if(!net.connected){
+          delete lagMap[net.config.id];
+          highLagNotified.delete(net.config.id);
+        } else if(Number.isFinite(net.lag_ms)){
+          lagMap[net.config.id]=net.lag_ms;
+          if(net.lag_ms<ircLatencyRecoveryThreshold()) highLagNotified.delete(net.config.id);
+        }
+      }
+      for(const id of Object.keys(lagMap)){
+        if(!networks.some(net=>net.config.id===id&&net.connected)){delete lagMap[id];highLagNotified.delete(id);}
+      }
       if(ev.vault_unlocked&&chanList&&!networks.some(net=>net.config.id===chanList.connId)){
         invalidateChanListNetwork(chanList.connId,'This IRC network was removed.');
       }
@@ -2019,9 +2043,20 @@ function handleEvent(ev) {
       _drainPendingNotifNav();
       if(typeof updateE2EIndicator==='function') updateE2EIndicator();
       break;
-    case 'connecting':   avatarForgetConn(ev.conn_id); sysMsg(ev.conn_id,'status',`Connecting to ${ev.server}…`,'system'); setNetDot(ev.conn_id,'connecting'); break;
-    case 'connected':    avatarForgetConn(ev.conn_id); sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); keepnickStartPoll(ev.conn_id); break;
+    case 'connecting':   reactionSupport(ev.conn_id,false); avatarForgetConn(ev.conn_id); sysMsg(ev.conn_id,'status',`Connecting to ${ev.server}…`,'system'); setNetDot(ev.conn_id,'connecting'); break;
+    case 'connected':    avatarForgetConn(ev.conn_id); sysMsg(ev.conn_id,'status',`Connected to ${ev.server} as ${ev.nick}`,'system'); setNetDot(ev.conn_id,'online'); updateNick(ev.conn_id,ev.nick); break;
+    case 'keep_nick_updated': {
+      const net=networks.find(n=>n.config.id===ev.conn_id);
+      if(!net)break;
+      net.config.keep_nick=ev.nick;
+      net.config.keep_nick_managed=true;
+      if(!ev.imported)sysMsg(ev.conn_id,active?.conn_id===ev.conn_id?active.target:'status',
+        ev.nick?`KeepNick will reclaim ${ev.nick} on ${net.config.label||net.config.server}.`:'KeepNick stopped on this network.','system');
+      break;
+    }
     case 'disconnected':
+      reactionSupport(ev.conn_id,false);
+      highLagNotified.delete(ev.conn_id);
       invalidateChanListNetwork(ev.conn_id,'The IRC network disconnected. Refresh the list after reconnecting.');
       avatarForgetConn(ev.conn_id);
       sysMsg(ev.conn_id,'status',`Disconnected: ${ev.reason}`,'error'); setNetDot(ev.conn_id,'offline'); lagMap[ev.conn_id]=null; if(active&&active.conn_id===ev.conn_id) updateLagDisplay();
@@ -2032,6 +2067,7 @@ function handleEvent(ev) {
       }
       break;
     case 'reconnecting': {
+      reactionSupport(ev.conn_id,false);
       invalidateChanListNetwork(ev.conn_id,'The IRC network disconnected. Refresh the list after reconnecting.');
       avatarForgetConn(ev.conn_id);
       sysMsg(ev.conn_id,'status',`↻ Reconnecting in ${ev.delay_secs}s (attempt ${ev.attempt})…`,'system');
@@ -2043,7 +2079,25 @@ function handleEvent(ev) {
       }
       break;
     }
-    case 'lag_update': lagMap[ev.conn_id]=ev.ms; if(active&&active.conn_id===ev.conn_id) updateLagDisplay(); break;
+    case 'lag_update':
+      if(!Number.isFinite(ev.ms)) break;
+      lagMap[ev.conn_id]=ev.ms;
+      if(ev.ms<ircLatencyRecoveryThreshold()) highLagNotified.delete(ev.conn_id);
+      if(active&&active.conn_id===ev.conn_id) updateLagDisplay();
+      break;
+    case 'reaction_support': reactionSupport(ev.conn_id,ev.enabled===true); break;
+    case 'reaction_anchor': rememberReactionAnchor(ev); break;
+    case 'reaction_result': receiveReactionResult(ev); break;
+    case 'irc_reaction': receiveChatReaction(ev); break;
+    case 'sealed_reaction': receiveSealedReaction(ev); break;
+    case 'ctcp_request': {
+      const net=networks.find(n=>n.config.id===ev.conn_id);
+      if(!net || !ctcpAlertEnabled(ev.command) || isIgnored(ev.from,ev.prefix)) break;
+      if(pendingCtcpNotices.length>=32) pendingCtcpNotices.shift();
+      pendingCtcpNotices.push({command:ev.command,text:`CTCP ${ev.command} detected from ${ev.from} on ${net.config.label||net.config.server}.`});
+      showPrivateNetworkNotices();
+      break;
+    }
     case 'sasl_status': sysMsg(ev.conn_id,'status', ev.success?`✓ SASL: ${ev.message}`:`✗ SASL failed: ${ev.message}`, ev.success?'system':'error'); break;
     case 'irc_echo': {
       // An echo is always our own message: target "status" is the user "status".
@@ -2061,15 +2115,23 @@ function handleEvent(ev) {
       window._sentMsgs=window._sentMsgs.filter(s=>now-s.t<60000);
       // Check if this device sent this exact message
       const idx=window._sentMsgs.findIndex(s=>s.conn===ev.conn_id&&s.target===ev.target&&s.text===ev.text);
+      // An X3DH header precedes the first encrypted message. It never has a row
+      // of its own, so it must not claim the optimistic row's ID.
+      if(typeof ev.text==='string' && ev.text.startsWith('[e2ex3dh]')){
+        if(idx>=0) window._sentMsgs.splice(idx,1);
+        break;
+      }
       if(idx>=0){
         // This device sent it — already displayed, skip. Stamp the buffer
         // entry with msg_id so any duplicate echo that arrives later (e.g.
         // from a second WS subscription) gets caught by addMessage's
         // internal dedup-by-id at the buf.push() path.
-        window._sentMsgs.splice(idx,1);
+        const record=window._sentMsgs.splice(idx,1)[0];
         const _eb=getBuf(ev.conn_id,ev.target);
-        let _ei=_eb.findIndex(m=>!m.id&&m.ts===ev.ts&&m.from===ev.from&&(m.text||'').slice(0,50)===(ev.text||'').slice(0,50));
-        if(_ei<0){
+        const linked=record.row && [record.row,...(_rowTwins.get(record.row)||[])].find(m=>_eb.includes(m));
+        let _ei=record.row ? (linked&&!linked.id&&linked.sendState!=='failed'?_eb.indexOf(linked):-1) :
+          _eb.findIndex(m=>!m.id&&m.sendState!=='failed'&&m.ts===ev.ts&&m.from===ev.from&&(m.text||'').slice(0,50)===(ev.text||'').slice(0,50));
+        if(_ei<0&&!record.row){
           // Fallback covering two failure modes of the strict-equality
           // findIndex above:
           //   • clock skew: optimistic add used Date.now()/1000 (client)
@@ -2080,15 +2142,27 @@ function handleEvent(ev) {
           // We're inside the `idx>=0` branch, so _sentMsgs already
           // confirmed this echo corresponds to one of OUR sends. Walk
           // backwards and pick the OLDEST unstamped self-sent entry in
-          // the 30s window — echoes arrive in send order, so for rapid
+          // the 60s sent-record window — echoes arrive in send order, so for rapid
           // A/B/C fires we want to stamp A first, then B, then C.
           for(let i=_eb.length-1;i>=0;i--){
             const m=_eb[i];
-            if(m.ts<ev.ts-30) break;
-            if(m.from===ev.from && !m.id) _ei=i;
+            if(m.ts<ev.ts-60) break;
+            if(m.from===ev.from && !m.id && m.sendState!=='failed') _ei=i;
           }
         }
-        if(_ei>=0&&ev.msg_id) _eb[_ei].id=ev.msg_id;
+        if(_ei>=0&&ev.msg_id) {
+          const sent=_eb[_ei];
+          sent.id=ev.msg_id;
+          if(sent.encrypted && reactionEnabled(ev.conn_id)) {
+            void hashChatReactionReference(ev.text).then(reference=>{
+              if(!reference)return;
+              sent.reactionRef=reference;
+              refreshReactionRows(ev.conn_id,ev.target,reference);
+            });
+          } else if(reactionAnchors.has(reactionAnchorKey(ev.conn_id,ev.msg_id))) {
+            refreshReactionRows(ev.conn_id,ev.target,null,ev.msg_id);
+          }
+        }
         break;
       }
       // From another device — OR a duplicate echo where _sentMsgs was already
@@ -2111,8 +2185,6 @@ function handleEvent(ev) {
         // iteration's body throws (e.g. a malformed event), the chain would stay
         // permanently rejected and silently drop ALL later messages. This resets it.
         _e2eEnqueue(_eConn,_eTarget,async()=>{
-          // X3DH header lines (single or fragmented) are protocol plumbing, not chat.
-          if(typeof _eText==='string'&&_eText.startsWith('[e2ex3dh]')) return;
           let dtext=_eText, enc=false;
           if(typeof _eText==='string'&&_eText.startsWith('sd8~')&&typeof channelDecrypt==='function'){
             try{
@@ -2135,6 +2207,7 @@ function handleEvent(ev) {
           addMessage(_eConn,_eTarget,{
             id:_eId, ts:_eTs, from:_eFrom, text:dtext, encrypted:enc, own:true,
             kind:_eKind==='Action'?'action':_eKind==='Notice'?'notice':'privmsg',
+            reactionRef:enc && reactionEnabled(_eConn) ? await hashChatReactionReference(_eText) : null,
           });
         });
       }
@@ -2171,27 +2244,6 @@ function handleEvent(ev) {
       // *contains* one of these phrases isn't silently dropped — only server-originated
       // notices/errors are suppressed.
       if(ev.kind!=='Privmsg'&&ev.kind!=='Action'&&ev.text&&(ev.text.includes('No such nick/channel')||ev.text.includes('Command disabled')||ev.text.includes('Unknown command')||ev.text.includes('@+typing'))) break;
-      // Intercept ISON (303) replies for keepnick — narrow window to prevent swallowing other messages
-      if(ev.target==='status'&&_keepnickIsonPending[ev.conn_id]){
-        const pendingTs=_keepnickIsonPending[ev.conn_id];
-        // Only intercept within 5 seconds of sending ISON and if text is short (nicks only)
-        if(typeof pendingTs==='number'&&Date.now()-pendingTs<5000){
-          const t=(ev.text||'').replace(/^:\s*/,'').trim();
-          if(t.length<200){
-            const kn=loadKeepNicks();
-            if(kn[ev.conn_id]){
-              const words=t?t.split(/\s+/):[];
-              const allNickChars=words.length<=10&&words.every(w=>/^[a-zA-Z0-9_\-\[\]\\`^|{}]+$/.test(w));
-              if(allNickChars||t===''){
-                delete _keepnickIsonPending[ev.conn_id];
-                keepnickHandleIson(ev.conn_id,t);
-                break;
-              }
-            }
-          }
-        }
-        delete _keepnickIsonPending[ev.conn_id]; // Expire stale pending flag
-      }
       // Intercept links data for /links overlay
       // Only the server's own 364/365 relay matches (status target, Notice, no msg_id) —
       // a real user nicked "links" can never produce that shape — and the capture
@@ -2394,9 +2446,13 @@ function handleEvent(ev) {
           encrypted: encrypted,
           mentioned: mentioned,
           prefix: ev.prefix||null,
+          reactionRef:_dr.reactionReady && reactionEnabled(ev.conn_id) ? await hashChatReactionReference(_txt) : null,
         };
         markLiveTranslation(ev.conn_id,ev.target,liveMessage);
         addMessage(ev.conn_id,ev.target,liveMessage);
+        if(_msgKind==='privmsg' && !ev.replayed && (encrypted ? plaintext!==null : !ev.text?.startsWith('[e2e'))){
+          playChatEffect(ev.conn_id,ev.target,displayText);
+        }
         // Auto-open query for pending WHOIS
         if(window._pendingWhois&&window._pendingWhois[ev.conn_id]){
           const pnick=window._pendingWhois[ev.conn_id].toLowerCase();
@@ -2411,6 +2467,7 @@ function handleEvent(ev) {
     case 'e2e_identity_blob':
     case 'e2e_session':
     case 'e2e_bundle':
+    case 'e2e_bundle_missing':
     case 'e2e_channel_key':
     case 'e2e_channel_list':
     case 'e2e_otpk_low':
@@ -2506,7 +2563,6 @@ function handleEvent(ev) {
       if(quitSelf) renderSidebar();
       blinkUserCount('part');
       monitorOffline(ev.nick);
-      keepnickOnQuit(ev.conn_id,ev.nick);
       break;
     }
     case 'irc_nick': {
@@ -2524,9 +2580,6 @@ function handleEvent(ev) {
       if(!nickChans.length) sysMsg(ev.conn_id,'status',`• ${ev.old} is now known as ${ev.new}`,'nick',{ts:ev.ts,from:ev.new,self:nickSelf,subject:ev.new,subject2:ev.old});
       if(ev.old===getNick(ev.conn_id)||ev.new===getNick(ev.conn_id)){
         updateNick(ev.conn_id,ev.new);
-        keepnickOnOwnNickChange(ev.conn_id,ev.old,ev.new);
-      } else {
-        keepnickOnNickChange(ev.conn_id,ev.old,ev.new);
       }
       // Sidebar rows don't display member nicks, so only a SELF nick change can
       // affect sidebar state — skip the rebuild for others (flicker source).
@@ -2965,6 +3018,7 @@ function handleEvent(ev) {
     }
     case 'data_cleared':
       buffers={}; _historyView=null; conversationScroll.clear(); conversationHistory.clear();
+      resetChatReactions();
       unread.clear();
       mentionUnread.clear();
       for(const k of Object.keys(_lastMsgId)) delete _lastMsgId[k];
@@ -2987,7 +3041,7 @@ function handleEvent(ev) {
       unreadClear(k);
       mentionUnread.delete(k);
       saveUnread();
-      clearNoticesForTarget(ev.conn_id,ev.target);
+      markNoticesRead(ev.conn_id,ev.target);
       if(isActive(ev.conn_id,ev.target)) renderChat();
       renderSidebar();
       break;
@@ -4033,6 +4087,20 @@ function updateLagDisplay(){
       mv.textContent=ms+'ms';
     }
   }
+  showPrivateNetworkNotices();
+}
+function showPrivateNetworkNotices(){
+  if(!active || isMessagesActive() || isUploadsActive() || isChanListActive()
+      || _historyView?.bk===bk(active.conn_id,active.target)) return;
+  const {conn_id,target}=active;
+  const net=networks.find(n=>n.config.id===conn_id);
+  if(!net) return;
+  for(const {text} of pendingCtcpNotices.splice(0)) sysMsg(conn_id,target,text,'system',{noUnread:true});
+  const ms=lagMap[conn_id];
+  if(ircAlertPrefs.latency && ms>=ircAlertPrefs.threshold && !highLagNotified.has(conn_id)){
+    highLagNotified.add(conn_id);
+    sysMsg(conn_id,target,`High latency on ${net.config.label||net.config.server} (${ms} ms).`,'system',{noUnread:true});
+  }
 }
 const conversationScroll = new Map();
 const conversationHistory = new Map();
@@ -4083,6 +4151,7 @@ function restoreChatPosition(area,position){
 function setActive(conn_id,target,options){
   const key=bk(conn_id,target);
   if(active&&bk(active.conn_id,active.target)!==key){
+    clearChatEffect();
     rememberChatPosition();
     _jumpAnchor=false;
   }
@@ -4122,7 +4191,7 @@ function setActive(conn_id,target,options){
   }
   adoptUnreadAsOf(bk(conn_id,target));   // kill immortal wall-clock-stamped badges (see helper)
   unreadClear(bk(conn_id,target)); mentionUnread.delete(bk(conn_id,target)); saveUnread();
-  if(!options?.keepNotices) clearNoticesForTarget(conn_id,target);
+  if(!options?.keepNotices) markNoticesRead(conn_id,target);
   // Persist active view and open queries — skipped in detached mode so the
   // popup's target doesn't overwrite the main window's last-active on reload.
   if(!_detMode){
@@ -4762,6 +4831,7 @@ function buildRow(msg,conv,tweetConv){
     row.appendChild(replyBtn);
   }
   row._msgRef=msg;
+  mountChatReactions(row,msg,tweetConv||conv||active);
   if(msg.sendState) _applySendState(row,msg);
   return row;
 }
@@ -7304,11 +7374,6 @@ async function handleInput(raw){
       // ── Identity ────────────────────────────────────────────────────
       case 'NICK':
         if(!args[0]){sysMsg(conn_id,target,'Usage: /nick <newnick>','error');break;}
-        // KeepNick: if user manually changes AWAY from the kept nick, deactivate
-        {const kn=loadKeepNicks();
-        if(kn[conn_id]&&kn[conn_id].active&&getNick(conn_id).toLowerCase()===kn[conn_id].nick.toLowerCase()&&args[0].toLowerCase()!==kn[conn_id].nick.toLowerCase()){
-          keepnickDeactivate(conn_id);sysMsg(conn_id,target,`KeepNick deactivated (you changed away from ${kn[conn_id].nick}). Use /keepnick to reactivate.`,'system');
-        }}
         wsend({type:'send',conn_id,raw:`NICK ${args[0]}`}); break;
       case 'AWAY':
         wsend({type:'send',conn_id,raw:`AWAY :${args.join(' ')||'Away'}`});
@@ -7768,7 +7833,7 @@ async function handleInput(raw){
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
       case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 227 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';await _sendChatLine(conn_id,target,t);break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 257 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';await _sendChatLine(conn_id,target,t);break; }
       case 'NP': case 'NOWPLAYING': {
         const sub=(args[0]||'').toLowerCase();
         if(sub==='set'){ const u=(args[1]||'').trim(); if(!u){ sysMsg(conn_id,target,'Usage: /np set <your-lastfm-username>','error'); break; } doSetLastfm(conn_id,target,u); break; }
@@ -8036,34 +8101,25 @@ async function handleInput(raw){
         setVaultAutoLock(mins);sysMsg(conn_id,target,mins?`This device will lock after ${mins} minute${mins>1?'s':''} of inactivity (IRC stays connected; other devices are not affected)`:'Auto-lock disabled on this device','system');
         break;
       }
-      case 'KEEPNICK': {
-        const desired=args[0]||getNick(conn_id);
-        if(!desired){sysMsg(conn_id,target,'Usage: /keepnick [nick] — keep a nick (defaults to current)','error');break;}
-        keepnickSet(conn_id,desired);
-        const net=networks.find(n=>n.config.id===conn_id);
-        sysMsg(conn_id,target,`KeepNick: keeping "${desired}" on ${net?.config?.label||'this network'}. Will reclaim if lost.`,'system');
-        break;
-      }
-      case 'UNKEEPNICK': {
-        const kn=loadKeepNicks();
-        if(!kn[conn_id]){sysMsg(conn_id,target,'No keepnick set for this network.','error');break;}
-        const was=kn[conn_id].nick;
-        keepnickRemove(conn_id);
-        sysMsg(conn_id,target,`KeepNick: stopped keeping "${was}".`,'system');
+      case 'KEEPNICK': case 'UNKEEPNICK': case 'UNKEEP': {
+        const [first,second]=args.filter(Boolean);
+        const stop=cmd!=='KEEPNICK'||first?.toLowerCase()==='stop';
+        const nick=stop?(cmd==='KEEPNICK'?second:first):(first||getNick(conn_id));
+        if(!stop&&!nick){sysMsg(conn_id,target,'Usage: /keepnick [nick] or /keepnick stop [nick]','error');break;}
+        if(!wsend({type:'keep_nick',conn_id,nick:nick||null,stop})){
+          sysMsg(conn_id,target,'Connect to CryptIRC to change KeepNick settings.','error');
+          return 'keep';
+        }
         break;
       }
       case 'LISTNICK': case 'LISTNICKS': case 'KEEPNICKS': {
-        const kn=loadKeepNicks();
-        const entries=Object.entries(kn);
-        if(!entries.length){sysMsg(conn_id,target,'No keepnicks set.','system');break;}
-        sysMsg(conn_id,target,'── KeepNick List ──','system');
-        for(const[cid,v] of entries){
-          const net=networks.find(n=>n.config.id===cid);
-          const label=net?.config?.label||cid.slice(0,8);
-          const cur=getNick(cid)||'?';
-          const hasIt=cur.toLowerCase()===v.nick.toLowerCase();
-          const status=hasIt?'✓ have it':v.active?'polling...':'inactive';
-          sysMsg(conn_id,target,`  ${label}: ${v.nick} [${status}]`,'system');
+        const kept=networks.filter(net=>net.config.keep_nick);
+        if(!kept.length){sysMsg(conn_id,target,'No nicknames are being kept.','system');break;}
+        for(const net of kept){
+          const {id,label,keep_nick}=net.config;
+          const fold=_chanKeyFold(id);
+          const status=!net.connected?'disconnected':fold(getNick(id))===fold(keep_nick)?'held':'waiting';
+          sysMsg(conn_id,target,`KeepNick on ${label||net.config.server}: ${keep_nick} (${status})`,'system');
         }
         break;
       }
@@ -8094,11 +8150,11 @@ async function handleInput(raw){
     const parts=[];
     if(replyPrefix){
       const q=await _prepChatPart(conn_id,target,replyPrefix.trim(),'PRIVMSG');
-      if(!q) return;              // quote refused → the message is not sent either (as before)
+      if(!q) return 'keep';
       parts.push(q);
     }
     const body=await _prepChatPart(conn_id,target,raw2,'PRIVMSG');
-    if(!body) return outgoing!==raw?'keep':undefined;
+    if(!body) return 'keep';
     parts.push(body);
     _queueChatParts(conn_id,target,parts,'privmsg');
   }
@@ -10024,10 +10080,13 @@ function setVaultUnlockNeeded(needed){
   if(!needed){_vaultWasUnlocked=true;_vaultUnlockForEncryption=false;}
 }
 function showVaultForEncryptedChat(){
-  if(!ws||ws.readyState!==1){showToast('Connect to CryptIRC before unlocking encrypted chats.');return;}
-  if(_vaultUnlockForEncryption&&document.getElementById('vault-overlay').classList.contains('show')) return;
+  const overlay=document.getElementById('vault-overlay');
+  if(_vaultUnlockForEncryption&&overlay.classList.contains('show')) return;
   _vaultUnlockForEncryption=true;
   _showVaultLockedUi(!_deviceLocked&&!_devLockFlag());
+  // The vault prompt must cover Encryption even when the Later button is unavailable.
+  overlay.classList.add('on-demand');
+  document.getElementById('vault-pass').focus();
 }
 function deferVaultUnlock(){
   if(document.getElementById('vault-unlock-later').hidden) return;
@@ -10744,7 +10803,7 @@ async function _e2eSendToTargets(conn_id,verb,to,text,opts){
     let wire=null; const tails=[];
     if(list.length<=1){
       // r7: the continuation pieces come back (defer) and are queued right behind the first.
-      try{ wire=(window.E2E?.ready||window.E2E?.channelKeys?.[to])?await e2eEncryptOutgoing(to,text,conn_id,{verb,defer:tails}):null; }
+      try{ wire=(window.E2E?.ready||window.E2E?.channelKeys?.[to])?await e2eEncryptOutgoing(to,text,conn_id,{verb,defer:tails,auto:true}):null; }
       catch(_){ showToast('🔒 Encryption failed — message not sent.'); return false; }
       if(_e2eBlockedWarn(wire)) return false;
     }
@@ -10805,7 +10864,7 @@ async function _e2eSendToTargets(conn_id,verb,to,text,opts){
 async function _prepChatPart(conn_id,target,text,verb){
   verb=verb||'PRIVMSG';
   let first=null; const tails=[];
-  try{ first=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,text,conn_id,{verb,defer:tails}):null; }
+  try{ first=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,text,conn_id,{verb,defer:tails,auto:true}):null; }
   catch(_){ showToast('🔒 Encryption failed — message not sent.'); return null; }
   if(_e2eBlockedWarn(first)) return null;
   if(first) return {encrypted:true,payloads:[{type:'send',conn_id,raw:`${verb} ${target} :${first}`},...tails.map(t=>({type:'send',conn_id:t.cid||conn_id,raw:t.raw}))],rows:[text]};
@@ -10822,11 +10881,13 @@ function _queueChatParts(conn_id,target,parts,kind){
       const m={ts:Date.now()/1000|0,from:getNick(conn_id),text:_chatRowText(part.rows[0],kind),kind,encrypted:true};
       for(const p of part.payloads) _queueChatSend(p,m);
       addMessage(conn_id,target,m);
+      if(kind==='privmsg') playChatEffect(conn_id,target,m.text);
     } else {
       for(let i=0;i<part.payloads.length;i++){
         const m={ts:Date.now()/1000|0,from:getNick(conn_id),text:_chatRowText(part.rows[i],kind),kind};
         _queueChatSend(part.payloads[i],m);
         addMessage(conn_id,target,m);
+        if(kind==='privmsg') playChatEffect(conn_id,target,m.text);
       }
     }
   }
@@ -11623,7 +11684,7 @@ function showEncryptPanel(){
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
-          <div><strong>Encrypted</strong><br><span style="font-size:11px;color:var(--text2)">Messages in this channel are encrypted with a shared key</span></div>
+          <div><strong>Encrypted</strong><br><span class="encrypt-status-detail">Messages in this channel are encrypted with a shared key</span></div>
         </div>
         <div class="encrypt-actions">
           <button class="encrypt-btn" data-encrypt-cmd="share">
@@ -11647,7 +11708,7 @@ function showEncryptPanel(){
       body.innerHTML=`
         <div class="encrypt-status off">
           <span class="encrypt-status-icon">🔓</span>
-          <div><strong>Not Encrypted</strong><br><span style="font-size:11px;color:var(--text3)">Messages are sent in plaintext</span></div>
+          <div><strong>Not Encrypted</strong><br><span class="encrypt-status-detail">Messages are sent in plaintext</span></div>
         </div>
         <div class="encrypt-actions">
           <button class="encrypt-btn" data-encrypt-cmd="keygen">
@@ -11673,7 +11734,7 @@ function showEncryptPanel(){
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
-          <div><strong>PSK Encrypted</strong><br><span style="font-size:11px;color:var(--text2)">Using a shared key — works with any IRC client</span></div>
+          <div><strong>PSK Encrypted</strong><br><span class="encrypt-status-detail">Using a shared key — works with any IRC client</span></div>
         </div>
         <div class="encrypt-actions">
           <button class="encrypt-btn" data-encrypt-cmd="share">
@@ -11697,7 +11758,7 @@ function showEncryptPanel(){
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
-          <div><strong>E2E Encrypted</strong><br><span style="font-size:11px;color:var(--text2)">Using Signal protocol (X3DH + Double Ratchet)</span></div>
+          <div><strong>E2E Encrypted</strong><br><span class="encrypt-status-detail">Using Signal protocol (X3DH + Double Ratchet)</span></div>
         </div>
         <div class="encrypt-actions">
           <button class="encrypt-btn" data-encrypt-cmd="verify" data-encrypt-target="1">
@@ -11717,7 +11778,7 @@ function showEncryptPanel(){
       body.innerHTML=`
         <div class="encrypt-status off">
           <span class="encrypt-status-icon">🔓</span>
-          <div><strong>Not Encrypted</strong><br><span style="font-size:11px;color:var(--text3)">Messages are sent in plaintext</span></div>
+          <div><strong>Not Encrypted</strong><br><span class="encrypt-status-detail">Messages are sent in plaintext</span></div>
         </div>
         <div class="encrypt-actions">
           <button class="encrypt-btn" data-encrypt-cmd="keygen">
@@ -11730,7 +11791,7 @@ function showEncryptPanel(){
           </button>
           <button class="encrypt-btn" data-encrypt-cmd="on" data-encrypt-target="1">
             <span class="encrypt-btn-icon">🔐</span>
-            <div class="encrypt-btn-text">Signal E2E<div class="encrypt-btn-sub">Auto key exchange — requires ${esc(target)} on this CryptIRC server</div></div>
+            <div class="encrypt-btn-text">Signal E2E<div class="encrypt-btn-sub">Key exchange with ${esc(target)} through this instance or a supported IRC bridge</div></div>
           </button>
         </div>`;
     }
@@ -11765,7 +11826,30 @@ function _bindEncryptDelegation(){
   });
 }
 async function encryptAction(cmd,arg){
-  if(cmd==='unlock'){await e2ePromptDeviceUnlock();return;}
+  if(cmd==='reload'){location.reload();return;}
+  if(cmd==='unlock'){
+    const button=document.querySelector('#encrypt-panel-body [data-encrypt-cmd="unlock"]');
+    const label=button?.textContent;
+    if(button){button.disabled=true;button.textContent='Opening encryption…';}
+    let timeout;
+    const offerReload=()=>{
+      if(!button.isConnected)return;
+      if(document.querySelector('#custom-prompt-overlay.open, #vault-overlay.show')){
+        timeout=setTimeout(offerReload,30000);
+        return;
+      }
+      button.dataset.encryptCmd='reload';
+      button.textContent='Reload CryptIRC to retry unlocking';
+      button.disabled=false;
+    };
+    if(button)timeout=setTimeout(offerReload,30000);
+    try{await e2ePromptDeviceUnlock();}
+    finally{
+      clearTimeout(timeout);
+      if(button){button.dataset.encryptCmd='unlock';button.disabled=false;button.textContent=label;}
+    }
+    return;
+  }
   if(!active||isMessagesActive()||isUploadsActive())return;
   const args=arg?[cmd,arg]:[cmd];
   await handleEncryptCommand(args,active.conn_id,active.target);
@@ -11839,6 +11923,98 @@ async function copyChannelKey(){
 
 // ─── Appearance ───────────────────────────────────────────────────────────────
 const THEMES={
+  // New graphic studies
+  signal_receipt: {label:"Signal Receipt",bg0:"#ddebeb",bg1:"#24474b",bg2:"#f0f5ee",bg3:"#dae6e1",bg4:"#e2d0c8",border:"#b6c5c2",border2:"#96a7a5",
+    text:"#122e32",text2:"#316443",text3:"#46625f",accent:"#a83225",accent2:"#286a79",link:"#276472",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"repeating-linear-gradient(90deg,transparent 0 6px,#16394555 6px 9px,transparent 9px 13px),linear-gradient(112deg,transparent 0 80%,#a8322566 80% 81%,transparent 81% 100%)"},
+  kiln_ticket: {label:"Kiln Ticket",bg0:"#e3d6ee",bg1:"#4d334e",bg2:"#fff0d8",bg3:"#f0ddcd",bg4:"#ead0b4",border:"#cdbab1",border2:"#ae9b99",
+    text:"#2d1b34",text2:"#6f374d",text3:"#5e4f66",accent:"#90491d",accent2:"#794274",link:"#774172",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"radial-gradient(circle at 10% 76%,#63305277 0 1.4%,transparent 1.8%),radial-gradient(circle at 20% 76%,#63305277 0 1.4%,transparent 1.8%),radial-gradient(circle at 30% 76%,#63305277 0 1.4%,transparent 1.8%),radial-gradient(circle at 40% 76%,#63305277 0 1.4%,transparent 1.8%),linear-gradient(0deg,#a2504266 0 24%,transparent 24%)"},
+  witness_mark: {label:"Witness Mark",bg0:"#edc65e",bg1:"#332749",bg2:"#fff3cf",bg3:"#f4dfbd",bg4:"#dfcdbb",border:"#d0bda5",border2:"#b09f8f",
+    text:"#2d2235",text2:"#634238",text3:"#574730",accent:"#592964",accent2:"#973d2e",link:"#7b3429",warn:"#68410f",error:"#8b2039",join:"#18543d",part:"#7a352f",notice:"#484086",action:"#6d3e2a",
+    bgImage:"conic-gradient(from 0deg at 89% 18%,transparent 0 74%,#48245177 74% 85%,transparent 85%),linear-gradient(90deg,transparent 0 7%,#783b2a66 7% 7.5%,transparent 7.5%)"},
+  spool_end: {label:"Spool End",bg0:"#4f3d20",bg1:"#1d3a4e",bg2:"#3f325a",bg3:"#55455c",bg4:"#5c4d7d",border:"#726276",border2:"#8c7c8d",
+    text:"#f8e8eb",text2:"#ddcaff",text3:"#dac1b8",accent:"#c7b4ff",accent2:"#f6ce6b",link:"#f6ce6b",warn:"#f7d37a",error:"#ffa1ab",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"repeating-conic-gradient(from 65deg at 89% 67%,#ffbc7444 0 2deg,transparent 2deg 9deg),radial-gradient(ellipse at 89% 67%,#a9aaff77 0 11%,transparent 11.6% 21%,#a9aaff55 21.5% 22%,transparent 22.3%)"},
+  weld_stamp: {label:"Weld Stamp",bg0:"#244538",bg1:"#17392f",bg2:"#36504b",bg3:"#4e5b53",bg4:"#5d6d50",border:"#6d7565",border2:"#888c75",
+    text:"#f8ecb7",text2:"#efc4a4",text3:"#c2d2b1",accent:"#efda62",accent2:"#ffa88d",link:"#ffa88d",warn:"#f7d37a",error:"#ff9faa",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"linear-gradient(43deg,transparent 0 76%,#eab07566 76% 77%,transparent 77% 82%,#eff48066 82% 83%,transparent 83%),repeating-linear-gradient(132deg,#cbd96638 0 1px,transparent 1px 12px)"},
+  cadastral_fold: {label:"Cadastral Fold",bg0:"#c5deeb",bg1:"#69382f",bg2:"#f5ebdc",bg3:"#ecdac9",bg4:"#cdcdc9",border:"#c6bbb1",border2:"#a49e9b",
+    text:"#182b42",text2:"#74372d",text3:"#485569",accent:"#244e79",accent2:"#9f5231",link:"#80442b",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"linear-gradient(164deg,transparent 0 52%,#983a3266 52% 52.6%,#7d513f36 52.6% 68%,transparent 68%),linear-gradient(91deg,transparent 0 75%,#34517477 75% 75.3%,transparent 75.3%)"},
+  drypoint_etude: {label:"Drypoint Etude",bg0:"#253d51",bg1:"#29334f",bg2:"#293e57",bg3:"#3b4b6b",bg4:"#534c67",border:"#5d6685",border2:"#7b7f9c",
+    text:"#f8e3fc",text2:"#f6b8c7",text3:"#c4c1e0",accent:"#f082a3",accent2:"#c1acfa",link:"#c1acfa",warn:"#f7d37a",error:"#ff9faa",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"repeating-linear-gradient(38deg,#e995c633 0 1px,transparent 1px 7px),repeating-linear-gradient(165deg,#ab99ee2e 0 1px,transparent 1px 17px)"},
+  buoy_markings: {label:"Buoy Markings",bg0:"#f3a78e",bg1:"#25364e",bg2:"#ffe4ca",bg3:"#e7d3c0",bg4:"#eac2ab",border:"#c7b3a7",border2:"#aa9690",
+    text:"#332133",text2:"#2c4059",text3:"#54373b",accent:"#8f3027",accent2:"#244d73",link:"#21405f",warn:"#573811",error:"#751d33",join:"#184635",part:"#652e2a",notice:"#3e3770",action:"#5b3526",
+    bgImage:"linear-gradient(129deg,transparent 0 60%,#fcdb8d88 60% 66%,transparent 66% 81%,#29375266 81% 82%,transparent 82%),linear-gradient(0deg,transparent 0 12%,#ffe5bc66 12% 14%,transparent 14%)"},
+  counterform: {label:"Counterform",bg0:"#492534",bg1:"#2c2d43",bg2:"#54283c",bg3:"#68384a",bg4:"#6d5147",border:"#815760",border2:"#987374",
+    text:"#f5e5c6",text2:"#d7eb99",text3:"#c2b1c7",accent:"#c9eb70",accent2:"#fcb0af",link:"#fcb0af",warn:"#f7d37a",error:"#ff9faa",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"conic-gradient(from 90deg at 85% 17%,#d9ef7755 0 24.9%,transparent 25% 100%),conic-gradient(from 0deg at 67% 70%,#e6a4ac45 0 24.9%,transparent 25% 100%),linear-gradient(0deg,transparent 0 11%,#afb97844 11% 11.5%,transparent 11.5%)"},
+  tamper_tape: {label:"Tamper Tape",bg0:"#f1d8ac",bg1:"#204d5b",bg2:"#deefed",bg3:"#d8dcd9",bg4:"#becedb",border:"#b5bebf",border2:"#96a3a8",
+    text:"#173449",text2:"#2b5272",text3:"#5b5257",accent:"#34418e",accent2:"#a54336",link:"#8d3b31",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"repeating-linear-gradient(146deg,#38458f44 0 8px,transparent 8px 27px),linear-gradient(90deg,transparent 0 91%,#a5433655 91% 95%,transparent 95%)"},
+  queue_at_noon: {label:"Queue at Noon",bg0:"#cbb7e8",bg1:"#584223",bg2:"#f3e7da",bg3:"#e8d6c5",bg4:"#dfc2bf",border:"#c7b5ad",border2:"#a99897",
+    text:"#30213e",text2:"#583749",text3:"#4b3e53",accent:"#8c254b",accent2:"#92501c",link:"#62381b",warn:"#5d3b10",error:"#7d1e35",join:"#184b38",part:"#6d302c",notice:"#423a78",action:"#613827",
+    bgImage:"linear-gradient(90deg,transparent 0 69%,#f0cb6f99 69% 73%,transparent 73% 76%,#53356c66 76% 77%,transparent 77%),radial-gradient(ellipse at 99% 6%,#efaf9988 0 23%,transparent 24%)"},
+  blue_plate_notice: {label:"Blue Plate Notice",bg0:"#e8dda9",bg1:"#27346e",bg2:"#f6eec8",bg3:"#ebdfb7",bg4:"#cfccc4",border:"#c7bea3",border2:"#a7a191",
+    text:"#222846",text2:"#36356b",text3:"#5c5449",accent:"#273ab1",accent2:"#946529",link:"#714e25",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"linear-gradient(0deg,transparent 0 14%,#374aae77 14% 14.7%,transparent 14.7% 18%,#374aae66 18% 18.4%,transparent 18.4%),radial-gradient(ellipse at 88% 73%,transparent 0 16%,#87703b66 16% 16.8%,transparent 17% 50%)"},
+  ribbon_fault: {label:"Ribbon Fault",bg0:"#d9ed9b",bg1:"#482b48",bg2:"#f3ebc8",bg3:"#dddcbc",bg4:"#dbc6b4",border:"#bcbea4",border2:"#9fa38e",
+    text:"#263536",text2:"#68364d",text3:"#4e5b42",accent:"#74295d",accent2:"#2d6159",link:"#2d6159",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"linear-gradient(152deg,transparent 0 21%,#86526a55 21% 22%,transparent 22% 71%,#6d477377 71% 77%,transparent 77%),linear-gradient(25deg,transparent 0 62%,#afc95f66 62% 68%,transparent 68%)"},
+  ridge_stitch: {label:"Ridge Stitch",bg0:"#5c4031",bg1:"#1f424a",bg2:"#493b39",bg3:"#524d4b",bg4:"#605e43",border:"#706a65",border2:"#8a847d",
+    text:"#f8f0dd",text2:"#e7cb9b",text3:"#d0c3ae",accent:"#b8e067",accent2:"#90d4d2",link:"#90d4d2",warn:"#f7d37a",error:"#ffafb6",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"repeating-linear-gradient(84deg,transparent 0 31px,#adcf9966 31px 33px,transparent 33px 41px),radial-gradient(ellipse at 6% 91%,#3a7d7c66 0 24%,transparent 25%)"},
+  violet_spline: {label:"Violet Spline",bg0:"#393762",bg1:"#4b263d",bg2:"#453960",bg3:"#544a72",bg4:"#6c506a",border:"#736888",border2:"#8e829b",
+    text:"#fff0ea",text2:"#ffd0a8",text3:"#d1bcdc",accent:"#ffa68e",accent2:"#c4c9fa",link:"#c4c9fa",warn:"#f7d37a",error:"#ff9faa",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"radial-gradient(ellipse at 14% 105%,transparent 0 42%,#f3b49677 42.5% 44%,transparent 45%),radial-gradient(ellipse at 93% 29%,transparent 0 28%,#9eaaf966 28.5% 30%,transparent 31%)"},
+  porcelain_rivet: {label:"Porcelain Rivet",bg0:"#f5e3d0",bg1:"#57263a",bg2:"#eff2dc",bg3:"#e5e0c9",bg4:"#c9d7c2",border:"#c4c0ae",border2:"#a6a495",
+    text:"#2d3131",text2:"#68444c",text3:"#605852",accent:"#286251",accent2:"#98502f",link:"#8a492d",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"radial-gradient(circle at 84% 16%,#682a4877 0 1%,#39776355 1.2% 3%,transparent 3.3%),radial-gradient(circle at 14% 86%,#682a4877 0 1%,#39776355 1.2% 3%,transparent 3.3%),linear-gradient(126deg,transparent 0 48%,#89466b44 48% 49%,transparent 49%)"},
+  service_stripe: {label:"Service Stripe",bg0:"#25545a",bg1:"#492b37",bg2:"#30474d",bg3:"#495658",bg4:"#556954",border:"#68726f",border2:"#838c84",
+    text:"#f5f4d8",text2:"#f5e88b",text3:"#c6d4c8",accent:"#e0ea6d",accent2:"#ffc3ab",link:"#ffc3ab",warn:"#f7d37a",error:"#ffbfc2",join:"#a7deba",part:"#ffc2a2",notice:"#d6c8f9",action:"#f0dc9d",
+    bgImage:"linear-gradient(0deg,transparent 0 38%,#e4ed7755 38% 40%,transparent 40% 43%,#e3a48755 43% 44%,transparent 44% 100%),linear-gradient(102deg,transparent 0 85%,#fbc39166 85% 89%,transparent 89%)"},
+  index_brass: {label:"Index Brass",bg0:"#485025",bg1:"#302c43",bg2:"#3e4c31",bg3:"#4b5949",bg4:"#676052",border:"#6a7461",border2:"#868b76",
+    text:"#f9edce",text2:"#f0cde9",text3:"#d5d2a8",accent:"#ffacce",accent2:"#a9bafa",link:"#c1ccf6",warn:"#f7d37a",error:"#ffbdc0",join:"#a7deba",part:"#ffc09f",notice:"#d4c6f9",action:"#f0dc9d",
+    bgImage:"repeating-conic-gradient(from 45deg at 94% 87%,transparent 0 70deg,#d9b6e355 70deg 78deg,transparent 78deg 120deg),linear-gradient(90deg,transparent 0 82%,#e5cf7d55 82% 82.7%,transparent 82.7%)"},
+  laundry_stamp: {label:"Laundry Stamp",bg0:"#efb7c8",bg1:"#343a67",bg2:"#e8edfb",bg3:"#ded9e9",bg4:"#c8cde6",border:"#bfbbce",border2:"#a4a0b6",
+    text:"#343252",text2:"#4d406d",text3:"#524159",accent:"#3e438c",accent2:"#8e3653",link:"#762f47",warn:"#643f0f",error:"#861f38",join:"#18503b",part:"#75332e",notice:"#463e81",action:"#683b28",
+    bgImage:"repeating-linear-gradient(112deg,transparent 0 7px,#444b9444 7px 8px,transparent 8px 19px),radial-gradient(ellipse at 94% 86%,#9299de77 0 17%,transparent 18%)"},
+  silent_lozenge: {label:"Silent Lozenge",bg0:"#52446c",bg1:"#383827",bg2:"#3f485c",bg3:"#51566e",bg4:"#626b63",border:"#6f7282",border2:"#8a8b94",
+    text:"#faf3df",text2:"#e9ec9f",text3:"#ded5e5",accent:"#e8ee7e",accent2:"#d4bdf4",link:"#d8c3f3",warn:"#f7d37a",error:"#ffbabe",join:"#a7deba",part:"#ffbd9b",notice:"#d1c4fa",action:"#f0dc9d",
+    bgImage:"radial-gradient(ellipse 20% 6% at 78% 24%,#e8ee7e77 0 55%,transparent 57%),radial-gradient(ellipse 32% 7% at 98% 68%,#d4bdf477 0 55%,transparent 57%),linear-gradient(0deg,transparent 0 31%,#d4bdf433 31% 32%,transparent 32%)"},
+  ballot_stub: {label:"Ballot Stub",bg0:"#f3eadc",bg1:"#2b3a55",bg2:"#dfe5f0",bg3:"#ccd4e4",bg4:"#d4c5c7",border:"#adb6c8",border2:"#929caf",
+    text:"#202f48",text2:"#754139",text3:"#5b534f",accent:"#a63e16",accent2:"#354e83",link:"#354e83",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"radial-gradient(circle at 92% 18%,#99513177 0 1.3%,transparent 1.7%),radial-gradient(circle at 92% 37%,#99513177 0 1.3%,transparent 1.7%),radial-gradient(circle at 92% 56%,#99513177 0 1.3%,transparent 1.7%),radial-gradient(circle at 92% 75%,#99513177 0 1.3%,transparent 1.7%),linear-gradient(90deg,transparent 0 89%,#405d914d 89% 90%,transparent 90%)"},
+  ledger_rule: {label:"Ledger Rule",bg0:"#d6ebd5",bg1:"#263d31",bg2:"#eef3e4",bg3:"#dce5d2",bg4:"#dccbc5",border:"#bbc6b5",border2:"#9daa9b",
+    text:"#243831",text2:"#6c334b",text3:"#455c45",accent:"#8d2240",accent2:"#497443",link:"#40633b",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"repeating-linear-gradient(0deg,transparent 0 26px,#2d52393a 26px 27px,transparent 27px 39px),linear-gradient(90deg,transparent 0 10%,#9a3e5755 10% 10.3%,transparent 10.3% 11.4%,#9a3e5755 11.4% 11.7%,transparent 11.7%)"},
+  sluice_gate: {label:"Sluice Gate",bg0:"#18272d",bg1:"#decaa0",bg2:"#254041",bg3:"#3d4f47",bg4:"#2f5d5a",border:"#5b6d63",border2:"#76877c",
+    text:"#e4f4e2",text2:"#b4dfc9",text3:"#bbcfc4",accent:"#54cbba",accent2:"#efbe71",link:"#efbe71",warn:"#f7d37a",error:"#ff9faa",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"linear-gradient(0deg,#378e7666 0 11%,transparent 11% 19%,#71a19966 19% 34%,transparent 34% 69%,#bcd06d3b 69% 70%,transparent 70%),linear-gradient(91deg,transparent 0 88%,#cbd59155 88% 89%,transparent 89%)"},
+  gauge_needle: {label:"Gauge Needle",bg0:"#371c23",bg1:"#e4c5f0",bg2:"#462c47",bg3:"#583b5b",bg4:"#6b4548",border:"#755b74",border2:"#8e788b",
+    text:"#f8ede7",text2:"#efb7d9",text3:"#d6b7d4",accent:"#f6a14d",accent2:"#dca8ef",link:"#dca8ef",warn:"#f7d37a",error:"#ff9faa",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"conic-gradient(from 224deg at 87% 102%,#f1b96985 0 2deg,transparent 2deg 75deg,#be82d05e 75deg 100deg,transparent 100deg),repeating-radial-gradient(ellipse at 87% 102%,transparent 0 86px,#d4c58745 86px 87px,transparent 87px 110px)"},
+  pumice_grain: {label:"Pumice Grain",bg0:"#e8e2eb",bg1:"#45362f",bg2:"#f3ece6",bg3:"#e8dcd1",bg4:"#d8c8d8",border:"#c7bbb5",border2:"#a99e9d",
+    text:"#302737",text2:"#694570",text3:"#615365",accent:"#642e9b",accent2:"#8c592b",link:"#7d5029",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"repeating-radial-gradient(ellipse at 93% 40%,#743a8555 0 .7px,transparent .7px 6px,#59554533 6px 6.8px,transparent 6.8px 13px),linear-gradient(131deg,transparent 0 70%,#9165a34d 70% 74%,transparent 74%)"},
+  ration_card: {label:"Ration Card",bg0:"#e5d181",bg1:"#682747",bg2:"#daf0e4",bg3:"#d3ddd3",bg4:"#b5d7cb",border:"#b3bfb9",border2:"#97a5a1",
+    text:"#233940",text2:"#4c4732",text3:"#505037",accent:"#196b63",accent2:"#9b404c",link:"#7f3741",warn:"#6e450e",error:"#94213c",join:"#185940",part:"#823731",notice:"#4b438d",action:"#73412b",
+    bgImage:"conic-gradient(from 0deg at 82% 28%,#357e6e77 0 25%,transparent 25% 100%),conic-gradient(from 0deg at 77% 34%,#993b5d55 0 25%,transparent 25% 100%),linear-gradient(90deg,transparent 0 84%,#4e807b33 84% 85%,transparent 85%)"},
+  sodium_lamp: {label:"Sodium Lamp",bg0:"#3d2b26",bg1:"#315987",bg2:"#263e34",bg3:"#324d4b",bg4:"#525841",border:"#566a65",border2:"#77847c",
+    text:"#fcf0db",text2:"#efc17e",text3:"#d1baab",accent:"#f6bc71",accent2:"#8bbdf5",link:"#8bbdf5",warn:"#f7d37a",error:"#ff9faa",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"radial-gradient(ellipse 47% 78% at 97% 18%,#f6bc7188 0 8%,#b8733b66 15% 26%,transparent 65%),linear-gradient(112deg,transparent 20%,#38588655 80%)"},
+  plotter_drift: {label:"Plotter Drift",bg0:"#dce7f8",bg1:"#123c63",bg2:"#eef4f3",bg3:"#d8e4e8",bg4:"#ddccd1",border:"#b5c4cc",border2:"#97a7b3",
+    text:"#18314c",text2:"#394a72",text3:"#4c5870",accent:"#92233e",accent2:"#286791",link:"#276087",warn:"#774a0d",error:"#98213d",join:"#185b41",part:"#843831",notice:"#4b438d",action:"#75422b",
+    bgImage:"repeating-linear-gradient(23deg,transparent 0 75px,#28598044 75px 76px,transparent 76px 130px),linear-gradient(112deg,transparent 0 89%,#8d214e77 89% 90%,transparent 90%)"},
+  bracken_hollow: {label:"Bracken Hollow",bg0:"#273622",bg1:"#d5c1e8",bg2:"#3b3f36",bg3:"#4f4d4d",bg4:"#565f3f",border:"#6d6a67",border2:"#88847d",
+    text:"#f7f0db",text2:"#dce89d",text3:"#c4cfb9",accent:"#bcd960",accent2:"#dfb6f4",link:"#dfb6f4",warn:"#f7d37a",error:"#ff9faa",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"radial-gradient(ellipse 37% 19% at 89% 76%,#a3bd6177 0 54%,transparent 58%),radial-gradient(ellipse 30% 40% at 91% 98%,#9784ad77 0 48%,transparent 53%),radial-gradient(ellipse at 12% 9%,#a1a95a44 0 10%,transparent 12%)"},
+  selvedge_twill: {label:"Selvedge Twill",bg0:"#242842",bg1:"#ecd1af",bg2:"#343a53",bg3:"#424c64",bg4:"#5f4f59",border:"#636a7a",border2:"#81848e",
+    text:"#faf1df",text2:"#ffc890",text3:"#c9bed7",accent:"#ff9c71",accent2:"#a8d4e4",link:"#a8d4e4",warn:"#f7d37a",error:"#ff9faa",join:"#a7deba",part:"#ffbd9b",notice:"#d1c3fa",action:"#f0dc9d",
+    bgImage:"repeating-linear-gradient(135deg,#d7876359 0 2px,transparent 2px 7px),repeating-linear-gradient(45deg,transparent 0 39px,#91adb244 39px 40px,transparent 40px 52px)"},
+  // End of graphic studies
   midnight: {label:'Midnight',bg0:'#0b0d0f',bg1:'#111418',bg2:'#181d24',bg3:'#1e242e',bg4:'#252c38',border:'#2a3444',border2:'#3a4a60',text:'#c8d8e8',text2:'#7a9ab8',text3:'#4a6278'},
   dracula:  {label:'Dracula', bg0:'#282a36',bg1:'#2d303e',bg2:'#343746',bg3:'#3b3f51',bg4:'#44495e',border:'#44475a',border2:'#6272a4',text:'#f8f8f2',text2:'#bd93f9',text3:'#6272a4'},
   monokai:  {label:'Monokai', bg0:'#272822',bg1:'#2d2e27',bg2:'#383830',bg3:'#3e3d32',bg4:'#49483e',border:'#49483e',border2:'#75715e',text:'#f8f8f2',text2:'#a6e22e',text3:'#75715e'},
@@ -12107,7 +12283,7 @@ function resolveThemeObj(name,cfg){
     const ct=(cfg&&cfg.customThemes)?cfg.customThemes[name.slice(7)]:null;
     if(ct) return {t:ct, custom:true};
   }
-  return {t:THEMES[name]||THEMES.midnight, custom:false};
+  return {t:Object.prototype.hasOwnProperty.call(THEMES,name)?THEMES[name]:THEMES.midnight, custom:false};
 }
 // Background image for a custom theme: syncable bgUrl wins, else the device-local
 // data URL (stored outside the 4KB-capped appearance config). Returns null/none.
@@ -12193,6 +12369,8 @@ function _safeBgCss(v){
 function _safeColor(v,fallback){
   if(typeof v==='string'){
     const s=v.trim();
+    if(/^(?:inherit|initial|unset|revert(?:-layer)?|currentcolor)$/i.test(s)||
+      (typeof CSS!=='undefined'&&!CSS.supports('color',s))) return fallback;
     if(/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s)) return s;
     if(/^(?:rgb|rgba|hsl|hsla)\(\s*[0-9a-zA-Z.,%\s\/]+\)$/i.test(s)) return s;
     if(/^[a-zA-Z]+$/.test(s)) return s;
@@ -12201,12 +12379,13 @@ function _safeColor(v,fallback){
 }
 // Resolve CSS colors in the browser, then move low-contrast text toward black or
 // white without changing saved preferences. Both boot and runtime use this helper.
-function readableTextColor(color, background, minimum=4.8){
+function readableTextColor(color, background, minimum=4.8, underlay){
   const ctx=readableTextColor._ctx||(readableTextColor._ctx=document.createElement('canvas').getContext('2d',{willReadFrequently:true}));
   if(!ctx)return color;
   const rgb=value=>{ctx.clearRect(0,0,1,1);ctx.fillStyle='#000000';ctx.fillStyle=value;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
   const bg=rgb(background),fg=rgb(color);
-  const base=bg.slice(0,3).map(v=>v*bg[3]/255);
+  const beneath=underlay?rgb(underlay):[0,0,0,255];
+  const base=bg.slice(0,3).map((v,i)=>v*bg[3]/255+beneath[i]*beneath[3]/255*(1-bg[3]/255));
   const start=fg.slice(0,3).map((v,i)=>Math.round(v*fg[3]/255+base[i]*(1-fg[3]/255)));
   const luminance=values=>values.map(v=>{v/=255;return v<=0.04045?v/12.92:((v+0.055)/1.055)**2.4;}).reduce((sum,v,i)=>sum+v*[0.2126,0.7152,0.0722][i],0);
   const bgL=luminance(base),contrast=values=>{const l=luminance(values);return (Math.max(l,bgL)+0.05)/(Math.min(l,bgL)+0.05);};
@@ -12538,8 +12717,8 @@ function applyThemeCSS(cfg){
   try{ _clientChromeSync(); }catch(e){}   // populate the client-lookalike chrome bars
   // Keep the iOS PWA status-bar tint in sync with the active theme background,
   // otherwise a light theme shows a black status-bar seam above the app.
-  const _tc=document.querySelector('meta[name="theme-color"]'); if(_tc&&t.bg0) _tc.setAttribute('content',t.bg0);
   r.setProperty('--bg0',_safeColor(t.bg0,'#0b0d0f')); r.setProperty('--bg1',_safeColor(t.bg1,'#111418')); r.setProperty('--bg2',_safeColor(t.bg2,'#181d24'));
+  const _tc=document.querySelector('meta[name="theme-color"]'); if(_tc) _tc.setAttribute('content',r.getPropertyValue('--bg0'));
   r.setProperty('--bg3',_safeColor(t.bg3,'#1e242e')); r.setProperty('--bg4',_safeColor(t.bg4,'#252c38'));
   r.setProperty('--border',_safeColor(t.border,'#2a3444')); r.setProperty('--border2',_safeColor(t.border2,'#3a4a60'));
   r.setProperty('--text',_safeColor(t.text,'#c8d8e8')); r.setProperty('--text2',_safeColor(t.text2,'#7a9ab8')); r.setProperty('--text3',_safeColor(t.text3,'#82a0b8'));
@@ -12554,6 +12733,31 @@ function applyThemeCSS(cfg){
   const link=(mob&&cfg.mobileLink)?cfg.mobileLink:(cfg.linkColor||t.link||accent2);
   const chatBg=themeName==='mirc'?'#ffffff':_safeColor(t.bg0,'#0b0d0f');
   const listBg=themeName==='mirc'?'#ffffff':_safeColor(t.bg1,'#111418');
+  const panelBg=r.getPropertyValue('--bg2'), controlBg=r.getPropertyValue('--bg3');
+  const text=r.getPropertyValue('--text'), secondary=r.getPropertyValue('--text2'), muted=r.getPropertyValue('--text3');
+  const accentColor=r.getPropertyValue('--accent');
+  const foreground=(name,color,background,underlay)=>r.setProperty(name,readableTextColor(color,background,4.8,underlay));
+  foreground('--chat-text',text,chatBg);
+  foreground('--chat-muted',muted,chatBg);
+  foreground('--sidebar-text',secondary,listBg,chatBg);
+  const selectedBg=`color-mix(in srgb, ${accentColor} 12%, ${listBg})`;
+  const legacyChrome=_CLIENT_CHROME_THEMES.has(themeName);
+  const activeBg=legacyChrome||!CSS.supports('background-color',selectedBg)?r.getPropertyValue('--bg4'):selectedBg;
+  foreground('--sidebar-active-text',legacyChrome?accentColor:text,activeBg,listBg);
+  foreground('--panel-text',text,panelBg,chatBg);
+  foreground('--panel-secondary',secondary,panelBg,chatBg);
+  foreground('--panel-muted',muted,panelBg,chatBg);
+  foreground('--panel-accent',accentColor,panelBg,chatBg);
+  foreground('--control-text',text,controlBg,panelBg);
+  foreground('--control-muted',muted,controlBg,panelBg);
+  foreground('--field-text',text,listBg,chatBg);
+  foreground('--field-muted',muted,listBg,chatBg);
+  foreground('--encrypt-on-text',accentColor,'rgba(0,212,170,.1)',panelBg);
+  foreground('--encrypt-off-text',_safeColor(t.error,SEMANTIC_DEFAULTS.error),'rgba(255,68,102,.1)',panelBg);
+  foreground('--accent-text','#101510',accentColor,panelBg);
+  const raisedBg=r.getPropertyValue('--bg4');
+  foreground('--raised-text',text,raisedBg,panelBg);
+  foreground('--raised-muted',muted,raisedBg,panelBg);
   r.setProperty('--link',readableTextColor(_safeColor(link||accent2,'#0099ff'),chatBg));
   const ownNick=_safeColor(cfg.selfNickColor||'#7ce5cf','#7ce5cf');
   r.setProperty('--self-nick',readableTextColor(ownNick,chatBg));
@@ -12563,14 +12767,15 @@ function applyThemeCSS(cfg){
   // (Built-ins used to be excluded from this, which quietly made the warn/error/
   // join/part/notice/action keys mIRC has always defined dead code. Honoring them
   // is what those keys are for, and it's what lets a theme ship status colors that
-  // match its palette instead of the same six defaults on all 227.)
+  // match its palette instead of the same six defaults on every theme.)
   ['warn','error','join','part','notice','action'].forEach(k=>{
     if(t[k]) r.setProperty('--'+k,_safeColor(t[k],SEMANTIC_DEFAULTS[k]));
     else r.setProperty('--'+k,SEMANTIC_DEFAULTS[k]);
   });
-  r.setProperty('--sidebar-w',cfg.sidebarW+'px');
-  r.setProperty('--nicks-w',cfg.nickPanelW+'px');
-  r.setProperty('--input-h',(cfg.inputH!=null?cfg.inputH:36)+'px');
+  for(const size of RZ_DEFS){
+    if(size.cssVar) r.setProperty(size.cssVar,_rzClamp(size,Number(cfg[size.key])||size.def)+'px');
+  }
+  r.setProperty('--input-h',Math.min(96,Math.max(32,Number(cfg.inputH)||36))+'px');
   // Picture-backdrop layer — the theme's own SVG scene, or the user's own image
   // when they've set one (Appearance ▸ Background), behind the chat at low opacity.
   // Tiling is driven by CSS vars rather than a class so the no-flash boot script in
@@ -12654,7 +12859,7 @@ function applyThemeCSS(cfg){
   // unsanitized; a crafted string here would otherwise inject CSS into the <style>
   // text below — data-exfil via url()/defacement). Legit numbers pass through.
   const fontSize=(+(mob&&cfg.mobileChatSize?cfg.mobileChatSize:cfg.chatSize))||14;
-  const nickW=(+(mob&&cfg.mobileNickW?cfg.mobileNickW:cfg.nickW))||100;
+  const nickW=_rzClamp(RZ_DEFS.find(size=>size.key==='nickW'),Number(mob&&cfg.mobileNickW?cfg.mobileNickW:cfg.nickW)||100);
   // Also expose it as a var. The generated rule above falls back to the literal,
   // so nothing depends on this being set — it exists so a live drag can retarget
   // the column with one setProperty instead of regenerating this whole sheet at
@@ -13516,6 +13721,9 @@ function populateAppearanceModal(cfg){
     card.className='theme-card'+(cfg.theme===key?' active':'');
     card.dataset.theme=key;
     card.innerHTML=`<div class="theme-preview"><span style="background:${t.bg0}"></span><span style="background:${t.bg2}"></span><span style="background:${t.bg4}"></span></div><div class="theme-name">${t.label}</div>`;
+    if(t.bgImage&&/^(?:repeating-)?(?:linear|radial|conic)-gradient\(/.test(t.bgImage)){
+      card.querySelector('.theme-preview span').style.backgroundImage=t.bgImage;
+    }
     const edit=document.createElement('button');
     edit.className='tc-edit'; edit.title='Customize '+t.label; edit.textContent='✎';
     edit.onclick=(e)=>{e.stopPropagation();openThemeEditor(null,key);};
@@ -14588,8 +14796,8 @@ document.addEventListener('click',e=>{
     {cmd:'ratelimit',desc:'Set message rate limit (ms)',usage:'/ratelimit <ms>'},
     {cmd:'expire',desc:'Auto-delete old messages (hours)',usage:'/expire <hours>'},
     {cmd:'autolock',desc:'Vault auto-lock timer (minutes)',usage:'/autolock <minutes>'},
-    {cmd:'keepnick',desc:'Keep a nick (reclaim if lost)',usage:'/keepnick [nick]'},
-    {cmd:'unkeepnick',desc:'Stop keeping a nick',usage:'/unkeepnick'},
+    {cmd:'keepnick',desc:'Remember and reclaim a nick',usage:'/keepnick [nick] or /keepnick stop [nick]'},
+    {cmd:'unkeepnick',desc:'Stop keeping a nick',usage:'/unkeepnick [nick]'},
     {cmd:'listnick',desc:'List all kept nicks',usage:'/listnick'},
     // ── Fun ──
     {cmd:'prism',desc:'Rainbow colored text',usage:'/prism message'},
@@ -15641,6 +15849,7 @@ function runMessageExpiry(){
   // Rows already on screen were left behind before; repaint the open chat when it lost
   // lines (not while viewing a jumped-to history window).
   if(activeShrank && !_historyView){ try{ renderChat(); }catch(_){} }
+  if(document.getElementById('mentions-panel')?.classList.contains('show')) renderMentionsList();
 }
 // Run expiry check every 5 minutes + clean up stale bp: keys
 setInterval(()=>{
@@ -16537,107 +16746,20 @@ function smartPasteNo(){
   _smartPasteText='';
 }
 
-// ─── KeepNick — irssi keepnick.pl clone ──────────────────────────────────────
-// Storage: { conn_id: { nick, active } }
-const _keepnickTimers={},_keepnickIsonPending={};
-function loadKeepNicks(){try{return JSON.parse(localStorage.getItem('cryptirc_keepnicks')||'{}');}catch{return{};}}
-function saveKeepNicks(kn){localStorage.setItem('cryptirc_keepnicks',JSON.stringify(kn));localStorage.setItem('cryptirc_keepnicks_ts',String(Date.now()));savePrefsToServer();}
-function keepnickSet(conn_id,nick){
-  const kn=loadKeepNicks();
-  kn[conn_id]={nick:nick,active:true};
-  saveKeepNicks(kn);
-  keepnickStartPoll(conn_id);
+// Import active KeepNick preferences written by older clients. The server only
+// accepts an import for a config that has never been set or explicitly stopped.
+const _keepnickImports=new Set();
+function loadKeepNicks(){
+  try{const old=JSON.parse(localStorage.getItem('cryptirc_keepnicks'));return old&&typeof old==='object'?old:{};}
+  catch{return{};}
 }
-function keepnickRemove(conn_id){
-  const kn=loadKeepNicks();
-  delete kn[conn_id];
-  saveKeepNicks(kn);
-  keepnickStopPoll(conn_id);
-}
-function keepnickDeactivate(conn_id){
-  const kn=loadKeepNicks();
-  if(kn[conn_id]){kn[conn_id].active=false;saveKeepNicks(kn);}
-  keepnickStopPoll(conn_id);
-}
-function keepnickReactivate(conn_id){
-  const kn=loadKeepNicks();
-  if(kn[conn_id]){kn[conn_id].active=true;saveKeepNicks(kn);keepnickStartPoll(conn_id);}
-}
-function keepnickStartPoll(conn_id){
-  keepnickStopPoll(conn_id);
-  const kn=loadKeepNicks();
-  if(!kn[conn_id]||!kn[conn_id].active)return;
-  // Don't poll if we already have the nick
-  const cur=getNick(conn_id);
-  if(cur&&cur.toLowerCase()===kn[conn_id].nick.toLowerCase())return;
-  _keepnickTimers[conn_id]=setInterval(()=>{
-    const kn2=loadKeepNicks();
-    if(!kn2[conn_id]||!kn2[conn_id].active){keepnickStopPoll(conn_id);return;}
-    const cur2=getNick(conn_id);
-    if(cur2&&cur2.toLowerCase()===kn2[conn_id].nick.toLowerCase()){keepnickStopPoll(conn_id);return;}
-    // Send ISON query and mark pending
-    _keepnickIsonPending[conn_id]=Date.now();
-    wsend({type:'send',conn_id,raw:'ISON '+kn2[conn_id].nick});
-  },12000);
-}
-function keepnickStopPoll(conn_id){
-  if(_keepnickTimers[conn_id]){clearInterval(_keepnickTimers[conn_id]);delete _keepnickTimers[conn_id];}
-}
-// Called when we detect the kept nick is available — grab it
-function keepnickGrab(conn_id){
-  const kn=loadKeepNicks();
-  if(!kn[conn_id]||!kn[conn_id].active)return;
-  wsend({type:'send',conn_id,raw:'NICK '+kn[conn_id].nick});
-}
-// Called on irc_nick when OUR nick changes — check if we got it back or lost it
-function keepnickOnOwnNickChange(conn_id,oldNick,newNick){
-  const kn=loadKeepNicks();
-  if(!kn[conn_id])return;
-  const desired=kn[conn_id].nick.toLowerCase();
-  if(newNick.toLowerCase()===desired){
-    // Got the nick back — stop polling
-    keepnickStopPoll(conn_id);
-    sysMsg(conn_id,'status',`✓ KeepNick: Got ${newNick} back`,'system');
-  } else if(oldNick.toLowerCase()===desired){
-    // Lost the nick — reactivate polling
-    keepnickReactivate(conn_id);
-  }
-}
-// Called on irc_quit — check if the quitter had our desired nick
-function keepnickOnQuit(conn_id,nick){
-  const kn=loadKeepNicks();
-  if(!kn[conn_id]||!kn[conn_id].active)return;
-  if(nick.toLowerCase()===kn[conn_id].nick.toLowerCase()){
-    sysMsg(conn_id,'status',`KeepNick: ${nick} quit — reclaiming nick...`,'system');
-    setTimeout(()=>keepnickGrab(conn_id),500);
-  }
-}
-// Called on irc_nick — check if someone changed FROM our desired nick
-function keepnickOnNickChange(conn_id,oldNick,newNick){
-  const kn=loadKeepNicks();
-  if(!kn[conn_id]||!kn[conn_id].active)return;
-  if(oldNick.toLowerCase()===kn[conn_id].nick.toLowerCase()){
-    sysMsg(conn_id,'status',`KeepNick: ${oldNick} changed nick — reclaiming...`,'system');
-    setTimeout(()=>keepnickGrab(conn_id),500);
-  }
-}
-// Handle ISON (303) reply — intercept before it renders
-function keepnickHandleIson(conn_id,text){
-  const kn=loadKeepNicks();
-  if(!kn[conn_id]||!kn[conn_id].active)return false;
-  const desired=kn[conn_id].nick.toLowerCase();
-  // ISON reply is "nick1 nick2 ..." — if our nick is NOT in the list, it's free
-  const onlineNicks=text.trim().split(/\s+/).map(n=>n.toLowerCase());
-  if(!onlineNicks.includes(desired)||text.trim()===''){
-    keepnickGrab(conn_id);
-  }
-  return true; // consumed — don't show in status
-}
-// Start polls for all active keepnicks on page load / reconnect
-function keepnickInitAll(){
-  const kn=loadKeepNicks();
-  for(const cid of Object.keys(kn)){
-    if(kn[cid].active)keepnickStartPoll(cid);
+function importKeepNicks(){
+  const old=loadKeepNicks();
+  for(const {config} of networks){
+    const entry=old[config.id];
+    if(config.keep_nick_managed!==false || config.keep_nick || _keepnickImports.has(config.id)
+       || entry?.active!==true || typeof entry.nick!=='string' || !entry.nick)continue;
+    if(wsend({type:'keep_nick',conn_id:config.id,nick:entry.nick,import:true})) _keepnickImports.add(config.id);
   }
 }
 
@@ -16654,6 +16776,7 @@ function _dropRemovedNets(obj,sep){
   return out;
 }
 function gatherPreferences(){
+  syncLocalNotices();
   return _scrubE2eForSync({
     favorites: loadFavorites(),
     _favsTs: parseInt(localStorage.getItem('cryptirc_favs_ts')||'0'),
@@ -16670,8 +16793,9 @@ function gatherPreferences(){
     // re-upload from a genuinely new one instead of guessing from a boolean.
     unreadAsOf: (()=>{const o={};for(const[k,v] of unreadAsOf)o[k]=v;return o;})(),
     lastRead: _dropRemovedNets(_allLastReadTs(),'/'),
-    mentions: mentionsList.slice(0,100),
-    _mentionsTs: parseInt(localStorage.getItem('cryptirc_mentions_ts')||'0'),
+    mentions: mentionsList.slice(),
+    _mentionsTs: _noticesTs,
+    _mentionsClearTs: _noticesClearTs,
     // Only lines known not to belong to an E2E conversation (see _histSyncOk);
     // _ihV:2 tells a receiving client this list was filtered that way.
     // r3: the "no E2E conversation at all" shortcut only for an account this device has
@@ -16818,18 +16942,20 @@ function _fitPrefsToBudget(g){
   const measure=()=>{ const json=JSON.stringify(g); const frame=JSON.stringify({type:'save_preferences',prefs:json}); return {json,frame,ok:_utf8Len(json)<=PREFS_BUDGET&&_utf8Len(frame)<=PREFS_FRAME_MAX}; };
   let m=measure();
   if(m.ok) return {json:m.json,frame:m.frame,trimmed:false};
-  const clipMentions=(n,bytes)=>{ g.mentions=(g.mentions||[]).slice(0,n).map(x=>{ if(!x||typeof x.text!=='string') return x; const t=_clipForJson(x.text,bytes); return t===x.text?x:{...x,text:t,textTrunc:true}; }); };
+  const clipMentions=bytes=>{ g.mentions=(g.mentions||[]).map(x=>{ if(!x||typeof x.text!=='string') return x; const t=_clipForJson(x.text,bytes); return t===x.text?x:{...x,text:t,textTrunc:true}; }); };
   const clipBlocked=(n,bytes)=>{ g.pmBlocked=(g.pmBlocked||[]).slice(-n).map(x=>x&&typeof x.text==='string'?{...x,text:_clipForJson(x.text,bytes)}:x); };
   const stages=[
-    ()=>{ clipBlocked(100,200); clipMentions(100,400); },
+    ()=>{ clipBlocked(100,200); clipMentions(400); },
     ()=>{ g.inputHistory=(g.inputHistory||[]).slice(-25); },
     ()=>{ g.lastRead=_newestEntries(g.lastRead,250); },
     ()=>{ clipBlocked(25,160); },
-    ()=>{ clipMentions(50,240); },
+    ()=>{ clipMentions(160); },
     ()=>{ g.closedQueries=_newestEntries(g.closedQueries,150); },
     ()=>{ _trimStrangerPms(g,300); },
-    ()=>{ g.lastRead=_newestEntries(g.lastRead,100); g.inputHistory=[]; clipBlocked(10,120); clipMentions(25,200); },
+    ()=>{ g.lastRead=_newestEntries(g.lastRead,100); g.inputHistory=[]; clipBlocked(10,120); clipMentions(80); },
     ()=>{ _trimStrangerPms(g,50); },
+    ()=>{ capNotices(g.mentions,50); },
+    ()=>{ capNotices(g.mentions,25); },
   ];
   for(const st of stages){ st(); m=measure(); if(m.ok) return {json:m.json,frame:m.frame,trimmed:true}; }
   return null;
@@ -16916,7 +17042,7 @@ function _onServerError(message){
     const del=Date.now()-_deleteAcctPendingAt<120000; _deleteAcctPendingAt=0;
     toast((del?'Account NOT deleted — ':'')+m); return;
   }
-  if(/^Network limit reached\b/i.test(m)){ toast(m); return; }
+  if(/^(Network limit reached\b|KeepNick:)/i.test(m)){ toast(m); return; }
   // r3 (r2/app #8 re-sweep): further refusals that used to reach only the console.
   // Client-certificate actions (the "Generating…" spinner used to stay up for good).
   if(/^(Cert (generate|delete) failed|Vault must be unlocked to generate certificates|No certificate found)/i.test(m)){
@@ -17163,15 +17289,17 @@ function restorePreferences(p){
       const ou={};for(const[k,v] of unread)ou[k]=v;localStorage.setItem('cryptirc_unread',JSON.stringify(ou));
       const oa={};for(const[k,v] of unreadAsOf)oa[k]=v;localStorage.setItem('cryptirc_unread_asof',JSON.stringify(oa));
     }catch(e){}
-    if(p.mentions){
-      // Timestamp-guard like queries/favs: a read/clear on another device (the most
-      // recent write) must win so it doesn't resurrect here as still-unread. Only
-      // accept the server's list when our local copy isn't newer.
-      const localTs=parseInt(localStorage.getItem('cryptirc_mentions_ts')||'0');
-      const serverTs=p._mentionsTs||0;
-      if(localTs<=serverTs){
-        mentionsList=_keepLocalE2eText(p.mentions,mentionsList,m=>[m.type,m.conn_id,String(m.target||'').toLowerCase(),String(m.from||'').toLowerCase(),m.ts,m.id||0].join('|'));
-        try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));localStorage.setItem('cryptirc_mentions_ts',String(serverTs));}catch(e){}
+    if(Array.isArray(p.mentions)){
+      // A Clear supersedes snapshots from older generations, even if those
+      // devices saved unrelated preferences after the Clear.
+      syncLocalNotices();
+      const serverClear=Number(p._mentionsClearTs)||0;
+      const serverTs=Number(p._mentionsTs)||0;
+      if(serverClear>_noticesClearTs || (serverClear===_noticesClearTs && (_noticesTs<serverTs || (!_noticesTs&&!serverTs)))){
+        const readKeys=new Set(mentionsList.filter(m=>m.read).map(noticeKey));
+        mentionsList=_keepLocalE2eText(validNotices(p.mentions),mentionsList,noticeIdentity).map(m=>
+          !m.read&&readKeys.has(noticeKey(m))?{...m,read:true}:m);
+        storeNotices(serverTs,serverClear);
         if(document.getElementById('mentions-panel')?.classList.contains('show')) renderMentionsList();
       }
     }
@@ -17317,6 +17445,7 @@ function restorePreferences(p){
       const localTs=parseInt(localStorage.getItem('cryptirc_keepnicks_ts')||'0');
       const serverTs=p._keepnicksTs||0;
       if(localTs<=serverTs){localStorage.setItem('cryptirc_keepnicks',JSON.stringify(p.keepnicks));localStorage.setItem('cryptirc_keepnicks_ts',String(serverTs));}
+      importKeepNicks();
     }
     if(p.networkOrder){
       // F29: timestamp-gate (see ignoreList above) — a stale device must not clobber
@@ -18843,7 +18972,10 @@ function viewFullTopic(){
   box.innerHTML=`<div style="font-size:11px;color:var(--text3);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Topic — ${esc(active.target)}</div>${parseMircColors(topic)}`;
   ov.innerHTML='';ov.appendChild(box);
 }
+let _finishCustomPrompt=null;
 function customPrompt(message,defaultValue,isPassword,clearOnClose=isPassword,cancelLabel='Cancel',onCancelClick=null){
+  // Replacing a dialog settles its caller without triggering its Cancel button.
+  _finishCustomPrompt?.(null);
   return new Promise(resolve=>{
     const ov=document.getElementById('custom-prompt-overlay');
     const msg=document.getElementById('custom-prompt-msg');
@@ -18862,7 +18994,8 @@ function customPrompt(message,defaultValue,isPassword,clearOnClose=isPassword,ca
     inp.select();
     // For password prompts, clear the shared input's value on close so the secret
     // doesn't linger in the live DOM for later scripts/inspection to read.
-    function finish(val){ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;cancel.textContent='Cancel';inp.onkeydown=null;if(clearOnClose)inp.value='';resolve(val);}
+    function finish(val){_finishCustomPrompt=null;ov.classList.remove('open');ok.onclick=null;cancel.onclick=null;cancel.textContent='Cancel';inp.onkeydown=null;if(clearOnClose)inp.value='';resolve(val);}
+    _finishCustomPrompt=finish;
     ok.onclick=()=>finish(inp.value);
     cancel.onclick=event=>{finish(null);if(event&&onCancelClick) onCancelClick();};
     inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();e.stopPropagation();finish(inp.value);}else if(e.key==='Escape'){e.preventDefault();e.stopPropagation();finish(null);}};
@@ -19054,9 +19187,68 @@ function updateCertBtn(){const btn=document.getElementById('cert-menu-btn');if(!
 // ─── Push Notifications ───────────────────────────────────────────────────────
 let _notifPrefs = null;
 
+function ircLatencyThreshold(value,fallback){
+  return Number.isInteger(value)&&value>=IRC_LATENCY_MIN&&value<=IRC_LATENCY_MAX?value:fallback;
+}
+function ircLatencyRecoveryThreshold(){
+  const threshold=ircAlertPrefs.threshold;
+  return threshold-Math.min(500,Math.round(threshold/6));
+}
+function loadIrcAlertPrefs(){
+  let prefs;
+  try{prefs=JSON.parse(localStorage.getItem(IRC_ALERT_PREFS_KEY));}catch(e){}
+  return {
+    version:prefs?.version!==false,
+    finger:prefs?.finger!==false,
+    latency:prefs?.latency!==false,
+    threshold:ircLatencyThreshold(prefs?.threshold,IRC_LATENCY_DEFAULT),
+  };
+}
+function ctcpAlertEnabled(command){
+  return command==='VERSION'?ircAlertPrefs.version:command==='FINGER'?ircAlertPrefs.finger:true;
+}
+function renderIrcAlertPrefs(preserveThresholdEdit=false){
+  document.getElementById('notif-ctcp-version').checked=ircAlertPrefs.version;
+  document.getElementById('notif-ctcp-finger').checked=ircAlertPrefs.finger;
+  document.getElementById('notif-latency').checked=ircAlertPrefs.latency;
+  const threshold=document.getElementById('notif-latency-threshold');
+  if(!preserveThresholdEdit || document.activeElement!==threshold) threshold.value=ircAlertPrefs.threshold;
+  threshold.disabled=!ircAlertPrefs.latency;
+}
+function applyIrcAlertPrefs(next,fromStorage=false){
+  const thresholdChanged=next.threshold!==ircAlertPrefs.threshold;
+  if(next.latency!==ircAlertPrefs.latency) highLagNotified.clear();
+  else if(thresholdChanged){
+    for(const id of highLagNotified){
+      if(!(lagMap[id]>=next.threshold)) highLagNotified.delete(id);
+    }
+  }
+  ircAlertPrefs=next;
+  for(let i=pendingCtcpNotices.length-1;i>=0;i--){
+    if(!ctcpAlertEnabled(pendingCtcpNotices[i].command)) pendingCtcpNotices.splice(i,1);
+  }
+  if(document.getElementById('notif-modal')?.classList.contains('open')) renderIrcAlertPrefs(fromStorage&&!thresholdChanged);
+  showPrivateNetworkNotices();
+}
+function saveIrcAlertPrefs(){
+  const next={
+    version:document.getElementById('notif-ctcp-version').checked,
+    finger:document.getElementById('notif-ctcp-finger').checked,
+    latency:document.getElementById('notif-latency').checked,
+    threshold:ircLatencyThreshold(document.getElementById('notif-latency-threshold').valueAsNumber,ircAlertPrefs.threshold),
+  };
+  try{localStorage.setItem(IRC_ALERT_PREFS_KEY,JSON.stringify(next));}catch(e){}
+  applyIrcAlertPrefs(next);
+}
+window.addEventListener('storage',e=>{
+  if(e.storageArea===localStorage && (e.key===IRC_ALERT_PREFS_KEY || e.key===null)) applyIrcAlertPrefs(loadIrcAlertPrefs(),true);
+});
+
 async function showNotifModal() {
   document.getElementById('notif-modal').classList.add('open');
   _overlayOpen('notifModal', closeNotifModal);
+  renderIrcAlertPrefs();
+  document.getElementById('notif-chat-effects').checked=chatEffectsEnabled();
   await loadNotifPrefs();
   renderNotifModal();
   renderNotifNetworkList();
@@ -19129,7 +19321,13 @@ function renderHighlightTags(){
     c.addEventListener('click',e=>{const b=e.target.closest('.hl-tag-x[data-hl-word]');if(b&&c.contains(b))removeHighlightWord(b.dataset.hlWord);});
   }
 }
-function closeNotifModal() { _overlayClose('notifModal'); document.getElementById('notif-modal').classList.remove('open'); }
+function closeNotifModal() {
+  const modal=document.getElementById('notif-modal');
+  const threshold=document.getElementById('notif-latency-threshold');
+  if(modal.classList.contains('open') && document.activeElement===threshold && !threshold.disabled) saveIrcAlertPrefs();
+  _overlayClose('notifModal');
+  modal.classList.remove('open');
+}
 
 async function loadNotifPrefs() {
   if (!sessionToken) return;
@@ -19694,7 +19892,7 @@ function jumpToMessage(conn_id,target,ts,from,match){
       const area=document.getElementById('chat-area');_markProgrammaticScroll(area);
       _messageJump={serial,key:bk(conn_id,target),ts:tsNum,from,match,until:Date.now()+3000};
       _refreshJumpHighlight();updateScrollBtn();
-      if(match?.notice)clearNoticesForTarget(conn_id,target);
+      if(match?.noticeKey)markNoticesRead(conn_id,target,match.noticeKey);
       return;
     }
     if(Date.now()-started>25000){showToast('History is taking too long — try the notice again');return;}
@@ -19741,6 +19939,7 @@ function _exitHistoryView(){
   if(isActive(conn_id, target)){
     renderChat();                            // clear the stale window + banner now
     wsend({type:'get_logs', conn_id, target, limit:200}); // prependLogs scrolls to bottom
+    showPrivateNetworkNotices();
   }
 }
 
@@ -20665,8 +20864,8 @@ function showHelpPanel(){
       'ratelimit ms — Set message send rate (default 500ms, like irssi)',
       'expire hours — Auto-delete old messages (0 = off)',
       'autolock minutes — Vault auto-lock after inactivity (0 = off)',
-      'keepnick [nick] — Keep a nick (auto-reclaim via ISON poll + QUIT/NICK events)',
-      'unkeepnick — Stop keeping the nick for current network',
+      'keepnick [nick] — Remember and reclaim a nick on this network',
+      'keepnick stop [nick] or unkeepnick [nick] — Stop keeping the nick',
       'listnick — List all kept nicks with active/inactive status',
     ],
     ['Fun &amp; Emotes',
@@ -20699,14 +20898,14 @@ function showHelpPanel(){
   // Features section
   const feat=document.createElement('div');feat.className='help-section';
   feat.innerHTML=`<div class="help-section-title">Features</div>
-    <div class="help-cmd"><span class="help-cmd-name">227 themes</span><span class="help-cmd-desc">64 animated (canvas effects) + 163 static — hit ✎ on any theme card to customize it</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">257 themes</span><span class="help-cmd-desc">64 animated (canvas effects) + 193 static — hit ✎ on any theme card to customize it</span></div>
     <div class="help-cmd"><span class="help-cmd-name">140 fonts</span><span class="help-cmd-desc">Monospace, sans-serif, serif, display, handwriting</span></div>
     <div class="help-cmd"><span class="help-cmd-name">E2E encryption</span><span class="help-cmd-desc">Signal protocol for DMs + AES-256-GCM for channels</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Encrypted vault</span><span class="help-cmd-desc">Argon2id KDF — all data encrypted at rest</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Auto-identify</span><span class="help-cmd-desc">NickServ IDENTIFY on connect (network settings)</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Auto-rejoin</span><span class="help-cmd-desc">Rejoin channels automatically after being kicked</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Channel keys</span><span class="help-cmd-desc">Saved +k keys auto-sent on join (/key to manage)</span></div>
-    <div class="help-cmd"><span class="help-cmd-name">KeepNick</span><span class="help-cmd-desc">irssi-style nick keeper — ISON poll + QUIT/NICK events</span></div>
+    <div class="help-cmd"><span class="help-cmd-name">KeepNick</span><span class="help-cmd-desc">CryptIRC remembers and reclaims your nick after reconnecting</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Smart paste</span><span class="help-cmd-desc">Multi-line paste auto-offers pastebin creation, with an expiry choice</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Read markers</span><span class="help-cmd-desc">"New messages" divider when switching channels</span></div>
     <div class="help-cmd"><span class="help-cmd-name">Split view</span><span class="help-cmd-desc">View two channels side by side (/split)</span></div>
@@ -22950,6 +23149,8 @@ document.addEventListener('DOMContentLoaded',()=>{
 
 // ─── Mentions system ──────────────────────────────────────────────────────────
 let mentionsList=[];
+let _noticesTs=0,_noticesClearTs=0;
+const MAX_NOTICES=100;
 let _noticePointerHeld=false,_noticeRenderQueued=false;
 document.addEventListener('pointerdown',e=>{if(e.target.closest('#mentions-panel'))_noticePointerHeld=true;},true);
 function _releaseNoticePointer(){
@@ -22958,10 +23159,45 @@ function _releaseNoticePointer(){
 }
 window.addEventListener('pointerup',_releaseNoticePointer);
 window.addEventListener('pointercancel',_releaseNoticePointer);
-try{mentionsList=JSON.parse(localStorage.getItem('cryptirc_mentions')||'[]');}catch(e){}
-// `low`: an entry recorded from incoming traffic (background save); a clear/dismiss
-// is a user change and saves normally.
-function saveMentions(low){try{localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList.slice(-100)));localStorage.setItem('cryptirc_mentions_ts',String(Date.now()));}catch(e){} savePrefsToServer(low===true);}
+function capNotices(list,limit=MAX_NOTICES){
+  for(let i=list.length-1;i>=0&&list.length>limit;i--)if(list[i].read)list.splice(i,1);
+  if(list.length>limit)list.length=limit;
+  return list;
+}
+function validNotices(list){return Array.isArray(list)?capNotices(list.filter(m=>m&&typeof m==='object')):[];}
+function syncLocalNotices(force=false){
+  try{
+    const updated=Number(localStorage.getItem('cryptirc_mentions_ts'))||0;
+    const cleared=Number(localStorage.getItem('cryptirc_mentions_clear_ts'))||0;
+    if(!force&&updated===_noticesTs&&cleared===_noticesClearTs)return;
+    mentionsList=validNotices(JSON.parse(localStorage.getItem('cryptirc_mentions')||'[]'));
+    _noticesTs=updated;
+    _noticesClearTs=cleared;
+  }catch(e){}
+}
+syncLocalNotices(true);
+window.addEventListener('storage',event=>{
+  if(event.key!=='cryptirc_mentions')return;
+  syncLocalNotices(true);
+  updateMentionsBadge();
+});
+function storeNotices(updated,cleared){
+  _noticesTs=updated;
+  _noticesClearTs=cleared;
+  try{
+    localStorage.setItem('cryptirc_mentions_clear_ts',String(cleared));
+    localStorage.setItem('cryptirc_mentions_ts',String(updated));
+    localStorage.setItem('cryptirc_mentions',JSON.stringify(mentionsList));
+  }catch(e){}
+}
+// Read and clear changes save with user priority. Incoming traffic saves in the background.
+function saveMentions(low,clear=false){
+  const updated=Math.max(Date.now(),_noticesTs+1,_noticesClearTs+1);
+  storeNotices(updated,clear?updated:_noticesClearTs);
+  savePrefsToServer(low===true);
+}
+function noticeIdentity(m){return JSON.stringify([m.type,m.conn_id,String(m.target||'').toLowerCase(),String(m.from||'').toLowerCase(),m.ts,m.id||0]);}
+function noticeKey(m){return m.id?noticeIdentity(m):JSON.stringify([noticeIdentity(m),m.text]);}
 function getHighlightWords(){try{return JSON.parse(localStorage.getItem('cryptirc_highlight_words')||'[]');}catch{return[];}}
 function checkMention(conn_id,target,from,text,ts,record,id,enc){
   // B2: `record` (default true) gates the SIDE EFFECT (adding to the Mentions inbox +
@@ -22986,49 +23222,49 @@ function checkMention(conn_id,target,from,text,ts,record,id,enc){
   // A muted channel (or muted network) must NOT light the Notices inbox / mentions
   // badge — muting means no alert of any kind for that channel.
   if(mentioned && isChan && !_isOwnMsg(conn_id,{from}) && !_isBufMuted(conn_id,target) && record){
+    syncLocalNotices();
     const net=networks.find(x=>x.config.id===conn_id);
     const _me={type:'mention',conn_id,target,from,text,ts,id:id||0,network:net?.config.label||net?.config.server||conn_id};
     if(enc) _me.enc=true;   // decrypted E2E text: hidden in the synced copy (_scrubE2eForSync)
     mentionsList.unshift(_me);
-    if(mentionsList.length>100)mentionsList.length=100;
+    capNotices(mentionsList);
     saveMentions(true); updateMentionsBadge();
   }
   return mentioned;
 }
 function addPmNotice(conn_id,from,msg){
   if(!from||from==='*')return;
+  syncLocalNotices();
   const fL=from.toLowerCase();
   const i=mentionsList.findIndex(m=>m.type==='pm'&&m.conn_id===conn_id&&(m.from||'').toLowerCase()===fL);
   if(i>=0){
     const old=mentionsList[i];
-    if(old.ts>msg.ts || (old.ts===msg.ts && old.text===(msg.text||'')))return;
-    mentionsList.splice(i,1);
+    if(old.ts>msg.ts || (msg.id?old.id===msg.id:old.ts===msg.ts&&old.text===(msg.text||'')))return;
+    if(!old.read)mentionsList.splice(i,1);
   }
   const net=networks.find(x=>x.config.id===conn_id);
   const _pe={type:'pm',conn_id,target:from,from,text:msg.text||'',ts:msg.ts,id:msg.id||0,network:net?.config.label||net?.config.server||conn_id};
   if(msg.encrypted) _pe.enc=true;
   mentionsList.unshift(_pe);
-  if(mentionsList.length>100)mentionsList.length=100;
+  capNotices(mentionsList);
   saveMentions(true); updateMentionsBadge();
 }
-function clearNoticesForTarget(conn_id,target){
+function markNoticesRead(conn_id,target,key){
   if(!target)return;
+  syncLocalNotices();
   const t=target.toLowerCase();
-  const before=mentionsList.length;
-  mentionsList=mentionsList.filter(m=>{
-    if(m.conn_id!==conn_id)return true;
-    return (m.target||'').toLowerCase()!==t;
-  });
-  if(mentionsList.length!==before){
-    saveMentions(); updateMentionsBadge();
-
+  let changed=false;
+  for(const notice of mentionsList){
+    if(notice.read || notice.conn_id!==conn_id || (notice.target||'').toLowerCase()!==t || (key && noticeKey(notice)!==key))continue;
+    notice.read=true;
+    changed=true;
   }
+  if(changed){saveMentions();updateMentionsBadge();}
 }
-let _unseenMentions=0;
 function updateMentionsBadge(){
   const btn=document.getElementById('mentions-btn');
   if(!btn)return;
-  const count=mentionsList.length;
+  const count=mentionsList.filter(notice=>!notice.read).length;
   btn.classList.toggle('has-unread',count>0);
   btn.setAttribute('aria-label',count?'Notices, '+count+' unread':'Notices');
   btn.title=count?'Notices — unread mentions and private messages':'Notices';
@@ -23203,21 +23439,24 @@ function renderMentionsList(){
   const anchorKey=anchor?.dataset.noticeKey, anchorTop=anchor?.getBoundingClientRect().top;
   const scroll=el.scrollTop;
   document.getElementById('mentions-clear').disabled=!mentionsList.length;
-  if(!mentionsList.length){el.innerHTML='<div class="mention-empty">You’re all caught up.<br><span>Mentions and unread private messages appear here.</span></div>';return;}
+  if(!mentionsList.length){el.innerHTML='<div class="mention-empty">No notices yet.<br><span>Mentions and private messages appear here.</span></div>';return;}
   el.innerHTML='';
+  const expiry=getMessageExpiry();
+  const cutoff=expiry?Date.now()/1000-expiry*3600:0;
   for(const m of mentionsList){
     const d=document.createElement('button'); d.type='button';d.className='mention-item';
-    d.dataset.noticeKey=JSON.stringify([m.conn_id,m.type,m.target,m.from,m.ts,m.id||0,m.text]);
+    d.dataset.noticeKey=noticeKey(m);
     const time=esc(_fmtMsgTs(m.ts,'locale'));
     const meta=m.type==='pm'
       ? `PM from ${esc(m.from)} · ${esc(m.network||'')} · ${time}`
       : `${esc(m.from)} in ${esc(m.target)} · ${esc(m.network||'')} · ${time}`;
-    d.innerHTML=`<span class="mention-meta">${meta}</span><span class="mention-text">${esc(m.text)}</span>`;
+    const preview=expiry&&!(Number(m.ts)>cutoff)?'Preview hidden by message expiry':m.text;
+    d.innerHTML=`<span class="mention-meta">${meta} · ${m.read?'Read':'Unread'}</span><span class="mention-text">${esc(preview)}</span>`;
     d.onclick=()=>{
       closeMentionsPanel();
       // textTrunc: this entry's text was clipped to fit the synced prefs budget, so
       // the row lookup compares by prefix instead of exact text.
-      const match={id:m.id||0,text:m.text,notice:true,textTrunc:!!m.textTrunc};
+      const match={id:m.id||0,text:m.text,notice:true,noticeKey:noticeKey(m),textTrunc:!!m.textTrunc};
       if(!_detMode && isDetached(m.conn_id,m.target)){
         openDetachedWindow(m.conn_id,m.target, {ts:m.ts,from:m.from,match});
         return;
@@ -23232,7 +23471,12 @@ function renderMentionsList(){
   if(scroll>0 && anchored)el.scrollTop+=anchored.getBoundingClientRect().top-anchorTop;
   if(focused)rows.find(r=>r.dataset.noticeKey===focused)?.focus({preventScroll:true});
 }
-function clearMentions(){mentionsList=[];_unseenMentions=0;saveMentions();updateMentionsBadge();}
+function clearMentions(){
+  syncLocalNotices();
+  mentionsList=[];
+  saveMentions(false,true);
+  updateMentionsBadge();
+}
 document.addEventListener('click',e=>{
   if(!e.target.closest('#mentions-panel,#mentions-btn') && document.getElementById('mentions-panel')?.classList.contains('show'))closeMentionsPanel();
 });

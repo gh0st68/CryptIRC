@@ -85,6 +85,8 @@ reconnect:
 sudo bash deploy/update.sh --restart-daemon
 ```
 
+Source builds automatically switch to one Cargo job and skip optimization for CryptIRC's own code when available memory is 2 GiB or less. See [Clone and Build](../INSTALL.md#step-3-clone-and-build) for manual builds and overrides.
+
 **A box that shouldn't build** (a small production host): build the binaries elsewhere
 from the same commit — for the host's distribution release, so they need no newer system
 libraries (e.g. in a `rust:1-bookworm` container for Debian 12) — copy `cryptirc` (and

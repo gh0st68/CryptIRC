@@ -17,7 +17,11 @@ const server=http.createServer(async(req,res)=>{
   const file=path.resolve(staticRoot,u.pathname.replace(/^\/cryptirc\//,'')||'index.html');
   if(!file.startsWith(staticRoot+'/')){res.writeHead(403).end();return;}
   let data=await fs.readFile(file);
-  if(file.endsWith('app.js'))data=Buffer.from(data.toString().replaceAll('__CRYPTIRC_VERSION__','test').replaceAll('__CRYPTIRC_BUILD__','test'));
+  if(file.endsWith('app.js')){
+   const controls=await fs.readFile(path.join(staticRoot,'page-controls.js'),'utf8');
+   const reactions=await fs.readFile(path.join(staticRoot,'reactions.js'),'utf8');
+   data=Buffer.from(controls+'\n'+reactions+'\n'+data.toString().replaceAll('__CRYPTIRC_VERSION__','test').replaceAll('__CRYPTIRC_BUILD__','test'));
+  }
   res.setHeader('Content-Type',({'.html':'text/html','.js':'application/javascript','.svg':'image/svg+xml','.json':'application/json','.ttf':'font/ttf','.otf':'font/otf'})[path.extname(file)]||'application/octet-stream');res.end(data);
  }catch{res.writeHead(404).end();}
 });
@@ -59,12 +63,18 @@ const fixture=`(()=>{
  document.getElementById('lag-mobile-dot').classList.add('good');
  scrollForce();return true;
 })()`;
+let loadNumber=0;
 const load=async(width,height,mobile,url='/cryptirc/')=>{
  await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile});
  await send('Emulation.setTouchEmulationEnabled',{enabled:mobile,maxTouchPoints:1});
  await send('Emulation.setEmulatedMedia',{features:[{name:'hover',value:mobile?'none':'hover'},{name:'pointer',value:mobile?'coarse':'fine'},{name:'prefers-reduced-motion',value:'reduce'}]});
- await send('Page.navigate',{url:'http://127.0.0.1:'+port+url});
- for(let i=0;i<80;i++){await sleep(100);if(await ev(`typeof setActive==='function' && document.readyState==='complete'`))break;}
+ const destination='http://127.0.0.1:'+port+url+'?fixture='+ ++loadNumber;
+ await send('Page.navigate',{url:destination});
+ for(let i=0;i<80;i++){
+  await sleep(100);
+  if(await ev(`location.href===${JSON.stringify(destination)} && typeof setActive==='function' && document.readyState==='complete' && document.getElementById('auth-screen').style.display==='flex'`))break;
+  if(i===79)throw new Error('Notification fixture did not reach the sign-in screen');
+ }
  await ev(fixture);await sleep(350);
 };
 const shot=async(name)=>{const r=await send('Page.captureScreenshot',{format:'png'});await fs.writeFile(path.join(out,name+'.png'),Buffer.from(r.data,'base64'));};
@@ -73,7 +83,7 @@ const geometry=()=>ev(`(()=>{const rect=id=>{const r=document.getElementById(id)
 const checks=[];const ok=(name,value)=>{checks.push({name,pass:!!value});if(!value)console.error('FAIL:',name);};
 const base='/cryptirc/';
 const reset=async(w=1440,h=900,m=false)=>{await load(w,h,m,base);await ev(`mentionsList=[];updateMentionsBadge();_pendingLogs.clear();`);};
-const click=async(selector,touch=false)=>{const p=await ev(`(()=>{const r=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);if(touch){await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[p]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});}else{await send('Input.dispatchMouseEvent',{type:'mousePressed',...p,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',...p,button:'left',clickCount:1});}await sleep(100);};
+const click=async(selector,touch=false)=>{const p=await ev(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});if(!el)return null;const r=el.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);if(!p)throw new Error('Missing click target '+selector+' during load '+loadNumber+'; browser exceptions: '+JSON.stringify(errors));if(touch){await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[p]});await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});}else{await send('Input.dispatchMouseEvent',{type:'mousePressed',...p,button:'left',clickCount:1});await send('Input.dispatchMouseEvent',{type:'mouseReleased',...p,button:'left',clickCount:1});}await sleep(100);};
 const seed=`mentionsList=[{type:'mention',conn_id:'preview',target:'#lounge',from:'Alex',text:'ghost, have a look at this',ts:100,network:'TwistedNET'}];updateMentionsBadge();`;
 for(const [w,h,m] of [[320,640,true],[390,844,true],[844,390,true],[1440,900,false]]){
  await reset(w,h,m);await ev(seed);await click('#mentions-btn',m);
@@ -99,6 +109,10 @@ await reset();await ev(`addPmNotice('preview','Sam',{text:'first message',ts:100
 ok('one PM row updates to latest unread message',await ev(`mentionsList.length===1&&mentionsList[0].text==='latest message'&&mentionsList[0].ts===101`));
 await ev(`addPmNotice('preview','Sam',{text:'older arrival',ts:99});`);
 ok('late PM cannot replace latest preview',await ev(`mentionsList[0].text==='latest message'`));
+await ev(`markNoticesRead('preview','Sam');addPmNotice('preview','Sam',{text:'new unread',ts:102,id:102});`);
+ok('a new PM retains the previously read notice',await ev(`mentionsList.length===2&&mentionsList[1].read===true&&!mentionsList[0].read`));
+await ev(`const oldestUnread={...mentionsList[0],id:299};mentionsList=[...Array.from({length:99},(_,i)=>({...mentionsList[1],id:i+300})),oldestUnread];checkMention('preview','#music','river','ghost: new mention',103,true,500);`);
+ok('the notice limit evicts old read entries before unread ones',await ev(`mentionsList.length===100&&mentionsList.some(m=>m.id===299)&&mentionsList[0].id===500`));
 await ev(`mentionsList=[];checkMention('preview','#music','ghost','ghost says hello',102,true)`);
 ok('own messages do not create unread notices',await ev(`mentionsList.length===0`));
 await reset();await ev(seed);await click('#mentions-btn');await ev(`unread.set('preview/#music',4);document.querySelector('#mentions-clear,[onclick=\"clearMentions()\"]')?.click()`);
@@ -126,13 +140,27 @@ for(const [w,h,m] of [[390,844,true],[1440,900,false]]){
  await click('#mentions-btn',m);await click('.mention-item',m);await sleep(200);
  const landed=()=>ev(`(()=>{const r=document.querySelector('#chat-area .msg-row.flash[data-ts="1020"]'),a=document.getElementById('chat-area');if(!r)return false;const rr=r.getBoundingClientRect(),ar=a.getBoundingClientRect();return active.target==='#lounge'&&rr.top>=ar.top&&rr.bottom<=ar.bottom;})()`);
  ok(w+'px: notice click lands on the correct visible message',await landed());
- ok(w+'px: successful jump dismisses the notice',await ev(`mentionsList.length===0&&!document.getElementById('mentions-panel').classList.contains('show')`));
+ ok(w+'px: successful jump retains the read notice and clears the unread badge',await ev(`mentionsList.length===1&&mentionsList[0].read===true&&!document.getElementById('mentions-btn').classList.contains('has-unread')&&!document.getElementById('mentions-panel').classList.contains('show')`));
  await sleep(2100);
  ok(w+'px: delayed auto-scroll cannot pull away from jump',await landed());
  if(w===390)await shot('cryptirc-notice-message-highlight');
 }
 await reset();await ev(seed);await ev(`jumpToMessage('preview','#lounge',100,'Alex',{text:'ghost, have a look at this',notice:true})`);await sleep(6400);
 ok('failed/offline jump preserves notice for retry',await ev(`mentionsList.length===1&&document.getElementById('mentions-btn').classList.contains('has-unread')`));
+
+await reset();await ev(seed);
+await ev(`getBuf('preview','#lounge').push({id:500,ts:100,from:'Alex',text:mentionsList[0].text,kind:'privmsg'});checkMention('preview','#lounge','river','ghost: a second notice',101,true,501);`);
+await click('#mentions-btn');await click('.mention-item:last-child');await sleep(200);
+ok('reading one notice keeps the other unread, including in the same conversation',await ev(`mentionsList[1].read===true&&!mentionsList[0].read&&document.getElementById('mentions-btn').getAttribute('aria-label')==='Notices, 1 unread'`));
+await load(1440,900,false,base);await click('#mentions-btn');
+ok('read and unread rows survive a reload',await ev(`mentionsList.length===2&&mentionsList[1].read===true&&!mentionsList[0].read&&/Read/.test(document.querySelector('.mention-item:last-child').textContent)`));
+await ev(`setMessageExpiry(1);runMessageExpiry()`);
+ok('message expiry hides old previews while retaining the notice rows',await ev(`document.querySelectorAll('.mention-item').length===2&&Array.from(document.querySelectorAll('.mention-text')).every(e=>e.textContent==='Preview hidden by message expiry')`));
+await ev(`setMessageExpiry(0)`);
+await click('#mentions-clear');
+ok('Clear removes read and unread rows',await ev(`mentionsList.length===0&&!document.getElementById('mentions-btn').classList.contains('has-unread')`));
+await ev(`restorePreferences({mentions:[{type:'mention',conn_id:'preview',target:'#lounge',from:'Alex',text:'old row',ts:100}],_mentionsTs:Date.now()+5000})`);
+ok('a more recent save from before Clear cannot restore a notice',await ev(`mentionsList.length===0`));
 
 
 await reset();await ev(rows);await ev(`jumpToMessage('preview','#dev',1060,'Alex')`);await sleep(180);

@@ -298,6 +298,9 @@ pub fn apply_registration_facts(c: &mut IrcConnection, facts: &cryptirc::ipc::Re
     let caps = facts.caps.join(" ");
     let classification = classify_avatar_registration(facts.server_name.as_deref(), &caps, &facts.isupport, facts.cap_ls_done);
     c.daemon_registration = true;
+    if !facts.truncated && facts.cap_ls_done {
+        c.e2e_bridge.advertised = facts.caps.iter().any(|cap| cap == crate::e2e_bridge::CAP);
+    }
     c.cap_ls_done |= classification.cap_ls_done;
     c.behind_bouncer |= classification.behind_bouncer || facts.behind_bouncer || facts.truncated;
     // An incomplete snapshot cannot prove support or enablement; it also cannot

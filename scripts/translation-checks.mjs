@@ -155,7 +155,13 @@ export async function checkTranslation({
   await waitFor(()=>ev(`getBuf(${j(networkA)},${j(other)}).some(m=>m.text==='Nachricht vom anderen Teilnehmer')`),'incoming DM in the browser');
   await ev(`setActive(${j(networkA)},${j(other)})`);
   await selectChat(other,"f.outgoing.value='peer'");
-  await draft('Good evening');
+  const sending=draft('Good evening');
+  const allowPlain = `Array.from(document.querySelectorAll('button')).find(b=>b.textContent==='Allow unencrypted')`;
+  await waitFor(()=>ev(`!!(${allowPlain})`),'plain DM confirmation for a peer without encryption');
+  check('discovery holds a DM to a peer without encryption before plaintext consent',
+    !otherWs.events.some(e=>e.text==='Guten Abend'));
+  await ev(`(${allowPlain}).click()`);
+  await sending;
   await otherWs.wait(e=>e.type==='irc_message'&&e.text==='Guten Abend','translated outgoing DM');
   check('DM auto-matches the last incoming language',calls.some(c=>c.text==='Good evening'&&c.target==='de'));
   await pause(220);

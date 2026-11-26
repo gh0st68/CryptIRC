@@ -532,7 +532,7 @@ async fn send(state: &AppState, user: &str, args: &Value) -> ToolResult {
     {
         return Err("Invalid message. Use plain text up to 4 KiB.".into());
     }
-    check_message_target(state, user, target).await?;
+    check_message_target(state, user, &id, target).await?;
     let raw = match args["kind"].as_str().unwrap_or("message") {
         "message" => format!("PRIVMSG {target} :{text}"),
         "notice" => format!("NOTICE {target} :{text}"),
@@ -542,13 +542,13 @@ async fn send(state: &AppState, user: &str, args: &Value) -> ToolResult {
     dispatch(state, user, ClientMessage::Send { conn_id: id, raw }).await
 }
 
-async fn check_message_target(state: &AppState, user: &str, target: &str) -> Result<(), String> {
+async fn check_message_target(state: &AppState, user: &str, conn_id: &str, target: &str) -> Result<(), String> {
     let (channels, peers) = state
         .e2e_store
         .protected_names(user)
         .await
         .map_err(|_| "CryptIRC could not verify the conversation's encryption settings.")?;
-    if match_e2e_target(target, channels, peers).is_some() {
+    if match_e2e_target(target, conn_id, channels, peers).is_some() {
         return Err(
             "This conversation is protected by end-to-end encryption. Send from CryptIRC.".into(),
         );
@@ -577,7 +577,7 @@ async fn irc_command(state: &AppState, user: &str, args: &Value) -> ToolResult {
             .params
             .first()
             .ok_or("A message target is required.")?;
-        check_message_target(state, user, target).await?;
+        check_message_target(state, user, &id, target).await?;
     }
     dispatch(
         state,
