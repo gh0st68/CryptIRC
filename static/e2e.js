@@ -41,6 +41,8 @@
 // re-establish a fresh session on first contact (a one-time re-encrypt).
 const E2E_DM_PREFIX     = '[e2edm2]';   // ASCII-only — safe through all IRC servers
 const E2E_CHAN_PREFIX    = 'sd8~';       // ASCII-only
+const E2E_SHARED_KEY_CONFLICT = '🔐 This message uses Signal encryption, but this chat is configured with a shared key. Agree on one encryption method with this contact.';
+const E2E_RESTART_RECEIVE_MS = 5 * 60 * 1000;
 const E2E_REACTION_DM_PREFIX = 'e2r1:';
 const E2E_REACTION_PSK_PREFIX = 'e2r1p:';
 const E2E_REACTION_AD = new TextEncoder().encode('\nCryptIRC-Reaction-v1');
@@ -655,17 +657,26 @@ async function _e2eSyncFromDevice(nk) {
   if (!rec || !Number.isInteger(rec.ep)) return;
   const cur = E2E.dmSessions[nk];
   const curEp = cur ? (cur.epoch | 0) : -1;
-  if (rec.ep <= curEp) return;
+  // Updating a device-only receive fallback does not move the primary ratchet epoch.
+  if (rec.ep < curEp || (rec.ep === curEp && !(cur?.x3dhPending && (cur.restartPrev || rec.restart)))) return;
   if (rec.del) {
     if (cur) { delete E2E.dmSessions[nk]; E2E._sessionEpoch[nk] = Math.max(E2E._sessionEpoch[nk] || 0, rec.ep); }
     return;
   }
   try {
-    const o = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(rec.blob, _e2eDevSlot(nk))));
+    let o = JSON.parse(new TextDecoder().decode(await aesDecryptBlob(rec.blob, _e2eDevSlot(nk))));
     if (!o || typeof o !== 'object' || !o.RK || (o.epoch | 0) !== rec.ep) return;
+    if (rec.ep === curEp) {
+      if (!cur.startEph || o.startEph !== cur.startEph) return;
+      const { restartPrev, ...primary } = cur;
+      o = o.restartPrev ? { ...primary, restartPrev:o.restartPrev } : primary;
+    }
     o.nick = nk; o.skipped = o.skipped || {}; o.recent = o.recent || {};
     E2E.dmSessions[nk] = o;
     E2E._sessionEpoch[nk] = Math.max(E2E._sessionEpoch[nk] || 0, rec.ep);
+    if (o.restartPrev?.until > Date.now() && cur?.restartPrev?.until !== o.restartPrev.until) {
+      _e2eScheduleRestartExpiry(nk, o.restartPrev.until);
+    }
   } catch (e) { console.warn('[E2E] device session copy unreadable:', nk, e && e.message); }
 }
 // Browser-wide notices between tabs (no secrets): "E2E key is now cached".
@@ -2278,6 +2289,9 @@ async function e2eEstablishResponderSession(from, header, opts = {}) {
 }
 async function _e2eEstablishInner(from, header, opts = {}) {
   const nk = opts.peerKey || _e2eDmKey(from, opts.connId);
+  const gen = E2E._lockGen;
+  const user = _e2eUser();
+  const sharedKeyConfigured = () => _e2eSharedKeyConfigured(_e2eCanon(from,opts.connId) || _e2eK(from));
   // SECURITY: peer ratchet sessions share the server-side e2e/sessions namespace with
   // the user's OWN internal key blobs ('__spk__', '__otpk__<id>', '__state__'). Test
   // the SERVER-SANITIZED form (see _e2eReservedNamespace). (saveSession enforces too.)
@@ -2289,6 +2303,7 @@ async function _e2eEstablishInner(from, header, opts = {}) {
     console.warn('[E2E] responder establish: missing sender_ik');
     return { ok: false, why: 'invalid' };
   }
+  if (sharedKeyConfigured()) return { ok:false, why:'shared-key' };
   // REPLAY GUARD: a header that already established the live session (same ephemeral —
   // x3dhInitiate generates a new ephemeral every time, a replay/duplicate reuses it) is
   // an idempotent no-op instead of resetting the receive chain. The initiator re-sends
@@ -2299,7 +2314,8 @@ async function _e2eEstablishInner(from, header, opts = {}) {
       && (_existing.establishEph === header.ephemeral_pub
           || (Array.isArray(_existing.priorEstablishEphs)
               && _existing.priorEstablishEphs.includes(header.ephemeral_pub)))) {
-    return { ok: true, why: 'replay' };
+    const pt = opts.envelope ? await _ratchetDecryptInner(nk, opts.envelope) : undefined;
+    return { ok: true, why: 'replay', pt };
   }
   // #25: REQUIRE a non-empty signing identity key so the pin always covers BOTH keys.
   if (!header.sender_sign_ik || !header.sender_ik) {
@@ -2348,7 +2364,7 @@ async function _e2eEstablishInner(from, header, opts = {}) {
   // new session only if its first message decrypts. Envelope-driven re-establishment is
   // rate-limited per peer.
   if (_existing && !_existing._unusable) {
-    if (!opts.withEnvelope) {
+    if (!opts.envelope) {
       console.warn('[E2E] deferring header-only X3DH re-establishment for live session:', from);
       return { ok: false, why: 'deferred' };
     }
@@ -2369,16 +2385,20 @@ async function _e2eEstablishInner(from, header, opts = {}) {
   // establishing ephemeral for the replay guard. P4: seed the ratchet's initial DHs from
   // the spk_id-selected SPK. opts.alt: build the session WITHOUT installing it (glare).
   const sess = await ratchetInitRecv(nk, sharedSecret, header.sender_ik, identityAD, header.ephemeral_pub, selectedSpk,
-                                     { noInstall: !!opts.alt, theirSignPub: header.sender_sign_ik, connId:_e2eDmScope(nk)?.[1] });
-  if (opts.alt) { E2E._glareAlt = E2E._glareAlt || Object.create(null); E2E._glareAlt[nk] = sess; }
-  // #29: now that the session is established (and x3dhRespond didn't abort on a
-  // missing OTPK), it's safe to consume the one-time prekey.
-  if (consumedOtpkId != null) {
-    _e2eWs({ type: 'e2e_delete_session', v: E2E_STORAGE_VERSION, partner: `__otpk__${consumedOtpkId}` });
+                                     { previous: _existing, theirSignPub: header.sender_sign_ik, connId:_e2eDmScope(nk)?.[1] });
+  if (!E2E.keyReady || _e2eBootStale(gen)) return { ok:false, why:'invalid' };
+  if (sharedKeyConfigured()) return { ok:false, why:'shared-key' };
+  // A replacement only becomes live after its first message authenticates.
+  const pt = opts.envelope
+    ? await _ratchetDecryptInner(nk, opts.envelope, { useAlt: !!opts.alt, candidate:sess })
+    : await saveSession(nk, sess);
+  if (consumedOtpkId != null && user === _e2eUser()) {
+    _e2eWs({ type: 'e2e_delete_session', v: E2E_STORAGE_VERSION, partner: `__otpk__${consumedOtpkId}` }, () => user === _e2eUser());
     delete E2E._sessionCache[`__otpk__${consumedOtpkId}`];
   }
+  if (!E2E.keyReady || _e2eBootStale(gen)) return { ok:false, why:'invalid' };
   if (!opts.alt) _e2eStateSetDm(nk, true);
-  return { ok: true, why: '' };
+  return { ok: true, why: '', pt };
 }
 
 // ─── Session blob cache (for SPK and OTPKs loaded async) ─────────────────────
@@ -2596,6 +2616,25 @@ async function _e2eAdoptMoved(k) {
 
 // ─── Double Ratchet ───────────────────────────────────────────────────────────
 
+function _e2ePriorEstablishEphs(previous, except = null) {
+  if (!previous) return [];
+  const prior = Array.isArray(previous.priorEstablishEphs) ? previous.priorEstablishEphs : [];
+  return [...new Set([...prior, previous.establishEph].filter(e => e && e !== except))].slice(-32);
+}
+
+function _e2eRestartFrom(session) {
+  return session ? session.startEph || session.establishEph || session.x3dhPending?.ephemeral_pub || null : undefined;
+}
+
+function _e2eScheduleRestartExpiry(nick, until) {
+  const user = _e2eUser();
+  setTimeout(() => {
+    if (user === _e2eUser() && E2E.keyReady) {
+      void _withRatchetLock(nick, () => {}).catch(() => {});
+    }
+  }, Math.max(0, until - Date.now()));
+}
+
 async function ratchetInitSend(nick, sharedSecret, theirSPKPub, theirIdentityPub, identityAD, extra = {}) {
   nick = _e2eK(nick);
   // L1: DHr = their SIGNED PREKEY (not identity key)
@@ -2629,9 +2668,17 @@ async function ratchetInitSend(nick, sharedSecret, theirSPKPub, theirIdentityPub
     // H6/reload: the X3DH header travels with the session until the peer answers
     // (public values only), so it survives a reload and can be re-sent.
     x3dhPending: extra.x3dhHeader || null,
+    startEph:    extra.x3dhHeader?.ephemeral_pub || null,
+    priorEstablishEphs: _e2ePriorEstablishEphs(extra.previous),
   };
 
   if (extra.stillPending && !extra.stillPending()) return null;
+  const previous = extra.previous;
+  if (previous && !previous._unusable && previous.theirIdentityPub === theirIdentityPub && previous.theirSignPub === session.theirSignPub) {
+    const { CKs, recent, restartPrev, ...fallback } = previous;
+    session.restartPrev = { ...fallback, until:Date.now() + E2E_RESTART_RECEIVE_MS };
+    _e2eScheduleRestartExpiry(nick, session.restartPrev.until);
+  }
   E2E.dmSessions[nick] = session;
   await saveSession(nick, session);
   _e2eStateSetDm(nick, true);
@@ -2645,13 +2692,7 @@ async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD,
 
   // Carry forward EVERY ephemeral that has previously established this session so the
   // replay guard recognises a re-delivered OLDER genuine header. Bounded to 32 + deduped.
-  const _old = opts.noInstall ? null : E2E.dmSessions[nick];
-  const _prior = [];
-  if (_old) {
-    if (_old.establishEph) _prior.push(_old.establishEph);
-    if (Array.isArray(_old.priorEstablishEphs)) for (const e of _old.priorEstablishEphs) _prior.push(e);
-  }
-  const _priorDedup = [...new Set(_prior.filter(e => e && e !== establishEph))].slice(-32);
+  const prior = _e2ePriorEstablishEphs(opts.previous, establishEph);
 
   // Use SPK keypair as initial DHs so initiator can match the first ratchet step.
   // P4 (#25/#84): prefer the spk_id-selected SPK the caller resolved in x3dhRespond.
@@ -2680,14 +2721,12 @@ async function ratchetInitRecv(nick, sharedSecret, theirIdentityPub, identityAD,
     theirSignPub: opts.theirSignPub || null,
     identityAD:  identityAD || null,
     establishEph: establishEph || null,
-    priorEstablishEphs: _priorDedup,
+    startEph:    establishEph || null,
+    priorEstablishEphs: prior,
     skipped:     {},
     isInitiator: false,
   };
 
-  if (opts.noInstall) return session;
-  E2E.dmSessions[nick] = session;
-  await saveSession(nick, session);
   return session;
 }
 
@@ -2712,7 +2751,16 @@ function _withRatchetLock(nick, fn) {
   return (async () => {
     try {
       await prev;
-      return await _e2eXLock('r:' + nick, async () => { await _e2eSyncFromDevice(nick); return await fn(); });
+      return await _e2eXLock('r:' + nick, async () => {
+        await _e2eSyncFromDevice(nick);
+        const session = E2E.dmSessions[nick];
+        if (E2E.keyReady && session?.restartPrev && !(session.restartPrev.until > Date.now())) {
+          const { restartPrev, ...activeSession } = session;
+          E2E.dmSessions[nick] = activeSession;
+          await _e2eWriteDeviceSession(nick, activeSession);
+        }
+        return await fn();
+      });
     } finally {
       resolve();
       // r8 (codex-p3 e2e.js:4039): nobody queued behind → the entry goes (one per nick
@@ -2726,10 +2774,22 @@ function _withRatchetLock(nick, fn) {
 // across all nicks — expired entries of senders who stopped, and the oldest beyond a
 // global bound — instead of only for the nick currently sending.
 const E2E_STRANGER_MAX = 200;
+const E2E_HEADER_TTL_MS = 10 * 60 * 1000;
 // r9 (astra-p3 e2e.js:3453): when each pending X3DH header arrived (keyed by the header
 // object, so the stored value keeps its shape).
 const _e2ePendHdrAt = new WeakMap();
 const _e2eHeaderNetworks = new WeakMap();
+function _e2eForgetPendingHeader(k,hdr) {
+  if (hdr && E2E._pendingIncomingX3DH?.[k] === hdr) delete E2E._pendingIncomingX3DH[k];
+}
+function _e2ePendingHeader(k) {
+  const hdr = E2E._pendingIncomingX3DH?.[k];
+  if (hdr && !E2E.trustStore[k]?.pendingFingerprint && Date.now() - _e2ePendHdrAt.get(hdr) >= E2E_HEADER_TTL_MS) {
+    _e2eForgetPendingHeader(k,hdr);
+    return null;
+  }
+  return hdr;
+}
 function _e2eSweepStrangerState() {
   const now = Date.now();
   // r9 (astra-p3 e2e.js:3453): headers that arrived alone and were not used (malformed,
@@ -2746,7 +2806,7 @@ function _e2eSweepStrangerState() {
       if (t === undefined) { t = now; _e2ePendHdrAt.set(h, t); }
       const tr = E2E.trustStore && E2E.trustStore[k];
       if (tr && tr.pendingFingerprint) held.push([k, t]);
-      else if (now - t < 600000) live.push([k, t]); else delete P[k];
+      else if (now - t < E2E_HEADER_TTL_MS) live.push([k, t]); else delete P[k];
     }
     for (const a of [live, held]) {
       if (a.length < E2E_STRANGER_MAX) continue;
@@ -2869,15 +2929,16 @@ async function _ratchetEncryptInner(nick, plaintext, reaction = false) {
 
 async function ratchetDecrypt(nick, envelope, useAlt = false, reaction = false) {
   // Serialise with the send path (and other decrypts) per nick — see _withRatchetLock.
-  return _withRatchetLock(_e2eK(nick), () => _ratchetDecryptInner(_e2eK(nick), envelope, useAlt, reaction));
+  return _withRatchetLock(_e2eK(nick), () => _ratchetDecryptInner(_e2eK(nick), envelope, {useAlt,reaction}));
 }
 
-async function _ratchetDecryptInner(nick, envelope, useAlt = false, reaction = false) {
+async function _ratchetDecryptInner(nick, envelope, {useAlt = false, reaction = false, candidate = null, restartBase = null} = {}) {
   // L2: null-check session BEFORE any property access
   // useAlt: decrypt with the glare-loser's responder session held aside (not installed).
-  const live = useAlt ? (E2E._glareAlt && E2E._glareAlt[nick]) : E2E.dmSessions[nick];
+  const live = restartBase?.restartPrev || candidate || (useAlt ? E2E._glareAlt?.[nick] : E2E.dmSessions[nick]);
   if (!live) throw new Error(`No ratchet session with ${nick} — key exchange needed`);
   if (live._unusable) throw new Error(live._unusable);
+  const gen = E2E._lockGen;
   if (reaction) {
     await _e2eSessFp(live);
     if (!E2E.keyReady || _e2eSessPinMismatch(nick, live) !== false) throw new Error('Encrypted reaction session unavailable');
@@ -2908,12 +2969,26 @@ async function _ratchetDecryptInner(nick, envelope, useAlt = false, reaction = f
 
   const skipKey = `${nick}/${header.dh}/${header.n}`;
   const commit = async (mk) => {
+    if (!E2E.keyReady || _e2eBootStale(gen)) throw new Error('Encrypted chats were locked while opening the message');
+    if (restartBase && !(live.until > Date.now())) throw new Error('Previous Signal session expired');
     // First authenticated message from the peer: they have our X3DH header, stop resending it.
-    if (session.x3dhPending) delete session.x3dhPending;
-    if (mk) _e2eNoteRecent(session, skipKey, mk);
+    const confirmed = !!session.x3dhPending;
+    if (confirmed) {
+      delete session.x3dhPending;
+      delete session.restartPrev;
+    }
+    if (restartBase) {
+      delete session.CKs;
+      delete session.recent;
+    } else if (mk) _e2eNoteRecent(session, skipKey, mk);
     _e2eMarkConsumed(skipKey);
-    if (useAlt) E2E._glareAlt[nick] = session;
-    else await saveSession(nick, session);
+    if (useAlt) (E2E._glareAlt ||= Object.create(null))[nick] = session;
+    else if (restartBase) {
+      const activeSession = { ...restartBase, restartPrev:session };
+      E2E.dmSessions[nick] = activeSession;
+      await _e2eWriteDeviceSession(nick, activeSession);
+    } else await saveSession(nick, session);
+    if (confirmed && !restartBase && !useAlt && !_e2eBootStale(gen)) updateE2EIndicator(_e2eDmNick(nick));
   };
   // r2: another tab of this browser already decrypted this very message (and advanced
   // the shared ratchet): read it with the key it left behind — once per tab, no state
@@ -3293,6 +3368,14 @@ async function loadChannelKeyFromBlob(channel, blob) {
 
 // ─── Session persistence ──────────────────────────────────────────────────────
 
+async function _e2eWriteDeviceSession(nick,session) {
+  const gen = E2E._lockGen;
+  try {
+    const blob = await aesEncryptBlob(new TextEncoder().encode(JSON.stringify(session)), _e2eDevSlot(nick));
+    if (!_e2eBootStale(gen)) await _e2eDevSessPut(nick, { ep:session.epoch, blob, ...(session.restartPrev ? {restart:1} : {}) });
+  } catch (e) { console.warn('[E2E] device session copy not written:', e && e.message); }
+}
+
 async function saveSession(nick, session, opts = null) {
   nick = _e2eK(nick);
   // SECURITY chokepoint: never persist a PEER session under the reserved internal
@@ -3314,13 +3397,10 @@ async function saveSession(nick, session, opts = null) {
   // r2: this browser's copy (incl. skipped/recent message keys — device-local only,
   // wrapped under the master key) is written before the ratchet lock is released, so
   // the next tab to take the lock continues from exactly this state.
-  try {
-    const devBlob = await aesEncryptBlob(new TextEncoder().encode(JSON.stringify(session)), _e2eDevSlot(nick));
-    await _e2eDevSessPut(nick, { ep: epoch, blob: devBlob });
-  } catch (e) { console.warn('[E2E] device session copy not written:', e && e.message); }
+  await _e2eWriteDeviceSession(nick, session);
   // #39: never persist buffered skipped message keys (session.skipped) to the untrusted
   // server — keep them in memory only; the persisted blob carries an EMPTY skipped map.
-  const { skipped, skippedMeta, recent, ...persist } = session;
+  const { skipped, skippedMeta, recent, restartPrev, ...persist } = session;
   const blob = await aesEncryptBlob(new TextEncoder().encode(JSON.stringify({ ...persist, skipped: {} })), _e2eCtxSession(nick));
   // Only advance this device's high-water mark if the write actually went out, so a
   // dropped write can't make the (older) stored copy look like a rollback later.
@@ -3691,7 +3771,7 @@ async function e2eHandleEvent(ev) {
         // (r7: unless it is bound to a replaced identity — then this bundle replaces it)
         const cur = E2E.dmSessions[k];
         if (cur && !cur._unusable) { try { await _e2eSessFp(cur); } catch (_) {} }
-        if (cur && !cur._unusable && _e2eSessPinMismatch(k, cur) !== true) {
+        if (!pend.restart && cur && !cur._unusable && _e2eSessPinMismatch(k, cur) !== true) {
           e2eSysMsg(nick, `🔐 Session with ${nick} already active — skipping duplicate initiation`, pend.cid);
           break;
         }
@@ -3734,15 +3814,27 @@ async function e2eHandleEvent(ev) {
         };
         // L1: pass SPK pub (not identity key) as DHr seed. #2/#12: pin identity + AD.
         // r2: under the (browser-wide) ratchet lock, like every other session write.
-        const session = await _withRatchetLock(k, () => stillPending() && ratchetInitSend(k, sharedSecret, bundle.signed_prekey.public_key, bundle.identity_dh_key, identityAD,
-                              { x3dhHeader, theirSignPub: bundle.identity_sign_key, connId: _e2eDmScope(k)?.[1], stillPending }));
-        if (!session) break;
+        const session = await _withRatchetLock(k, async () => {
+          const previous = E2E.dmSessions[k];
+          const canStart = () => stillPending() && !_e2eSharedKeyConfigured(canonical) &&
+            (!pend.restart || _e2eRestartFrom(E2E.dmSessions[k]) === pend.restartFrom);
+          if (!canStart()) return null;
+          return ratchetInitSend(k, sharedSecret, bundle.signed_prekey.public_key, bundle.identity_dh_key, identityAD,
+            { x3dhHeader, theirSignPub: bundle.identity_sign_key, connId: _e2eDmScope(k)?.[1], stillPending: canStart,
+              previous: pend.restart ? previous : null });
+        });
+        if (!session) {
+          if (pend.restart && stillPending() && _e2eRestartFrom(E2E.dmSessions[k]) !== pend.restartFrom) {
+            e2eSysMsg(nick, '🔐 The Signal session was updated while reconnecting. Using the updated session.', pend.cid);
+          }
+          break;
+        }
         await _e2eSessFp(session);
         if (!stillPending()) break;
         if (E2E._hdrSent) delete E2E._hdrSent[k];
 
         updateE2EIndicator(nick);
-        e2eSysMsg(nick, '🔐 E2E session established with ' + nick, pend.cid);
+        e2eSysMsg(nick, `🔐 Signal encryption with ${nick} is ready to send. An encrypted reply will confirm the session.`, pend.cid);
         // Refresh encryption panel if it's open for this nick
         if (typeof showEncryptPanel === 'function' && active?.conn_id === pend.cid && _e2eDmKey(active.target, pend.cid) === k) {
           const overlay = document.getElementById('encrypt-overlay');
@@ -3905,10 +3997,13 @@ async function _e2eHandleHeader(nick, hdr, via, connId = null) {
   if (E2E._x3dhWaiters && E2E._x3dhWaiters[k]) E2E._x3dhWaiters[k](hdr);
   try {
     const r = await e2eEstablishResponderSession(nick, hdr, {connId});
-    if (!r.ok) return;  // changed (warned) / deferred / invalid: header stays pending
-    delete E2E._pendingIncomingX3DH[k];
+    if (!r.ok) {
+      if (r.why !== 'changed' && r.why !== 'deferred') _e2eForgetPendingHeader(k,hdr);
+      return;
+    }
+    _e2eForgetPendingHeader(k,hdr);
     updateE2EIndicator(nick);
-    if (r.why !== 'replay') e2eSysMsg(nick, '🔐 E2E session established with ' + nick, connId);
+    if (r.why !== 'replay') e2eSysMsg(nick, `🔐 Signal keys received from ${nick}. Waiting for their first encrypted message.`, connId);
     // Envelopes that arrived before this header (reordered / delayed header lines).
     const orphans = (E2E._orphans && E2E._orphans[k]) || [];
     if (orphans.length) {
@@ -3924,6 +4019,7 @@ async function _e2eHandleHeader(nick, hdr, via, connId = null) {
       }
     }
   } catch (e) {
+    if (/^E2E_(SPK|OTPK)_MISSING/.test(e?.message || '')) _e2eForgetPendingHeader(k,hdr);
     console.error('[E2E] x3dh pre-init failed (' + via + '):', e && (e.message || e.name));
     e2eSysMsg(nick, `🔐 X3DH setup failed: ${e && (e.message || e.name || String(e))}`, connId);
   }
@@ -3998,12 +4094,16 @@ function e2eTargetState(target, opts = null) {
   }
   return st0;
 }
+function _e2eSharedKeyConfigured(k, hinted = _e2eHints().ch) {
+  const state = E2E.state?.ch[k];
+  return !!(E2E.channelKeys[k] || state?.on || hinted.includes(k) ||
+    (E2E._serverHints?.channels?.includes(k) && !(state && !state.on)));
+}
 // The E2E state of the resolved name `k` (lowercased); `t` = the name as written.
 function _e2eTargetStateOf(k, t, opts) {
   const isDM = !_e2eIsChan(k);
   const hints = _e2eHints();
   const sh = E2E._serverHints;
-  const srvCh = (sh && sh.channels) || [];
   const srvPeers = (sh && sh.peers) || [];
   // r6 (codex-p3 HIGH e2e.js:1007): reconnected, not re-synced yet → nothing goes out
   // (E2E may have been turned on, or a key rotated, on another device meanwhile).
@@ -4021,7 +4121,7 @@ function _e2eTargetStateOf(k, t, opts) {
     if (kg !== undefined && stCh && Number.isInteger(stCh.g) && stCh.g > kg) return { mode:'blocked', reason:`The encryption key for ${t} was rotated on another device and the new key has not loaded here yet — message not sent; reload if this persists` };
     return { mode:'psk' };
   }
-  const chOn = !!(stCh && stCh.on) || hints.ch.includes(k) || (srvCh.includes(k) && !(stCh && !stCh.on));
+  const chOn = _e2eSharedKeyConfigured(k, hints.ch);
   if (isDM) k = _e2eDmKey(k, opts?.conn_id);
   const stDm = E2E.state && E2E.state.dm[k];
   // r2 (NEW-3): /encrypt on is in progress (bundle requested, maybe queued in an outage).
@@ -4201,9 +4301,11 @@ function e2eQueuedWireVerdict(target, cid, text, heldMs) {
     const changed = !E2E.channelKeys[meta.k] || (meta.gen !== undefined && g !== undefined ? g !== meta.gen : E2E.channelKeys[meta.k] !== meta.key);
     if (changed) return { refuse: true, reason: 'the channel key changed (rotated or replaced) after it was encrypted' };
   }
-  if (meta.mode === 'dm' && meta.fp) {
-    const cur = _e2eSessFpCached(E2E.dmSessions[meta.k]);
-    if (cur && cur !== meta.fp) return { refuse: true, reason: 'the identity of the other side changed after it was encrypted' };
+  if (meta.mode === 'dm') {
+    const session = E2E.dmSessions[meta.k];
+    const cur = _e2eSessFpCached(session);
+    if (meta.fp && cur && cur !== meta.fp) return { refuse: true, reason: 'the identity of the other side changed after it was encrypted' };
+    if (session?.startEph !== meta.startEph) return { refuse: true, reason: 'the Signal session changed after it was encrypted' };
   }
   return 'send';
 }
@@ -4324,7 +4426,7 @@ async function e2eEncryptOutgoing(target, plaintext, connId, opts) {
     const sess = E2E.dmSessions[k];
     if (sess.x3dhPending) _e2eSendHeader(target, sess, cid);
     const pieces = _e2eSplit(String(plaintext), _e2eMaxPlain('dm', budget));
-    const meta = { mode: 'dm', k, fp: _e2eSessFpCached(sess) || null };
+    const meta = { mode: 'dm', k, fp: _e2eSessFpCached(sess) || null, startEph: sess.startEph };
     const from = cid && typeof getNick === 'function' ? getNick(cid) : null;
     const wire = await _e2eEmitPieces(target, pieces, async p => {
       const line = E2E_DM_PREFIX + btoa(JSON.stringify(await ratchetEncrypt(k,p)));
@@ -4440,7 +4542,9 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
     }
     if (opts.reaction) return { plaintext:null, encrypted:false };
     if (!E2E.keyReady) return { plaintext:'🔐 [encrypted — E2E is locked on this device: /encrypt unlock]', encrypted:true };
-    return { plaintext:'🔐 [encrypted — wrong or missing key]', encrypted:true };
+    return { plaintext:isDM
+      ? '🔐 Shared-key message could not be opened. Check that both sides use the same shared key or agree to use Signal encryption.'
+      : '🔐 Shared-key message could not be opened. Check the channel’s shared key.', encrypted:true };
   }
 
   // r4 (agy-flash F3-3 + SEC-HOOK-W1): an encrypted DM from a sender who is a known E2E
@@ -4496,15 +4600,12 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
       return { plaintext: E2E.keyReady ? '🔐 [E2E identity not loaded on this device — it will be shown when it is]' : '🔐 [encrypted — E2E is locked on this device: /encrypt unlock (it will be shown then)]', encrypted:true, historyPending:true };
     }
     _e2eDmHistoryWires.set(envelope,{from,target,text,prefix:opts.prefix});
+    let x3dh = null;
     try {
       // #47: x3dh header comes inline (envelope.x3dh_header, legacy) or via a preceding
       // header line / the server relay.
       // r4 (SEC-HOOK-W1): a remapped sender may only use the existing session.
-      let x3dh = remapped ? null : (envelope.x3dh_header || null);
-      if (!remapped && !x3dh && E2E._pendingIncomingX3DH?.[fk]) {
-        x3dh = E2E._pendingIncomingX3DH[fk];
-        delete E2E._pendingIncomingX3DH[fk];
-      }
+      x3dh = remapped ? null : (envelope.x3dh_header || _e2ePendingHeader(fk));
       // A newer copy from another tab of this browser?
       if (!x3dh) await _withRatchetLock(fk, async () => {});
       // No header and no session: lazily try a stored session (pre-upgrade sessions are
@@ -4539,14 +4640,14 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
         hw.busy = true;
         try {
           x3dh = await new Promise(resolve => {
-            if (E2E._pendingIncomingX3DH?.[fk]) { const h = E2E._pendingIncomingX3DH[fk]; delete E2E._pendingIncomingX3DH[fk]; resolve(h); return; }
+            const pending = _e2ePendingHeader(fk);
+            if (pending) { resolve(pending); return; }
             if (!E2E._x3dhWaiters) E2E._x3dhWaiters = Object.create(null);
             const timeout = setTimeout(() => { delete E2E._x3dhWaiters[fk]; resolve(null); }, 3000);
             E2E._x3dhWaiters[fk] = (hdr) => { clearTimeout(timeout); delete E2E._x3dhWaiters[fk]; resolve(hdr); };
           });
         } finally { hw.busy = false; }
         if (!x3dh) hw.fails.push(Date.now());
-        if (x3dh && E2E._pendingIncomingX3DH) delete E2E._pendingIncomingX3DH[fk];
       }
 
       if (x3dh && _e2eHeaderNetworks.has(x3dh) && _e2eHeaderNetworks.get(x3dh) !== opts.conn_id) x3dh = null;
@@ -4567,10 +4668,7 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
         if (existingOk) {
           try {
             const pt = await _e2eDecryptWithFallback(fk, envelope);
-            if (!envelope.x3dh_header && x3dh.ephemeral_pub && existing.establishEph !== x3dh.ephemeral_pub) {
-              E2E._pendingIncomingX3DH = E2E._pendingIncomingX3DH || Object.create(null);
-              if (!E2E._pendingIncomingX3DH[fk]) E2E._pendingIncomingX3DH[fk] = x3dh;
-            }
+            if (existing.establishEph === x3dh.ephemeral_pub) _e2eForgetPendingHeader(fk,x3dh);
             const tr0 = E2E.trustStore[fk];
             if (tr0 && tr0.keyChanged) _e2eSys(from, `⚠️ ${from} recently presented a DIFFERENT identity key (not accepted). The message above was authenticated with the key you already trust. /encrypt accept ${from} or /encrypt reject ${from}`);
             return { plaintext:pt, encrypted:true, reactionReady:true };
@@ -4585,8 +4683,9 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
           const myDh = await exportPub(E2E.identityKeys.dhKeyPair.publicKey, 'ECDH');
           const iWin = _e2eCmpBytes(base64ToBytes(myDh), base64ToBytes(String(x3dh.sender_ik || ''))) < 0;
           if (iWin) {
-            const r = await _e2eEstablishAndDecrypt(from, x3dh, envelope, { withEnvelope: true, alt: true, connId:opts.conn_id });
+            const r = await _e2eEstablishAndDecrypt(from, x3dh, envelope, { alt: true, connId:opts.conn_id });
             if (!r.ok) return _e2eRefusedResult(fk, r, x3dh, envelope, from, opts.conn_id);
+            _e2eForgetPendingHeader(fk,x3dh);
             return { plaintext:r.pt, encrypted:true, reactionReady:true };
           }
         }
@@ -4595,14 +4694,18 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
         // (the prior session is restored if it doesn't decrypt), and establishment +
         // first decrypt run under ONE ratchet lock, so an outgoing message can't slip in
         // between and find a half-built (not yet send-ready) responder session.
-        const r = await _e2eEstablishAndDecrypt(from, x3dh, envelope, { withEnvelope: true, connId:opts.conn_id });
+        const r = await _e2eEstablishAndDecrypt(from, x3dh, envelope, { connId:opts.conn_id });
         if (!r.ok) return _e2eRefusedResult(fk, r, x3dh, envelope, from, opts.conn_id);
+        _e2eForgetPendingHeader(fk,x3dh);
         if (E2E._glareAlt) delete E2E._glareAlt[fk];
         updateE2EIndicator(from);
         return { plaintext:r.pt, encrypted:true, reactionReady:true };
       }
 
       const live = E2E.dmSessions[fk];
+      if (!live && _e2eSharedKeyConfigured(_e2eCanon(from,opts.conn_id) || _e2eK(from))) {
+        return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true };
+      }
       if (!live && remapped) return { plaintext:`🔐 [encrypted — cannot decrypt: no encryption session with ${from}]`, encrypted:true };
       if (!live) {
         // Header not here (yet): hold the envelope (≤20/peer, 10 min) and decrypt it as
@@ -4647,7 +4750,11 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
       const errMsg = e.message || e.name || String(e);
       console.error('[E2E] DM decrypt FAILED:', errMsg, e.stack || e);
       if (/^E2E_(SPK|OTPK)_MISSING/.test(errMsg)) {
-        return { plaintext:`🔐 [encrypted — ${from} started encryption with a prekey this account no longer has. Ask ${from} to restart it: /encrypt off ${me || 'you'} then /encrypt on ${me || 'you'}]`, encrypted:true };
+        _e2eForgetPendingHeader(fk,x3dh);
+        return { plaintext:`🔐 ${from} started Signal encryption with a key this account no longer has. Ask them to restart the Signal session.`, encrypted:true };
+      }
+      if (e.name === 'OperationError') {
+        return { plaintext:'🔐 Signal message could not be authenticated. To reconnect, use Restart Signal Session in this chat’s encryption menu.', encrypted:true };
       }
       return { plaintext:`🔐 [decryption failed: ${errMsg}]`, encrypted:true };
     }
@@ -4673,22 +4780,7 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
 
 async function _e2eEstablishAndDecrypt(from, x3dh, envelope, opts) {
   const fk = _e2eDmKey(from, opts.connId);
-  return _withRatchetLock(fk, async () => {
-    const savedSession = opts.alt ? null : E2E.dmSessions[fk];
-    const r = await _e2eEstablishInner(from, x3dh, { ...opts, peerKey: fk });
-    if (!r.ok) return r;
-    try {
-      const pt = await _ratchetDecryptInner(fk, envelope, !!opts.alt);
-      return { ok: true, why: r.why, pt };
-    } catch (e) {
-      if (!opts.alt && savedSession && E2E.dmSessions[fk] !== savedSession) {
-        await saveSession(fk, savedSession);
-        console.warn('[E2E] X3DH re-establishment failed to authenticate — restored prior session for', from);
-      }
-      if (opts.alt && E2E._glareAlt) delete E2E._glareAlt[fk];
-      throw e;
-    }
-  });
+  return _withRatchetLock(fk, () => _e2eEstablishInner(from, x3dh, { ...opts, peerKey:fk, envelope }));
 }
 
 // Main session first; a glare side session (if any) second. Dropping the side session
@@ -4699,12 +4791,26 @@ async function _e2eDecryptWithFallback(fk, envelope) {
     if (E2E._glareAlt && E2E._glareAlt[fk]) delete E2E._glareAlt[fk];
     return pt;
   } catch (e) {
-    if (E2E._glareAlt && E2E._glareAlt[fk]) return await ratchetDecrypt(fk, envelope, true);
-    throw e;
+    if (E2E._glareAlt?.[fk]) {
+      try { return await ratchetDecrypt(fk, envelope, true); } catch (_) {}
+    }
+    if (!E2E.dmSessions[fk]?.x3dhPending) throw e;
+    return _withRatchetLock(fk, async () => {
+      const restartBase = E2E.dmSessions[fk];
+      const gen = E2E._lockGen;
+      if (!restartBase?.x3dhPending || !restartBase.restartPrev) throw e;
+      await _e2eSessFp(restartBase);
+      if (_e2eBootStale(gen) || _e2eSessPinMismatch(fk,restartBase) !== false) throw e;
+      return _ratchetDecryptInner(fk,envelope,{restartBase});
+    });
   }
 }
 
 function _e2eRefusedResult(fk, r, x3dh, envelope, from, connId = null) {
+  if (r.why === 'invalid' || r.why === 'rejected' || r.why === 'shared-key') _e2eForgetPendingHeader(fk,x3dh);
+  if (r.why === 'shared-key') {
+    return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true };
+  }
   if (r.why === 'changed') {
     _e2eStashChanged(fk, x3dh, envelope, connId);
     return { plaintext:`🔐 [message under a CHANGED identity key for ${from} — not decrypted. Verify it, then /encrypt accept ${from}]`, encrypted:true, historyPending:true };
@@ -4728,7 +4834,9 @@ async function _e2eFetchBundleQueued(nick, k, cid) {
     if (E2E._pendingOn[k] !== p) return;
     if (Date.now() - started > 120000) {
       delete E2E._pendingOn[k];
-      _e2eSys(p.target, `🔓 Could not reach the server to set up encryption with ${nick} — NOT started (messages to ${nick} are not encrypted). Try /encrypt on ${nick} again.`);
+      _e2eSys(p.target, p.restart && E2E.dmSessions[k]
+        ? `🔐 Could not reach the server to restart Signal encryption with ${nick}. The existing session stays active.`
+        : `🔓 Could not reach the server to set up encryption with ${nick}. Try /encrypt on ${nick} again.`,p.cid);
       try { updateE2EIndicator(p.target); } catch (_) {}
       return;
     }
@@ -4740,13 +4848,16 @@ async function _e2eFetchBundleQueued(nick, k, cid) {
     const p = E2E._pendingOn && E2E._pendingOn[k];
     if (!p || p.t > started || p.answered) return;     // r6: answered → being set up
     delete E2E._pendingOn[k];
-    _e2eSys(p.target, `🔓 No answer from the server for ${nick}'s key bundle — encryption with ${nick} was NOT started. Try /encrypt on ${nick} again.`);
+    _e2eSys(p.target, p.restart && E2E.dmSessions[k]
+      ? `🔐 The server did not answer the Signal restart for ${nick}. The existing session stays active.`
+      : `🔓 No answer from the server for ${nick}'s key bundle. Try /encrypt on ${nick} again.`,p.cid);
     try { updateE2EIndicator(p.target); } catch (_) {}
   }, Math.max(1000, 30000 - (Date.now() - sentAt)));
 }
 
 const _e2eAutoMiss = new Map();
 const _e2eAutoBusy = new Map();
+const _e2eRestartRequested = new Map();
 const E2E_PLAINTEXT_WINDOW = 60000;
 const E2E_BRIDGE_RETRY_WINDOW = 60000;
 function _e2eBundleFailure(nick, reason) {
@@ -4860,30 +4971,57 @@ async function handleEncryptCommand(args, conn_id, target) {
       await e2ePromptDeviceUnlock();
       break;
     }
-    case 'on': case 'start': {
+    case 'on': case 'start': case 'restart': {
       const nick = args[1] || target;
-      if (!nick || _e2eIsChan(nick) || nick === 'status') { e2eSysMsg(target,'Usage: /encrypt on <nick>'); return; }
+      if (!nick || _e2eIsChan(nick) || nick === 'status') { e2eSysMsg(target,`Usage: /encrypt ${sub} <nick>`,cid); return; }
       if (!E2E.keyReady) await e2ePromptDeviceUnlock();
       if (!E2E.keyReady || _e2eBootStale(commandGen)) return;
-      if (!E2E.identityReady) { e2eSysMsg(target,'🔐 E2E identity not loaded yet — try again in a moment'); return; }
-      const k = _e2eDmKey(nick, cid);
+      if (!E2E.identityReady) { e2eSysMsg(target,'🔐 E2E identity not loaded yet — try again in a moment',cid); return; }
+      const canonical = _e2eCanon(nick,cid);
+      if (canonical === null) { e2eSysMsg(target,'🔐 Use the exact IRC nick to manage its encryption.',cid); return; }
+      if (_e2eSharedKeyConfigured(canonical)) {
+        e2eSysMsg(target,`🔐 A shared key is configured for ${nick}. Agree with them on an encryption method before removing the shared key or setting up Signal.`,cid);
+        return;
+      }
+      const k = _e2eDmKey(canonical, cid);
       const cur = E2E.dmSessions[k];
+      const restart = sub === 'restart';
       // r7: a session bound to a replaced identity (accepted on another device) is replaced.
       if (cur && !cur._unusable) { try { await _e2eSessFp(cur); } catch (_) {} }
-      if (cur && !cur._unusable && _e2eSessPinMismatch(k, cur) !== true) { e2eSysMsg(target,`🔐 Session with ${nick} already active`); return; }
-      if (E2E.trustStore[k]?.keyChanged) { e2eSysMsg(target,`⚠️ ${nick}'s identity key changed — /encrypt accept ${nick} (after verifying) or /encrypt reject ${nick} first`); return; }
+      if (!restart && cur && !cur._unusable && _e2eSessPinMismatch(k, cur) !== true) { e2eSysMsg(target,`🔐 Session with ${nick} already active`,cid); return; }
+      if (E2E.trustStore[k]?.keyChanged) { e2eSysMsg(target,`⚠️ ${nick}'s identity key changed — /encrypt accept ${nick} (after verifying) or /encrypt reject ${nick} first`,cid); return; }
       // r2 (v-e2e NEW-3): from now until the bundle answer, messages to this nick are
       // BLOCKED (never cleartext), and the request is QUEUED if the socket is down —
       // it used to be dropped silently during an outage while the next typed line went
       // out unencrypted after the reconnect.
       E2E._pendingOn = E2E._pendingOn || Object.create(null);
       if (E2E._pendingOn[k]) {
-        e2eSysMsg(target, `🔐 Encryption with ${nick} is already being set up.`);
+        e2eSysMsg(target, `🔐 Encryption with ${nick} is already being set up.`,cid);
         return;
       }
-      E2E._pendingOn[k] = { t: Date.now(), target, cid, req:cid ? _e2eBundleRequestId() : undefined };
+      const now = Date.now();
+      if (restart && cur?.x3dhPending && cur.restartPrev?.until > now) {
+        if (E2E._hdrSent) delete E2E._hdrSent[k];
+        e2eSysMsg(target,`🔐 Still waiting for an encrypted reply from ${nick}. Your next message will retry the key exchange.`,cid);
+        return;
+      }
+      if (restart) {
+        const busyKey = String(cid || '').toLowerCase() + '\n' + k;
+        if ((_e2eAutoBusy.get(busyKey) || 0) > now) {
+          e2eSysMsg(target,'🔐 ' + _e2eBundleFailure(nick,'peer-busy'),cid);
+          return;
+        }
+        const restartKey = JSON.stringify([_e2eUser(),k]);
+        if (now - (_e2eRestartRequested.get(restartKey) || 0) < 15000) {
+          e2eSysMsg(target,`🔐 Wait a few seconds before restarting Signal encryption with ${nick} again.`,cid);
+          return;
+        }
+        if (_e2eRestartRequested.size >= 128) _e2eRestartRequested.delete(_e2eRestartRequested.keys().next().value);
+        _e2eRestartRequested.set(restartKey,now);
+      }
+      E2E._pendingOn[k] = { t:now, target, cid, restart, restartFrom:_e2eRestartFrom(cur), req:cid ? _e2eBundleRequestId() : undefined };
       updateE2EIndicator(target);
-      e2eSysMsg(target,`🔐 Fetching key bundle for ${nick}… (messages to ${nick} are held back until encryption is set up)`);
+      e2eSysMsg(target,`🔐 Fetching key bundle for ${nick}… (messages to ${nick} are held back until encryption is set up)`,cid);
       _e2eFetchBundleQueued(nick, k, cid);
       break;
     }
@@ -5054,7 +5192,7 @@ async function handleEncryptCommand(args, conn_id, target) {
         try {
           let pt;
           if (!established && item.x3dh) {
-            const r = await _e2eEstablishAndDecrypt(nick, item.x3dh, item.envelope, { withEnvelope: true, connId:item.conn_id });
+            const r = await _e2eEstablishAndDecrypt(nick, item.x3dh, item.envelope, { connId:item.conn_id });
             if (!r.ok) continue;
             established = true; pt = r.pt;
           } else if (!E2E.dmSessions[k]?.connId || E2E.dmSessions[k].connId === item.conn_id) pt = await ratchetDecrypt(k, item.envelope);
@@ -5104,15 +5242,15 @@ async function handleEncryptCommand(args, conn_id, target) {
     }
     case 'status': {
       const t = args[1] || target;
-      const st = e2eTargetState(t, { conn_id });
-      if (st.mode === 'blocked') { e2eSysMsg(target, `⛔ ${t} — encryption ON but unavailable: ${st.reason}`); break; }
+      const st = e2eTargetState(t, { conn_id:cid });
+      if (st.mode === 'blocked') { e2eSysMsg(target, `⛔ ${t} — encryption ON but unavailable: ${st.reason}`,cid); break; }
       if (_e2eIsChan(t)) {
-        e2eSysMsg(target, st.mode === 'psk' ? `🔐 ${t} — encrypted` : `🔓 ${t} — not encrypted`);
+        e2eSysMsg(target, st.mode === 'psk' ? `🔐 ${t} — encrypted` : `🔓 ${t} — not encrypted`,cid);
       } else {
         const trust = E2E.trustStore[_e2eDmKey(t, cid)];
         const badge = trust?.keyChanged ? '⚠ KEY CHANGED (pending)' : trust?.verified ? '✓ verified' : 'TOFU';
         e2eSysMsg(target, st.mode === 'psk' ? `🔐 DM ${t} — encrypted (shared key)` :
-                          st.mode === 'dm'  ? `🔐 DM ${t} — encrypted (${badge})` : `🔓 DM ${t} — not encrypted. /encrypt on ${t}`);
+                          st.mode === 'dm'  ? `🔐 DM ${t} — Signal encryption (${badge})` : `🔓 DM ${t} — not encrypted. /encrypt on ${t}`, cid);
       }
       break;
     }
@@ -5127,6 +5265,7 @@ async function handleEncryptCommand(args, conn_id, target) {
       e2eSysMsg(target,[
         '🔐 /encrypt commands:',
         '  on <nick>       — start E2E DM session',
+        '  restart [nick]  — set up a fresh Signal session while keeping encryption on',
         '  off [nick]      — end session or remove channel key',
         '  keygen          — generate channel key (in channel)',
         '  add <32 words>  — add channel key from words',
@@ -5194,13 +5333,14 @@ function updateE2EIndicator(target) {
     const unlockedSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9 0" fill="none"/></svg>';
     const encActive = st.mode === 'psk' || st.mode === 'dm';
     const blocked = st.mode === 'blocked';
+    const waitingForReply = st.mode === 'dm' && E2E.dmSessions[_e2eDmKey(t,active.conn_id)]?.x3dhPending;
     lock.innerHTML = (encActive || blocked) ? lockedSvg : unlockedSvg;
     // H5: the icon reflects reality — accent = usable; red = E2E on but sends blocked.
     lock.style.color = blocked ? 'var(--red, #e5484d)' : (encActive && !(trust && trust.keyChanged)) ? 'var(--accent)' : encActive ? 'var(--red, #e5484d)' : 'var(--text2)';
     lock.title = blocked
       ? ('Encryption ON but unavailable — messages are blocked: ' + st.reason)
       : encActive
-        ? (trust?.keyChanged ? 'KEY CHANGED (not accepted) — verify, then /encrypt accept' : st.mode === 'psk' ? 'Encrypted (shared key)' : trust?.verified ? 'E2E verified' : 'E2E encrypted (TOFU)')
+        ? (trust?.keyChanged ? 'KEY CHANGED (not accepted) — verify, then /encrypt accept' : st.mode === 'psk' ? 'Encrypted (shared key)' : waitingForReply ? 'Signal encryption ready to send — awaiting an encrypted reply' : trust?.verified ? 'E2E verified' : 'E2E encrypted (TOFU)')
         : 'Not encrypted — click to set up';
   }
   try { if (typeof renderSidebar === 'function') renderSidebar(); } catch (_) {}

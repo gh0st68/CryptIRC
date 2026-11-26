@@ -11866,13 +11866,26 @@ function showEncryptPanel(){
   } else if(target!=='status') {
     // DM
     title.textContent=`Encryption — ${target}`;
-    const hasPSK=window.E2E?.channelKeys?.[_e2eUiName(target,conn_id)];
-    const hasSession=window.E2E?.dmSessions?.[_e2eUiName(target,conn_id)];
-    if(hasPSK){
+    const name=_e2eUiName(target,conn_id);
+    const hasPSK=E2E.channelKeys[name];
+    const peerKey=_e2eDmKey(name,conn_id);
+    const session=E2E.dmSessions[peerKey];
+    const state=e2eTargetState(_e2eRealTarget(target),{conn_id});
+    const hasSignal=session||E2E.state?.dm[peerKey]?.on;
+    if(!hasPSK&&_e2eSharedKeyConfigured(name)){
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
-          <div><strong>PSK Encrypted</strong><br><span class="encrypt-status-detail">Using a shared key — works with any IRC client</span></div>
+          <div><strong>Shared-key encryption</strong><br><span class="encrypt-status-detail">The shared key is missing on this device</span></div>
+        </div>
+        <div class="encrypt-actions">
+          <button class="encrypt-btn" data-encrypt-fn="importKey">Import shared key</button>
+        </div>`;
+    } else if(hasPSK){
+      body.innerHTML=`
+        <div class="encrypt-status on">
+          <span class="encrypt-status-icon">🔐</span>
+          <div><strong>Shared-key encryption</strong><br><span class="encrypt-status-detail">Both sides need the same shared key</span></div>
         </div>
         <div class="encrypt-actions">
           <button class="encrypt-btn" data-encrypt-cmd="share">
@@ -11892,13 +11905,20 @@ function showEncryptPanel(){
             <div class="encrypt-btn-text">Disable Encryption<div class="encrypt-btn-sub">Send messages in plaintext</div></div>
           </button>
         </div>`;
-    } else if(hasSession){
+    } else if(hasSignal){
+      const detail=state.mode==='blocked'
+        ? state.reason
+        : session?.x3dhPending ? 'Ready to send. An encrypted reply will confirm the Signal session.' : 'Using Signal encryption.';
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
-          <div><strong>E2E Encrypted</strong><br><span class="encrypt-status-detail">Using Signal protocol (X3DH + Double Ratchet)</span></div>
+          <div><strong>Signal encryption</strong><br><span class="encrypt-status-detail">${esc(detail)}</span></div>
         </div>
         <div class="encrypt-actions">
+          <button class="encrypt-btn" data-encrypt-cmd="restart" data-encrypt-target="1">
+            <span class="encrypt-btn-icon">🔄</span>
+            <div class="encrypt-btn-text">Restart Signal Session<div class="encrypt-btn-sub">Reconnect with this contact while keeping encryption on</div></div>
+          </button>
           <button class="encrypt-btn" data-encrypt-cmd="verify" data-encrypt-target="1">
             <span class="encrypt-btn-icon">✓</span>
             <div class="encrypt-btn-text">Verify Identity<div class="encrypt-btn-sub">Compare safety phrases to verify this person</div></div>

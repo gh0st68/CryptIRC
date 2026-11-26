@@ -664,7 +664,7 @@ try {
       const files=await fs.readdir(path.join(tmp,'e2e',owner,'channels'));
       return !files.some(name=>name.endsWith('.enc'));
     },'test plaintext policy fixture removed');
-    await checkE2eChat({browser,chromium,check,waitFor,pause,owner,other,password,vault,tmp,ownerWs,otherWs,
+    const ownerCode=await checkE2eChat({browser,chromium,check,waitFor,pause,owner,other,password,vault,tmp,ownerWs,otherWs,
       networkA,networkB,channel,stamp,request,ownerSession});
     if(process.env.CRYPTIRC_TEST_E2E_BRIDGE==='1'){
       const remote='pkx'+stamp;
@@ -694,7 +694,7 @@ try {
       await remoteWs.wait(e=>e.type==='connected'&&e.conn_id===remoteNetwork,'second instance linked IRC registration');
       const ordinary='pkn'+stamp;
       const irc=await ordinaryIrcClient(IRC_LEAF_PORT,ordinary);
-      await checkCrossInstanceE2e({browser,peer:await chromium('encrypted-bridge',endpoint),check,waitFor,
+      await checkCrossInstanceE2e({browser,peer:await chromium('encrypted-bridge',endpoint),chromium,ownerCode,check,waitFor,
         owner,ownerWs,remote,password,networkA,remoteNetwork,remoteWs,stamp,otherWs,remoteData,ordinary,ordinaryLines:irc.lines});
       irc.close();
     }

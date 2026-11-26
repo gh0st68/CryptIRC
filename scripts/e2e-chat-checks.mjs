@@ -116,7 +116,7 @@ async function compose(browser, network, target, text) {
   await browser.send('Input.dispatchKeyEvent', {type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
 }
 
-async function clickVisible(browser, selector) {
+async function clickVisible(browser, selector, touch = false) {
   const point = await browser.evaluate(`(() => {
     const el = document.querySelector(${q(selector)});
     const r = el.getBoundingClientRect();
@@ -124,6 +124,11 @@ async function clickVisible(browser, selector) {
     if (!el.contains(document.elementFromPoint(x, y))) throw new Error('Control is covered: ' + ${q(selector)});
     return {x, y};
   })()`);
+  if (touch) {
+    await browser.send('Input.dispatchTouchEvent', {type:'touchStart',touchPoints:[point]});
+    await browser.send('Input.dispatchTouchEvent', {type:'touchEnd',touchPoints:[]});
+    return;
+  }
   await browser.send('Input.dispatchMouseEvent', {type:'mousePressed', button:'left', clickCount:1, ...point});
   await browser.send('Input.dispatchMouseEvent', {type:'mouseReleased', button:'left', clickCount:1, ...point});
 }
@@ -611,9 +616,23 @@ export async function checkE2eChat({
   await compose(browser, networkA, channel, afterOff);
   await otherWs.wait(ev => ev.type === 'irc_message' && ev.text === afterOff,'channel send after acknowledged disable');
   check('server permits ordinary chat after explicit, acknowledged disable', true);
+  const priorSameInstance=await browser.evaluate(`E2E.dmSessions[${peerKey}].startEph`);
+  await browser.evaluate(`handleEncryptCommand(['restart',${q(other)}],${q(networkA)},${q(other)})`);
+  await waitFor(()=>browser.evaluate(`E2E.dmSessions[${peerKey}]?.x3dhPending&&
+    E2E.dmSessions[${peerKey}].startEph!==${q(priorSameInstance)}&&!E2E._pendingOn[${peerKey}]`),
+    'fresh Signal restart for accounts on the same CryptIRC instance');
+  const sameInstanceSend='same-instance send after restart '+stamp;
+  const sameInstanceReply='same-instance reply after restart '+stamp;
+  await compose(browser,networkA,other,sameInstanceSend);
+  await waitFor(()=>row(peer,networkB,owner,sameInstanceSend),'same-instance peer decrypts after restart');
+  await compose(peer,networkB,owner,sameInstanceReply);
+  check('a same-instance Signal restart recovers encrypted messages in both directions',
+    await waitFor(()=>row(browser,networkA,other,sameInstanceReply),'same-instance peer replies to the new session')&&
+    !otherWs.events.some(e=>e.text?.includes(sameInstanceSend))&&!ownerWs.events.some(e=>e.text?.includes(sameInstanceReply)));
+  return ownerCode;
 }
 
-export async function checkCrossInstanceE2e({browser,peer,check,waitFor,owner,ownerWs,remote,password,networkA,remoteNetwork,remoteWs,stamp,otherWs,remoteData,ordinary,ordinaryLines}) {
+export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,check,waitFor,owner,ownerWs,remote,password,networkA,remoteNetwork,remoteWs,stamp,otherWs,remoteData,ordinary,ordinaryLines}) {
   await login(peer,remote,password,waitFor);
   await waitFor(() => peer.evaluate('E2E._vaultUp && E2E._krReceived'), 'bridge peer discovery');
   await peer.evaluate(openEncryptionSettings);
@@ -649,6 +668,132 @@ export async function checkCrossInstanceE2e({browser,peer,check,waitFor,owner,ow
   if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
     await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:first,target:'cross-instance PM',emoji:'❤️'});
   }
+  const remoteTarget=q(remote), localConn=q(networkA);
+  check('the encryption panel recognizes a network-scoped Signal session',await browser.evaluate(`(() => {
+    setActive(${localConn},${remoteTarget});
+    showEncryptPanel();
+    const body=document.getElementById('encrypt-panel-body');
+    const result=body.textContent.includes('Signal encryption')&&!!body.querySelector('[data-encrypt-cmd=restart]');
+    closeEncryptPanel();
+    return result;
+  })()`));
+  const beforeBlockedRestart=browser.frames.length;
+  check('Signal setup and restart preserve a configured DM shared key',await browser.evaluate(`(async () => {
+    const target=${remoteTarget}, cid=${localConn}, key=_e2eCanon(target,cid);
+    const signal=E2E.dmSessions[_e2eDmKey(target,cid)];
+    const {key:shared}=await generateChannelKey();
+    E2E.channelKeys[key]=shared;
+    try {
+      await handleEncryptCommand(['on',target],cid,target);
+      await handleEncryptCommand(['restart',target],cid,target);
+      return E2E.channelKeys[key]===shared&&E2E.dmSessions[_e2eDmKey(target,cid)]===signal&&
+        !E2E._pendingOn?.[_e2eDmKey(target,cid)]&&
+        getBuf(cid,target).some(row=>row.text.includes('A shared key is configured'));
+    } finally {delete E2E.channelKeys[key];}
+  })()`));
+  check('refusing mixed encryption sends no bundle request',
+    !browser.frames.slice(beforeBlockedRestart).some(frame=>JSON.parse(frame).type==='e2e_fetch_bundle'));
+  check('the panel identifies a configured shared key missing on this device',await browser.evaluate(`(() => {
+    const target=${remoteTarget}, cid=${localConn}, name=_e2eCanon(target,cid);
+    E2E.state.ch[name]={on:1,g:1};
+    try {
+      showEncryptPanel();
+      const body=document.getElementById('encrypt-panel-body');
+      return body.textContent.includes('The shared key is missing')&&!body.querySelector('[data-encrypt-cmd=restart]');
+    } finally {delete E2E.state.ch[name]; closeEncryptPanel();}
+  })()`));
+  const localSharedKey=`_e2eCanon(${remoteTarget},${localConn})`;
+  const peerSharedKey=`_e2eCanon(${q(owner)},${q(remoteNetwork)})`;
+  await Promise.all([
+    browser.evaluate(`(async()=>{E2E.channelKeys[${localSharedKey}]=(await generateChannelKey()).key})()`),
+    peer.evaluate(`(async()=>{E2E.channelKeys[${peerSharedKey}]=(await generateChannelKey()).key})()`),
+  ]);
+  try {
+    const wrongKey='shared-key fixture with mismatched keys '+stamp;
+    await compose(peer,remoteNetwork,owner,wrongKey);
+    check('a mismatched shared-key DM reports the mode and stays encrypted on IRC',
+      await waitFor(()=>browser.evaluate(`getBuf(${localConn},${remoteTarget}).some(
+        m=>m.from===${remoteTarget}&&m.text.includes('Shared-key message could not be opened'))`),'shared-key mismatch is readable')&&
+      !ownerWs.events.some(e=>e.text?.includes(wrongKey)));
+  } finally {
+    await Promise.all([
+      browser.evaluate(`delete E2E.channelKeys[${localSharedKey}]`),
+      peer.evaluate(`delete E2E.channelKeys[${peerSharedKey}]`),
+    ]);
+  }
+
+  await browser.send('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:3,mobile:true});
+  await browser.send('Emulation.setTouchEmulationEnabled', {enabled:true});
+  const readyToRestart=await browser.evaluate(`(async () => {
+    const target=${remoteTarget}, cid=${localConn}, key=_e2eDmKey(target,cid);
+    window.testBeforeRestart={
+      start:E2E.dmSessions[key].startEph,
+      pin:E2E.trustStore[key].fingerprint,
+      queued:await e2eEncryptOutgoing(target,'message queued before restart',cid),
+    };
+    setActive(cid,target);
+    showEncryptPanel();
+    return !!document.querySelector('#encrypt-panel-body [data-encrypt-cmd=restart]');
+  })()`);
+  check('a Signal chat can restart from its encryption panel at iPhone dimensions',readyToRestart);
+  await clickVisible(browser,'#encrypt-panel-body [data-encrypt-cmd=restart]',true);
+  await waitFor(()=>browser.evaluate(`(() => {
+    const key=_e2eDmKey(${remoteTarget},${localConn}), session=E2E.dmSessions[key];
+    return !!session?.startEph&&session.startEph!==window.testBeforeRestart.start&&!!session.x3dhPending&&!!session.restartPrev&&!E2E._pendingOn[key];
+  })()`),'restart prepared a fresh Signal session');
+  check('Signal restart preserves the pin and rejects ciphertext queued under the old session',
+    await browser.evaluate(`(() => {
+      const target=${remoteTarget},cid=${localConn},key=_e2eDmKey(target,cid);
+      const before=window.testBeforeRestart;
+      delete window.testBeforeRestart;
+      closeEncryptPanel();
+      return E2E.trustStore[key].fingerprint===before.pin&&
+        e2eQueuedWireVerdict(target,cid,before.queued)?.refuse===true&&
+        document.getElementById('e2e-lock').title.includes('reply');
+    })()`));
+  check('repeated restart taps retry the existing handshake without fetching more prekeys',
+    await browser.evaluate(`(async () => {
+      const target=${remoteTarget},cid=${localConn},key=_e2eDmKey(target,cid);
+      const session=E2E.dmSessions[key];
+      (E2E._hdrSent ||= Object.create(null))[key]=Date.now();
+      await handleEncryptCommand(['restart',target],cid,target);
+      return E2E.dmSessions[key]===session&&!E2E._pendingOn[key]&&!E2E._hdrSent[key]&&
+        !session.restartPrev.CKs&&!session.restartPrev.recent&&session.restartPrev.until>Date.now();
+    })()`));
+  await browser.send('Emulation.clearDeviceMetricsOverride');
+  await browser.send('Emulation.setTouchEmulationEnabled', {enabled:false});
+  await reopen(browser,waitFor,'window._appShown && E2E.keyReady && E2E.identityReady',
+    'same device reopens during an unconfirmed Signal restart');
+  const framesBeforeFallback=browser.frames.length;
+  for (const index of [1,2]) {
+    const inFlight='encrypted reply already in flight at restart '+index+' '+stamp;
+    await compose(peer,remoteNetwork,owner,inFlight);
+    check('the old receive session opens in-flight reply '+index+' during restart',
+      await waitFor(()=>row(browser,networkA,remote,inFlight),'old-session reply arrives during a restart'));
+  }
+  check('an older reply cannot confirm the new session',await browser.evaluate(`(() => {
+    const session=E2E.dmSessions[_e2eDmKey(${remoteTarget},${localConn})];
+    return !!session.x3dhPending&&!!session.restartPrev;
+  })()`));
+  check('receiving on the previous session never republishes the primary session',
+    !browser.frames.slice(framesBeforeFallback).some(frame=>{
+      const message=JSON.parse(frame);
+      return message.type==='e2e_store_session'&&message.partner===`@${networkA}:${remote}`;
+    }));
+  const restarted='first encrypted message after restart '+stamp;
+  await compose(browser,networkA,remote,restarted);
+  await waitFor(()=>row(peer,remoteNetwork,owner,restarted),'peer decrypts after Signal restart');
+  const restartedReply='encrypted reply after restart '+stamp;
+  await compose(peer,remoteNetwork,owner,restartedReply);
+  check('the re-established cross-instance session decrypts in both directions',
+    await waitFor(()=>row(browser,networkA,remote,restartedReply),'peer replies after Signal restart'));
+  check('a reply under the new session discards the previous receive keys',await browser.evaluate(`(() => {
+    const session=E2E.dmSessions[_e2eDmKey(${remoteTarget},${localConn})];
+    return !session.x3dhPending&&!session.restartPrev;
+  })()`));
+  check('the linked IRC testnet receives only ciphertext after restart',
+    !remoteWs.events.some(e=>e.text?.includes(restarted))&&!ownerWs.events.some(e=>e.text?.includes(restartedReply)));
+  const bridgeReplyWindowEnds=Date.now()+61000;
   check('bridge discovery is private to the intended IRC users',!otherWs.events.some(e=>e.type==='e2e_bundle'&&e.username===remote));
   const alternate = 'deadbeef-1234-4cce-8b52-555555555555';
   check('a cross-instance session and pin are isolated from the same nick on another network',await browser.evaluate(`
@@ -724,5 +869,182 @@ export async function checkCrossInstanceE2e({browser,peer,check,waitFor,owner,ow
   } finally {
     await browser.evaluate(`wsend=window.testBridgeWsend;delete window.testBridgeWsend;delete window.testBridgeRequests;document.getElementById('msg-input').value=''`);
   }
-  check('the bridge browser reports no unhandled exceptions',peer.errors.length===0);
+  const localSessionKey=`_e2eDmKey(${remoteTarget},${localConn})`;
+  check('an unresolved identity change blocks restart and preserves the old pin',await browser.evaluate(`(async () => {
+    const key=${localSessionKey},pin=E2E.trustStore[key],session=E2E.dmSessions[key];
+    pin.keyChanged=true;
+    try {
+      await handleEncryptCommand(['restart',${remoteTarget}],${localConn},${remoteTarget});
+      return E2E.trustStore[key]===pin&&E2E.dmSessions[key]===session&&!E2E._pendingOn[key];
+    } finally {pin.keyChanged=false;}
+  })()`));
+  const beforeExpiry=await browser.evaluate(`E2E.dmSessions[${localSessionKey}].startEph`);
+  await browser.evaluate(`(() => {
+    window.testRestartWsend=wsend;
+    window.testRestartBundleFailed=0;
+    wsend=message=>{
+      if(message.type==='e2e_fetch_bundle'&&message.username===${remoteTarget}){
+        queueMicrotask(async()=>{
+          await e2eHandleEvent({type:'e2e_bundle_missing',username:${remoteTarget},conn_id:message.conn_id,
+            req:message.req,reason:'peer-busy'});
+          window.testRestartBundleFailed++;
+        });
+        return true;
+      }
+      return window.testRestartWsend(message);
+    };
+  })()`);
+  try {
+    await browser.evaluate(`_e2eRestartRequested.clear();handleEncryptCommand(['restart',${remoteTarget}],${localConn},${remoteTarget})`);
+    check('a temporarily unavailable bundle leaves the existing Signal session usable',
+      await waitFor(()=>browser.evaluate(`window.testRestartBundleFailed&&!E2E._pendingOn[${localSessionKey}]&&
+        E2E.dmSessions[${localSessionKey}].startEph===${q(beforeExpiry)}&&
+        e2eTargetState(${remoteTarget},{conn_id:${localConn}}).mode==='dm'`),'failed restart preserves the working ratchet'));
+    check('a busy bridge holds repeated manual restarts without sending another request',await browser.evaluate(`(async () => {
+      _e2eRestartRequested.clear();
+      await handleEncryptCommand(['restart',${remoteTarget}],${localConn},${remoteTarget});
+      return window.testRestartBundleFailed===1&&!E2E._pendingOn[${localSessionKey}];
+    })()`));
+  } finally {
+    await browser.evaluate(`wsend=window.testRestartWsend;delete window.testRestartWsend;delete window.testRestartBundleFailed;_e2eAutoBusy.clear()`);
+  }
+  // The bridge serves two bundles per requester host in a rolling minute.
+  await new Promise(resolve=>setTimeout(resolve,Math.max(0,bridgeReplyWindowEnds-Date.now())));
+  await browser.evaluate(`_e2eRestartRequested.clear();handleEncryptCommand(['restart',${remoteTarget}],${localConn},${remoteTarget})`);
+  const newStart=await waitFor(()=>browser.evaluate(`(() => {
+    const key=${localSessionKey},session=E2E.dmSessions[key];
+    return session?.restartPrev&&session.startEph!==${q(beforeExpiry)}&&!E2E._pendingOn[key] ? session.startEph : null;
+  })()`),'second restart prepares the expiry fixture');
+  check('expiry removes the old receive keys and keeps the new session protected',await browser.evaluate(`(async () => {
+    const key=${localSessionKey};
+    await _withRatchetLock(key,async () => {
+      const session=E2E.dmSessions[key];
+      session.restartPrev.until=Date.now()-1;
+      await _e2eWriteDeviceSession(key,session);
+    });
+    await _withRatchetLock(key,()=>{});
+    const current=E2E.dmSessions[key];
+    return current.startEph===${q(newStart)}&&!!current.x3dhPending&&!current.restartPrev&&
+      e2eTargetState(${remoteTarget},{conn_id:${localConn}}).mode==='dm';
+  })()`));
+  const tooLate='old encrypted reply after the receive window '+stamp;
+  const errorsBeforeExpiry=await browser.evaluate(`getBuf(${localConn},${remoteTarget}).filter(
+    m=>m.text.includes('Signal message could not be authenticated')).length`);
+  await compose(peer,remoteNetwork,owner,tooLate);
+  check('a late old reply stays unreadable after the previous receive keys expire',
+    await waitFor(()=>browser.evaluate(`getBuf(${localConn},${remoteTarget}).filter(
+      m=>m.text.includes('Signal message could not be authenticated')).length>${errorsBeforeExpiry}`),'expired session gives the Signal recovery message')&&
+    !await row(browser,networkA,remote,tooLate));
+  const originalUrl=await browser.evaluate('location.href');
+  await browser.send('Page.navigate',{url:'about:blank'});
+  await waitFor(()=>browser.evaluate("location.href==='about:blank'"),'the original device closes its CryptIRC page');
+  try {
+    const secondDevice=await chromium('encrypted-restart-second-device');
+    await login(secondDevice,owner,password,waitFor);
+    await waitFor(()=>secondDevice.evaluate('E2E._vaultUp && E2E._krReceived'),'second device is ready to unlock');
+    await secondDevice.evaluate('void e2ePromptDeviceUnlock()');
+    await waitPrompt(secondDevice,waitFor,unlockText);
+    await fillPrompt(secondDevice,ownerCode);
+    check('a second device restores the pending session without receiving old receive keys',
+      await waitFor(()=>secondDevice.evaluate(`(() => {
+        const session=E2E.dmSessions[${localSessionKey}];
+        return E2E.identityReady&&session?.startEph===${q(newStart)}&&!!session.x3dhPending&&!session.restartPrev;
+      })()`),'second device restores the pending Signal session')&&!secondDevice.frames.some(frame=>frame.includes(ownerCode)));
+    await waitFor(()=>secondDevice.evaluate(`window._appShown&&_wsReady()&&!E2E._resyncPending&&
+      networks.some(n=>n.config.id===${localConn}&&n.connected)`),'second device is ready to send IRC messages');
+    const fromSecondDevice='first encrypted send from the second device after restart, long enough to span multiple IRC messages '+stamp;
+    const partsFromSecondDevice=await secondDevice.evaluate(`_e2eSplit(${q(fromSecondDevice)},
+      _e2eMaxPlain('dm',_e2eWireBudget(${remoteTarget},${localConn})))`);
+    check('the second-device fixture requires multiple encrypted IRC messages',partsFromSecondDevice.length>1);
+    const secondSendStart=secondDevice.frames.length;
+    const secondReceiveStart=remoteWs.events.length;
+    await compose(secondDevice,networkA,remote,fromSecondDevice);
+    try {
+      await waitFor(async()=>(await Promise.all(partsFromSecondDevice.map(text=>row(peer,remoteNetwork,owner,text)))).every(Boolean),
+        'every part of the second-device message decrypts');
+    } catch (error) {
+      const state=await secondDevice.evaluate(`({
+        ready:E2E.keyReady,phase:E2E._bootPhase,resync:E2E._resyncPending,mode:e2eTargetState(${remoteTarget},{conn_id:${localConn}}).mode,
+        block:E2E.lastBlockReason||null,connected:networks.some(n=>n.config.id===${localConn}&&n.connected)
+      })`);
+      const sent=secondDevice.frames.slice(secondSendStart).filter(frame=>{
+        const msg=JSON.parse(frame);
+        return msg.type==='send'&&msg.raw?.includes(' :[e2e');
+      }).length;
+      const received=remoteWs.events.slice(secondReceiveStart).filter(ev=>ev.from===owner&&ev.text?.startsWith('[e2e')).length;
+      const peerWarning=await peer.evaluate(`getBuf(${q(remoteNetwork)},${q(owner)}).slice(-6).map(m=>m.text).find(
+        text=>/(key exchange|decrypt|encryption unavailable|prekey|wrong key|out of order|identity)/i.test(text))||null`);
+      throw new Error(`${error.message}; sender state ${JSON.stringify(state)}; encrypted send frames ${sent}; peer received ${received}; peer warning ${peerWarning}`);
+    }
+    const toSecondDevice='encrypted reply to second device after restart '+stamp;
+    await compose(peer,remoteNetwork,owner,toSecondDevice);
+    check('changing devices mid-handshake completes the restart in both directions',
+      await waitFor(()=>row(secondDevice,networkA,remote,toSecondDevice),'second device decrypts the peer reply')&&
+      !remoteWs.events.some(e=>partsFromSecondDevice.includes(e.text))&&!ownerWs.events.some(e=>e.text?.includes(toSecondDevice)));
+    if(await peer.evaluate("typeof _e2eRestartFrom==='function'")){
+      const left=`E2E.dmSessions[${localSessionKey}]`;
+      const peerSessionKey=`_e2eDmKey(${q(owner)},${q(remoteNetwork)})`;
+      const right=`E2E.dmSessions[${peerSessionKey}]`;
+      const [leftBefore,rightBefore]=await Promise.all([secondDevice.evaluate(left+'.startEph'),peer.evaluate(right+'.startEph')]);
+      await Promise.all([
+        secondDevice.evaluate(`handleEncryptCommand(['restart',${remoteTarget}],${localConn},${remoteTarget})`),
+        peer.evaluate(`handleEncryptCommand(['restart',${q(owner)}],${q(remoteNetwork)},${q(owner)})`),
+      ]);
+      await waitFor(async()=>{
+        const [a,b]=await Promise.all([
+          secondDevice.evaluate(`!E2E._pendingOn[${localSessionKey}]&&${left}.startEph`),
+          peer.evaluate(`!E2E._pendingOn[${peerSessionKey}]&&${right}.startEph`),
+        ]);
+        return a&&b&&a!==leftBefore&&b!==rightBefore;
+      },'both peers prepare independent Signal restarts');
+      const leftFirst='simultaneous encrypted restart left '+stamp;
+      const rightFirst='simultaneous encrypted restart right '+stamp;
+      const holdPeerInput=(device,nick)=>device.evaluate(`(() => {
+        const original=e2eDecryptIncoming;
+        let release;
+        const gate=new Promise(resolve=>{release=resolve;});
+        e2eDecryptIncoming=async (...args)=>{
+          if(args[0]===${q(nick)}&&(args[2].startsWith('[e2ex3dh]')||args[2].startsWith('[e2edm2]'))) await gate;
+          return original(...args);
+        };
+        window.releaseSimultaneousRestart=()=>{e2eDecryptIncoming=original;release();delete window.releaseSimultaneousRestart;};
+      })()`);
+      await Promise.all([holdPeerInput(secondDevice,remote),holdPeerInput(peer,owner)]);
+      try {
+        const atOwner=ownerWs.events.length,atPeer=remoteWs.events.length;
+        await Promise.all([compose(secondDevice,networkA,remote,leftFirst),compose(peer,remoteNetwork,owner,rightFirst)]);
+        await waitFor(()=>ownerWs.events.slice(atOwner).some(e=>e.from===remote&&e.text?.startsWith('[e2edm2]'))&&
+          remoteWs.events.slice(atPeer).some(e=>e.from===owner&&e.text?.startsWith('[e2edm2]')),
+          'both first restart messages cross IRC before either peer processes them');
+      } finally {
+        await Promise.all([secondDevice.evaluate('window.releaseSimultaneousRestart()'),peer.evaluate('window.releaseSimultaneousRestart()')]);
+      }
+      try {
+        await Promise.all([
+          waitFor(()=>row(peer,remoteNetwork,owner,leftFirst),'peer reads the simultaneous restart message'),
+          waitFor(()=>row(secondDevice,networkA,remote,rightFirst),'second device reads the simultaneous restart message'),
+        ]);
+      } catch (error) {
+        const describe=(device,cid,nick)=>device.evaluate(`(() => {
+          const k=_e2eDmKey(${q(nick)},${q(cid)}),s=E2E.dmSessions[k];
+          return {initiator:s?.isInitiator,waiting:!!s?.x3dhPending,received:s?.Nr,alternate:!!E2E._glareAlt?.[k],
+            diagnostic:getBuf(${q(cid)},${q(nick)}).slice(-8).map(m=>m.text).filter(t=>/🔐|🔒/.test(t)).slice(-3)};
+        })()`);
+        const [a,b]=await Promise.all([describe(secondDevice,networkA,remote),describe(peer,remoteNetwork,owner)]);
+        throw new Error(`${error.message}; second device ${JSON.stringify(a)}; peer ${JSON.stringify(b)}`);
+      }
+      const followup='one shared Signal session after both restart '+stamp;
+      await compose(secondDevice,networkA,remote,followup);
+      check('simultaneous restarts keep messages readable and converge on one session',
+        await waitFor(()=>row(peer,remoteNetwork,owner,followup),'follow-up after simultaneous restart')&&
+        await waitFor(async()=>{
+          const [a,b]=await Promise.all([secondDevice.evaluate(left+'.startEph'),peer.evaluate(right+'.startEph')]);
+          return a&&a===b;
+        },'both sides agree on the same Signal session'));
+    }
+    check('the bridge browser reports no unhandled exceptions',peer.errors.length===0);
+  } finally {
+    await browser.send('Page.navigate',{url:originalUrl});
+    await waitFor(()=>browser.evaluate('window._appShown&&_wsReady()&&E2E.keyReady'),'the original test device reopens');
+  }
 }
