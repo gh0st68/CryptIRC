@@ -654,6 +654,8 @@ pub enum ClientMessage {
     // prefers the account actually holding that nick on that network.
     #[serde(rename = "e2e_fetch_bundle")]
     E2EFetchBundle    { username: String, #[serde(default)] conn_id: Option<String>, #[serde(default)] req: Option<String> },
+    #[serde(rename = "e2e_suggest_signal")]
+    E2ESuggestSignal { conn_id: String, nick: String },
     #[serde(rename = "e2e_store_session")]
     E2EStoreSession   { partner: String, blob: String,
                         // r2 (NEW-7): sending device id + "this save follows a send".
@@ -846,6 +848,8 @@ pub enum ServerEvent {
     E2EBundleMissing { conn_id: String, req: String, reason: &'static str },
     #[serde(rename = "e2e_setup_needed")]
     E2ESetupNeeded { conn_id: String, from: String, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String> },
+    #[serde(rename = "e2e_signal_suggestion")]
+    E2ESignalSuggestion { conn_id: String, nick: String, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String>, sent: bool },
     #[serde(rename = "e2e_identity_blob")]
     E2EIdentityBlob  { blob: String },
     #[serde(rename = "e2e_session")]
@@ -5664,6 +5668,7 @@ fn canonicalize_cmd_ids(mut cmd: ClientMessage) -> ClientMessage {
         | ClientMessage::GetLogs { conn_id, .. }
         | ClientMessage::SearchLogs { conn_id, .. }
         | ClientMessage::Sync { conn_id, .. }
+        | ClientMessage::E2ESuggestSignal { conn_id, .. }
         | ClientMessage::GenerateCert { conn_id }
         | ClientMessage::DeleteCert { conn_id }
         | ClientMessage::GetCertInfo { conn_id }
@@ -7572,6 +7577,21 @@ async fn handle_command(
             match state.e2e_store.add_one_time_prekeys(username, keys).await {
                 Ok(_)  => {}
                 Err(e) => send(ServerEvent::Error { message: format!("E2E add OTPKs: {}", e) }),
+            }
+        }
+        ClientMessage::E2ESuggestSignal { conn_id, nick } => {
+            if !state.owns_conn(username, &conn_id) || !e2e_bridge::valid_nick(&nick) { return; }
+            if state.auth.check_user_create_rate_limit(username, "e2e_method_hint").is_err() {
+                send_self(ServerEvent::Error { message: "Wait a minute before suggesting an encryption method again.".into() });
+                return;
+            }
+            let Some(conn) = state.connections.get(&conn_id).map(|c| c.clone()) else { return };
+            let mut c = conn.lock().await;
+            if c.connected && c.registered && c.casemapping.fold(&nick) != c.casemapping.fold(&c.nick) &&
+                c.send_raw(&format!("NOTICE {nick} :{}", e2e_bridge::SIGNAL_SUGGESTION)).await.is_ok() {
+                send_self(ServerEvent::E2ESignalSuggestion { conn_id, nick, prefix: None, sent: true });
+            } else {
+                send_self(ServerEvent::Error { message: "Could not send the encryption suggestion. Check the IRC connection.".into() });
             }
         }
         ClientMessage::E2EFetchBundle { username: target_user, conn_id, req } => {
@@ -10195,6 +10215,8 @@ mod ws_fix_tests {
         assert!(matches!(c, ClientMessage::E2EFetchBundle { conn_id: Some(ref id), .. } if id == lo));
         let c = canonicalize_cmd_ids(ClientMessage::E2ERelayX3DH { target_nick: "bob".into(), header: serde_json::json!({}), conn_id: Some(up.into()) });
         assert!(matches!(c, ClientMessage::E2ERelayX3DH { conn_id: Some(ref id), .. } if id == lo));
+        let c = canonicalize_cmd_ids(ClientMessage::E2ESuggestSignal { conn_id: up.into(), nick: "bob".into() });
+        assert!(matches!(c, ClientMessage::E2ESuggestSignal { ref conn_id, .. } if conn_id == lo));
         let c = canonicalize_cmd_ids(ClientMessage::E2EFetchBundle { username: "bob".into(), conn_id: None, req: None });
         assert!(matches!(c, ClientMessage::E2EFetchBundle { conn_id: None, .. }));
     }

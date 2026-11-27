@@ -14,6 +14,57 @@ export function reactionButton(text,emoji){
   })()`;
 }
 
+async function reopenReactionChat(device,connId,target,waitFor,encrypted=false){
+  const before=await device.evaluate('performance.timeOrigin');
+  await device.send('Page.reload');
+  await waitFor(()=>device.evaluate(`performance.timeOrigin!==${before}&&window._appShown&&_wsReady()&&
+    reactionEnabled(${q(connId)})${encrypted?'&&E2E._bootPhase==="ready"':''}`).catch(()=>false),'reopened reaction chat');
+  await device.evaluate(`_sidebarActivate(${q(connId)},${q(target)})`);
+}
+
+export async function checkReactionHistory({browser,check,waitFor,otherWs,networkA,networkB,channel,stamp}){
+  const text='persistent reaction message '+stamp;
+  await browser.evaluate(`_sidebarActivate(${q(networkA)},${q(channel)})`);
+  otherWs.send({type:'send',conn_id:networkB,raw:`PRIVMSG ${channel} :${text}`});
+  await waitFor(()=>browser.evaluate(`(()=>{const row=${reactionRow(text)};return !!row&&!!messageReactionFor(row);})()`),
+    'persistent plain reaction anchor');
+  const choices = ['👍','❤️'];
+  for (const emoji of choices) {
+    const at=otherWs.events.length;
+    check('can react '+emoji+' before closing the device',await browser.evaluate(reactionButton(text,emoji)));
+    await waitFor(()=>otherWs.events.slice(at).some(e=>e.type==='irc_reaction'&&e.emoji===emoji),'plain reaction delivered');
+  }
+  await waitFor(()=>browser.evaluate('reactionHistoryQueues.size===0&&loadReactionHistory(false)?.records.size===1'),'saved plain reactions');
+  check('a temporary read failure preserves earlier saved reactions',await browser.evaluate(`(async()=>{
+    const slot=reactionHistorySlot(false), read=_e2eIdbOp;
+    const before=JSON.stringify([...await readReactionHistory(slot,null)]);
+    _e2eIdbOp=(mode,...args)=>mode==='readonly'?Promise.reject(new Error('fixture read failure')):read(mode,...args);
+    try{
+      updateReactionHistory(slot,null,records=>records.clear());
+      await reactionHistoryQueues.get(JSON.stringify(slot));
+    }finally{_e2eIdbOp=read;}
+    return before===JSON.stringify([...await readReactionHistory(slot,null)]);
+  })()`));
+  await browser.send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:3,mobile:true});
+  try {
+    await reopenReactionChat(browser,networkA,channel,waitFor);
+    check('own Like and Heart survive an iPhone-width page reopen',await waitFor(()=>browser.evaluate(`(()=>{
+      const row=${reactionRow(text)};
+      return ${q(choices)}.every(emoji=>[...row?.querySelectorAll('.reaction-count[aria-pressed=true]')||[]]
+        .some(chip=>chip.textContent===emoji+' 1'));
+    })()`),'reopened Like and Heart'));
+    const at=otherWs.events.length;
+    check('a reopened reaction can be removed from the original message',await browser.evaluate(reactionButton(text,'❤️')));
+    await waitFor(()=>otherWs.events.slice(at).some(e=>e.type==='irc_reaction'&&e.emoji==='❤️'&&e.remove),'plain removal delivered');
+    await waitFor(()=>browser.evaluate('reactionHistoryQueues.size===0'),'saved reaction removal');
+    await reopenReactionChat(browser,networkA,channel,waitFor);
+    check('removing Heart persists without removing Like',await waitFor(()=>browser.evaluate(`(()=>{
+      const row=${reactionRow(text)};
+      return row?.querySelector('.reaction-count[aria-pressed=true]')?.textContent==='👍 1'&&row.querySelectorAll('.reaction-count').length===1;
+    })()`),'reopened after removing Heart'));
+  } finally { await browser.send('Emulation.clearDeviceMetricsOverride'); }
+}
+
 export async function checkLegacyReactionMenu({ev,check,waitFor,ownerWs,legacyNetwork,legacyNick,legacyPlain,legacySender,stamp}){
   const text=`legacy reaction sender ${stamp}`;
   await waitFor(()=>ev(`reactionEnabled(${q(legacyNetwork)})`),'old reaction capability retained');
@@ -269,7 +320,7 @@ export async function checkPlainReactions({ev,cdp,check,waitFor,ownerWs,otherWs,
   check('reaction frames stay out of ordinary private chat text',!ownerWs.events.some(e=>e.type==='irc_message'&&['❤️','❤️ 1'].includes(e.text)));
 }
 
-export async function checkSealedReaction({browser,peer,check,waitFor,sourceWs,text,target,emoji}){
+export async function checkSealedReaction({browser,peer,check,waitFor,sourceWs,text,target,emoji,reopen}){
   await waitFor(()=>peer.evaluate(`(()=>{const row=${reactionRow(text)};return !!row&&!!messageReactionFor(row);})()`),'encrypted message reaction anchor');
   const sent=peer.frames.length, before=sourceWs.events.length;
   check('encrypted '+target+' lets the recipient choose a reaction',await peer.evaluate(reactionButton(text,emoji)));
@@ -282,6 +333,16 @@ export async function checkSealedReaction({browser,peer,check,waitFor,sourceWs,t
     !JSON.stringify(outbound).includes(emoji)&&!Object.hasOwn(outbound.reaction,'reference'));
   await waitFor(()=>peer.evaluate(`(${reactionRow(text)})?.querySelector('.reaction-count')?.getAttribute('aria-pressed')==='true'`),
     'IRC echo confirms own encrypted reaction');
+  if (reopen) {
+    await waitFor(()=>peer.evaluate('reactionHistoryQueues.size===0&&loadReactionHistory(true)?.records.size>0'),'encrypted reaction saved');
+    check('sealed local reaction history is stored as ciphertext',await peer.evaluate(`(async()=>{
+      const slot=reactionHistorySlot(true), stored=await _e2eIdbOp('readonly',store=>store.get(slot),2000);
+      return stored instanceof Uint8Array&&stored.length>32;
+    })()`));
+    await reopenReactionChat(peer,reopen.connId,reopen.target,waitFor,true);
+    check('an encrypted reaction survives reopening the device',await waitFor(()=>peer.evaluate(
+      `(${reactionRow(text)})?.querySelector('.reaction-count[aria-pressed=true]')?.textContent===${q(emoji+' 1')}`),'reopened encrypted reaction'));
+  }
   const beforeUndo=sourceWs.events.length;
   check('encrypted '+target+' lets the recipient remove their own reaction',await peer.evaluate(reactionButton(text,emoji)));
   await waitFor(()=>sourceWs.events.slice(beforeUndo).some(e=>e.type==='sealed_reaction'),'encrypted removal delivered');

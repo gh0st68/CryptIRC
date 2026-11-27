@@ -18,6 +18,99 @@ const reactionFold = (id, target) => _chanKeyFold(id)(target);
 const reactionKey = (id, target, reference, encrypted) => JSON.stringify([id, reactionFold(id,target), reference, encrypted]);
 const reactionAnchorKey = (id, msgId) => `${id}/${msgId}`;
 const encryptedReactionReference = value => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
+const REACTION_HISTORY_LIMIT = 512;
+const reactionHistory = new Map();
+const reactionHistoryQueues = new Map();
+
+function reactionHistoryKey(connId,target,msgId) {
+  return JSON.stringify([connId,reactionFold(connId,target),msgId]);
+}
+
+function reactionHistorySlot(encrypted) {
+  return ['chat-reactions-v1',currentUser,encrypted ? 'sealed' : 'plain'];
+}
+
+async function readReactionHistory(slot,master) {
+  const data = await _e2eIdbOp('readonly',store=>store.get(slot),2000);
+  if (!data) return new Map();
+  if (!master) return new Map(data);
+  const aad = _e2eBlobAAD('chat-reactions-v1\n'+slot[1]);
+  const bytes = await _e2eGcmDec(master,data,aad);
+  try { return new Map(JSON.parse(new TextDecoder().decode(bytes))); }
+  finally { bytes.fill(0); }
+}
+
+function refreshReactionHistoryRows() {
+  for (const network of networks) if (network.reactions) refreshReactionRows(network.config.id);
+}
+
+function loadReactionHistory(encrypted) {
+  if (!currentUser || !_wsAuthed || typeof _e2eIdbOp !== 'function') return null;
+  const master = encrypted ? window.E2E?.e2eEncKey : null;
+  if (encrypted && (!master || !E2E.keyReady)) return null;
+  const prior = reactionHistory.get(encrypted);
+  if (prior?.user === currentUser && prior.master === master) return prior;
+  const slot = reactionHistorySlot(encrypted);
+  const cache = {user:currentUser,master,records:new Map()};
+  reactionHistory.set(encrypted,cache);
+  cache.ready = readReactionHistory(slot,master).then(records=>{
+    if (reactionHistory.get(encrypted) !== cache || currentUser !== cache.user) return;
+    if (encrypted && (!E2E.keyReady || E2E.e2eEncKey !== master)) return;
+    cache.records = records;
+    refreshReactionHistoryRows();
+  }).catch(()=>{ if (reactionHistory.get(encrypted) === cache) reactionHistory.delete(encrypted); });
+  return cache;
+}
+
+function storedReaction(connId,target,msgId,encrypted) {
+  const record = loadReactionHistory(encrypted)?.records.get(reactionHistoryKey(connId,target,msgId));
+  if (!record || !Array.isArray(record.entries) || !reactionReference(record.anchor) ||
+      (encrypted ? !encryptedReactionReference(record.reference) : record.reference !== record.anchor)) return null;
+  return record;
+}
+
+function updateReactionHistory(slot, master, change, clear = false) {
+  const lane = JSON.stringify(slot);
+  const encrypted = slot[2] === 'sealed';
+  const current = () => currentUser === slot[1] && (!master || window.E2E?.e2eEncKey === master);
+  const task = (reactionHistoryQueues.get(lane) || Promise.resolve()).then(()=>_e2eXLock('chat-reaction-history:'+slot[2],async()=>{
+    if (!current()) return;
+    if (clear || (encrypted && !master)) {
+      await _e2eIdbOp('readwrite',store=>store.delete(slot),2000);
+      return;
+    }
+    // A failed read is not an empty store. Leave earlier reactions intact.
+    const records = await readReactionHistory(slot,master);
+    change(records);
+    while (records.size > REACTION_HISTORY_LIMIT) records.delete(records.keys().next().value);
+    let contents = [...records];
+    if (master) {
+      const plain = new TextEncoder().encode(JSON.stringify(contents));
+      try { contents = await _e2eGcmEnc(master,plain,_e2eBlobAAD('chat-reactions-v1\n'+slot[1])); }
+      finally { plain.fill(0); }
+    }
+    if (!current()) return;
+    await _e2eIdbOp('readwrite',store=>contents.length ? store.put(contents,slot) : store.delete(slot),2000);
+    const cache = reactionHistory.get(encrypted);
+    if (current() && cache?.user === slot[1] && cache.master === master) cache.records = records;
+  })).catch(()=>{});
+  reactionHistoryQueues.set(lane,task);
+  void task.then(()=>{ if (reactionHistoryQueues.get(lane) === task) reactionHistoryQueues.delete(lane); });
+}
+
+function forgetSavedReactions(connId,target) {
+  if (!currentUser || typeof _e2eIdbOp !== 'function') return;
+  const scope = connId ? JSON.stringify([connId,reactionFold(connId,target)]).slice(0,-1)+',' : '';
+  for (const key of chatReactions.keys()) if (!scope || key.startsWith(scope)) chatReactions.delete(key);
+  for (const encrypted of [false,true]) {
+    const remove = records=>{
+      for (const key of records.keys()) if (!scope || key.startsWith(scope)) records.delete(key);
+    };
+    const cache = reactionHistory.get(encrypted);
+    if (cache) remove(cache.records);
+    updateReactionHistory(reactionHistorySlot(encrypted),encrypted ? window.E2E?.e2eEncKey : null,remove,!scope);
+  }
+}
 
 async function hashChatReactionReference(wire) {
   if (!/^(?:sd8~|\[e2edm2\])/.test(wire)) return null;
@@ -56,21 +149,17 @@ function resetChatReactions(connId) {
   for (const [id, pending] of pendingChatReactions) {
     if (!connId || pending.connId === connId) pendingChatReactions.delete(id);
   }
-  if (!connId) { reactionAnchors.clear(); reactionAnchorTargets.clear(); chatReactions.clear(); return; }
+  if (!connId) { reactionAnchors.clear(); reactionAnchorTargets.clear(); chatReactions.clear(); reactionHistory.clear(); return; }
   for (const [key, group] of reactionAnchorTargets) if (group.connId === connId) reactionAnchorTargets.delete(key);
   for (const key of reactionAnchors.keys()) if (key.startsWith(`${connId}/`)) reactionAnchors.delete(key);
   for (const [key, entry] of chatReactions) if (entry.connId === connId) chatReactions.delete(key);
 }
 
 function clearEncryptedChatReactions() {
+  reactionHistory.delete(true);
   for (const [id, pending] of pendingChatReactions) if (pending.encrypted) pendingChatReactions.delete(id);
-  const changed = new Set();
-  for (const [key, entry] of chatReactions) {
-    if (!entry.encrypted) continue;
-    chatReactions.delete(key);
-    changed.add(entry.connId);
-  }
-  for (const connId of changed) refreshReactionRows(connId);
+  for (const [key, entry] of chatReactions) if (entry.encrypted) chatReactions.delete(key);
+  refreshReactionHistoryRows();
 }
 
 function reactionSupport(connId, enabled, dislike = false) {
@@ -94,26 +183,57 @@ function reactionSupport(connId, enabled, dislike = false) {
 function applyChatReaction(connId, target, reference, emoji, remove, sender, own, encrypted) {
   if (!reactionEnabled(connId) || !reactionAllows(connId,emoji) || !reactionReference(reference) || !CHAT_REACTIONS.has(emoji)) return;
   const key = reactionKey(connId,target,reference,encrypted);
+  const group = reactionAnchorTargets.get(JSON.stringify([connId,reactionFold(connId,target)]));
+  const message = (!encrypted && group?.ids.has(reference) ? {id:group.ids.get(reference)} : getBuf(connId,target).find(m=>
+    m.id && ((encrypted && m.reactionRef === reference) || storedReaction(connId,target,m.id,encrypted)?.reference === reference)));
+  const saved = message && storedReaction(connId,target,message.id,encrypted);
+  const anchor = message && (reactionAnchors.get(reactionAnchorKey(connId,message.id))?.reference || saved?.anchor);
   let state = chatReactions.get(key);
   if (!state) {
-    if (remove) return;
     if (chatReactions.size >= 2048) chatReactions.delete(chatReactions.keys().next().value);
-    state = {connId, encrypted, entries:new Map()};
+    state = {connId, encrypted, entries:reactionEntryMap(saved?.reference === reference ? saved.entries : [])};
     chatReactions.set(key,state);
   }
   if (state.encrypted !== encrypted) return;
-  let names = state.entries.get(emoji);
-  if (!names) { names = new Map(); state.entries.set(emoji,names); }
   const actor = own ? '' : reactionFold(connId,sender);
-  if (remove) names.delete(actor);
-  else if (names.size < 64 || own || names.has(actor)) names.set(actor,sender);
-  if (!names.size) state.entries.delete(emoji);
-  if (!state.entries.size) chatReactions.delete(key);
+  updateReactionActors(state.entries,emoji,actor,sender,remove);
+  if (anchor && loadReactionHistory(encrypted)) {
+    const historyKey = reactionHistoryKey(connId,target,message.id);
+    const master = encrypted ? E2E.e2eEncKey : null;
+    updateReactionHistory(reactionHistorySlot(encrypted),master,records=>{
+      const record = records.get(historyKey);
+      const entries = reactionEntryMap(record?.reference === reference ? record.entries : []);
+      updateReactionActors(entries,emoji,actor,sender,remove);
+      records.delete(historyKey);
+      if (entries.size) records.set(historyKey,{anchor,reference,entries:[...entries].map(([code,names])=>[code,[...names]])});
+    });
+  }
   refreshReactionRows(connId,target,reference);
 }
 
-function receiveChatReaction(ev) {
+function reactionEntryMap(entries) {
+  const result = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!Array.isArray(entry) || !CHAT_REACTIONS.has(entry[0]) || !Array.isArray(entry[1])) continue;
+    const actors = entry[1].filter(actor=>Array.isArray(actor) && typeof actor[0] === 'string' && typeof actor[1] === 'string');
+    if (actors.length) result.set(entry[0],new Map(actors.slice(0,65)));
+  }
+  return result;
+}
+
+function updateReactionActors(entries,emoji,actor,sender,remove) {
+  let names = entries.get(emoji);
+  if (!names) { names = new Map(); entries.set(emoji,names); }
+  if (remove) names.delete(actor);
+  else if (names.size < 64 || !actor || names.has(actor)) names.set(actor,sender);
+  if (!names.size) entries.delete(emoji);
+}
+
+async function receiveChatReaction(ev) {
   if (reactionMode(ev.conn_id,ev.target) !== 'none') return;
+  const account = currentUser, socket = ws;
+  await loadReactionHistory(false)?.ready;
+  if (currentUser !== account || ws !== socket || reactionMode(ev.conn_id,ev.target) !== 'none') return;
   if (ev.own || !isIgnored(ev.from,ev.prefix)) {
     if (ev.own) {
       const pending = [...pendingChatReactions].find(([,p])=>
@@ -151,10 +271,13 @@ function receiveSealedReaction(ev) {
       const result = await e2eDecryptIncoming(ev.from,ev.target,wire,{conn_id:ev.conn_id,live:true,prefix:ev.prefix,kind:'Privmsg',reaction:true});
       if (!result.encrypted || result.duplicate || typeof result.plaintext !== 'string' || !E2E.keyReady ||
           E2E._lockGen !== generation || isIgnored(ev.from,ev.prefix)) return;
+      await loadReactionHistory(true)?.ready;
+      if (!E2E.keyReady || E2E._lockGen !== generation || !reactionEnabled(ev.conn_id)) return;
       const data = JSON.parse(result.plaintext);
       if (data?.v !== 1 || !encryptedReactionReference(data.ref) || !Number.isInteger(data.emoji) ||
           data.emoji < 0 || data.emoji >= CHAT_REACTION_EMOJI.length ||
-          (data.remove !== 0 && data.remove !== 1) || !getBuf(ev.conn_id,ev.target).some(m=>m.reactionRef === data.ref)) return;
+          (data.remove !== 0 && data.remove !== 1) || !getBuf(ev.conn_id,ev.target).some(m=>m.reactionRef === data.ref ||
+            storedReaction(ev.conn_id,ev.target,m.id,true)?.reference === data.ref)) return;
       applyChatReaction(ev.conn_id,ev.target,data.ref,CHAT_REACTION_EMOJI[data.emoji],data.remove===1,ev.from,false,true);
     } catch (_) { /* Ignore invalid reaction payloads. */ }
   });
@@ -241,7 +364,8 @@ document.addEventListener('selectionchange',()=>{
 
 function mountChatMessageActions(row, message, conversation) {
   if (!conversation || message.from === '*' || !['privmsg','action'].includes(message.kind) ||
-      (message._dmHistoryState && message._dmHistoryState!=='ready')) return;
+      (message._dmHistoryState && message._dmHistoryState!=='ready') ||
+      (message._pskHistoryState && message._pskHistoryState!=='ready')) return;
   row._chatReaction = {message, connId:conversation.conn_id||conversation.connId, target:message._tgt||conversation.target};
   row.tabIndex = -1;
   row.setAttribute('aria-keyshortcuts','Enter Space');
@@ -287,21 +411,28 @@ function refreshReactionRows(connId,target,reference,msgId) {
     const info = row._chatReaction;
     if (info?.connId !== connId || (msgId && info.message.id !== msgId) ||
         (folded && reactionFold(connId,info.target) !== folded)) continue;
-    if (reference && info.message.reactionRef !== reference &&
-        reactionAnchors.get(reactionAnchorKey(connId,info.message.id))?.reference !== reference) continue;
+    if (reference && messageReactionFor(row)?.reference !== reference) continue;
     renderReactionRow(row);
   }
 }
 
 function messageReactionFor(row) {
   const {message,connId,target} = row._chatReaction;
-  const anchor = reactionAnchors.get(reactionAnchorKey(connId,message.id));
-  if (!reactionEnabled(connId) || !anchor || reactionFold(connId,anchor.target) !== reactionFold(connId,target)) return null;
+  if (!reactionEnabled(connId)) return null;
   const encrypted = message.encrypted === true;
-  const reference = encrypted ? message.reactionRef : anchor.reference;
+  if (encrypted && !window.E2E?.keyReady) return null;
+  const saved = message.id && storedReaction(connId,target,message.id,encrypted);
+  const anchor = reactionAnchors.get(reactionAnchorKey(connId,message.id));
+  if ((anchor && reactionFold(connId,anchor.target) !== reactionFold(connId,target)) || (!anchor && !saved)) return null;
+  const reference = encrypted ? message.reactionRef || saved?.reference : anchor?.reference || saved?.reference;
   if (!reference) return null;
   const state = chatReactions.get(reactionKey(connId,target,reference,encrypted));
-  return {connId,target,reference,encrypted,counts:state?.entries};
+  let counts = state?.entries || (saved?.reference === reference ? reactionEntryMap(saved.entries) : undefined);
+  if (counts?.has('👎') && !reactionAllows(connId,'👎')) {
+    counts = new Map(counts);
+    counts.delete('👎');
+  }
+  return {connId,target,reference,encrypted,counts};
 }
 
 function reactToMessage(row,emoji) {

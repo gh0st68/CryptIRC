@@ -121,6 +121,8 @@ async function compose(browser, network, target, text) {
 async function clickVisible(browser, selector, touch = false) {
   const point = await browser.evaluate(`(() => {
     const el = document.querySelector(${q(selector)});
+    if (!el) throw new Error('Missing control: ' + ${q(selector)});
+    el.scrollIntoView({block:'nearest',inline:'nearest'});
     const r = el.getBoundingClientRect();
     const x = r.left + r.width / 2, y = r.top + r.height / 2;
     const top = document.elementFromPoint(x, y);
@@ -344,6 +346,35 @@ export async function checkE2eChat({
       !ev.e2e_pepper && !ev.e2e_legacy_key && !ev.e2e_enc_key));
 
   await waitFor(() => peer.evaluate('E2E._txq.length===0'), 'responder prekeys sent');
+  const receiverKey=`_e2eDmKey(${q(owner)},${q(networkB)})`;
+  await peer.evaluate(`(async()=>{
+    const name=_e2eCanon(${q(owner)},${q(networkB)});
+    const saved=await generateChannelKey();
+    await storeChannelKey(name,saved.key,saved.keyB64);
+    setActive(${q(networkB)},${q(owner)});
+    window.savedTestMethodSend=wsend;
+    wsend=message=>{
+      if(message.type==='e2e_fetch_bundle'&&message.username===${q(owner)}){
+        queueMicrotask(()=>e2eHandleEvent({type:'e2e_bundle_missing',conn_id:message.conn_id,req:message.req,reason:'unavailable'}));
+        return true;
+      }
+      return window.savedTestMethodSend(message);
+    };
+    void handleEncryptCommand(['use-signal'],${q(networkB)},${q(owner)});
+  })()`);
+  const chooseSignal=`[...document.querySelectorAll('[role=alertdialog] button')].find(button=>button.textContent==='Use Signal')`;
+  try {
+    await waitFor(()=>peer.evaluate(`!!(${chooseSignal})`),'select Signal before a session exists');
+    await peer.evaluate(`(${chooseSignal}).click()`);
+    await waitFor(()=>peer.evaluate(`_e2ePrefersSignal(${receiverKey})&&!E2E._pendingOn?.[${receiverKey}]`),'failed discovery keeps Signal selected');
+  } finally {await peer.evaluate('wsend=window.savedTestMethodSend;delete window.savedTestMethodSend');}
+  const heldSwitchDraft='hold while Signal has no session '+stamp;
+  const beforeMethodSend=ownerWs.events.length;
+  await compose(peer,networkB,owner,heldSwitchDraft);
+  check('a failed first Signal lookup keeps the draft and its saved shared key',await waitFor(()=>peer.evaluate(`
+    e2eTargetState(${q(owner)},{conn_id:${q(networkB)}}).mode==='blocked'&&
+    !!E2E.channelKeys[_e2eCanon(${q(owner)},${q(networkB)})]&&document.getElementById('msg-input').value===${q(heldSwitchDraft)}`),
+    'selected Signal is blocked until ready')&&!ownerWs.events.slice(beforeMethodSend).some(e=>e.type==='irc_message'&&e.from===other));
   const dm = 'encrypted DM '+stamp;
   const peerKey = `_e2eDmKey(${q(other)},${q(networkA)})`;
   await compose(browser, networkA, other, dm);
@@ -365,6 +396,13 @@ export async function checkE2eChat({
   if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
     await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:dm,target:'PM',emoji:'👍'});
     await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:dm,target:'PM thumbs-down',emoji:'👎'});
+  }
+  if(process.env.CRYPTIRC_TEST_REACTION_HISTORY==='1'){
+    await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:dm,target:'PM',emoji:'❤️',
+      reopen:{connId:networkB,target:owner}});
+    check('a reopened device still uses Signal and retains the older shared key',await waitFor(()=>peer.evaluate(`
+      _e2ePrefersSignal(${receiverKey})&&e2eTargetState(${q(owner)},{conn_id:${q(networkB)}}).mode==='dm'&&
+      !!E2E.channelKeys[_e2eCanon(${q(owner)},${q(networkB)})]`),'reopened method and saved key'));
   }
   const dmAction='ratchet action '+stamp;
   await compose(peer,networkB,owner,'/me '+dmAction);
@@ -861,16 +899,108 @@ export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,che
   ]);
   try {
     const wrongKey='shared-key fixture with mismatched keys '+stamp;
+    const messagesAt=ownerWs.events.length;
     await compose(peer,remoteNetwork,owner,wrongKey);
     check('a mismatched shared-key DM reports the mode and stays encrypted on IRC',
       await waitFor(()=>browser.evaluate(`getBuf(${localConn},${remoteTarget}).some(
         m=>m.from===${remoteTarget}&&m.text.includes('Shared-key message could not be opened'))`),'shared-key mismatch is readable')&&
       !ownerWs.events.some(e=>e.text?.includes(wrongKey)));
+    const wire=ownerWs.events.slice(messagesAt).find(e=>e.type==='irc_message'&&e.from===remote&&e.text?.startsWith('sd8~'))?.text;
+    check('history shows a readable shared-key failure while retaining the encrypted row',!!wire&&await browser.evaluate(`(async()=>{
+      const [row]=await _decryptLogLines(${remoteTarget},[{id:2600,ts:1,from:${remoteTarget},kind:'privmsg',text:${q(wire)}}],${localConn});
+      return row.encrypted&&row._pskHistoryWire===${q(wire)}&&row._pskHistoryState==='needs-key'&&
+        row.text.includes('shared key used when it was sent')&&!row.text.includes('sd8~');
+    })()`));
+    check('history displays a locked shared-key row and decrypts it while unlocked',await peer.evaluate(`(async()=>{
+      const line={id:2600,ts:1,from:${remoteTarget},kind:'privmsg',text:${q(wire)}};
+      const decoded=await _decryptLogLines(${q(owner)},[line],${q(remoteNetwork)});
+      const hiddenAction=pskHistoryRow({...decoded[0],kind:'action'},undefined,false);
+      const restored=await _decryptPskHistoryRow(${q(owner)},hiddenAction,${q(remoteNetwork)},true);
+      const ready=E2E.keyReady;
+      let locked;
+      try{E2E.keyReady=false;locked=await _decryptLogLines(${q(owner)},[line],${q(remoteNetwork)});}
+      finally{E2E.keyReady=ready;}
+      return decoded[0].text===${q(wrongKey)}&&locked[0]._pskHistoryState==='locked'&&locked[0].text.includes('Unlock')&&
+        hiddenAction.kind==='privmsg'&&!hiddenAction.text.includes(${q(wrongKey)})&&
+        restored.text===${q(wrongKey)}&&(!reactionEnabled(${q(remoteNetwork)})||restored.reactionRef===await hashChatReactionReference(${q(wire)}));
+    })()`));
+    check('wrong-sender history stays refused and a literal sd8~ prefix stays readable',await peer.evaluate(`(async()=>{
+      const [refused,literal]=await _decryptLogLines(${q(owner)},[
+        {id:2601,ts:1,from:'OtherNick',kind:'privmsg',text:${q(wire)}},
+        {id:2602,ts:1,from:${remoteTarget},kind:'privmsg',text:'sd8~ example'}
+      ],${q(remoteNetwork)});
+      return refused._pskHistoryState==='refused'&&!refused.text.includes(${q(wrongKey)})&&
+        !refused.text.includes('sd8~')&&literal.text==='sd8~ example';
+    })()`));
+    const otherEventCount=otherWs.events.length;
+    await peer.evaluate(`setActive(${q(remoteNetwork)},'status')`);
+    await browser.evaluate(`setActive(${localConn},${remoteTarget});showEncryptPanel()`);
+    await clickVisible(browser,'[data-encrypt-cmd="suggest-signal"]');
+    await remoteWs.wait(e=>e.type==='e2e_signal_suggestion'&&!e.sent&&e.conn_id===remoteNetwork&&e.nick===owner,
+      'Signal suggestion reaches the real linked peer privately');
+    check('a Signal suggestion marks only the private conversation unread',await waitFor(()=>peer.evaluate(`
+      active?.target==='status'&&unread.has(bk(${q(remoteNetwork)},${q(owner)}))&&
+      getBuf(${q(remoteNetwork)},${q(owner)}).some(m=>m.e2eSetupAction==='method-request')&&
+      !getBuf(${q(remoteNetwork)},'status').some(m=>m.e2eSetupAction==='method-request')`),'suggestion stays in the DM'));
+    check('a Signal suggestion leaves the recipient on their shared key and opens no popup',await peer.evaluate(`
+      e2eTargetState(${q(owner)},{conn_id:${q(remoteNetwork)}}).mode==='psk'&&!(${promptOpen})`)&&
+      !otherWs.events.slice(otherEventCount).some(e=>e.type==='e2e_signal_suggestion'));
+    const choose='[data-encrypt-cmd="use-signal"]';
+    const methodDialog='[role=alertdialog][aria-label="Confirm encryption method"]';
+    const confirmation=`[...document.querySelectorAll('${methodDialog} button')].find(button=>button.textContent==='Use Signal')`;
+    check('sending a Signal suggestion does not switch the sender’s shared key',await browser.evaluate(`
+      e2eTargetState(${remoteTarget},{conn_id:${localConn}}).mode==='psk'`));
+    await clickVisible(browser,choose);
+    await waitFor(()=>browser.evaluate(`!!(${confirmation})`),'sender also confirms the Signal method');
+    await browser.evaluate(`(${confirmation}).click()`);
+    await waitFor(()=>browser.evaluate(`e2eTargetState(${remoteTarget},{conn_id:${localConn}}).mode==='dm'`),'sender selected Signal');
+    await browser.evaluate('closeEncryptPanel()');
+    await peer.send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:3,mobile:true});
+    await peer.send('Emulation.setTouchEmulationEnabled',{enabled:true});
+    await peer.evaluate(`(document.querySelector('#pwa-banner .pwa-b-x')||document.querySelector('#pwa-banner .pwa-b-btn'))?.click();
+      setActive(${q(remoteNetwork)},${q(owner)})`);
+    await waitFor(()=>peer.evaluate("!document.getElementById('pwa-banner')"),'install banner dismissed before tapping the conversation');
+    const reviewButton='#chat-area [data-e2e-method="review"]';
+    await waitFor(()=>peer.evaluate(`!!document.querySelector(${q(reviewButton)})`),'recipient can review the Signal suggestion');
+    await clickVisible(peer,reviewButton,true);
+    await clickVisible(peer,choose,true);
+    await waitFor(()=>peer.evaluate(`!!(${confirmation})`),'Signal switch requires confirmation');
+    await peer.evaluate(`(${confirmation}).previousElementSibling.click()`);
+    await waitFor(()=>peer.evaluate(`!(${confirmation})`),'Cancel dismissed the encryption confirmation');
+    check('Cancel leaves the shared key selected',await peer.evaluate(`e2eTargetState(${q(owner)},{conn_id:${q(remoteNetwork)}}).mode==='psk'`));
+    await peer.evaluate(`window.testRetainedSharedKey=E2E.channelKeys[${peerSharedKey}];showEncryptPanel()`);
+    await clickVisible(peer,choose,true);
+    await waitFor(()=>peer.evaluate(`!!(${confirmation})`),'second Signal switch confirmation');
+    await peer.evaluate(`(${confirmation}).click()`);
+    check('choosing Signal retains the shared key for older messages and switches new sends',await waitFor(()=>peer.evaluate(`
+      E2E.channelKeys[${peerSharedKey}]===window.testRetainedSharedKey&&
+      e2eTargetState(${q(owner)},{conn_id:${q(remoteNetwork)}}).mode==='dm'`),'Signal selected with old key present'));
+    await peer.evaluate('closeEncryptPanel();delete window.testRetainedSharedKey');
+    const afterChoice='Signal after choosing an encryption method '+stamp;
+    await compose(peer,remoteNetwork,owner,afterChoice);
+    check('the switched peer sends readable Signal messages without a plaintext copy',
+      await waitFor(()=>row(browser,networkA,remote,afterChoice),'peer decrypts after switching to Signal')&&
+      !ownerWs.events.some(e=>e.text?.includes(afterChoice)));
+    await peer.evaluate('showEncryptPanel()');
+    await clickVisible(peer,'[data-encrypt-cmd="use-shared-key"]',true);
+    const confirmShared=`[...document.querySelectorAll('${methodDialog} button')].find(button=>button.textContent==='Use shared key')`;
+    await waitFor(()=>peer.evaluate(`!!(${confirmShared})`),'returning to the saved key requires confirmation');
+    await peer.evaluate(`(${confirmShared}).click()`);
+    check('explicit confirmation can switch back to the retained shared key',await waitFor(()=>peer.evaluate(`
+      e2eTargetState(${q(owner)},{conn_id:${q(remoteNetwork)}}).mode==='psk'`),'shared-key mode restored'));
+    await peer.evaluate('showEncryptPanel()');
+    await clickVisible(peer,choose,true);
+    await waitFor(()=>peer.evaluate(`!!(${confirmation})`),'returning to Signal requires confirmation');
+    await peer.evaluate(`(${confirmation}).click()`);
+    await waitFor(()=>peer.evaluate(`e2eTargetState(${q(owner)},{conn_id:${q(remoteNetwork)}}).mode==='dm'`),'Signal mode restored');
+    await peer.evaluate('closeEncryptPanel()');
   } finally {
     await Promise.all([
       browser.evaluate(`delete E2E.channelKeys[${localSharedKey}]`),
       peer.evaluate(`delete E2E.channelKeys[${peerSharedKey}]`),
+      peer.send('Emulation.clearDeviceMetricsOverride'),
     ]);
+    await peer.send('Emulation.setTouchEmulationEnabled',{enabled:false});
   }
 
   await browser.send('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:3,mobile:true});

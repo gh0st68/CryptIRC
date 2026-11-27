@@ -1606,11 +1606,15 @@ pub async fn dispatch_line(
             let in_batch = p.tags.contains_key("batch");
             let echo_message_enabled = { conn.lock().await.echo_message_enabled };
             if echo_message_enabled && same_nick(&from, &user_nick) && !in_batch {
-                if !replayed {
-                    if let Some(reference) = p.tags.get("msgid") {
-                        let mut c = conn.lock().await;
-                        if !incoming_channel_target(&c, &target).is_some_and(|(_, restricted)| restricted) {
-                            let clean = text.strip_prefix("\x01ACTION ").and_then(|s| s.strip_suffix('\x01')).unwrap_or(&text);
+                if let Some(reference) = p.tags.get("msgid") {
+                    let mut c = conn.lock().await;
+                    if !incoming_channel_target(&c, &target).is_some_and(|(_, restricted)| restricted) {
+                        let clean = text.strip_prefix("\x01ACTION ").and_then(|s| s.strip_suffix('\x01')).unwrap_or(&text);
+                        if replayed {
+                            if crate::reactions::anchorable_wire(clean) {
+                                crate::reactions::remember(&mut c, &target, reference, crate::reactions::encrypted_wire(clean));
+                            }
+                        } else {
                             if let Some(event) = crate::reactions::own_wire(&mut c, &target, clean, reference)
                                 .and_then(|id| crate::reactions::anchor_event(conn_id, &target, id, reference)) {
                                 send(event);
@@ -1650,7 +1654,7 @@ pub async fn dispatch_line(
             // msg_id 0 (the frontend routes replayed events through its silent/dedup path).
             let msg_id = if first_seen { log_line(state, username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await } else { 0 };
             send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind, msg_id, prefix: p.prefix.clone() });
-            if first_seen && !in_batch && !is_statusmsg && !from.contains('.') && from != "*" && crate::reactions::anchorable_wire(&clean) {
+            if (first_seen || replayed) && !in_batch && !is_statusmsg && !from.contains('.') && from != "*" && crate::reactions::anchorable_wire(&clean) {
                 if let Some(reference) = p.tags.get("msgid") {
                     let mut c = conn.lock().await;
                     if crate::reactions::available(&c) {
@@ -1705,6 +1709,15 @@ pub async fn dispatch_line(
             // Remote avatars: a CTCP AVATAR answer counts only from the nick we just asked
             // (live); an announce tag counts like on PRIVMSG. CTCP AVATAR lines are never shown.
             let own = { conn.lock().await.echo_nick(replayed) };
+            if text == crate::e2e_bridge::SIGNAL_SUGGESTION && !replayed && !in_batch && ts >= received - 60
+                && p.prefix.as_deref().is_some_and(|prefix| prefix.contains('@'))
+                && crate::e2e_bridge::signal_suggestion(&mut *conn.lock().await, &from, &target)
+                && state.user_tx(username).send(ServerEvent::E2ESignalSuggestion {
+                    conn_id: conn_id.to_string(), nick: from.clone(), prefix: p.prefix.clone(), sent: false,
+                }).is_ok()
+            {
+                return Ok(());
+            }
             let ctcp = crate::avatar::remote::ctcp_avatar(&text).map(str::to_string);
             // A negative CTCP answer (ERRMSG, …) also voids our query to that nick.
             if ctcp.is_none() && text.starts_with('\u{1}') { state.avatar_remote.forget_query(conn_id, &from); }

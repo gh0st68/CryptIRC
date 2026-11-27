@@ -12,7 +12,7 @@ import {checkSettingsSearch} from './settings-search-checks.mjs';
 import {checkTranslation, startTranslator} from './translation-checks.mjs';
 import {checkCrossInstanceE2e, checkE2eChat, checkLegacyMigration, seedLegacyE2e} from './e2e-chat-checks.mjs';
 import {checkChannelList} from './channel-list-checks.mjs';
-import {checkLegacyReactionMenu, checkOrdinaryClientReactions, checkPlainReactions} from './reaction-checks.mjs';
+import {checkLegacyReactionMenu, checkOrdinaryClientReactions, checkPlainReactions, checkReactionHistory} from './reaction-checks.mjs';
 
 const {CRYPTIRC_BIN, CRYPTIRC_CORE_BIN, IRC_PORT, IRC_LEAF_PORT, CHROMIUM} = process.env;
 assert(CRYPTIRC_BIN && CRYPTIRC_CORE_BIN && Number(IRC_PORT), 'Set the test binaries and local IRC testnet port');
@@ -139,8 +139,17 @@ async function chromium(profile='chrome', endpoint=base) {
     if(m.error)reject(new Error(m.error.message));else resolve(m.result);
   };
   const send=(method,params={})=>new Promise((resolve,reject)=>{
-    pending.set(++id,{resolve,reject});
-    socket.send(JSON.stringify({id,method,params}));
+    const commandId=++id;
+    const timeout=setTimeout(()=>{
+      pending.delete(commandId);
+      reject(new Error('Chromium did not answer '+method));
+    },45000);
+    pending.set(commandId,{
+      resolve:value=>{clearTimeout(timeout);resolve(value);},
+      reject:error=>{clearTimeout(timeout);reject(error);},
+    });
+    try{socket.send(JSON.stringify({id:commandId,method,params}));}
+    catch(error){pending.delete(commandId);clearTimeout(timeout);reject(error);}
   });
   const evaluate=async expression=>{
     const result=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true,userGesture:true});
@@ -422,6 +431,9 @@ try {
   await tool(token,'irc_network',{action:'connect',network:noticeNetwork});
   await ownerWs.wait(e=>e.type==='connected'&&e.conn_id===noticeNetwork,'second viewer network');
   await waitFor(()=>ev(`networks.some(n=>n.config.id===${JSON.stringify(noticeNetwork)})`),'browser second network');
+  if(process.env.CRYPTIRC_TEST_REACTION_HISTORY==='1'){
+    await checkReactionHistory({browser,check,waitFor,otherWs,networkA,networkB,channel,stamp});
+  }
   if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
     const unsupportedNick='pkr'+stamp;
     const unsupportedNetwork=await network(token,unsupportedNick,process.env.IRC_UNSUPPORTED_PORT,'No reaction capability');

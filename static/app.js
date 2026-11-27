@@ -2202,39 +2202,43 @@ function handleEvent(ev) {
           const echoBuf=getBuf(_eConn,_eTarget), generation=window.E2E?._lockGen;
           const dmWire=_isDMTarget(_eTarget)&&typeof e2eIsDmHistoryWire==='function'&&e2eIsDmHistoryWire(_eText);
           let dtext=_eText, enc=false;
-          if(typeof _eText==='string'&&_eText.startsWith('sd8~')&&typeof channelDecrypt==='function'){
-            try{
-              const kn=(typeof _resolveChanKeyName==='function')?_resolveChanKeyName(_eTarget,_eConn):null;
-              if(kn){ const pt=await channelDecrypt(kn,_eText,_eFrom); if(pt!==null){dtext=pt;enc=true;} }
-            }catch(_){}
-          }
+          const pskHistory=_isPskHistoryWire(_eText)?await _decryptPskHistoryRow(_eTarget,{text:_eText,from:_eFrom,
+            kind:_eKind==='Notice'?'notice':_eKind==='Action'?'action':'privmsg'},_eConn):null;
+          if(pskHistory){dtext=pskHistory.text;enc=true;_eKind=pskHistory.kind==='action'?'Action':pskHistory.kind==='notice'?'Notice':'Privmsg';}
           const dmHistory = dmWire ? (await _decryptLogLines(_eTarget,[{text:_eText,from:_eFrom,kind:_eKind==='Notice'?'notice':'privmsg'}],_eConn))[0] : null;
           if(dmHistory){dtext=dmHistory.text;enc=true;_eKind=dmHistory.kind==='action'?'Action':dmHistory.kind==='notice'?'Notice':'Privmsg';}
-          if(enc&&!dmHistory&&typeof e2eSplitAction==='function'){ const _a=e2eSplitAction(dtext); if(_a.action){ dtext=_a.text; _eKind='Action'; } }
-          const reactionRef=enc&&reactionEnabled(_eConn)?await hashChatReactionReference(_eText):null;
+          const reactionRef=enc&&(!pskHistory||pskHistory._pskHistoryState==='ready')&&reactionEnabled(_eConn)?await hashChatReactionReference(_eText):null;
           if(buffers[bk(_eConn,_eTarget)]!==echoBuf) return;
           if(dmHistory&&(!E2E.keyReady||E2E._lockGen!==generation)){
             Object.assign(dmHistory,dmHistoryRow(dmHistory,undefined,false));
             dtext=dmHistory.text; _eKind=dmHistory.kind==='notice'?'Notice':'Privmsg';
           }
+          if(pskHistory&&(!E2E.keyReady||E2E._lockGen!==generation)){
+            Object.assign(pskHistory,pskHistoryRow(pskHistory,undefined,false));
+            dtext=pskHistory.text; _eKind=pskHistory.kind==='notice'?'Notice':'Privmsg';
+          }
           if(_ePre) dtext=_ePre+dtext;
-          const echoKey=_historyRowKey({ts:_eTs,from:_eFrom,text:dtext,_dmHistoryWire:dmHistory?._dmHistoryWire});
+          const echoKey=_historyRowKey({ts:_eTs,from:_eFrom,text:dtext,_dmHistoryWire:dmHistory?._dmHistoryWire,_pskHistoryWire:pskHistory?._pskHistoryWire});
           if(echoBuf.some(m=>(_eId&&m.id===_eId)||_historyRowKey(m)===echoKey)) return;
           // A self-sent optimistic row (id 0, client-clock ts) that missed the
           // _sentMsgs window lands here; reconcile by stamping it rather than adding
           // a 2nd copy (the exact-ts key above can't catch the client/server skew).
-          if((!dmHistory||dmHistory._dmHistoryState==='ready')&&_reconcileSelfRow(echoBuf,_eFrom,dtext,_eId,_eTs)) return;
+          if((!dmHistory||dmHistory._dmHistoryState==='ready')&&(!pskHistory||pskHistory._pskHistoryState==='ready')&&
+            _reconcileSelfRow(echoBuf,_eFrom,dtext,_eId,_eTs)) return;
           // own:true — an IrcEcho is always THIS account's own send (from some
           // device); it must never bump unread or fire a PM sound/notification,
           // even if the local nick tracker is stale/case-mismatched (see _isOwnMsg).
           addMessage(_eConn,_eTarget,{
             id:_eId, ts:_eTs, from:_eFrom, text:dtext, encrypted:enc, own:true,
             kind:_eKind==='Action'?'action':_eKind==='Notice'?'notice':'privmsg',
-            reactionRef,
+            reactionRef:pskHistory?._pskHistoryState==='locked'?null:reactionRef,
             _dmHistoryWire:dmHistory?._dmHistoryWire,
             _dmHistoryState:dmHistory?._dmHistoryState,
+            _pskHistoryWire:pskHistory?._pskHistoryWire,
+            _pskHistoryState:pskHistory?._pskHistoryState,
           });
           if(dmHistory?._dmHistoryState==='locked') void restoreCachedDmHistory(_eConn,_eTarget);
+          if(pskHistory?._pskHistoryState==='locked'&&E2E.keyReady) void redecryptChannelHistory(_eTarget);
         });
       }
       break;
@@ -2361,19 +2365,25 @@ function handleEvent(ev) {
           }
         }
         const dmHistoryWire=(_dr.reactionReady||_dr.historyPending)&&e2eIsDmHistoryWire(_txt)&&ev.target===_realTarget?_txt:null;
+        const pskHistoryWire=_dr.pskStatus&&_isPskHistoryWire(_txt)&&ev.target===_realTarget?_txt:null;
+        if(_dr.methodConflict&&!ev.replayed&&_isDmIncoming&&ev.target===_realTarget&&ev.target===ev.from){
+          _e2eSetupRow(ev.conn_id,ev.from,'🔐 Review encryption methods for this private chat.','methods',ev.prefix);
+        }
         const dmGeneration=window.E2E?._lockGen;
         const dmBuffer=dmHistoryWire?getBuf(ev.conn_id,ev.target):null;
         if(dmHistoryWire&&_dr.reactionReady) void e2eRememberDmHistory(ev.conn_id,_realTarget,ev.from,dmHistoryWire,plaintext);
         const reactionRef=_dr.reactionReady&&reactionEnabled(ev.conn_id)?await hashChatReactionReference(_txt):null;
         if(dmBuffer&&buffers[bk(ev.conn_id,ev.target)]!==dmBuffer) return;
         const dmLocked=dmHistoryWire&&(!E2E.keyReady||dmGeneration!==E2E._lockGen);
+        const pskLocked=pskHistoryWire&&(!E2E.keyReady||dmGeneration!==E2E._lockGen);
         if(dmLocked) displayText=DM_HISTORY_LOCKED;
+        if(pskLocked) displayText=PSK_HISTORY_LOCKED;
         // Host-change announcements ("*** X has changed hostname to Y", sent by the
         // server as from '*') are status noise, not chat. Classify them as 'chghost'
         // so they get the same silent treatment as join/part (no unread/red/sound)
         // and condense, instead of landing as a chat notice.
         const _isHostChange = ev.from==='*' && /^\*\*\* \S+ has changed hostname to /.test(displayText);
-        const _msgKind = _isHostChange ? 'chghost' : ((!dmLocked&&(ev.kind==='Action'||(_act&&_act.action)))?'action':ev.kind==='Notice'?'notice':'privmsg');
+        const _msgKind = _isHostChange ? 'chghost' : ((!dmLocked&&!pskLocked&&(ev.kind==='Action'||(_act&&_act.action)))?'action':ev.kind==='Notice'?'notice':'privmsg');
         // Server/system notices (from '*') are never real mentions — skip detection so
         // they don't turn channels red or spam the Mentions panel.
         // B2: suppress the mentions-inbox/badge SIDE EFFECT only for DETERMINISTIC ring
@@ -2388,7 +2398,8 @@ function handleEvent(ev) {
         const mentioned=(ev.from==='*'||ev.target==='status')?false:checkMention(ev.conn_id,ev.target,ev.from,displayText,ev.ts,_recordMention,ev.msg_id,encrypted);
         // ZNC playback detection — batch old messages silently
         const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null,_tgt:ev.target,
-          _dmHistoryWire:dmHistoryWire,_dmHistoryState:dmHistoryWire?(dmLocked?'locked':_dr.historyPending?'pending':'ready'):undefined};
+          _dmHistoryWire:dmHistoryWire,_dmHistoryState:dmHistoryWire?(dmLocked?'locked':_dr.historyPending?'pending':'ready'):undefined,
+          _pskHistoryWire:pskHistoryWire,_pskHistoryState:pskHistoryWire?(pskLocked?'locked':_dr.pskStatus):undefined};
         // Daemon ring-buffer replay (a cryptirc.service restart reattaching to the
         // live daemon) sets ev.replayed — a DETERMINISTIC signal to take the silent
         // path (render to scrollback, dedup, but no notification/unread/sound),
@@ -2453,6 +2464,7 @@ function handleEvent(ev) {
             trackStat(ev.conn_id,ev.target,ev.from);
           }
           if(!_zdup&&isActive(ev.conn_id,ev.target))appendMsgRow(zncMsg,ev.conn_id,ev.target);
+          if(!_zdup&&zncMsg._pskHistoryState==='locked'&&E2E.keyReady) void redecryptChannelHistory(ev.target);
           // A replayed DM must still SURFACE its conversation (row in the sidebar +
           // Messages inbox) even though it stays silent (no unread/sound): a browser
           // that reconnects across a web restart may receive a brand-new PM ONLY as
@@ -2481,12 +2493,15 @@ function handleEvent(ev) {
           encrypted: encrypted,
           mentioned: mentioned,
           prefix: ev.prefix||null,
-          reactionRef,
+          reactionRef:zncMsg._pskHistoryState==='locked'?null:reactionRef,
           _dmHistoryWire:zncMsg._dmHistoryWire,
           _dmHistoryState:zncMsg._dmHistoryState,
+          _pskHistoryWire:zncMsg._pskHistoryWire,
+          _pskHistoryState:zncMsg._pskHistoryState,
         };
         markLiveTranslation(ev.conn_id,ev.target,liveMessage);
         addMessage(ev.conn_id,ev.target,liveMessage);
+        if(liveMessage._pskHistoryState==='locked'&&E2E.keyReady) void redecryptChannelHistory(ev.target);
         if(_msgKind==='privmsg' && !ev.replayed && (encrypted ? plaintext!==null : !ev.text?.startsWith('[e2e'))){
           if(!dmLocked) playChatEffect(ev.conn_id,ev.target,displayText);
         }
@@ -2506,6 +2521,7 @@ function handleEvent(ev) {
     case 'e2e_bundle':
     case 'e2e_bundle_missing':
     case 'e2e_setup_needed':
+    case 'e2e_signal_suggestion':
     case 'e2e_channel_key':
     case 'e2e_channel_list':
     case 'e2e_otpk_low':
@@ -3057,6 +3073,7 @@ function handleEvent(ev) {
     case 'data_cleared':
       buffers={}; _historyView=null; conversationScroll.clear(); conversationHistory.clear();
       resetChatReactions();
+      forgetSavedReactions();
       if(typeof e2eClearDmHistory==='function') void e2eClearDmHistory();
       unread.clear();
       mentionUnread.clear();
@@ -3072,6 +3089,7 @@ function handleEvent(ev) {
       // buffer + sync state on every session so reload/resync can't bring
       // the conversation back.
       const k=bk(ev.conn_id,ev.target);
+      forgetSavedReactions(ev.conn_id,ev.target);
       if(typeof e2eClearDmHistory==='function'){
         void e2eClearDmHistory(ev.conn_id,ev.target);
         if(ev.target==='status') void e2eClearDmHistory(ev.conn_id,_STATUS_NICK_Q);
@@ -3644,7 +3662,6 @@ function _resolveChanKeyName(target,cid){
 }
 async function _decryptLogLines(target,lines,cid){
   if(!Array.isArray(lines)||!lines.length) return lines;
-  const keyName=typeof channelDecrypt==='function' ? _resolveChanKeyName(target,cid) : null;
   const dm=_isDMTarget(target)&&typeof e2eReadDmHistory==='function';
   const generation=window.E2E?._lockGen;
   const historyReady=dm&&window.E2E?.keyReady;
@@ -3660,25 +3677,67 @@ async function _decryptLogLines(target,lines,cid){
       out[i]=Object.assign({},l,{text:'',_e2eSetupLine:true});
       continue;
     }
-    if(keyName&&l&&typeof l.text==='string'&&l.text.startsWith('sd8~')){
-      try{
-        const pt=await channelDecrypt(keyName,l.text,l.from);
-        if(pt!==null){
-          const _a=(typeof e2eSplitAction==='function')?e2eSplitAction(pt):{action:false,text:pt};
-          out[i]=Object.assign({},l,{text:_a.text,encrypted:true},_a.action?{kind:'action'}:{}); continue;
-        }
-      }catch(_){}
+    if(_isPskHistoryWire(l?.text)){
+      out[i]=await _decryptPskHistoryRow(target,l,cid);
+      continue;
     }
     out[i]=l;
   }
   if(generation!==window.E2E?._lockGen) {
-    for(let i=0;i<out.length;i++) if(out[i]?._dmHistoryWire) out[i]=dmHistoryRow(out[i],undefined,false);
+    for(let i=0;i<out.length;i++) {
+      if(out[i]?._dmHistoryWire) out[i]=dmHistoryRow(out[i],undefined,false);
+      else if(out[i]?._pskHistoryWire) out[i]=pskHistoryRow(out[i],undefined,false);
+    }
   }
   return out;
 }
 
 const DM_HISTORY_LOCKED = '🔒 Encrypted message. Unlock encrypted chats to read it on this device.';
-const DM_HISTORY_UNAVAILABLE = '🔒 Encrypted message unavailable on this device.';
+const DM_HISTORY_UNAVAILABLE = '🔒 This device has no saved readable copy of this Signal message. It can be resent from a device that can still read it.';
+const PSK_HISTORY_LOCKED = '🔒 Shared-key message. Unlock encrypted chats to check for the key.';
+const PSK_HISTORY_UNAVAILABLE = '🔒 Shared-key message could not be opened. It requires the shared key used when it was sent.';
+
+function _isPskHistoryWire(wire){
+  if(typeof wire!=='string'||wire.length>8192||!wire.startsWith('sd8~')) return false;
+  try{
+    const envelope=JSON.parse(atob(wire.slice(4)));
+    return typeof envelope?.n==='string'&&typeof envelope.c==='string'&&atob(envelope.n).length===12&&atob(envelope.c).length>=16;
+  }catch(_){return false;}
+}
+
+function pskHistoryRow(line,plaintext,ready) {
+  const decoded=typeof plaintext==='string'?e2eSplitAction(plaintext):null;
+  return {...line,_pskHistoryWire:line._pskHistoryWire||line.text,
+    _pskHistoryState:decoded?'ready':ready?'needs-key':'locked',
+    text:decoded?decoded.text:ready?PSK_HISTORY_UNAVAILABLE:PSK_HISTORY_LOCKED,
+    kind:decoded?.action?'action':line.kind==='notice'?'notice':'privmsg',encrypted:true};
+}
+
+async function _decryptPskHistoryRow(target,line,cid,restoreReaction = false) {
+  const generation=window.E2E?._lockGen;
+  if(!window.E2E?.keyReady) return pskHistoryRow(line,undefined,false);
+  const name=_resolveChanKeyName(target,cid);
+  const key=name&&E2E.channelKeys[name];
+  const keyGeneration=E2E._chanKeyGen?.[name];
+  const wire=line._pskHistoryWire||line.text;
+  let result,reactionRef;
+  try{
+    if(key) result=await channelDecryptEx(name,wire,line.from);
+    if(restoreReaction&&result?.verified&&!result.bad&&!line.reactionRef&&reactionEnabled(cid)){
+      reactionRef=await hashChatReactionReference(wire);
+    }
+  }catch(_){}
+  const ready=E2E.keyReady&&E2E._lockGen===generation;
+  const keyCurrent=typeof _e2ePskKeyCurrent==='function'
+    ? _e2ePskKeyCurrent(name,key,keyGeneration) : key===E2E.channelKeys[name];
+  if(ready&&result&&keyCurrent){
+    const row=pskHistoryRow(line,_e2ePskShown(result,line.from),true);
+    if(result.bad) row._pskHistoryState='refused';
+    if(reactionRef) row.reactionRef=reactionRef;
+    return row;
+  }
+  return pskHistoryRow(line,undefined,ready);
+}
 
 function dmHistoryRow(line,plaintext,ready) {
   const decoded = typeof plaintext==='string' ? e2eSplitAction(plaintext) : null;
@@ -3719,13 +3778,21 @@ async function restoreCachedDmHistory(connId,target) {
   }
 }
 
+function restoreCachedPskHistory() {
+  const targets=new Set();
+  for(const [key,rows] of Object.entries(buffers)){
+    if(rows.some(row=>row._pskHistoryState==='locked'||row._pskHistoryState==='needs-key')) targets.add(_splitParse(key)[1]);
+  }
+  for(const target of targets) void redecryptChannelHistory(target);
+}
+
 function lockCachedDmHistory(){
   for(const buffer of Object.values(buffers)) {
     for(const message of buffer) if(message._dmHistoryWire){
       message.text=DM_HISTORY_LOCKED;
       if(message.kind==='action') message.kind='privmsg';
       message._dmHistoryState='locked';
-    }
+    } else if(message._pskHistoryWire) Object.assign(message,pskHistoryRow(message,undefined,false));
   }
 }
 
@@ -3745,6 +3812,7 @@ function applyHeldDmHistory(connId,target,from,wire,plaintext){
 // covers the race where get_logs returns before e2e_channel_key arrives.
 async function redecryptChannelHistory(channel){
   if(typeof channelDecrypt!=='function'||!window.E2E||!window.E2E.channelKeys) return;
+  const generation=E2E._lockGen;
   const lc=String(channel).toLowerCase();
   // r4 (F3-4): also the buffers of other spellings of this channel (#room{ for a key
   // held as #room[) — each decided by _resolveChanKeyName on its own connection.
@@ -3760,19 +3828,18 @@ async function redecryptChannelHistory(channel){
     const buf=buffers[k];
     let changed=false;
     for(const m of buf){
-      if(m&&typeof m.text==='string'&&m.text.startsWith('sd8~')){
-        try{
-          const pt=await channelDecrypt(keyName,m.text,m.from);
-          if(pt!==null){
-            const _a=(typeof e2eSplitAction==='function')?e2eSplitAction(pt):{action:false,text:pt};
-            m.text=_a.text; m.encrypted=true; if(_a.action) m.kind='action'; changed=true;
-          }
-        }catch(_){}
+      if(m?._pskHistoryWire&&['locked','needs-key'].includes(m._pskHistoryState)){
+        const previous=m._pskHistoryState;
+        const row=await _decryptPskHistoryRow(bt,m,k.slice(0,slash),true);
+        if(!E2E.keyReady||E2E._lockGen!==generation) return;
+        if(buffers[k]!==buf||!buf.includes(m)||m._pskHistoryState!==previous) continue;
+        if(row._pskHistoryState!==previous){Object.assign(m,row);changed=true;}
       }
     }
     if(changed){
       const conn_id=k.slice(0,slash);
-      if(active&&active.conn_id===conn_id&&typeof active.target==='string'&&active.target.toLowerCase()===bt) renderChat();
+      if(isActive(conn_id,bt)) renderChat();
+      if(_splitActive&&_splitTarget===k) renderSplitChat();
     }
   }
 }
@@ -3847,7 +3914,8 @@ function _idlessRowIndex(buf){
   return m;
 }
 function _historyRowKey(row){
-  return row._dmHistoryWire ? JSON.stringify([String(row.from||'').toLowerCase(),row._dmHistoryWire]) : row.ts+'|'+row.from+'|'+(row.text||'').slice(0,50);
+  const wire=row._dmHistoryWire||row._pskHistoryWire;
+  return wire ? JSON.stringify([String(row.from||'').toLowerCase(),wire]) : row.ts+'|'+row.from+'|'+(row.text||'').slice(0,50);
 }
 function _stampIdlessRow(idx,key,id){
   const a=idx.get(key); if(!a||!a.length) return false;
@@ -3862,7 +3930,7 @@ async function prependLogs(conn_id,target,lines){
   const _selfNick=getNick(conn_id);
   // Track highest msg_id from log lines
   for(const l of lines) trackMsgId(conn_id,target,l.id||0);
-  const newMsgs=lines.filter(l=>!l._e2eSetupLine).map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState},conn_id));
+  const newMsgs=lines.filter(l=>!l._e2eSetupLine).map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState,_pskHistoryWire:l._pskHistoryWire,_pskHistoryState:l._pskHistoryState},conn_id));
   // A device that never saw this connection's live 005 (new browser, cleared data)
   // can still learn PREFIX/CHANMODES from the logged copy in the status history.
   if(target==='status'){ for(const m of newMsgs){ if(m.from==='*'&&_isIsupportLine(m.text)) _sniffIsupport(conn_id,m.text); } }
@@ -3902,6 +3970,7 @@ async function prependLogs(conn_id,target,lines){
        trimmed back out. */
     if(buf.length>5000) buf.splice(0,buf.length-5000);
     if(unique.some(m=>m._dmHistoryState==='locked')) void restoreCachedDmHistory(conn_id,target);
+    if(unique.some(m=>m._pskHistoryWire&&m._pskHistoryState!=='ready')) void redecryptChannelHistory(target);
   }
   if(isActive(conn_id,target)){
     const area=document.getElementById('chat-area');
@@ -3960,7 +4029,7 @@ async function appendSyncLines(conn_id,target,lines){
   const existingKeys=new Set(buf.map(_historyRowKey));
   const idless=_idlessRowIndex(buf);
   let added=0;
-  let restoreDm=false;
+  let restoreDm=false, restorePsk=false;
   for(const l of lines){
     const id=l.id||0;
     trackMsgId(conn_id,target,id);
@@ -4009,12 +4078,14 @@ async function appendSyncLines(conn_id,target,lines){
     // above, which were computed once before the loop.
     if(id>0) existingIds.add(id);
     existingKeys.add(fk);
-    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState},conn_id));
+    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState,_pskHistoryWire:l._pskHistoryWire,_pskHistoryState:l._pskHistoryState},conn_id));
     restoreDm ||= l._dmHistoryState==='locked';
+    restorePsk ||= !!l._pskHistoryWire&&l._pskHistoryState!=='ready';
     added++;
   }
   if(added>0){
     if(restoreDm) void restoreCachedDmHistory(conn_id,target);
+    if(restorePsk) void redecryptChannelHistory(target);
     buf.sort((a,b)=>a.ts-b.ts);
     if(buf.length>2000) buf.splice(0,buf.length-2000);
     if(isActive(conn_id,target)){
@@ -4971,6 +5042,13 @@ function buildRow(msg,conv,tweetConv){
       button.disabled=!!window.E2E?.keyReady;
       button.textContent=button.disabled?'Encryption ready':button.dataset.e2eUnlock;
       button.onclick=()=>e2ePromptDeviceUnlock();
+    } else if(msg.e2eSetupAction==='methods'||msg.e2eSetupAction==='method-request'){
+      button.dataset.e2eMethod='review';
+      button.textContent='Review encryption';
+      button.onclick=()=>{
+        setActive(msg.e2eSetupConn,msg.e2eSetupNick);
+        showEncryptPanel();
+      };
     } else if(msg.e2eSetupAction==='send'){
       button.textContent='Send setup instructions';
       button.onclick=()=>{
@@ -11857,8 +11935,10 @@ function showEncryptPanel(){
   const current=active&&!isMessagesActive()&&!isUploadsActive()&&!isChanListActive()?active:null;
   const target=current?.target||'status';
   const conn_id=current?.conn_id;
-  const isChan=target.startsWith('#')||target.startsWith('&');
+  const isChan=/^[#&+!]/.test(target);
+  const methodControls=typeof _e2ePrefersSignal==='function';
   const body=document.getElementById('encrypt-panel-body');
+  body._encryptionView=current;
   const title=document.getElementById('encrypt-panel-title');
   if (!window.E2E?.keyReady) {
     title.textContent=target==='status'?'Encryption':`Encryption — ${target}`;
@@ -11925,10 +12005,11 @@ function showEncryptPanel(){
     const name=_e2eUiName(target,conn_id);
     const hasPSK=E2E.channelKeys[name];
     const peerKey=_e2eDmKey(name,conn_id);
+    const signalPreferred=methodControls&&_e2ePrefersSignal(peerKey);
     const session=E2E.dmSessions[peerKey];
     const state=e2eTargetState(_e2eRealTarget(target),{conn_id});
     const hasSignal=session||E2E.state?.dm[peerKey]?.on;
-    if(!hasPSK&&_e2eSharedKeyConfigured(name)){
+    if(!signalPreferred&&!hasPSK&&_e2eSharedKeyConfigured(name)){
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
@@ -11936,14 +12017,16 @@ function showEncryptPanel(){
         </div>
         <div class="encrypt-actions">
           <button class="encrypt-btn" data-encrypt-fn="importKey">Import shared key</button>
+          ${methodControls?'<button class="encrypt-btn" data-encrypt-cmd="use-signal">Use Signal for new messages</button>':''}
         </div>`;
-    } else if(hasPSK){
+    } else if(hasPSK&&!signalPreferred){
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
           <div><strong>Shared-key encryption</strong><br><span class="encrypt-status-detail">Both sides need the same shared key</span></div>
         </div>
         <div class="encrypt-actions">
+          ${methodControls?'<button class="encrypt-btn" data-encrypt-cmd="use-signal">Use Signal for new messages</button>':''}
           <button class="encrypt-btn" data-encrypt-cmd="share">
             <span class="encrypt-btn-icon">👁</span>
             <div class="encrypt-btn-text">Show Key<div class="encrypt-btn-sub">Display the 32-word key</div></div>
@@ -11971,9 +12054,10 @@ function showEncryptPanel(){
           <div><strong>Signal encryption</strong><br><span class="encrypt-status-detail">${esc(detail)}</span></div>
         </div>
         <div class="encrypt-actions">
-          <button class="encrypt-btn" data-encrypt-cmd="restart" data-encrypt-target="1">
+          ${signalPreferred&&hasPSK?'<button class="encrypt-btn" data-encrypt-cmd="use-shared-key">Use saved shared key for new messages</button>':''}
+          <button class="encrypt-btn" data-encrypt-cmd="${session?'restart':'on'}" data-encrypt-target="1">
             <span class="encrypt-btn-icon">🔄</span>
-            <div class="encrypt-btn-text">Restart Signal Session<div class="encrypt-btn-sub">Reconnect with this contact while keeping encryption on</div></div>
+            <div class="encrypt-btn-text">${session?'Restart Signal Session':'Start Signal session'}<div class="encrypt-btn-sub">Connect with this contact while keeping encryption on</div></div>
           </button>
           <button class="encrypt-btn" data-encrypt-cmd="verify" data-encrypt-target="1">
             <span class="encrypt-btn-icon">✓</span>
@@ -12013,6 +12097,12 @@ function showEncryptPanel(){
     title.textContent='Encryption';
     body.innerHTML='<div class="encrypt-note" style="text-align:center;padding:20px 0;">Select a channel or DM to manage encryption.</div>';
   }
+  if(methodControls&&target!=='status'&&!isChan&&_e2eSetupNick(target)){
+    const suggest=document.createElement('button');
+    suggest.type='button'; suggest.className='encrypt-btn'; suggest.dataset.encryptCmd='suggest-signal';
+    suggest.textContent='Ask to use Signal';
+    body.querySelector('.encrypt-actions')?.prepend(suggest);
+  }
   document.getElementById('encrypt-overlay').classList.add('show');
   _overlayOpen('encryptPanel', closeEncryptPanel);
 }
@@ -12036,6 +12126,10 @@ function _bindEncryptDelegation(){
     if(fn==='importKey'){showImportKeyUI();return;}
     const cmd=btn.dataset.encryptCmd;
     if(!cmd)return;
+    if(['use-signal','use-shared-key','suggest-signal'].includes(cmd)&&body._encryptionView!==active){
+      showEncryptPanel();
+      return;
+    }
     encryptAction(cmd, btn.dataset.encryptTarget&&active?active.target:undefined);
   });
 }
@@ -19218,7 +19312,7 @@ function customPrompt(message,defaultValue,isPassword,clearOnClose=isPassword,ca
 // customConfirm — Promise-based replacement for window.confirm(), which is
 // unreliable in Electron. Resolves true on OK, false on Cancel/Escape/backdrop click.
 const _confirmDialogs=[];
-function customConfirm(message, okLabel, cancelLabel, explicitApproval=false){
+function customConfirm(message, okLabel, cancelLabel, explicitApproval=false, approvalLabel='Send unencrypted message'){
   okLabel = okLabel || 'OK';
   cancelLabel = cancelLabel || 'Cancel';
   return new Promise(resolve=>{
@@ -19244,7 +19338,7 @@ function customConfirm(message, okLabel, cancelLabel, explicitApproval=false){
     if(explicitApproval){
       box.setAttribute('role','alertdialog');
       box.setAttribute('aria-modal','true');
-      box.setAttribute('aria-label','Send unencrypted message');
+      box.setAttribute('aria-label',approvalLabel);
     }
     ov.appendChild(box); document.body.appendChild(ov);
     _confirmDialogs.push(ov);

@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 
 pub(crate) const CAP: &str = "cryptirc.com/e2e";
 pub(crate) const TAG: &str = "+cryptirc.com/e2e";
+pub(crate) const SIGNAL_SUGGESTION: &str = "CryptIRC: I suggest using Signal encryption for our private chat. Open Encryption in our DM to review. This notice does not change your settings.";
 const MAX_BUNDLE: usize = 1200;
 const REQUEST_TTL: Duration = Duration::from_secs(5);
 const REPLY_WINDOW: Duration = Duration::from_secs(60);
@@ -27,6 +28,7 @@ pub(crate) struct Bridge {
     replies: Vec<(String, Instant)>,
     busy_replies: Vec<(String, Instant)>,
     setup_notices: Vec<(String, Instant)>,
+    method_notices: Vec<(String, Instant)>,
 }
 
 pub(crate) fn valid_id(id: &str) -> bool {
@@ -42,6 +44,18 @@ pub(crate) fn valid_nick(nick: &str) -> bool {
 
 fn supported(c: &IrcConnection) -> bool {
     c.connected && c.registered && c.message_tags && c.e2e_bridge.advertised
+}
+
+pub(crate) fn signal_suggestion(c: &mut IrcConnection, from: &str, target: &str) -> bool {
+    if !c.connected || !c.registered || !valid_nick(from) || !valid_nick(target) { return false; }
+    let sender = c.casemapping.fold(from);
+    let own = c.casemapping.fold(&c.nick);
+    if sender == own || c.casemapping.fold(target) != own { return false; }
+    let notices = &mut c.e2e_bridge.method_notices;
+    notices.retain(|(_, at)| at.elapsed() < REPLY_WINDOW);
+    if notices.len() >= 4 || notices.iter().any(|(nick, _)| nick == &sender) { return false; }
+    notices.push((sender, Instant::now()));
+    true
 }
 
 pub(crate) fn notify_setup(

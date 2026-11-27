@@ -41,7 +41,7 @@
 // re-establish a fresh session on first contact (a one-time re-encrypt).
 const E2E_DM_PREFIX     = '[e2edm2]';   // ASCII-only — safe through all IRC servers
 const E2E_CHAN_PREFIX    = 'sd8~';       // ASCII-only
-const E2E_SHARED_KEY_CONFLICT = '🔐 This message uses Signal encryption, but this chat is configured with a shared key. Agree on one encryption method with this contact.';
+const E2E_SHARED_KEY_CONFLICT = '🔐 This Signal message could not be opened because this chat uses a shared key. Review encryption below, then ask the sender to resend it.';
 const E2E_RESTART_RECEIVE_MS = 5 * 60 * 1000;
 const E2E_SETUP_NOTICE_MS = 60 * 1000;
 const _e2eSetupNotices = new Map();
@@ -49,7 +49,7 @@ const _e2eSetupNotices = new Map();
 function _e2eSetupRow(connId,nick,text,action,prefix = null) {
   if (!connId || !_e2eSetupNick(nick) || !networks.some(net => net.config.id === connId && net.connected)) return;
   const incoming = action !== 'send';
-  if (incoming && (E2E.keyReady || isIgnored(nick,prefix) ||
+  if (incoming && ((!['methods','method-request'].includes(action) && E2E.keyReady) || isIgnored(nick,prefix) ||
       (getPmSettings(connId).enabled && !isPmAllowedFor(connId,nick)))) return;
   const now = Date.now();
   let incomingCount=0;
@@ -57,7 +57,7 @@ function _e2eSetupRow(connId,nick,text,action,prefix = null) {
     if (now - at >= E2E_SETUP_NOTICE_MS) _e2eSetupNotices.delete(key);
     else if (key.startsWith('["incoming",')) incomingCount++;
   }
-  const key = JSON.stringify([incoming?'incoming':'send',connId,_e2eRecvFold(nick,_e2eCaseMap(connId))]);
+  const key = JSON.stringify([incoming?'incoming':'send',connId,_e2eRecvFold(nick,_e2eCaseMap(connId)),action]);
   if (_e2eSetupNotices.has(key) || (incoming && incomingCount >= 8)) return;
   if (_e2eSetupNotices.size >= 128) _e2eSetupNotices.delete(_e2eSetupNotices.keys().next().value);
   _e2eSetupNotices.set(key,now);
@@ -354,10 +354,10 @@ function _e2eKeyCmdName(target, cid) {
   return { name: t };
 }
 // The question for { ask } above (the in-app dialog when app.js is there).
-async function _e2eKeyCmdConfirm(msg, okLabel, explicitApproval = false) {
+async function _e2eKeyCmdConfirm(msg, okLabel, explicitApproval = false, approvalLabel) {
   try {
     if (explicitApproval && (typeof customConfirm !== 'function' || !customConfirm.supportsExplicitApproval)) return false;
-    if (typeof customConfirm === 'function' && typeof document !== 'undefined' && document && document.body) return !!(await customConfirm(msg, okLabel || 'Continue', 'Cancel', explicitApproval));
+    if (typeof customConfirm === 'function' && typeof document !== 'undefined' && document && document.body) return !!(await customConfirm(msg, okLabel || 'Continue', 'Cancel', explicitApproval, approvalLabel));
     if (typeof confirm === 'function') return !!confirm(msg);
   } catch (_) {}
   return false;
@@ -1250,9 +1250,9 @@ async function e2eOnVaultLocked(opts) {
 }
 // Every key / session / pending request out of memory (vault lock, session end).
 function _e2eWipeMemory() {
-  if (typeof clearEncryptedChatReactions === 'function') clearEncryptedChatReactions();
   if (typeof lockCachedDmHistory === 'function') lockCachedDmHistory();
   E2E.keyReady = false; E2E.identityReady = false;
+  if (typeof clearEncryptedChatReactions === 'function') clearEncryptedChatReactions();
   E2E._v2Slots = new Set();
   E2E.e2eEncKey = null; E2E._previousKey = null; E2E._finalKeyring = null; E2E._legacyKey = null; E2E._pepper = null; E2E.identityKeys = null;
   e2eNotePassphrase(null);
@@ -1610,6 +1610,7 @@ async function _e2eBoot(vaultPass, interactive = false) {
     E2E._bootPhase = 'ready';
     _e2eResyncDone();     // r6: a full boot loaded everything a re-sync would
     if (typeof restoreCachedDmHistory === 'function') void restoreCachedDmHistory();
+    if (typeof restoreCachedPskHistory === 'function') restoreCachedPskHistory();
     _e2eReleaseLockedHold();
     if (typeof showEncryptPanel === 'function' && document.getElementById('encrypt-overlay')?.classList.contains('show')) {
       showEncryptPanel();
@@ -1891,7 +1892,7 @@ function _e2eStateSetDm(k, on, force = false) {
   if (!E2E.state) return;
   const cur = E2E.state.dm[k];
   if (!force && (on ? (cur && cur.on) : !(cur && cur.on))) return;
-  _e2eStateOp('dm', k, (c) => ({ on: on ? 1 : 0, n: ((c && c.n) | 0) + 1 }));
+  _e2eStateOp('dm', k, (c) => ({ on: on ? 1 : 0, n: ((c && c.n) | 0) + 1, ...(on && c?.signal===1 ? {signal:1} : {}) }));
 }
 function _e2eStateSetChan(k, on, g) {
   if (!E2E.state) return;
@@ -2338,7 +2339,7 @@ async function _e2eEstablishInner(from, header, opts = {}) {
   const nk = opts.peerKey || _e2eDmKey(from, opts.connId);
   const gen = E2E._lockGen;
   const user = _e2eUser();
-  const sharedKeyConfigured = () => _e2eSharedKeyConfigured(_e2eCanon(from,opts.connId) || _e2eK(from));
+  const sharedKeyConfigured = () => !_e2ePrefersSignal(nk) && _e2eSharedKeyConfigured(_e2eCanon(from,opts.connId) || _e2eK(from));
   // SECURITY: peer ratchet sessions share the server-side e2e/sessions namespace with
   // the user's OWN internal key blobs ('__spk__', '__otpk__<id>', '__state__'). Test
   // the SERVER-SANITIZED form (see _e2eReservedNamespace). (saveSession enforces too.)
@@ -3268,6 +3269,15 @@ function _e2eReactionPskParams(nonce, channel, sender) {
     'CryptIRC-PSK-Reaction-v1\n' + _e2ePskBinding(channel,sender))};
 }
 
+function _e2ePskKeyCurrent(name, key, generation) {
+  const current = E2E.channelKeys[name];
+  const currentGeneration = E2E._chanKeyGen[name];
+  if (!current || E2E.chanRemoved[name]) return false;
+  // Reconnect may import the same authenticated generation as a new CryptoKey.
+  return generation !== undefined && currentGeneration !== undefined
+    ? generation === currentGeneration : key === current;
+}
+
 async function channelEncrypt(channel, plaintext, sender = null, reaction = false) {
   const key = E2E.channelKeys[_e2eK(channel)];
   if (!key) throw new Error(`No E2E key for ${channel}`);
@@ -3288,7 +3298,10 @@ async function channelEncrypt(channel, plaintext, sender = null, reaction = fals
 async function channelDecryptEx(channel, wireText, sender = null, opts = {}) {
   const prefix = opts.reaction ? E2E_REACTION_PSK_PREFIX : E2E_CHAN_PREFIX;
   if (typeof wireText !== 'string' || !wireText.startsWith(prefix) || (opts.reaction && !sender)) return null;
-  const key = E2E.channelKeys[_e2eK(channel)];
+  const name = _e2eK(channel);
+  const generation = E2E._lockGen;
+  const keyGeneration = E2E._chanKeyGen[name];
+  const key = E2E.channelKeys[name];
   if (!key) return null;
   let env, pt;
   try {
@@ -3312,6 +3325,7 @@ async function channelDecryptEx(channel, wireText, sender = null, opts = {}) {
     if (!ok) { r.bad = true; return r; }
     r.verified = true; r.ts = env.t;
     if (opts.live) {
+      if (_e2eBootStale(generation) || !_e2ePskKeyCurrent(name,key,keyGeneration)) return null;
       if (Math.abs(Date.now() / 1000 - env.t) > E2E_PSK_OLD_SECS) r.old = true;
       if (!opts.self) {
         let seen = E2E._pskSeen.get(binding);
@@ -3760,6 +3774,13 @@ async function e2eHandleEvent(ev) {
       _e2eSetupRow(ev.conn_id,nick,`🔐 ${nick} would like to send you an encrypted DM. Set up encryption, then ask them to try again. You can also run /encrypt unlock.`,'setup',ev.prefix);
       break;
     }
+    case 'e2e_signal_suggestion': {
+      const nick=String(ev.nick||'');
+      if (!_e2eSetupNick(nick) || !networks.some(net=>net.config.id===ev.conn_id&&net.connected)) break;
+      if (ev.sent) sysMsg(ev.conn_id,nick,'🔐 Signal suggestion sent to IRC. Once you’ve agreed, both people should select Signal in this DM’s Encryption panel.');
+      else _e2eSetupRow(ev.conn_id,nick,`🔐 IRC received a suggestion from ${nick} to use Signal for future private messages. Confirm with them before switching.`, 'method-request',ev.prefix);
+      break;
+    }
     case 'e2e_bundle_missing': {
       const connId = String(ev.conn_id || '').toLowerCase();
       const found = Object.entries(E2E._pendingOn || {}).find(([, pending]) => pending.req === ev.req && String(pending.cid).toLowerCase() === connId);
@@ -3872,7 +3893,7 @@ async function e2eHandleEvent(ev) {
         // r2: under the (browser-wide) ratchet lock, like every other session write.
         const session = await _withRatchetLock(k, async () => {
           const previous = E2E.dmSessions[k];
-          const canStart = () => stillPending() && !_e2eSharedKeyConfigured(canonical) &&
+          const canStart = () => stillPending() && (_e2ePrefersSignal(k) || !_e2eSharedKeyConfigured(canonical)) &&
             (!pend.restart || _e2eRestartFrom(E2E.dmSessions[k]) === pend.restartFrom);
           if (!canStart()) return null;
           return ratchetInitSend(k, sharedSecret, bundle.signed_prekey.public_key, bundle.identity_dh_key, identityAD,
@@ -4155,6 +4176,9 @@ function _e2eSharedKeyConfigured(k, hinted = _e2eHints().ch) {
   return !!(E2E.channelKeys[k] || state?.on || hinted.includes(k) ||
     (E2E._serverHints?.channels?.includes(k) && !(state && !state.on)));
 }
+function _e2ePrefersSignal(key) {
+  return !!_e2eDmScope(key) && E2E.state?.dm[key]?.on === 1 && E2E.state.dm[key].signal === 1;
+}
 // The E2E state of the resolved name `k` (lowercased); `t` = the name as written.
 function _e2eTargetStateOf(k, t, opts) {
   const isDM = !_e2eIsChan(k);
@@ -4169,7 +4193,9 @@ function _e2eTargetStateOf(k, t, opts) {
     return { mode:'blocked', discovery: true, reason:'E2E status is being re-checked after the reconnect — message not sent; try again in a moment' };
   }
   const stCh = E2E.state && E2E.state.ch[k];
-  if (E2E.channelKeys[k]) {
+  const dmKey = isDM ? _e2eDmKey(k, opts?.conn_id) : null;
+  const preferSignal = dmKey && _e2ePrefersSignal(dmKey);
+  if (E2E.channelKeys[k] && !preferSignal) {
     if (E2E.chanRemoved[k]) return { mode:'blocked', reason:`The encryption key for ${t} was removed on another device or by the server — run /encrypt off to send unencrypted, or re-add the key` };
     // r6: the E2E state says a NEWER key generation is in use (rotated on another
     // device) than the key installed here — never encrypt with the replaced key.
@@ -4178,7 +4204,7 @@ function _e2eTargetStateOf(k, t, opts) {
     return { mode:'psk' };
   }
   const chOn = _e2eSharedKeyConfigured(k, hints.ch);
-  if (isDM) k = _e2eDmKey(k, opts?.conn_id);
+  if (isDM) k = dmKey;
   const stDm = E2E.state && E2E.state.dm[k];
   // r2 (NEW-3): /encrypt on is in progress (bundle requested, maybe queued in an outage).
   const pend = E2E._pendingOn && E2E._pendingOn[k];
@@ -4211,7 +4237,7 @@ function _e2eTargetStateOf(k, t, opts) {
     }
     return { mode:'none' };
   }
-  if (chOn) return { mode:'blocked', reason:`Encryption is on for ${t} but its key is missing (the server did not return it) — re-add the key, or /encrypt off to send unencrypted` };
+  if (chOn && !preferSignal) return { mode:'blocked', reason:`Encryption is on for ${t} but its key is missing (the server did not return it) — re-add the key, or /encrypt off to send unencrypted` };
   if (!isDM) return { mode:'none' };
   const s = E2E.dmSessions[k];
   const tr = E2E.trustStore[k];
@@ -4239,6 +4265,7 @@ function _e2eTargetStateOf(k, t, opts) {
   const on = !!(stDm && stDm.on) || (srvPeers.includes(k) && !(stDm && !stDm.on));
   if (s && s._unusable) return { mode:'blocked', reason:`E2E session with ${t} unusable (${s._unusable})` };
   if (tr && tr.keyChanged && on) return { mode:'blocked', reason:`${t}'s identity key CHANGED — verify it, then /encrypt accept ${t} (or /encrypt off ${t})` };
+  if (preferSignal) return { mode:'blocked', reason:'Signal was selected for this chat. Open Encryption to start or retry the Signal session.' };
   if (on) return { mode:'blocked', reason:`E2E is on for ${t} but there is no session — /encrypt on ${t} to re-establish, or /encrypt off ${t} to send unencrypted` };
   return { mode:'none' };
 }
@@ -4353,9 +4380,7 @@ function e2eQueuedWireVerdict(target, cid, text, heldMs) {
     // By key GENERATION (a rotation always raises it): the reconnect re-sync re-imports
     // the same key as a new CryptoKey object, which must not refuse lines encrypted
     // with it. Object identity only when a generation is not known.
-    const g = E2E._chanKeyGen[meta.k];
-    const changed = !E2E.channelKeys[meta.k] || (meta.gen !== undefined && g !== undefined ? g !== meta.gen : E2E.channelKeys[meta.k] !== meta.key);
-    if (changed) return { refuse: true, reason: 'the channel key changed (rotated or replaced) after it was encrypted' };
+    if (!_e2ePskKeyCurrent(meta.k,meta.key,meta.gen)) return { refuse: true, reason: 'the channel key changed (rotated or replaced) after it was encrypted' };
   }
   if (meta.mode === 'dm') {
     const session = E2E.dmSessions[meta.k];
@@ -4587,24 +4612,33 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
   if (text.startsWith(opts.reaction ? E2E_REACTION_PSK_PREFIX : E2E_CHAN_PREFIX)) {
     // r6 (codex-p3 e2e.js:3129): never with E2E locked here — a key that slipped back
     // into memory after the wipe must not decrypt anything while the device is locked.
-    if (!E2E.keyReady) return { plaintext:'🔐 [encrypted — E2E is locked on this device: /encrypt unlock]', encrypted:true };
+    if (!E2E.keyReady) return { plaintext:'🔐 [encrypted — E2E is locked on this device: /encrypt unlock]', encrypted:true, pskStatus:'locked' };
     // For DMs, the PSK is stored under the sender's nick. r3: resolved under the
     // network's casemapping (the server relays its own spelling of the channel).
     // r4 (SEC-HOOK-W1): receive side → the network's REAL casemapping (_e2eRecvName).
     const pskTarget = _e2eRecvName(isDM ? from : target, opts.conn_id);
     const po = { live: !!opts.live, self: !!me && fk === me, reaction: !!opts.reaction };
-    let r = await channelDecryptEx(pskTarget, text, from, po);
-    if (!r && isDM) r = await channelDecryptEx(target, text, from, po);
+    const generation = E2E._lockGen;
+    let name = _e2eK(pskTarget), key = E2E.channelKeys[name], keyGeneration = E2E._chanKeyGen[name];
+    let r = await channelDecryptEx(name, text, from, po);
+    if (!r && isDM && _e2eK(target)!==name && !_e2eBootStale(generation)) {
+      name = _e2eK(target); key = E2E.channelKeys[name]; keyGeneration = E2E._chanKeyGen[name];
+      r = await channelDecryptEx(name, text, from, po);
+    }
+    if (!E2E.keyReady || _e2eBootStale(generation)) return opts.reaction ? {plaintext:null,encrypted:false} :
+      {plaintext:'🔐 [encrypted — E2E is locked on this device: /encrypt unlock]',encrypted:true,pskStatus:'locked'};
+    if (key && !_e2ePskKeyCurrent(name,key,keyGeneration)) return opts.reaction ? {plaintext:null,encrypted:false} :
+      {plaintext:'🔐 The shared key changed while opening this message. It requires the shared key used when it was sent.',encrypted:true,pskStatus:'needs-key'};
     if (r) {
       if (r.replay) return { plaintext: null, encrypted: true, duplicate: true };
       if (opts.reaction && (!r.verified || r.old)) return { plaintext:null, encrypted:false };
-      return { plaintext: _e2ePskShown(r, from), encrypted: !r.bad, reactionReady:r.verified && !r.old };
+      return { plaintext: _e2ePskShown(r, from), encrypted: !r.bad, reactionReady:r.verified && !r.old, pskStatus:r.bad?'refused':'ready' };
     }
     if (opts.reaction) return { plaintext:null, encrypted:false };
-    if (!E2E.keyReady) return { plaintext:'🔐 [encrypted — E2E is locked on this device: /encrypt unlock]', encrypted:true };
+    if (!E2E.keyReady) return { plaintext:'🔐 [encrypted — E2E is locked on this device: /encrypt unlock]', encrypted:true, pskStatus:'locked' };
     return { plaintext:isDM
       ? '🔐 Shared-key message could not be opened. Check that both sides use the same shared key or agree to use Signal encryption.'
-      : '🔐 Shared-key message could not be opened. Check the channel’s shared key.', encrypted:true };
+      : '🔐 Shared-key message could not be opened. Check the channel’s shared key.', encrypted:true, methodConflict:isDM, pskStatus:'needs-key' };
   }
 
   // r4 (agy-flash F3-3 + SEC-HOOK-W1): an encrypted DM from a sender who is a known E2E
@@ -4766,8 +4800,8 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
       }
 
       const live = E2E.dmSessions[fk];
-      if (!live && _e2eSharedKeyConfigured(_e2eCanon(from,opts.conn_id) || _e2eK(from))) {
-        return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true };
+      if (!live && !_e2ePrefersSignal(fk) && _e2eSharedKeyConfigured(_e2eCanon(from,opts.conn_id) || _e2eK(from))) {
+        return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true, methodConflict:true };
       }
       if (!live && remapped) return { plaintext:`🔐 [encrypted — cannot decrypt: no encryption session with ${from}]`, encrypted:true };
       if (!live) {
@@ -4872,7 +4906,7 @@ async function _e2eDecryptWithFallback(fk, envelope) {
 function _e2eRefusedResult(fk, r, x3dh, envelope, from, connId = null) {
   if (r.why === 'invalid' || r.why === 'rejected' || r.why === 'shared-key') _e2eForgetPendingHeader(fk,x3dh);
   if (r.why === 'shared-key') {
-    return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true };
+    return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true, methodConflict:true };
   }
   if (r.why === 'changed') {
     _e2eStashChanged(fk, x3dh, envelope, connId);
@@ -5085,6 +5119,52 @@ async function handleEncryptCommand(args, conn_id, target) {
       await e2ePromptDeviceUnlock();
       break;
     }
+    case 'suggest-signal': {
+      if (!dmTarget || !_e2eSetupNick(dmTarget)) return;
+      if (!_wsReady() || wsend({type:'e2e_suggest_signal',conn_id:cid,nick:dmTarget}) === false) {
+        e2eSysMsg(target,'🔐 Could not send the encryption suggestion. Reconnect and try again.',cid);
+      }
+      break;
+    }
+    case 'use-signal': case 'use-shared-key': {
+      if (!dmTarget || !_e2eSetupNick(dmTarget)) return;
+      if (!E2E.keyReady || E2E._bootPhase !== 'ready' || !E2E.state || E2E._resyncPending) {
+        e2eSysMsg(target,'🔐 Unlock encrypted chats and wait for them to finish loading before changing the method.',cid);
+        return;
+      }
+      const name = _e2eCanon(dmTarget,cid);
+      const key = name && _e2eDmKey(name,cid);
+      if (!key || !_e2eSharedKeyConfigured(name)) {
+        e2eSysMsg(target,'🔐 This chat no longer has a shared key configured. Open Encryption to see the current options.',cid);
+        return;
+      }
+      if (_e2eDmScope(key)?.[1] !== String(cid).toLowerCase()) {
+        e2eSysMsg(target,'🔐 This chat has a legacy Signal session shared across networks. Review the existing session’s safety phrase before choosing how to proceed.',cid);
+        return;
+      }
+      const signal = sub === 'use-signal';
+      const view = active;
+      const old = E2E.state.dm[key];
+      const sharedKey = E2E.channelKeys[name];
+      const keyGeneration = E2E._chanKeyGen[name];
+      if (!signal && (!sharedKey || e2eTargetState(dmTarget,{conn_id:cid}).mode==='psk')) {
+        e2eSysMsg(target,'🔐 The shared key is unavailable or already selected. Open Encryption to see the current options.',cid);
+        return;
+      }
+      const text = signal ? `Confirm with ${dmTarget} that they are using Signal for this chat before switching. Compare safety phrases under Verify Identity before sending sensitive messages. Your shared key stays available for older messages.`
+        : `Use the saved shared key for new messages to ${dmTarget}? Only do this if ${dmTarget} has agreed to use that same key.`;
+      if (!await _e2eKeyCmdConfirm(text,signal?'Use Signal':'Use shared key',true,'Confirm encryption method')) return;
+      if (_e2eBootStale(commandGen) || !E2E.keyReady || E2E._resyncPending || active !== view ||
+          active?.conn_id !== cid || active?.target !== dmTarget || E2E.state?.dm[key] !== old || E2E._pendingOn?.[key] ||
+          !_e2eSharedKeyConfigured(name) || (!signal && !_e2ePskKeyCurrent(name,sharedKey,keyGeneration))) {
+        e2eSysMsg(target,'🔐 The chat or its encryption state changed while confirming. Open Encryption in this DM and try again.',cid);
+        return;
+      }
+      _e2eStateOp('dm',key,c=>({on:1,n:((c?.n)|0)+1,...(signal?{signal:1}:{})}));
+      updateE2EIndicator(dmTarget);
+      if (signal) await handleEncryptCommand(['on',dmTarget],cid,dmTarget);
+      break;
+    }
     case 'on': case 'start': case 'restart': {
       const nick = args[1] || target;
       if (!nick || _e2eIsChan(nick) || nick === 'status') { e2eSysMsg(target,`Usage: /encrypt ${sub} <nick>`,cid); return; }
@@ -5093,11 +5173,11 @@ async function handleEncryptCommand(args, conn_id, target) {
       if (!E2E.identityReady) { e2eSysMsg(target,'🔐 E2E identity not loaded yet — try again in a moment',cid); return; }
       const canonical = _e2eCanon(nick,cid);
       if (canonical === null) { e2eSysMsg(target,'🔐 Use the exact IRC nick to manage its encryption.',cid); return; }
-      if (_e2eSharedKeyConfigured(canonical)) {
-        e2eSysMsg(target,`🔐 A shared key is configured for ${nick}. Agree with them on an encryption method before removing the shared key or setting up Signal.`,cid);
+      const k = _e2eDmKey(canonical, cid);
+      if (!_e2ePrefersSignal(k) && _e2eSharedKeyConfigured(canonical)) {
+        e2eSysMsg(target,`🔐 A shared key is configured for ${nick}. Open Encryption to review the methods for this chat.`,cid);
         return;
       }
-      const k = _e2eDmKey(canonical, cid);
       _e2eDiscoveryMiss.delete(String(cid).toLowerCase() + '\n' + k);
       const cur = E2E.dmSessions[k];
       const restart = sub === 'restart';
