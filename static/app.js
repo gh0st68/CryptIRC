@@ -3660,12 +3660,23 @@ function _resolveChanKeyName(target,cid){
   }
   return null;
 }
+function e2eCanRecoverSignalHistory(target){
+  // Log rows lack a host prefix. Leave host-mask decisions to live traffic.
+  return ![...ignoreList].some(mask=>{
+    const bang=mask.indexOf('!');
+    return bang>=0?wildcardMatch(target.toLowerCase(),mask.slice(0,bang)||'*'):mask.includes('@');
+  });
+}
 async function _decryptLogLines(target,lines,cid){
   if(!Array.isArray(lines)||!lines.length) return lines;
   const dm=_isDMTarget(target)&&typeof e2eReadDmHistory==='function';
   const generation=window.E2E?._lockGen;
   const historyReady=dm&&window.E2E?.keyReady;
   const dmText=historyReady ? await e2eReadDmHistory(cid,target,lines) : new Map();
+  if(historyReady&&generation===window.E2E?._lockGen&&typeof e2eStageSignalHistory==='function'&&
+    e2eCanRecoverSignalHistory(target)){
+    e2eStageSignalHistory(cid,target,lines,dmText);
+  }
   const out=new Array(lines.length);
   for(let i=0;i<lines.length;i++){
     const l=lines[i];

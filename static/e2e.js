@@ -41,7 +41,7 @@
 // re-establish a fresh session on first contact (a one-time re-encrypt).
 const E2E_DM_PREFIX     = '[e2edm2]';   // ASCII-only — safe through all IRC servers
 const E2E_CHAN_PREFIX    = 'sd8~';       // ASCII-only
-const E2E_SHARED_KEY_CONFLICT = '🔐 This Signal message could not be opened because this chat uses a shared key. Review encryption below, then ask the sender to resend it.';
+const E2E_SHARED_KEY_CONFLICT = '🔐 This Signal message could not be opened because this chat uses a shared key. Review encryption to retry the message.';
 const E2E_RESTART_RECEIVE_MS = 5 * 60 * 1000;
 const E2E_SETUP_NOTICE_MS = 60 * 1000;
 const _e2eSetupNotices = new Map();
@@ -1268,6 +1268,9 @@ function _e2eWipeMemory() {
   _e2eDiscoveryMiss.clear();
   _e2ePlainConnections.clear();
   E2E._orphans = Object.create(null); E2E._hdrWait = Object.create(null); E2E._lazyTried = Object.create(null);   // r8
+  E2E._pendingIncomingX3DH = Object.create(null); E2E._hdrFrags = Object.create(null);
+  _e2eRecentOffers.clear();
+  _e2eHistoryAttempts.clear();
 }
 // r2 (v-fe-a NEW-1): the session ended (auth_failed / sign-out): close our passphrase
 // prompt — it used to stay on top of the login screen, intercepting clicks and asking
@@ -1612,6 +1615,11 @@ async function _e2eBoot(vaultPass, interactive = false) {
     if (typeof restoreCachedDmHistory === 'function') void restoreCachedDmHistory();
     if (typeof restoreCachedPskHistory === 'function') restoreCachedPskHistory();
     _e2eReleaseLockedHold();
+    // The active chat may have loaded its first page while the vault was locked.
+    if (typeof active !== 'undefined' && active?.conn_id && _e2eSetupNick(active.target) && typeof _isE2eConversation === 'function' &&
+        _isE2eConversation(active.target,active.conn_id)) {
+      _e2eWs({type:'get_logs',conn_id:active.conn_id,target:active.target,limit:60});
+    }
     if (typeof showEncryptPanel === 'function' && document.getElementById('encrypt-overlay')?.classList.contains('show')) {
       showEncryptPanel();
     }
@@ -2329,6 +2337,19 @@ function _x3dhHeaderSigMsg(senderIk, ephemeralPub, spkId, usedOtpkId) {
     (usedOtpkId == null ? '' : String(usedOtpkId))
   );
 }
+const _e2eVerifiedOffers = new WeakSet();
+async function _e2eVerifyOffer(header) {
+  if (!header || !header.sender_sign_ik || !header.sender_ik || !header.sender_sign_sig) return false;
+  if (_e2eVerifiedOffers.has(header)) return true;
+  try {
+    const key = await importPub(header.sender_sign_ik, 'ECDSA');
+    const valid = await crypto.subtle.verify({ name:'ECDSA', hash:'SHA-256' }, key,
+      base64ToBytes(header.sender_sign_sig),
+      _x3dhHeaderSigMsg(header.sender_ik,header.ephemeral_pub,header.spk_id,header.used_otpk_id));
+    if (valid) _e2eVerifiedOffers.add(header);
+    return valid;
+  } catch (_) { return false; }
+}
 // Serialised per peer (same lock as the ratchet), so the relayed copy and the IRC copy
 // of one header can't both run the X3DH respond (double OTPK use / double prompt).
 async function e2eEstablishResponderSession(from, header, opts = {}) {
@@ -2366,33 +2387,12 @@ async function _e2eEstablishInner(from, header, opts = {}) {
     return { ok: true, why: 'replay', pt };
   }
   // #25: REQUIRE a non-empty signing identity key so the pin always covers BOTH keys.
-  if (!header.sender_sign_ik || !header.sender_ik) {
-    console.warn('[E2E] refusing X3DH from', from, '— missing identity key(s)');
-    return { ok: false, why: 'invalid' };
-  }
-  // #47: verify the ECDSA signature over sender_ik||ephemeral_pub||spk_id||used_otpk_id
-  // BEFORE pinning; refuse on any missing/invalid/error.
-  if (!header.sender_sign_sig) {
-    console.warn('[E2E] refusing X3DH from', from, '— missing header signature');
-    return { ok: false, why: 'invalid' };
-  }
-  try {
-    const _signPub = await importPub(header.sender_sign_ik, 'ECDSA');
-    const _sigOk = await crypto.subtle.verify(
-      { name:'ECDSA', hash:'SHA-256' }, _signPub,
-      base64ToBytes(header.sender_sign_sig),
-      _x3dhHeaderSigMsg(header.sender_ik, header.ephemeral_pub, header.spk_id, header.used_otpk_id)
-    );
-    if (!_sigOk) {
-      console.warn('[E2E] refusing X3DH from', from, '— header signature invalid (possible relay tamper)');
-      return { ok: false, why: 'invalid' };
-    }
-  } catch (e) {
-    console.warn('[E2E] refusing X3DH from', from, '— header signature verify error:', e && e.message);
-    return { ok: false, why: 'invalid' };
-  }
+  // #47: verify the header before using it or asking the user to trust a new identity.
+  if (!await _e2eVerifyOffer(header)) return { ok:false, why:'invalid' };
   // #11/#25: pin BOTH identity keys (dh + sign).
   const fp    = await computeIdentityFingerprint(header.sender_ik, header.sender_sign_ik);
+  if (opts.expectedFingerprint && (fp !== opts.expectedFingerprint || E2E.trustStore[nk]?.fingerprint !== fp ||
+      E2E.trustStore[nk].keyChanged || E2E.state?.dm?.[nk]?.on === 0 || _e2eBootStale(gen))) return {ok:false,why:'invalid'};
   const trust = await e2eCheckTrust(from, fp, { connId: opts.connId, peerKey: nk });
 
   // #1/C2: a changed identity must NOT silently re-establish. Warn and refuse; the pin
@@ -2823,6 +2823,9 @@ function _withRatchetLock(nick, fn) {
 // global bound — instead of only for the nick currently sending.
 const E2E_STRANGER_MAX = 200;
 const E2E_HEADER_TTL_MS = 10 * 60 * 1000;
+const _e2eRecentOffers = new Map();
+const _e2eHistoryAttempts = new Map();
+const _e2eHeldInFlight = new WeakSet();
 // r9 (astra-p3 e2e.js:3453): when each pending X3DH header arrived (keyed by the header
 // object, so the stored value keeps its shape).
 const _e2ePendHdrAt = new WeakMap();
@@ -4065,7 +4068,8 @@ async function e2eReplenishOTPKs() {
 // when that is safe (first contact / no usable session).
 async function _e2eHandleHeader(nick, hdr, via, connId = null) {
   const k = _e2eDmKey(nick, connId);
-  if (!hdr || typeof hdr !== 'object') return;
+  const generation = E2E._lockGen;
+  if (!hdr || typeof hdr !== 'object' || !await _e2eVerifyOffer(hdr) || _e2eBootStale(generation)) return;
   if (E2E.dmSessions[k]?.connId && E2E.dmSessions[k].connId !== connId) return;
   E2E._pendingIncomingX3DH = E2E._pendingIncomingX3DH || Object.create(null);
   if (!E2E._pendingIncomingX3DH[k]) _e2eSweepStrangerState();   // r9: bounded (see the sweep)
@@ -4075,26 +4079,19 @@ async function _e2eHandleHeader(nick, hdr, via, connId = null) {
   try {
     const r = await e2eEstablishResponderSession(nick, hdr, {connId});
     if (!r.ok) {
-      if (r.why !== 'changed' && r.why !== 'deferred') _e2eForgetPendingHeader(k,hdr);
+      if (r.why === 'deferred') {
+        const trust = E2E.trustStore[k];
+        if (trust?.fingerprint && !trust.keyChanged && _e2eRecentOffers.has(k) && _e2eDmScope(k)?.[1] === connId) {
+          await _e2eRecoverRecentSignal(k,connId,nick,trust.fingerprint);
+        } else await _e2eRetryHeldDm(k,connId);
+      }
+      else if (r.why !== 'changed' && r.why !== 'shared-key') _e2eForgetPendingHeader(k,hdr);
       return;
     }
     _e2eForgetPendingHeader(k,hdr);
     updateE2EIndicator(nick);
     if (r.why !== 'replay') e2eSysMsg(nick, `🔐 Signal keys received from ${nick}. Waiting for their first encrypted message.`, connId);
-    // Envelopes that arrived before this header (reordered / delayed header lines).
-    const orphans = (E2E._orphans && E2E._orphans[k]) || [];
-    if (orphans.length) {
-      delete E2E._orphans[k];
-      for (const o of orphans) {
-        if (connId && o.conn_id !== connId) continue;
-        try {
-          const pt = await _e2eDecryptWithFallback(k, o.envelope);
-          _e2eShowDecrypted(o.conn_id,nick,nick,pt,`🔐 The next message from ${nick} arrived before its key exchange (delayed):`,
-            _e2eDmHistoryWires.get(o.envelope));
-        }
-        catch (e) { console.warn('[E2E] held message failed:', e && e.message); }
-      }
-    }
+    await _e2eRetryHeldDm(k,connId);
   } catch (e) {
     if (/^E2E_(SPK|OTPK)_MISSING/.test(e?.message || '')) _e2eForgetPendingHeader(k,hdr);
     console.error('[E2E] x3dh pre-init failed (' + via + '):', e && (e.message || e.name));
@@ -4102,25 +4099,200 @@ async function _e2eHandleHeader(nick, hdr, via, connId = null) {
   }
 }
 
+function _e2eAllowHeldDm(connId,from,prefix,fromHistory = false) {
+  return !!connId && !(typeof isIgnored === 'function' && isIgnored(from,prefix)) &&
+    !(typeof getPmSettings === 'function' && getPmSettings(connId).enabled && !isPmAllowedFor(connId,from)) &&
+    (!fromHistory || typeof e2eCanRecoverSignalHistory !== 'function' || e2eCanRecoverSignalHistory(from));
+}
+
+function _e2eHoldDm(k,envelope,connId,t = Date.now()) {
+  const wire = _e2eDmHistoryWires.get(envelope);
+  if (!wire || !_e2eAllowHeldDm(connId,wire.from,wire.prefix,wire.fromHistory)) return false;
+  _e2eSweepStrangerState();
+  const pending = E2E._orphans ||= Object.create(null);
+  const messages = pending[k] ||= [];
+  if (messages.some(m => m.conn_id === connId && _e2eDmHistoryWires.get(m.envelope)?.text === wire.text)) return true;
+  if (messages.length >= 20) {
+    const oldest = messages.reduce((i,m,j)=>m.t < messages[i].t ? j : i,0);
+    if (t < messages[oldest].t) return false;
+    messages.splice(oldest,1);
+  }
+  messages.push({t,envelope,conn_id:connId});
+  return true;
+}
+
+async function _e2eRetryHeldDm(k,connId,expectedFingerprint = null) {
+  const generation = E2E._lockGen;
+  const current = () => E2E.keyReady && !_e2eBootStale(generation) && E2E.state?.dm?.[k]?.on !== 0 &&
+    (!expectedFingerprint || (E2E.trustStore[k]?.fingerprint === expectedFingerprint && !E2E.trustStore[k].keyChanged));
+  const pending = E2E._orphans?.[k] || [];
+  const items = pending.filter(o => !connId || o.conn_id === connId);
+  if (!items.length || !current()) return false;
+  let decrypted = false;
+  const remove = item => {
+    const queue = E2E._orphans?.[k];
+    const index = queue?.indexOf(item) ?? -1;
+    if (index >= 0) {
+      queue.splice(index,1);
+      if (!queue.length) delete E2E._orphans[k];
+    }
+  };
+  for (const item of items) {
+    if (!current()) break;
+    if (_e2eHeldInFlight.has(item) || !E2E._orphans?.[k]?.includes(item)) continue;
+    const {t,envelope,conn_id} = item;
+    const wire = _e2eDmHistoryWires.get(envelope);
+    if (!wire || Date.now()-t >= E2E_HEADER_TTL_MS || !_e2eAllowHeldDm(conn_id,wire.from,wire.prefix,wire.fromHistory) ||
+        _e2eDmKey(wire.from,conn_id) !== k) { remove(item); continue; }
+    _e2eHeldInFlight.add(item);
+    let r;
+    try {
+      r = await e2eDecryptIncoming(wire.from,wire.target,wire.text,
+        {conn_id,prefix:wire.prefix,held:true,recovering:true,expectedFingerprint});
+    } finally { _e2eHeldInFlight.delete(item); }
+    if (r.reactionReady && current() && _e2eAllowHeldDm(conn_id,wire.from,wire.prefix,wire.fromHistory)) {
+      remove(item);
+      _e2eShowDecrypted(conn_id,wire.target,wire.from,r.plaintext,null,wire);
+      decrypted = true;
+    } else if (current() && !r.historyPending) remove(item);
+  }
+  return decrypted;
+}
+
+// Keep recent incoming ciphertext and setup frames for an explicit method change,
+// or automatic retry on an already trusted Signal conversation.
+function e2eStageSignalHistory(connId,target,lines,readable) {
+  const key = _e2eDmKey(target,connId);
+  if (_e2eDmScope(key)?.[1] !== connId || !_e2eAllowHeldDm(connId,target)) return;
+  const now = Date.now();
+  let confirmed = null;
+  for (const line of lines) {
+    if (line && _e2eK(line.from) === _e2eK(target) && readable.has(line) &&
+        (!confirmed || line.ts > confirmed.ts || (line.ts === confirmed.ts && (line.id||0) > (confirmed.id||0)))) confirmed = line;
+  }
+  const newer = line => !confirmed || line.ts > confirmed.ts || (line.ts === confirmed.ts && (line.id||0) > (confirmed.id||0));
+  const keep = new Map((_e2eRecentOffers.get(key) || []).filter(l => now-l.ts*1000 < E2E_HEADER_TTL_MS)
+    .filter(newer)
+    .map(l => [l.text,l]));
+  for (const line of lines) {
+    if (!line || _e2eK(line.from) !== _e2eK(target) || !Number.isFinite(line.ts) || !newer(line) ||
+        now-line.ts*1000 >= E2E_HEADER_TTL_MS || line.ts*1000 > now+60000 ||
+        typeof line.text !== 'string' || line.text.length>4096) continue;
+    if (!line.text.startsWith(E2E_HDR_PREFIX) && !line.text.startsWith(E2E_DM_PREFIX)) continue;
+    keep.set(line.text,{from:line.from,text:line.text,ts:line.ts,id:line.id||0});
+  }
+  if (!keep.size) { _e2eRecentOffers.delete(key); return; }
+  _e2eRecentOffers.delete(key);
+  if (_e2eRecentOffers.size >= 32) _e2eRecentOffers.delete(_e2eRecentOffers.keys().next().value);
+  const order = (a,b) => a.ts-b.ts||a.id-b.id;
+  const sorted = [...keep.values()].sort(order);
+  const rows = [...sorted.filter(l=>l.text.startsWith(E2E_HDR_PREFIX)).slice(-16),
+    ...sorted.filter(l=>l.text.startsWith(E2E_DM_PREFIX)).slice(-32)].sort(order);
+  _e2eRecentOffers.set(key,rows);
+  const last = rows.findLast(line=>line.text.startsWith(E2E_DM_PREFIX)) ||
+    (E2E._orphans?.[key]?.length && rows.at(-1));
+  const savedHeaders = rows.filter(line=>line.text.startsWith(E2E_HDR_PREFIX));
+  const liveOffer = _e2ePendingHeader(key);
+  const trust = E2E.trustStore[key];
+  if (!last || !trust?.fingerprint || trust.keyChanged ||
+      !E2E.identityReady || !(E2E.dmSessions[key] || _e2ePrefersSignal(key)) ||
+      (!_e2ePrefersSignal(key) && _e2eSharedKeyConfigured(_e2eCanon(target,connId) || _e2eK(target)))) return;
+  if (!liveOffer && !savedHeaders.length && !rows.some(line=>{
+    try { return !!JSON.parse(atob(line.text.slice(E2E_DM_PREFIX.length))).x3dh_header; } catch (_) { return false; }
+  })) return;
+  // A later history page can supply a missing setup fragment for the same message.
+  const marker = JSON.stringify([last.id||last.text,liveOffer?.ephemeral_pub,...savedHeaders.map(l=>l.id||l.text)]);
+  if (_e2eHistoryAttempts.get(key) === marker) return;
+  _e2eHistoryAttempts.delete(key);
+  if (_e2eHistoryAttempts.size >= 32) _e2eHistoryAttempts.delete(_e2eHistoryAttempts.keys().next().value);
+  _e2eHistoryAttempts.set(key,marker);
+  const generation = E2E._lockGen;
+  const recover = () => {
+    if (!_e2eBootStale(generation)) return _e2eRecoverRecentSignal(key,connId,target,trust.fingerprint);
+  };
+  if (typeof _e2eEnqueue === 'function') _e2eEnqueue(connId,target,recover);
+}
+
+async function _e2eRecoverRecentSignal(key,connId,target,expectedFingerprint = null) {
+  const generation = E2E._lockGen;
+  const current = () => E2E.keyReady && E2E.identityReady && !_e2eBootStale(generation) &&
+    E2E.state?.dm?.[key]?.on !== 0 &&
+    (_e2ePrefersSignal(key) || !_e2eSharedKeyConfigured(_e2eCanon(target,connId) || _e2eK(target))) &&
+    _e2eDmScope(key)?.[1] === connId && _e2eDmKey(target,connId) === key && _e2eAllowHeldDm(connId,target) &&
+    (!expectedFingerprint || (E2E.trustStore[key]?.fingerprint === expectedFingerprint && !E2E.trustStore[key].keyChanged));
+  if (!current()) return false;
+  const liveOffer = _e2ePendingHeader(key) || null;
+  const currentOffer = () => current() && (_e2ePendingHeader(key) || null) === liveOffer;
+  if (liveOffer && expectedFingerprint &&
+      await computeIdentityFingerprint(liveOffer.sender_ik,liveOffer.sender_sign_ik) !== expectedFingerprint) return false;
+  if (!currentOffer()) return false;
+  if ((liveOffer || (!expectedFingerprint && E2E._orphans?.[key]?.some(o=>o.envelope.x3dh_header))) &&
+      await _e2eRetryHeldDm(key,connId,expectedFingerprint)) return true;
+  const historyAllowed = () => typeof e2eCanRecoverSignalHistory !== 'function' || e2eCanRecoverSignalHistory(target);
+  if (!currentOffer() || !historyAllowed()) return false;
+  const rows = _e2eRecentOffers.get(key) || [];
+  const fragments = Object.create(null);
+  let offer = liveOffer, offerTime = 0;
+  const messages = [];
+  for (const line of rows) {
+    if (Date.now()-line.ts*1000 >= E2E_HEADER_TTL_MS) continue;
+    let hdr;
+    try {
+      if (line.text.startsWith(E2E_HDR_PREFIX)) {
+        hdr = line.text.startsWith(E2E_HDR_FRAG) ? _e2eHdrFragment(line.from,line.text,connId,fragments) :
+          JSON.parse(atob(line.text.slice(E2E_HDR_PREFIX.length)));
+      } else {
+        const envelope = JSON.parse(atob(line.text.slice(E2E_DM_PREFIX.length)));
+        if (!_e2eEnvelopeOk(envelope)) continue;
+        messages.push({line,envelope});
+        hdr = envelope.x3dh_header;
+      }
+    } catch (_) { continue; }
+    if (liveOffer || !hdr || !await _e2eVerifyOffer(hdr)) continue;
+    if (expectedFingerprint) {
+      const session = E2E.dmSessions[key];
+      if (hdr.ephemeral_pub === session?.establishEph || session?.priorEstablishEphs?.includes(hdr.ephemeral_pub) ||
+          await computeIdentityFingerprint(hdr.sender_ik,hdr.sender_sign_ik) !== expectedFingerprint) continue;
+    }
+    if (!currentOffer()) return false;
+    offer = hdr;
+    offerTime = line.ts*1000;
+  }
+  if (!offer || (!messages.length && !E2E._orphans?.[key]?.length) || !currentOffer() || !historyAllowed()) return false;
+  if (!liveOffer) {
+    (E2E._pendingIncomingX3DH ||= Object.create(null))[key] = offer;
+    _e2ePendHdrAt.set(offer,offerTime);
+    _e2eHeaderNetworks.set(offer,connId);
+  }
+  for (const {line,envelope} of messages.slice(-20)) {
+    _e2eDmHistoryWires.set(envelope,{from:line.from,target,text:line.text,fromHistory:true});
+    _e2eHoldDm(key,envelope,connId,line.ts*1000);
+  }
+  const recovered = await _e2eRetryHeldDm(key,connId,expectedFingerprint);
+  if (recovered && _e2eRecentOffers.get(key) === rows) _e2eRecentOffers.delete(key);
+  if (!recovered && !liveOffer && expectedFingerprint && !E2E.trustStore[key]?.keyChanged) _e2eForgetPendingHeader(key,offer);
+  return recovered;
+}
+
 // H6: reassembly of fragmented headers ([e2ex3dh]~id~i~n~data). Caps: ≤8 fragments of
 // ≤600 chars, ≤4 KiB total, ≤4 open ids per sender, ≤64 senders, 120 s TTL; a fragment
 // index seen twice with different data poisons that id.
 E2E._hdrFrags = Object.create(null);
-function _e2eHdrFragment(from, text, cid) {
+function _e2eHdrFragment(from, text, cid, fragments = E2E._hdrFrags) {
   const m = /^\[e2ex3dh\]~([a-z0-9]{4,12})~([1-8])~([1-8])~([A-Za-z0-9+/=]{1,600})$/.exec(text);
   if (!m) return null;
   const k = _e2eDmKey(from, cid), id = m[1], i = +m[2], n = +m[3], data = m[4];
   if (i > n) return null;
   const now = Date.now();
-  for (const s of Object.keys(E2E._hdrFrags)) {
-    for (const fid of Object.keys(E2E._hdrFrags[s])) if (now - E2E._hdrFrags[s][fid].t > 120000) delete E2E._hdrFrags[s][fid];
-    if (!Object.keys(E2E._hdrFrags[s]).length) delete E2E._hdrFrags[s];
+  for (const s of Object.keys(fragments)) {
+    for (const fid of Object.keys(fragments[s])) if (now - fragments[s][fid].t > 120000) delete fragments[s][fid];
+    if (!Object.keys(fragments[s]).length) delete fragments[s];
   }
-  if (!E2E._hdrFrags[k]) {
-    if (Object.keys(E2E._hdrFrags).length >= 64) return null;
-    E2E._hdrFrags[k] = Object.create(null);
+  if (!fragments[k]) {
+    if (Object.keys(fragments).length >= 64) return null;
+    fragments[k] = Object.create(null);
   }
-  const per = E2E._hdrFrags[k];
+  const per = fragments[k];
   let e = per[id];
   if (!e) {
     if (Object.keys(per).length >= 4) return null;
@@ -4733,7 +4905,7 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
       if (!E2E._hdrWait[fk]) _e2eSweepStrangerState();   // r8
       const hw = E2E._hdrWait[fk] || (E2E._hdrWait[fk] = { busy: false, fails: [] });
       hw.fails = hw.fails.filter(t => Date.now() - t < 60000);
-      if (!remapped && !x3dh && !E2E.dmSessions[fk] && !hw.busy && hw.fails.length < 1) {
+      if (!opts.recovering && !remapped && !x3dh && !E2E.dmSessions[fk] && !hw.busy && hw.fails.length < 1) {
         hw.busy = true;
         try {
           x3dh = await new Promise(resolve => {
@@ -4780,8 +4952,8 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
           const myDh = await exportPub(E2E.identityKeys.dhKeyPair.publicKey, 'ECDH');
           const iWin = _e2eCmpBytes(base64ToBytes(myDh), base64ToBytes(String(x3dh.sender_ik || ''))) < 0;
           if (iWin) {
-            const r = await _e2eEstablishAndDecrypt(from, x3dh, envelope, { alt: true, connId:opts.conn_id });
-            if (!r.ok) return _e2eRefusedResult(fk, r, x3dh, envelope, from, opts.conn_id);
+            const r = await _e2eEstablishAndDecrypt(from,x3dh,envelope,{alt:true,connId:opts.conn_id,expectedFingerprint:opts.expectedFingerprint});
+            if (!r.ok) return _e2eRefusedResult(fk,r,x3dh,envelope,from,opts);
             _e2eForgetPendingHeader(fk,x3dh);
             return { plaintext:r.pt, encrypted:true, reactionReady:true };
           }
@@ -4791,8 +4963,8 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
         // (the prior session is restored if it doesn't decrypt), and establishment +
         // first decrypt run under ONE ratchet lock, so an outgoing message can't slip in
         // between and find a half-built (not yet send-ready) responder session.
-        const r = await _e2eEstablishAndDecrypt(from, x3dh, envelope, { connId:opts.conn_id });
-        if (!r.ok) return _e2eRefusedResult(fk, r, x3dh, envelope, from, opts.conn_id);
+        const r = await _e2eEstablishAndDecrypt(from,x3dh,envelope,{connId:opts.conn_id,expectedFingerprint:opts.expectedFingerprint});
+        if (!r.ok) return _e2eRefusedResult(fk,r,x3dh,envelope,from,opts);
         _e2eForgetPendingHeader(fk,x3dh);
         if (E2E._glareAlt) delete E2E._glareAlt[fk];
         updateE2EIndicator(from);
@@ -4801,18 +4973,15 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
 
       const live = E2E.dmSessions[fk];
       if (!live && !_e2ePrefersSignal(fk) && _e2eSharedKeyConfigured(_e2eCanon(from,opts.conn_id) || _e2eK(from))) {
-        return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true, methodConflict:true };
+        return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true, methodConflict:true,
+          historyPending:!remapped&&(opts.recovering||_e2eHoldDm(fk,envelope,opts.conn_id)) };
       }
       if (!live && remapped) return { plaintext:`🔐 [encrypted — cannot decrypt: no encryption session with ${from}]`, encrypted:true };
       if (!live) {
         // Header not here (yet): hold the envelope (≤20/peer, 10 min) and decrypt it as
         // soon as a header for this peer establishes a session.
-        _e2eSweepStrangerState();   // r8: expired / excess entries of OTHER nicks too
-        E2E._orphans = E2E._orphans || Object.create(null);
-        const oa = (E2E._orphans[fk] || []).filter(o => Date.now() - o.t < 600000);
-        if (oa.length < 20) oa.push({ t: Date.now(), envelope, conn_id: opts.conn_id || null });
-        E2E._orphans[fk] = oa;
-        return { plaintext:'🔐 [encrypted — waiting for the key exchange; it will be shown when it arrives]', encrypted:true, historyPending:true };
+        const waiting = opts.recovering || _e2eHoldDm(fk,envelope,opts.conn_id);
+        return { plaintext:'🔐 [encrypted — waiting for the key exchange]', encrypted:true, historyPending:waiting };
       }
       // r8 (codex-p3 e2e.js:4043): the live session must belong to the identity pinned NOW
       // — after a replacement was accepted on another device the old ratchet kept
@@ -4851,6 +5020,9 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
         return { plaintext:`🔐 ${from} started Signal encryption with a key this account no longer has. Ask them to restart the Signal session.`, encrypted:true };
       }
       if (e.name === 'OperationError') {
+        if (!remapped && (opts.recovering || (!x3dh && _e2eHoldDm(fk,envelope,opts.conn_id)))) {
+          return { plaintext:'🔐 Signal message could not be authenticated yet. CryptIRC will retry if the key exchange arrives. You can also restart the Signal session from Encryption.', encrypted:true,historyPending:true };
+        }
         return { plaintext:'🔐 Signal message could not be authenticated. To reconnect, use Restart Signal Session in this chat’s encryption menu.', encrypted:true };
       }
       return { plaintext:`🔐 [decryption failed: ${errMsg}]`, encrypted:true };
@@ -4903,10 +5075,12 @@ async function _e2eDecryptWithFallback(fk, envelope) {
   }
 }
 
-function _e2eRefusedResult(fk, r, x3dh, envelope, from, connId = null) {
-  if (r.why === 'invalid' || r.why === 'rejected' || r.why === 'shared-key') _e2eForgetPendingHeader(fk,x3dh);
+function _e2eRefusedResult(fk,r,x3dh,envelope,from,opts) {
+  const connId = opts.conn_id;
+  if (r.why === 'invalid' || r.why === 'rejected') _e2eForgetPendingHeader(fk,x3dh);
   if (r.why === 'shared-key') {
-    return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true, methodConflict:true };
+    return { plaintext:E2E_SHARED_KEY_CONFLICT, encrypted:true, methodConflict:true,
+      historyPending:opts.recovering||_e2eHoldDm(fk,envelope,connId) };
   }
   if (r.why === 'changed') {
     _e2eStashChanged(fk, x3dh, envelope, connId);
@@ -5162,7 +5336,18 @@ async function handleEncryptCommand(args, conn_id, target) {
       }
       _e2eStateOp('dm',key,c=>({on:1,n:((c?.n)|0)+1,...(signal?{signal:1}:{})}));
       updateE2EIndicator(dmTarget);
-      if (signal) await handleEncryptCommand(['on',dmTarget],cid,dmTarget);
+      if (signal) {
+        let receivedOffer = false;
+        const recover = () => {
+          receivedOffer = !!_e2ePendingHeader(key) || _e2eRecentOffers.get(key)?.some(line=>line.text.startsWith(E2E_HDR_PREFIX));
+          return _e2eRecoverRecentSignal(key,cid,dmTarget);
+        };
+        const recovered = typeof _e2eEnqueue === 'function' ? await _e2eEnqueue(cid,dmTarget,recover) : await recover();
+        if (!recovered && !_e2eBootStale(commandGen) && active === view && _e2ePrefersSignal(key)) {
+          if (_e2ePendingHeader(key)) e2eSysMsg(target,`🔐 Waiting for ${dmTarget}’s encrypted message to finish the Signal setup.`,cid);
+          else if (!receivedOffer && !E2E.trustStore[key]?.keyChanged) await handleEncryptCommand(['on',dmTarget],cid,dmTarget);
+        }
+      }
       break;
     }
     case 'on': case 'start': case 'restart': {
@@ -5310,6 +5495,12 @@ async function handleEncryptCommand(args, conn_id, target) {
       const pending = E2E._pendingOn?.[k];
       if (pending) { delete E2E._pendingOn[k]; pending.done?.('blocked'); }
       if (!isChannel && !session) _e2eStateSetDm(k, false, true);
+      if (!isChannel) {
+        delete E2E._orphans?.[k];
+        _e2eForgetPendingHeader(k,_e2ePendingHeader(k));
+        _e2eRecentOffers.delete(k);
+        _e2eHistoryAttempts.delete(k);
+      }
       if (sh) {
         if (shared) sh.channels = sh.channels.filter(x => x !== name);
         if (session) sh.peers = sh.peers.filter(x => x !== k);

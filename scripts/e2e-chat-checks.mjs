@@ -829,6 +829,20 @@ export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,che
   await peer.evaluate('closeEncryptPanel()');
   await waitFor(()=>fs.stat(path.join(remoteData,'e2e',remote,'bundle.json')).catch(()=>null),'remote prekey bundle stored');
 
+  const mixedFirst = process.env.CRYPTIRC_TEST_SIGNAL_HANDOFF!=='0' &&
+    await peer.evaluate("typeof e2eStageSignalHistory==='function'");
+  const mixedKey = `_e2eDmKey(${q(owner)},${q(remoteNetwork)})`;
+  const mixedName = `_e2eCanon(${q(owner)},${q(remoteNetwork)})`;
+  if(mixedFirst){
+    await peer.evaluate(`(async()=>{
+      const saved=await generateChannelKey();
+      await storeChannelKey(${mixedName},saved.key,saved.keyB64);
+      setActive(${q(remoteNetwork)},${q(owner)});
+    })()`);
+    await waitFor(()=>peer.evaluate(`!E2E._stateSaving&&e2eTargetState(${q(owner)},{conn_id:${q(remoteNetwork)}}).mode==='psk'`),
+      'first bridge recipient has a saved shared key');
+  }
+
   const first = 'first encrypted cross-instance DM '+stamp;
   const framesAtStart = browser.frames.length;
   await compose(browser,networkA,remote,first);
@@ -841,7 +855,52 @@ export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,che
   await waitFor(()=>browser.frames.slice(prefsAtStart).some(frame=>JSON.parse(frame).type==='save_preferences'),
     'preferences sent during automatic encryption setup');
   await acceptIdentity(browser,waitFor);
-  await acceptIdentity(peer,waitFor);
+  if(mixedFirst){
+    check('the initial bridged Signal offer waits behind the existing shared key without pinning or creating a session',
+      await waitFor(()=>peer.evaluate(`!!_e2ePendingHeader(${mixedKey})&&E2E._orphans?.[${mixedKey}]?.length===1&&
+        !E2E.dmSessions[${mixedKey}]&&!E2E.trustStore[${mixedKey}]&&
+        getBuf(${q(remoteNetwork)},${q(owner)}).some(m=>m._dmHistoryState==='pending')`),'mixed-method first message was held'));
+    check('an offer with a broken signature cannot displace the held Signal offer',await peer.evaluate(`(async()=>{
+      const offer=_e2ePendingHeader(${mixedKey});
+      await _e2eHandleHeader(${q(owner)},{...offer,ephemeral_pub:offer.sender_ik},'irc',${q(remoteNetwork)});
+      return _e2ePendingHeader(${mixedKey})===offer&&!E2E.trustStore[${mixedKey}];
+    })()`));
+    if(process.env.CRYPTIRC_TEST_SIGNAL_HISTORY_RECOVERY==='1'){
+      await reopen(peer,waitFor,"E2E._bootPhase==='ready'&&E2E.identityReady",'recipient opens a new browser page before agreeing');
+      await peer.evaluate(`setActive(${q(remoteNetwork)},${q(owner)})`);
+      try {
+        await waitFor(()=>peer.evaluate(`!!_e2eRecentOffers.get(${mixedKey})?.some(r=>r.text.startsWith('[e2edm2]'))&&
+          !_e2ePendingHeader(${mixedKey})&&!E2E.dmSessions[${mixedKey}]&&!!E2E.channelKeys[${mixedName}]`),
+          'reopened device stages the recent offer from encrypted scrollback');
+      } catch (error) {
+        const state=await peer.evaluate(`({phase:E2E._bootPhase,active:active?.target===${q(owner)},
+          ready:E2E.keyReady,session:!!E2E.dmSessions[${mixedKey}],offer:!!_e2ePendingHeader(${mixedKey}),
+          shared:!!E2E.channelKeys[${mixedName}],staged:_e2eRecentOffers.get(${mixedKey})?.length||0,
+          buffered:getBuf(${q(remoteNetwork)},${q(owner)}).filter(m=>m._dmHistoryWire).length,
+          requested:_pendingLogs.has(${q(remoteNetwork+'/'+owner)})})`);
+        throw new Error(error.message+' '+JSON.stringify(state));
+      }
+    }
+    await peer.evaluate(`setActive(${q(remoteNetwork)},${q(owner)});showEncryptPanel()`);
+    const switchConfirm='[role=alertdialog][aria-label="Confirm encryption method"]';
+    await clickVisible(peer,'[data-encrypt-cmd="use-signal"]');
+    await waitFor(()=>peer.evaluate(`!!document.querySelector(${q(switchConfirm)})`),'mixed-method confirmation');
+    await clickVisible(peer,switchConfirm+' button:first-child');
+    check('declining a switch leaves the first message unopened and sends no Signal offer',await peer.evaluate(`
+      !E2E.dmSessions[${mixedKey}]&&e2eTargetState(${q(owner)},{conn_id:${q(remoteNetwork)}}).mode==='psk'`));
+    const framesBeforeApproval=peer.frames.length;
+    await clickVisible(peer,'[data-encrypt-cmd="use-signal"]');
+    await waitFor(()=>peer.evaluate(`!!document.querySelector(${q(switchConfirm)})`),'mixed-method reapproval');
+    await clickVisible(peer,switchConfirm+' button:last-child');
+    await acceptIdentity(peer,waitFor);
+    check('switching to Signal authenticates the original held bridged message and avoids a competing handshake',
+      await waitFor(()=>row(peer,remoteNetwork,owner,first),'original message recovered after opting in')&&
+      !peer.frames.slice(framesBeforeApproval).some(frame=>JSON.parse(frame).type==='e2e_fetch_bundle')&&
+      await peer.evaluate(`!E2E.dmSessions[${mixedKey}]?.isInitiator&&!!E2E.channelKeys[${mixedName}]`));
+    await peer.evaluate('closeEncryptPanel()');
+  } else {
+    await acceptIdentity(peer,waitFor);
+  }
   await waitFor(()=>row(peer,remoteNetwork,owner,first),'cross-instance peer decrypted first message');
   // The browser and the test observer each have their own WebSocket.
   await remoteWs.wait(e=>e.type==='irc_message'&&e.from===owner&&e.text?.startsWith('[e2edm2]'),
@@ -854,6 +913,10 @@ export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,che
   const reply = 'encrypted cross-instance reply '+stamp;
   await compose(peer,remoteNetwork,owner,reply);
   check('the cross-instance Double Ratchet decrypts the reply',await waitFor(()=>row(browser,networkA,remote,reply),'cross-instance reply'));
+  if(mixedFirst)await peer.evaluate(`(async()=>{
+    if(!await removeChannelKey(${mixedName},[${mixedName}]))throw new Error('Could not remove the shared-key fixture');
+    _e2eStateOp('dm',${mixedKey},entry=>({on:1,n:(entry.n|0)+1}));
+  })()`);
   if(process.env.CRYPTIRC_TEST_REACTIONS==='1'){
     await checkSealedReaction({browser,peer,check,waitFor,sourceWs:ownerWs,text:first,target:'cross-instance PM',emoji:'❤️'});
   }
@@ -958,8 +1021,9 @@ export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,che
     await peer.send('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:3,mobile:true});
     await peer.send('Emulation.setTouchEmulationEnabled',{enabled:true});
     await peer.evaluate(`(document.querySelector('#pwa-banner .pwa-b-x')||document.querySelector('#pwa-banner .pwa-b-btn'))?.click();
-      setActive(${q(remoteNetwork)},${q(owner)})`);
-    await waitFor(()=>peer.evaluate("!document.getElementById('pwa-banner')"),'install banner dismissed before tapping the conversation');
+      setActive(${q(remoteNetwork)},${q(owner)});closeSidebar()`);
+    await waitFor(()=>peer.evaluate(`!document.getElementById('pwa-banner')&&
+      document.getElementById('sidebar').getBoundingClientRect().right<=2`),'mobile overlays settle before tapping the conversation');
     const reviewButton='#chat-area [data-e2e-method="review"]';
     await waitFor(()=>peer.evaluate(`!!document.querySelector(${q(reviewButton)})`),'recipient can review the Signal suggestion');
     await clickVisible(peer,reviewButton,true);
@@ -1064,7 +1128,54 @@ export async function checkCrossInstanceE2e({browser,peer,chromium,ownerCode,che
       return message.type==='e2e_store_session'&&message.partner===`@${networkA}:${remote}`;
     }));
   const restarted='first encrypted message after restart '+stamp;
-  await compose(browser,networkA,remote,restarted);
+  const restartEventIndex=remoteWs.events.length;
+  if(mixedFirst){
+    await peer.evaluate(`(() => {
+      window.testOriginalDmReceive=e2eDecryptIncoming;
+      window.testDelayedOffers=[];
+      e2eDecryptIncoming=(from,target,text,opts)=>{
+        if(from===${q(owner)}&&opts.conn_id===${q(remoteNetwork)}&&text.startsWith('[e2ex3dh]')){
+          window.testDelayedOffers.push([from,target,text,opts]);
+          return Promise.resolve({plaintext:null,encrypted:false});
+        }
+        return window.testOriginalDmReceive(from,target,text,opts);
+      };
+    })()`);
+  }
+  try {
+    await compose(browser,networkA,remote,restarted);
+    if(mixedFirst){
+      check('a restart ciphertext arriving before its offer waits without changing the established session',
+        await waitFor(()=>peer.evaluate(`window.testDelayedOffers.length>=2&&E2E._orphans?.[${mixedKey}]?.length===1&&
+          !!E2E.dmSessions[${mixedKey}]&&getBuf(${q(remoteNetwork)},${q(owner)}).some(m=>m._dmHistoryState==='pending')`),
+          'restart ciphertext waits while its setup fragments are delayed'));
+      if(process.env.CRYPTIRC_TEST_SIGNAL_HISTORY_RECOVERY==='1'){
+        const recorded = remoteWs.events.slice(restartEventIndex).filter(e=>e.type==='irc_message'&&e.from===owner&&
+          /^(?:\[e2ex3dh\]|\[e2edm2\])/.test(e.text||'')).map(e=>({id:e.msg_id||0,ts:e.ts,from:e.from,kind:'privmsg',text:e.text}));
+        const beforeRecovery=peer.frames.length;
+        check('the IRC transport captured the full missed setup and ciphertext',recorded.length>=3);
+        const lastFragment=recorded.findLast(line=>line.text.startsWith('[e2ex3dh]'));
+        const incomplete=recorded.filter(line=>line!==lastFragment);
+        await peer.evaluate(`e2eDecryptIncoming=window.testOriginalDmReceive;
+          prependLogs(${q(remoteNetwork)},${q(owner)},${q(incomplete)})`);
+        await peer.evaluate(`_e2eEnqueue(${q(remoteNetwork)},${q(owner)},()=>{})`);
+        check('incomplete setup in scrollback does not authenticate the held ciphertext',
+          !await row(peer,remoteNetwork,owner,restarted));
+        await peer.evaluate(`prependLogs(${q(remoteNetwork)},${q(owner)},${q([lastFragment])})`);
+        check('trusted Signal chats recover automatically when the missed setup appears in scrollback',
+          await waitFor(()=>row(peer,remoteNetwork,owner,restarted),'trusted automatic recovery')&&
+          !peer.frames.slice(beforeRecovery).some(frame=>JSON.parse(frame).type==='e2e_fetch_bundle')&&
+          await peer.evaluate("!document.querySelector('#e2e-id-accept')"));
+      } else {
+        await peer.evaluate(`(async()=>{
+          e2eDecryptIncoming=window.testOriginalDmReceive;
+          for(const args of window.testDelayedOffers)await e2eDecryptIncoming(...args);
+        })()`);
+      }
+    }
+  } finally {
+    if(mixedFirst)await peer.evaluate('e2eDecryptIncoming=window.testOriginalDmReceive;delete window.testOriginalDmReceive;delete window.testDelayedOffers');
+  }
   await waitFor(()=>row(peer,remoteNetwork,owner,restarted),'peer decrypts after Signal restart');
   const restartedReply='encrypted reply after restart '+stamp;
   await compose(peer,remoteNetwork,owner,restartedReply);
