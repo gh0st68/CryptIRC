@@ -188,7 +188,7 @@ function loadQueryBufs(){
 function saveClosedQueries(){
   try{
     localStorage.setItem('cryptirc_closed_queries',JSON.stringify(closedQueries));
-    localStorage.setItem('cryptirc_closed_queries_ts',String(Date.now()));
+    stampPreference('cryptirc_closed_queries_ts');
   }catch(e){} savePrefsToServer();
 }
 // Mark a query closed (so replays can't reopen it); clears its open buffer entry.
@@ -370,7 +370,8 @@ function _e2eKnown(){ try{ return _e2eEngineOk() && !!window.E2E._krReceived; }c
 // too (_e2eAliasesOf). `/msg #secret{ …` encrypts with #secret['s key, so the typed line
 // must stay local like one typed in #secret[ itself. `cid` = the connection (its
 // CASEMAPPING / STATUSMSG); without it the widest rules apply (RFC1459, default prefixes).
-function _isE2eConvName(E,k){
+function _isE2eConvName(E,k,cid){
+  if(typeof _e2eSharedKeyConfigured==='function'&&_e2eSharedKeyConfigured(k,cid)) return true;
   if((E.channelKeys&&E.channelKeys[k])||(E.dmSessions&&E.dmSessions[k])||(E.chanRemoved&&E.chanRemoved[k])) return true;
   const st=E.state;
   if(st&&((st.dm&&st.dm[k]&&st.dm[k].on)||(st.ch&&st.ch[k]&&st.ch[k].on))) return true;
@@ -383,15 +384,15 @@ function _isE2eConvName(E,k){
 }
 function _isE2eConvResolved(E,t,cid){
   const k=t.toLowerCase();
-  if(_isE2eConvName(E,k)) return true;
+  if(_isE2eConvName(E,k,cid)) return true;
   if(typeof _e2eCanon==='function'){
     const c=_e2eCanon(t,cid||null);
     if(c===null) return true;                       // fold-equal to several E2E names / a distinct one: E2E
-    if(c!==k && _isE2eConvName(E,c)) return true;
+    if(c!==k && _isE2eConvName(E,c,cid)) return true;
   }
   return false;
 }
-function _isE2eConversation(target,cid){
+function _isE2eConversation(target,cid,outgoing=false){
   try{
     const E=window.E2E; if(!E||!target) return false;
     const t=String(_e2eRealTarget(target));
@@ -399,11 +400,10 @@ function _isE2eConversation(target,cid){
     if(typeof _e2eAliasesOf==='function'){
       for(const a of _e2eAliasesOf(t,cid||null)) if(a && a!==t && _isE2eConvResolved(E,String(a),cid)) return true;
     }
-    // …and whatever the send path itself would not send in cleartext (e2eTargetState:
-    // encrypted, or blocked — incl. an alias / ambiguous spelling). `incoming` = no
-    // discovery kick and no "status not known yet" block (_e2eKnown covers that).
+    // Include the send path's repair and discovery blocks when deciding whether
+    // an outgoing draft can leave the browser through history or translation.
     if(typeof e2eTargetState==='function'){
-      const st=e2eTargetState(t,{conn_id:cid||null,incoming:true});
+      const st=e2eTargetState(t,{conn_id:cid||null,incoming:!outgoing});
       if(st&&st.mode&&st.mode!=='none') return true;
     }
   }catch(_){}
@@ -413,7 +413,7 @@ function _isE2eConversation(target,cid){
 // any slash command not known to send nothing there), plus the explicit target(s) of a
 // message command (comma lists split; /quote|/raw PRIVMSG|NOTICE <t>).
 const _HIST_NO_TEXT_CMDS=new Set(['JOIN','J','PART','LEAVE','CYCLE','REJOIN','NICK','WHOIS','WI','WHO','WHOWAS','MONITOR','WATCH','UNMONITOR','UNWATCH','IGNORE','UNIGNORE','AWAY','BACK','MODE','OP','DEOP','VOICE','DEVOICE','INVITE','NAMES','LIST','CLEAR','HELP','ENCRYPT','E2E','KEY','CHANKEY','SEEN','PING','LAG','VERSION','TIME','MOTD','LINKS']);
-const _HIST_TARGET_CMDS=new Set(['MSG','PRIVMSG','QUERY','NOTICE','CTCP','DESCRIBE']);
+const _HIST_TARGET_CMDS=new Set(['MSG','PRIVMSG','QUERY','Q','NOTICE','CTCP','DESCRIBE']);
 function _histTargetsOf(raw,act){
   const out=[]; const cur=act&&act.target;
   if(!raw.startsWith('/')){ if(cur) out.push(cur); return out; }
@@ -422,7 +422,7 @@ function _histTargetsOf(raw,act){
   let tg='';
   if(_HIST_TARGET_CMDS.has(cmd)) tg=p[1]||'';
   else if(cmd==='QUOTE'||cmd==='RAW') tg=/^(?:@\S+\s+)?(?::\S+\s+)?(?:privmsg|notice)\s+(\S+)/i.exec(p.slice(1).join(' '))?.[1]||'';
-  for(const x of tg.split(',')) if(x) out.push(x);
+  for(const x of tg.split(',')) if(x) out.push(_dmTarget(x));
   return out;
 }
 // r3 (codex-p3 HIGH app.js:13542): lines typed while a target WAS encrypted must stay
@@ -433,8 +433,42 @@ function _histTargetsOf(raw,act){
 //  - the "E2E seen" flag: this device has seen this account use E2E, so lines of
 //    unknown origin (typed before the server's E2E list arrived, or kept from an older
 //    app.js that did not record any of this) stay local too.
-let _histLocal=new Set();
-try{ const a=JSON.parse(localStorage.getItem('cryptirc_input_history_local')||'[]'); if(Array.isArray(a)) _histLocal=new Set(a.filter(x=>typeof x==='string')); }catch(_){}
+const _histLocal=new Set(), _HIST_LOCAL_LIMIT=500, _HIST_HELD_LIMIT=100;
+const _histSignalHeld=new Map();
+function _rememberHistorySignalHold(line,draft){
+  if(!_histLocal.has(line)||typeof draft?.user!=='string'||!draft.user||
+     typeof draft.connId!=='string'||!draft.connId||typeof draft.target!=='string'||!draft.target) return;
+  if(!_histSignalHeld.has(line)) _histSignalHeld.set(line,new Map());
+  _histSignalHeld.get(line).set(draft.user,{user:draft.user,connId:draft.connId,target:draft.target});
+}
+try{
+  const snapshot=JSON.parse(localStorage.getItem('cryptirc_input_history_local')||'[]');
+  if(Array.isArray(snapshot)){
+    for(const line of snapshot.filter(x=>typeof x==='string').slice(-_HIST_LOCAL_LIMIT)) _histLocal.add(line);
+    const metadata=snapshot.at(-1)?.signalHeld;
+    if(snapshot.length<=_HIST_LOCAL_LIMIT+1&&Array.isArray(metadata)){
+      for(const row of metadata.slice(-_HIST_HELD_LIMIT)){
+        if(!Array.isArray(row)||row.length!==2) continue;
+        const [index,draft]=row;
+        if(Number.isInteger(index)&&index>=0&&index<snapshot.length-1&&typeof snapshot[index]==='string')
+          _rememberHistorySignalHold(snapshot[index],draft);
+      }
+    }
+  }
+}catch(_){}
+try{
+  // Migrate a snapshot from the earlier format only if the line is still local.
+  const legacy=localStorage.getItem('cryptirc_input_history_signal_held');
+  if(legacy!==null){
+    let rows;
+    try{rows=JSON.parse(legacy);}catch(_){}
+    if(Array.isArray(rows)) for(const row of rows.slice(-_HIST_HELD_LIMIT)){
+      if(Array.isArray(row)&&row.length===2&&!_histSignalHeld.get(row[0])?.has(row[1]?.user))
+        _rememberHistorySignalHold(row[0],row[1]);
+    }
+    _saveHistLocal();
+  }
+}catch(_){}
 // Definite evidence (never a guess) that this account uses or used E2E: a conversation
 // with E2E on/listed/held now, an explicit "off" recorded in the E2E state, or a pinned
 // peer identity.
@@ -537,7 +571,21 @@ function redactSensitive(line){
 }
 // r3: the local-only marks, bounded to the lines still in history (like the sync list).
 function _saveHistLocal(){
-  try{ const keep=new Set(inputHistory); for(const l of [..._histLocal]) if(!keep.has(l)) _histLocal.delete(l); localStorage.setItem('cryptirc_input_history_local',JSON.stringify([..._histLocal].slice(-500))); }catch(_){}
+  const keep=new Set(inputHistory);
+  for(const l of _histLocal) if(!keep.has(l)) _histLocal.delete(l);
+  for(const l of _histSignalHeld.keys()) if(!keep.has(l)) _histSignalHeld.delete(l);
+  try{
+    const snapshot=[..._histLocal].slice(-_HIST_LOCAL_LIMIT);
+    const recallable=new Set(inputHistory.slice(-_HIST_HELD_LIMIT)), holds=[];
+    for(const [index,line] of snapshot.entries()){
+      if(!recallable.has(line)) continue;
+      for(const draft of _histSignalHeld.get(line)?.values()||[]) holds.push([index,draft]);
+    }
+    // Keep the old array of strings and append only indices into that snapshot.
+    if(holds.length) snapshot.push({signalHeld:holds.slice(-_HIST_HELD_LIMIT)});
+    localStorage.setItem('cryptirc_input_history_local',JSON.stringify(snapshot));
+    localStorage.removeItem('cryptirc_input_history_signal_held');
+  }catch(_){}
 }
 function saveInputHistory(){
   // Redact credentials, then keep the most recent 100 lines.
@@ -883,6 +931,7 @@ async function loadLoginCaptcha(){
 }
 async function doLogout() {
   if(!(await customConfirm('Sign out?','Sign out'))) return;
+  _clearComposerSendAttempt();
   clearTranslationData();
   clearTweetData();
   resetChatReactions();
@@ -1242,6 +1291,7 @@ function connectWs() {
     // sets prevents a stale key from making jumpToMessage's tick wait forever,
     // which showed up as "clicking a notification sometimes doesn't jump".
     _pendingLogs.clear(); _pendingSyncs.clear();
+    _pmInboxScanned.clear(); _pmInboxPrefsReady=false;
     _msgsPreviewAsked.clear(); // new connection → one fresh preview attempt per conversation
     // If the GIF settings never loaded (offline at login, transient failure),
     // a regained connection is a good moment to try again. No-op once loaded.
@@ -1260,6 +1310,13 @@ function connectWs() {
 // never be sent (session ended) it is marked "not sent" instead of silently
 // pretending it went out.
 const _rateRows=new WeakMap();          // queued WS payload -> optimistic msg object
+const _queuedPlainApprovals=new WeakMap();
+const _unsentPlainDrafts=new WeakMap();
+function _rememberQueuedPlain(payload,approval){
+  if(!approval?.plain) return;
+  const {key,conn_id,user,keyReady,unconfigured,generation,expires,connection,probe,reply,cold,checkedAt,checkedSocket,checkedRevision,checkedLocal}=approval.plain;
+  _queuedPlainApprovals.set(payload,{key,conn_id,user,keyReady,unconfigured,generation,expires,connection,probe,reply,cold,checkedAt,checkedSocket,checkedRevision,checkedLocal});
+}
 const _sentChatRows=new WeakMap();      // IRC echo correlation on reaction-enabled connections
 // r9: a line to several recipients (/msg a,b text, unencrypted: ONE payload) has a row in
 // each recipient's buffer — the first row is the tracked one, the others follow its state.
@@ -1276,7 +1333,8 @@ function _queueChatSend(payload,msg){
       if(!E2E.keyReady){msg.text=DM_HISTORY_LOCKED;if(msg.kind==='action')msg.kind='privmsg';}
     }
   }
-  if(firstDmWire||reactionEnabled(payload.conn_id)) _sentChatRows.set(payload,msg);
+  if(msg._dmHistoryWire&&payload.raw.includes(' :[e2edm2]')) msg._signalParts=(msg._signalParts||0)+1;
+  if(firstDmWire||msg._dmHistoryWire||_queuedPlainApprovals.get(payload)?.reply||reactionEnabled(payload.conn_id)) _sentChatRows.set(payload,msg);
   _rateRows.set(payload,msg);
   rateLimitedSend(payload);
   if(_rateQueue.includes(payload) && !_wsReady()) msg.sendState='pending';
@@ -1293,11 +1351,11 @@ function _rateSent(payload){
       try{ document.querySelectorAll('#chat-area .msg-row').forEach(r=>{ if(r._msgRef===x){ r.dataset.ts=x.ts; const t=r.querySelector('.msg-ts'); if(t) t.textContent=_fmtMsgTs(x.ts,'row'); } }); }catch(_){}
     }
   }
-  if(m.sendState) _setMsgSendState(m,null);
+  if(m.sendState==='pending') _setMsgSendState(m,null);
 }
 function _markRateQueuePending(e2eWait){
   for(const p of _rateQueue){
-    const m=_rateRows.get(p); if(!m) continue;
+    const m=_rateRows.get(p); if(!m||m.sendState==='failed') continue;
     const w=!!e2eWait;
     if(m.sendState!=='pending'||!!m.waitE2e!==w){ if(w) m.waitE2e=true; else delete m.waitE2e; _setMsgSendState(m,'pending'); }
   }
@@ -1341,6 +1399,27 @@ function _applySendState(row,msg){
     const f=document.createElement('span'); f.className='msg-send-flag';
     f.textContent=msg.sendState==='pending'?' ⏳':' ⚠ not sent';
     f.style.cssText='margin-left:6px;font-size:11px;flex-shrink:0;'+(msg.sendState==='failed'?'color:var(--red,#e5534b);font-weight:600':'color:var(--text3)');
+    const draft=_unsentPlainDrafts.get(msg);
+    if(draft&&msg.sendState==='failed'){
+      const edit=document.createElement('button');
+      edit.type='button';edit.className='e2e-setup-button';edit.dataset.restoreUnsent='';
+      edit.textContent='Restore draft';
+      edit.onclick=event=>{
+        event.stopPropagation();
+        if(currentUser!==draft.user||!active||!_sameConvAt(draft.connId,draft.target,active.conn_id,active.target))return;
+        const input=document.getElementById('msg-input');
+        if(input.value){showToast('Finish or clear your current draft before restoring this line.');return;}
+        if(draft.signal&&(!E2E.keyReady||msg._dmHistoryState!=='ready')){
+          showToast('Unlock encrypted chats to restore this draft.');return;
+        }
+        input.value=msg.kind==='action'?'/me '+msg.text:msg.kind==='notice'?'/notice '+_e2eRealTarget(draft.target)+' '+msg.text:
+          msg.text.startsWith('/')?'/say '+msg.text:msg.text;
+        input.dispatchEvent(new Event('input',{bubbles:true}));
+        if(draft.signal) _heldSignalDraft={user:draft.user,connId:draft.connId,target:draft.target};
+        input.focus();
+      };
+      f.appendChild(edit);
+    }
     (row.querySelector('.msg-body')||row).appendChild(f);
   }
 }
@@ -1483,6 +1562,7 @@ function _onResume(){
       }
     }
   }
+  _prepareVisiblePmReply();
   scrollBottom();
   updateTypingIndicator();
   // Safety net: re-render sidebar after sync responses arrive to ensure
@@ -1491,7 +1571,7 @@ function _onResume(){
   [500,1500,3000].forEach(ms=>setTimeout(()=>renderSidebar(),ms));
 }
 document.addEventListener('visibilitychange',()=>{
-  if(!document.hidden){_onResume();_resetIdleTimer();}
+  if(!document.hidden){_onResume();_resetIdleTimer();_recoverPmInbox();}
   else { clearTimeout(_idleTimer); _setSessionIdle(true); }
 });
 window.addEventListener('pageshow',e=>{
@@ -1599,6 +1679,8 @@ const _msgsPreviewAsked=new Set();
 // Set true by prependLogs around its "load older" renderChat so the read-horizon
 // advance in renderChat is skipped for that off-bottom render (F30-followup).
 let _suppressLastReadAdvance=false;
+let _encryptionSetupTap=null;
+let _encryptionSetupTouchRelease=null;
 // ── F4: e2eEncryptOutgoing() BLOCKED-sentinel guard ─────────────────────────
 // e2eEncryptOutgoing() may return the frozen sentinel E2E_ENCRYPT_BLOCKED
 // ({e2eBlocked:true}) when an established DM session is transiently NOT send-ready
@@ -1606,7 +1688,23 @@ let _suppressLastReadAdvance=false;
 // OBJECT, so a naive `wire ? sendEnc : sendPlain` would leak "[object Object]" to IRC.
 // Every call site must intercept it: drop the send and warn — never send plaintext.
 function _e2eBlocked(w){ return !!(w && w.e2eBlocked===true); }
-function _e2eBlockedWarn(w){ if(!_e2eBlocked(w)) return false; try{ const r=window.E2E&&window.E2E.lastBlockReason; showToast('🔒 Not sent: '+(r||'encrypted session not ready yet — try again in a moment.')); if(r&&active) sysMsg(active.conn_id,active.target,'🔒 Message not sent — '+r,'error'); }catch(_){} return true; }
+function _e2eBlockedWarn(w,view=active,account=currentUser,composer=null){
+  if(!_e2eBlocked(w)) return false;
+  if(account!==currentUser||!view) return true;
+  const reason=w.reason||window.E2E?.lastBlockReason;
+  if(w.readiness==='offline'){
+    sysMsg(view.conn_id,view.target,reason,'error');
+    return true;
+  }
+  if(w.readiness&&_composerSendCurrent(composer)){
+    _showComposerEncryptionStatus(composer,w.readiness);
+    return true;
+  }
+  if(active&&_sameConvAt(view.conn_id,view.target,active.conn_id,active.target))
+    showToast('🔒 Not sent: '+(reason||'encrypted session not ready yet — try again in a moment.'));
+  if(reason) sysMsg(view.conn_id,view.target,'🔒 Message not sent — '+reason,'error');
+  return true;
+}
 // Per-network ISUPPORT bits the mode parser needs (PREFIX, CHANMODES), sniffed from
 // the 005 lines the server forwards to the status buffer. Persisted because a web
 // reload reattaches to the long-lived IRC connection without a fresh 005.
@@ -1641,11 +1739,14 @@ function _sniffIsupport(conn_id,text){
       // r4 (verifier w3-web N2): UTF8MAPPING too — Ergo with `casemapping: precis` says
       // CASEMAPPING=ascii + UTF8MAPPING=rfc8265; e2e.js's RECEIVE rule uses it.
       m=/^(CASEMAPPING|STATUSMSG|UTF8MAPPING)=(\S{1,32})$/i.exec(tok);
-      if(m){ const n=m[1].toUpperCase(); cur[m[1].toLowerCase()]=(n==='CASEMAPPING'||n==='UTF8MAPPING')?m[2].toLowerCase():m[2]; hit=true; }
+      if(m){ const n=m[1].toUpperCase(); cur[m[1].toLowerCase()]=(n==='CASEMAPPING'||n==='UTF8MAPPING')?m[2].toLowerCase():m[2]; hit=true; continue; }
+      m=/^NETWORK=(\S+)$/i.exec(tok);
+      if(m){cur.network=m[1];hit=true;}
     }
     if(!hit) return;
     _isupport[conn_id]=cur;
     localStorage.setItem('cryptirc_isupport',JSON.stringify(_isupport));
+    if(cur.network&&window.E2E?.keyReady) restoreCachedPskHistory();
   }catch(_){}
 }
 // Notice senders that are never subject to PM protection: network services and
@@ -1682,8 +1783,8 @@ function _isStatusNickLogLine(conn_id,l){
 function _e2eRealTarget(t){ return t===_STATUS_NICK_Q ? 'status' : t; }
 // app.js ↔ e2e.js boundary: e2e.js (deferred, loads after this file) is wrapped once
 // so a target equal to the alias is translated to the real nick BEFORE any E2E
-// decision — never after. e2e.js treats a literal "status" target as the status
-// window in two places (its lock icon and "/encrypt on" default), handled below.
+// decision. Commands also receive their originating view so the console cannot
+// implicitly operate on a private conversation whose wire nickname is status.
 function _installStatusNickE2eShims(){
   if(window.__statusNickShims || typeof window.e2eEncryptOutgoing!=='function') return;
   window.__statusNickShims=true;
@@ -1693,17 +1794,21 @@ function _installStatusNickE2eShims(){
   // arguments e2e.js gained in round 2 (connId and {verb} for sends, {conn_id, live,
   // held} for incoming lines, {incoming} for the state check) — for every user, and
   // for e2e.js's own internal calls too, since the wrappers replace the globals.
-  wrap('e2eEncryptOutgoing',o=>function(target,...rest){ return o.call(this,_e2eRealTarget(target),...rest); });
+  wrap('e2eEncryptOutgoing',o=>function(target,...rest){
+    if(target===_STATUS_NICK_Q && rest[2]?.auto) rest[2]={...rest[2],namedStatusQuery:true};
+    return o.call(this,_e2eRealTarget(target),...rest);
+  });
+  wrap('e2eMayAutoEncrypt',o=>function(target,cid,...rest){
+    return o.call(this,_e2eRealTarget(target),cid,target===_STATUS_NICK_Q,...rest);
+  });
   wrap('e2eTargetState',o=>function(target,...rest){ return o.call(this,_e2eRealTarget(target),...rest); });
+  for(const name of ['e2eSignalOptOutKey','e2eCheckOptOutSlot','e2eDiscardDisabledDraft',
+    'e2eWithQueuedSignal','e2eQueuedWireVerdict','e2eRetryQueuedDm'])
+    wrap(name,o=>function(target,...rest){return o.call(this,_e2eRealTarget(target),...rest);});
   wrap('e2eDecryptIncoming',o=>function(from,target,...rest){ return o.call(this,from,_e2eRealTarget(target),...rest); });
   wrap('handleEncryptCommand',o=>function(args,conn_id,target,...rest){
-    if(target===_STATUS_NICK_Q){
-      target='status';
-      // e2e.js only defaults these to the window's nick when it is not "status".
-      const sub=String((args&&args[0])||'').toLowerCase();
-      if(['verify','trust','accept','reject','off','stop'].includes(sub)&&!args[1]) args=[args[0],'status',...args.slice(2)];
-    }
-    return o.call(this,args,conn_id,target,...rest);
+    if(args?.[1]===_STATUS_NICK_Q) args=[args[0],'status',...args.slice(2)];
+    return o.call(this,args,conn_id,_e2eRealTarget(target),target,...rest);
   });
   // E2E notices about the user "status" belong in its window while that window is open.
   wrap('e2eSysMsg',o=>function(target,...rest){ try{ if(target==='status'&&active&&active.target===_STATUS_NICK_Q) target=_STATUS_NICK_Q; }catch(_){} return o.call(this,target,...rest); });
@@ -1863,7 +1968,7 @@ function handleEvent(ev) {
     // r4 (C3-1): only while the E2E engine is loaded — a page without it is treated
     // by the server like an outdated tab (its guard refuses cleartext to E2E targets).
     case 'auth_required':
-      if(_e2eEngineOk()) wsend({type:'auth',token:sessionToken||'',e2e:window.E2E.storageVersion||2});
+      if(_e2eEngineOk()) wsend({type:'auth',token:sessionToken||'',e2e:window.E2E.protocolVersion||window.E2E.storageVersion||2});
       else { wsend({type:'auth',token:sessionToken||''}); _e2eEngineFailNotice(); }
       break;
     case 'bot_config':
@@ -1891,9 +1996,9 @@ function handleEvent(ev) {
       // r6 (codex-p3 HIGH e2e.js:1007): E2E re-syncs with the server after every
       // (re)connect; until then its targets are blocked and queued lines are held
       // (drainRateQueue). Must run BEFORE the queue is kicked.
-      try{ if(typeof e2eOnSocketAuthed==='function') e2eOnSocketAuthed(); }catch(_){}
+      try{ if(typeof e2eOnSocketAuthed==='function') e2eOnSocketAuthed(ev.history_sync===true); }catch(_){}
       // Authenticated: chat lines queued during an outage may go out now (once).
-      _wsAuthed=true; _kickRateQueue();
+      _wsAuthed=true; _prepareVisiblePmReply(); _kickRateQueue();
       fetchNews();  // pull the live news feed on connect so the "new news" dot can show without opening the tab
       // Re-check push subscription after auth
       setTimeout(async()=>{
@@ -1959,7 +2064,18 @@ function handleEvent(ev) {
           reactionSupport(net.config.id,true,next.reaction_dislike===true);
         }
       }
+      const previousNetworks=networks;
       networks=ev.networks||[];
+      recoverReactionReceipts(false);
+      recoverReactionReceipts(true);
+      const pskContextChanged=networks.some(net=>{
+        const previous=previousNetworks.find(item=>item.config.id===net.config.id);
+        if(previous&&(previous.config.server!==net.config.server||previous.config.port!==net.config.port)){
+          if(_isupport[net.config.id]) delete _isupport[net.config.id].network;
+        }
+        return previous?.network_name!==net.network_name||previous?.nick!==net.nick;
+      });
+      if(pskContextChanged&&window.E2E?.keyReady) restoreCachedPskHistory();
       importKeepNicks();
       for(const net of networks){
         if(!net.connected){
@@ -2003,6 +2119,8 @@ function handleEvent(ev) {
         if(!_chanStatsLoaded)loadStatsFromServer();
       }
       renderSidebar();
+      if(ev.vault_unlocked) _recoverPmInbox();
+      else { _pmInboxPrefsReady=false; _pmInboxScanned.clear(); }
       try{ _onNetworksState(ev); }catch(_){}   // app2: #7 Add&Connect target + H2 TLS-verify offer
       // Detached-mode auto-activation: force the requested target; ignore any
       // saved last-active so the popup always lands on the chat it was opened for.
@@ -2100,8 +2218,35 @@ function handleEvent(ev) {
       if(active&&active.conn_id===ev.conn_id) updateLagDisplay();
       break;
     case 'reaction_support': reactionSupport(ev.conn_id,ev.enabled===true,ev.dislike===true); break;
+    case 'irc_delivery_warning': {
+      const target=_dmTarget(ev.target);
+      if(typeof e2eForgetChatProbe==='function') e2eForgetChatProbe(ev.conn_id,ev.target);
+      if (ev.unsent_wire?.startsWith('[e2edm2]')) {
+        const records=window._sentMsgs || [];
+        const index=records.findIndex(r=>r.conn===ev.conn_id && r.target===target && r.text===ev.unsent_wire);
+        const sent=index>=0 ? records.splice(index,1)[0].row : null;
+        const rows=getBuf(ev.conn_id,target);
+        const row=sent && rows.includes(sent) ? sent : rows.find(m=>m._dmHistoryWire===ev.unsent_wire);
+        if(row){
+          if(row._signalParts===1&&row._dmHistoryState==='ready'&&currentUser)
+            _unsentPlainDrafts.set(row,{user:currentUser,connId:ev.conn_id,target,signal:true});
+          _setMsgSendState(row,'failed');
+        }
+      }else if(typeof ev.unsent_wire==='string'){
+        const records=window._sentMsgs||[];
+        const idx=records.findIndex(r=>r.conn===ev.conn_id&&r.target===target&&r.text===_chatRowText(ev.unsent_wire,r.row?.kind));
+        const row=idx<0?null:records.splice(idx,1)[0].row;
+        if(row&&getBuf(ev.conn_id,target).includes(row)){
+          _unsentPlainDrafts.set(row,{user:currentUser,connId:ev.conn_id,target});
+          _setMsgSendState(row,'failed');
+        }
+      }
+      sysMsg(ev.conn_id,target,ev.text,'error');
+      break;
+    }
     case 'reaction_anchor': rememberReactionAnchor(ev); break;
     case 'reaction_result': receiveReactionResult(ev); break;
+    case 'reaction_receipts': void receiveReactionReceipts(ev); break;
     case 'irc_reaction': receiveChatReaction(ev); break;
     case 'sealed_reaction': receiveSealedReaction(ev); break;
     case 'ctcp_request': {
@@ -2129,6 +2274,7 @@ function handleEvent(ev) {
       window._sentMsgs=window._sentMsgs.filter(s=>now-s.t<60000);
       // Check if this device sent this exact message
       const idx=window._sentMsgs.findIndex(s=>s.conn===ev.conn_id&&s.target===ev.target&&s.text===ev.text);
+      const signalWire=_isDMTarget(ev.target)&&typeof e2eIsDmHistoryWire==='function'&&e2eIsDmHistoryWire(ev.text);
       // An X3DH header precedes the first encrypted message. It never has a row
       // of its own, so it must not claim the optimistic row's ID.
       if(_isDMTarget(ev.target)&&typeof ev.text==='string'&&ev.text.startsWith('[e2ex3dh]')){
@@ -2143,8 +2289,17 @@ function handleEvent(ev) {
         const record=window._sentMsgs.splice(idx,1)[0];
         const _eb=getBuf(ev.conn_id,ev.target);
         const linked=record.row && [record.row,...(_rowTwins.get(record.row)||[])].find(m=>_eb.includes(m));
-        let _ei=record.row ? (linked&&!linked.id&&linked.sendState!=='failed'?_eb.indexOf(linked):-1) :
-          _eb.findIndex(m=>!m.id&&m.sendState!=='failed'&&m.ts===ev.ts&&m.from===ev.from&&(m.text||'').slice(0,50)===(ev.text||'').slice(0,50));
+        if(signalWire){
+          // One optimistic row represents the first wire of a split send.
+          // A continuation echo has no row of its own to stamp.
+          const key=_historyRowKey({from:ev.from,_dmHistoryWire:ev.text});
+          const sent=linked?._dmHistoryWire===ev.text ? linked :
+            _eb.find(m=>!m.id&&m.sendState!=='failed'&&m._dmHistoryWire&&_historyRowKey(m)===key);
+          if(sent&&!sent.id&&sent.sendState!=='failed'&&ev.msg_id) _stampSignalRow(ev.conn_id,ev.target,sent,ev.msg_id);
+          break;
+        }
+        let _ei=record.row ? (linked&&!linked.id&&!linked._dmHistoryWire&&linked.sendState!=='failed'?_eb.indexOf(linked):-1) :
+          _eb.findIndex(m=>!m.id&&!m._dmHistoryWire&&m.sendState!=='failed'&&m.ts===ev.ts&&m.from===ev.from&&(m.text||'').slice(0,50)===(ev.text||'').slice(0,50));
         if(_ei<0&&!record.row){
           // Fallback covering two failure modes of the strict-equality
           // findIndex above:
@@ -2161,7 +2316,7 @@ function handleEvent(ev) {
           for(let i=_eb.length-1;i>=0;i--){
             const m=_eb[i];
             if(m.ts<ev.ts-60) break;
-            if(m.from===ev.from && !m.id && m.sendState!=='failed') _ei=i;
+            if(m.from===ev.from && !m.id && !m._dmHistoryWire && m.sendState!=='failed') _ei=i;
           }
         }
         if(_ei>=0&&ev.msg_id) {
@@ -2202,12 +2357,12 @@ function handleEvent(ev) {
           const echoBuf=getBuf(_eConn,_eTarget), generation=window.E2E?._lockGen;
           const dmWire=_isDMTarget(_eTarget)&&typeof e2eIsDmHistoryWire==='function'&&e2eIsDmHistoryWire(_eText);
           let dtext=_eText, enc=false;
-          const pskHistory=_isPskHistoryWire(_eText)?await _decryptPskHistoryRow(_eTarget,{text:_eText,from:_eFrom,
+          const pskHistory=_isPskHistoryWire(_eText)?await _decryptPskHistoryRow(_eTarget,{text:_eText,from:_eFrom,irc_recipient:_eTarget,
             kind:_eKind==='Notice'?'notice':_eKind==='Action'?'action':'privmsg'},_eConn):null;
           if(pskHistory){dtext=pskHistory.text;enc=true;_eKind=pskHistory.kind==='action'?'Action':pskHistory.kind==='notice'?'Notice':'Privmsg';}
-          const dmHistory = dmWire ? (await _decryptLogLines(_eTarget,[{text:_eText,from:_eFrom,kind:_eKind==='Notice'?'notice':'privmsg'}],_eConn))[0] : null;
+          const dmHistory = dmWire ? (await _decryptLogLines(_eTarget,[{text:_eText,from:_eFrom,ts:_eTs,kind:_eKind==='Notice'?'notice':'privmsg'}],_eConn))[0] : null;
           if(dmHistory){dtext=dmHistory.text;enc=true;_eKind=dmHistory.kind==='action'?'Action':dmHistory.kind==='notice'?'Notice':'Privmsg';}
-          const reactionRef=enc&&(!pskHistory||pskHistory._pskHistoryState==='ready')&&reactionEnabled(_eConn)?await hashChatReactionReference(_eText):null;
+          const reactionRef=enc&&(!pskHistory||pskHistory._pskHistoryState==='ready')&&(!dmHistory||dmHistory._dmHistoryState==='ready')&&reactionEnabled(_eConn)?await hashChatReactionReference(_eText):null;
           if(buffers[bk(_eConn,_eTarget)]!==echoBuf) return;
           if(dmHistory&&(!E2E.keyReady||E2E._lockGen!==generation)){
             Object.assign(dmHistory,dmHistoryRow(dmHistory,undefined,false));
@@ -2219,11 +2374,16 @@ function handleEvent(ev) {
           }
           if(_ePre) dtext=_ePre+dtext;
           const echoKey=_historyRowKey({ts:_eTs,from:_eFrom,text:dtext,_dmHistoryWire:dmHistory?._dmHistoryWire,_pskHistoryWire:pskHistory?._pskHistoryWire});
-          if(echoBuf.some(m=>(_eId&&m.id===_eId)||_historyRowKey(m)===echoKey)) return;
+          if(_eId&&echoBuf.some(m=>m.id===_eId)) return;
+          const duplicate=echoBuf.find(m=>_historyRowKey(m)===echoKey);
+          if(duplicate){
+            if(dmHistory&&_eId&&!duplicate.id) _stampSignalRow(_eConn,_eTarget,duplicate,_eId);
+            return;
+          }
           // A self-sent optimistic row (id 0, client-clock ts) that missed the
           // _sentMsgs window lands here; reconcile by stamping it rather than adding
           // a 2nd copy (the exact-ts key above can't catch the client/server skew).
-          if((!dmHistory||dmHistory._dmHistoryState==='ready')&&(!pskHistory||pskHistory._pskHistoryState==='ready')&&
+          if(!dmHistory&&(!pskHistory||pskHistory._pskHistoryState==='ready')&&
             _reconcileSelfRow(echoBuf,_eFrom,dtext,_eId,_eTs)) return;
           // own:true — an IrcEcho is always THIS account's own send (from some
           // device); it must never bump unread or fire a PM sound/notification,
@@ -2234,10 +2394,13 @@ function handleEvent(ev) {
             reactionRef:pskHistory?._pskHistoryState==='locked'?null:reactionRef,
             _dmHistoryWire:dmHistory?._dmHistoryWire,
             _dmHistoryState:dmHistory?._dmHistoryState,
+            _dmHistoryDeviceCopy:dmHistory?._dmHistoryDeviceCopy,
             _pskHistoryWire:pskHistory?._pskHistoryWire,
             _pskHistoryState:pskHistory?._pskHistoryState,
+            irc_recipient:pskHistory?.irc_recipient,
           });
           if(dmHistory?._dmHistoryState==='locked') void restoreCachedDmHistory(_eConn,_eTarget);
+          if(dmHistory?._dmHistoryState==='unavailable' && typeof _e2eScheduleOwnEchoes==='function') _e2eScheduleOwnEchoes(_e2eDmKey(_eTarget,_eConn));
           if(pskHistory?._pskHistoryState==='locked'&&E2E.keyReady) void redecryptChannelHistory(_eTarget);
         });
       }
@@ -2259,6 +2422,9 @@ function handleEvent(ev) {
       // only chooses where it is shown (it used to make e2e.js see channel traffic in a
       // channel view and skip the DM ratchet: ciphertext on screen).
       const _realTarget=ev.target;
+      const ircRecipient=_isDMTarget(_realTarget)?networks.find(n=>n.config.id===ev.conn_id)?.nick:null;
+      if(!ev.replayed&&ircRecipient&&ev.from&&typeof e2eForgetChatProbe==='function'&&
+          /^(?:\[e2edm2\]|\[e2ex3dh\]|sd8~)/.test(ev.text||'')) e2eForgetChatProbe(ev.conn_id,ev.from);
       if(ev.kind==='Notice'&&ev.target&&ev.target!=='status'&&!/^[#&+!]/.test(ev.target)&&ev.from&&ev.from!=='*'&&!ev.from.includes('.')){
         if(ev.from!==getNick(ev.conn_id)){
           _privNotice=true;
@@ -2291,12 +2457,14 @@ function handleEvent(ev) {
       // .catch(()=>{}) BEFORE .then heals a rejected queue so one throwing event
       // (e.g. a null/non-string ev.text) can't permanently poison the chain and
       // silently drop every subsequent incoming message.
+      const resume=!ev.replayed&&_isDMTarget(_realTarget)&&typeof ev.text==='string'&&ev.text.startsWith('[e2edm2]')&&
+        typeof e2eLiveResumeCheck==='function' ? e2eLiveResumeCheck(ev.from,ev.conn_id) : null;
       _e2eEnqueue(ev.conn_id,(/^[#&+!]/.test(_realTarget||'')?_realTarget:ev.from),async()=>{
         // #62: coerce ev.text to a string up front so a null/non-string value from the
         // server can't throw inside e2eDecryptIncoming/startsWith and silently drop the
         // message via the queue's catch.
         const _txt = String(ev.text||'');
-        const _dr = await e2eDecryptIncoming(ev.from, _realTarget, _txt, { conn_id: ev.conn_id, live: !ev.replayed, prefix: ev.prefix || undefined, kind: ev.kind });
+        const _dr = await e2eDecryptIncoming(ev.from, _realTarget, _txt, { conn_id: ev.conn_id, live: !ev.replayed, prefix: ev.prefix || undefined, kind: ev.kind, recipient:ircRecipient, resume });
         const { plaintext, encrypted } = _dr;
         // A repeat of an encrypted channel line already shown (replayed copy): drop it.
         if (_dr.duplicate) return;
@@ -2399,7 +2567,8 @@ function handleEvent(ev) {
         // ZNC playback detection — batch old messages silently
         const zncMsg={id:ev.msg_id||0,ts:ev.ts,from:ev.from,text:displayText,kind:_msgKind,encrypted,mentioned,prefix:ev.prefix||null,_tgt:ev.target,
           _dmHistoryWire:dmHistoryWire,_dmHistoryState:dmHistoryWire?(dmLocked?'locked':_dr.historyPending?'pending':'ready'):undefined,
-          _pskHistoryWire:pskHistoryWire,_pskHistoryState:pskHistoryWire?(pskLocked?'locked':_dr.pskStatus):undefined};
+          _pskHistoryWire:pskHistoryWire,_pskHistoryState:pskHistoryWire?(pskLocked?'locked':_dr.pskStatus):undefined,
+          irc_recipient:pskHistoryWire?ircRecipient:undefined};
         // Daemon ring-buffer replay (a cryptirc.service restart reattaching to the
         // live daemon) sets ev.replayed — a DETERMINISTIC signal to take the silent
         // path (render to scrollback, dedup, but no notification/unread/sound),
@@ -2496,11 +2665,14 @@ function handleEvent(ev) {
           reactionRef:zncMsg._pskHistoryState==='locked'?null:reactionRef,
           _dmHistoryWire:zncMsg._dmHistoryWire,
           _dmHistoryState:zncMsg._dmHistoryState,
+          _dmHistoryDeviceCopy:zncMsg._dmHistoryDeviceCopy,
           _pskHistoryWire:zncMsg._pskHistoryWire,
           _pskHistoryState:zncMsg._pskHistoryState,
+          irc_recipient:zncMsg.irc_recipient,
         };
         markLiveTranslation(ev.conn_id,ev.target,liveMessage);
         addMessage(ev.conn_id,ev.target,liveMessage);
+        if(!encrypted&&_isDmIncoming&&_msgKind==='privmsg'&&isActive(ev.conn_id,ev.target)) _prepareVisiblePmReply();
         if(liveMessage._pskHistoryState==='locked'&&E2E.keyReady) void redecryptChannelHistory(ev.target);
         if(_msgKind==='privmsg' && !ev.replayed && (encrypted ? plaintext!==null : !ev.text?.startsWith('[e2e'))){
           if(!dmLocked) playChatEffect(ev.conn_id,ev.target,displayText);
@@ -2517,7 +2689,9 @@ function handleEvent(ev) {
       break;
     // E2E events — routed to the E2E engine
     case 'e2e_identity_blob':
+    case 'e2e_identity_moved':
     case 'e2e_session':
+    case 'e2e_plain_reply_checked':
     case 'e2e_bundle':
     case 'e2e_bundle_missing':
     case 'e2e_setup_needed':
@@ -2530,8 +2704,13 @@ function handleEvent(ev) {
     case 'e2e_keyring_stored':
     case 'e2e_blob_rewrapped':
     case 'e2e_key_deleted':
+    case 'e2e_session_committed':
+    case 'e2e_session_closed':
     case 'e2e_session_list':
     case 'e2e_session_moved':
+    case 'e2e_live_receive':
+    case 'e2e_live_receipt':
+    case 'e2e_history_sync':
       // .catch: e2eHandleEvent is async + fire-and-forget; a malformed server-supplied
       // bundle/header parsing throw would otherwise be an unhandled promise rejection.
       if (window.E2E) e2eHandleEvent(ev).catch(e=>{try{console.error('e2e event error:',e);}catch(_){}});
@@ -2598,6 +2777,7 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_quit': {
+      if(typeof e2eForgetChatProbe==='function') e2eForgetChatProbe(ev.conn_id,ev.nick);
       avatarForget(ev.conn_id,[ev.nick]);
       const net=networks.find(n=>n.config.id===ev.conn_id);
       // IRC nicks are case-insensitive — match members case-insensitively so a quit
@@ -2620,6 +2800,7 @@ function handleEvent(ev) {
       break;
     }
     case 'irc_nick': {
+      if(typeof e2eForgetChatProbe==='function') e2eForgetChatProbe(ev.conn_id,ev.old,ev.new);
       avatarForget(ev.conn_id,[ev.old,ev.new]);
       const nNet=networks.find(n=>n.config.id===ev.conn_id);
       // Case-insensitive member match (IRC nicks are case-insensitive).
@@ -3008,6 +3189,7 @@ function handleEvent(ev) {
         showToast('Could not load message history — try again');
       }).finally(()=>{
         if(_processingLogs.get(_lk)===work && --work.count===0) _processingLogs.delete(_lk);
+        if(isActive(ev.conn_id,ev.target)) _prepareVisiblePmReply();
       });
       break;
     }
@@ -3063,7 +3245,15 @@ function handleEvent(ev) {
       }catch(e){}
       break;
     case 'preferences':
-      try{ restorePreferences(JSON.parse(ev.prefs)); }catch(e){}
+      try{
+        const prefs=JSON.parse(ev.prefs);
+        restorePreferences(prefs);
+        _pmInboxPrefsReady=true;
+        _recoverPmInbox();
+      }catch(e){}
+      break;
+    case 'recent_private_threads':
+      _applyRecoveredPmThreads(ev);
       break;
     case 'notepad': {
       const ta=document.getElementById('notepad-area');
@@ -3171,7 +3361,7 @@ function _reconcileSelfRow(buf,from,text,id,ts){
   const start=Math.max(0,buf.length-_SELF_RECONCILE_TAIL);
   for(let i=buf.length-1;i>=start;i--){
     const m=buf[i];
-    if(m.id) continue;                                   // only optimistic (unstamped) rows
+    if(m.id||m._dmHistoryWire) continue;                 // Signal rows require exact wire correlation.
     if(m.from!==from) continue;
     if(Math.abs((m.ts||0)-(ts||0))>_SELF_RECONCILE_SKEW) continue;
     if((m.text||'').slice(0,50)!==slice) continue;
@@ -3652,13 +3842,8 @@ function _resolveChanKeyName(target,cid){
   const ck=window.E2E&&window.E2E.channelKeys;
   if(!ck||target==null) return null;
   target=_e2eRealTarget(target);
-  if(ck[target]) return target;            // exact case (matches the live path)
-  const lc=String(target).toLowerCase();   // fall back to case-insensitive
-  for(const k in ck){ if(k.toLowerCase()===lc) return k; }
-  if(typeof _e2eRecvName==='function'){
-    try{ const c=_e2eRecvName(target,cid||null); if(c && c!==lc && ck[c]) return c; }catch(_){}
-  }
-  return null;
+  const slot=_e2ePskSlot(_e2eRecvName(target,cid),cid);
+  return ck[slot]?slot:null;
 }
 function e2eCanRecoverSignalHistory(target){
   // Log rows lack a host prefix. Leave host-mask decisions to live traffic.
@@ -3672,16 +3857,14 @@ async function _decryptLogLines(target,lines,cid){
   const dm=_isDMTarget(target)&&typeof e2eReadDmHistory==='function';
   const generation=window.E2E?._lockGen;
   const historyReady=dm&&window.E2E?.keyReady;
-  const dmText=historyReady ? await e2eReadDmHistory(cid,target,lines) : new Map();
-  if(historyReady&&generation===window.E2E?._lockGen&&typeof e2eStageSignalHistory==='function'&&
-    e2eCanRecoverSignalHistory(target)){
-    e2eStageSignalHistory(cid,target,lines,dmText);
-  }
+  const deviceCopies=new Set();
+  const dmText=historyReady ? await e2eReadDmHistory(cid,target,lines,{deviceCopies}) : new Map();
   const out=new Array(lines.length);
   for(let i=0;i<lines.length;i++){
     const l=lines[i];
     if(dm&&e2eIsDmHistoryWire(l?.text)){
-      out[i]=dmHistoryRow(l,dmText.get(l),historyReady);
+      out[i]=dmHistoryRow(l,dmText.get(l),historyReady,deviceCopies.has(l));
+      await restoreSignalReactionReference(cid,out[i]);
       continue;
     }
     if(dm&&typeof l?.text==='string'&&l.text.startsWith('[e2ex3dh]')){
@@ -3689,7 +3872,7 @@ async function _decryptLogLines(target,lines,cid){
       continue;
     }
     if(_isPskHistoryWire(l?.text)){
-      out[i]=await _decryptPskHistoryRow(target,l,cid);
+      out[i]=await _decryptPskHistoryRow(target,l,cid,true);
       continue;
     }
     out[i]=l;
@@ -3703,8 +3886,16 @@ async function _decryptLogLines(target,lines,cid){
   return out;
 }
 
+function stageLogSignalRecovery(connId,target,lines,decoded){
+  if(!window.E2E||!_isDMTarget(target)||typeof e2eStageSignalHistory!=='function'||
+      !e2eCanRecoverSignalHistory(target)) return;
+  const readable=new Map();
+  for(let i=0;i<lines.length;i++) if(decoded[i]?._dmHistoryState==='ready'&&!decoded[i]._dmHistoryDeviceCopy) readable.set(lines[i],decoded[i].text);
+  e2eStageSignalHistory(connId,target,lines,readable);
+}
+
 const DM_HISTORY_LOCKED = '🔒 Encrypted message. Unlock encrypted chats to read it on this device.';
-const DM_HISTORY_UNAVAILABLE = '🔒 This device has no saved readable copy of this Signal message. It can be resent from a device that can still read it.';
+const DM_HISTORY_UNAVAILABLE = '🔒 No readable copy of this Signal message on this device. Keep another device that can read it online and unlocked to sync it.';
 const PSK_HISTORY_LOCKED = '🔒 Shared-key message. Unlock encrypted chats to check for the key.';
 const PSK_HISTORY_UNAVAILABLE = '🔒 Shared-key message could not be opened. It requires the shared key used when it was sent.';
 
@@ -3733,7 +3924,10 @@ async function _decryptPskHistoryRow(target,line,cid,restoreReaction = false) {
   const wire=line._pskHistoryWire||line.text;
   let result,reactionRef;
   try{
-    if(key) result=await channelDecryptEx(name,wire,line.from);
+    const peer=_e2eRealTarget(target), me=networks.find(n=>n.config.id===cid)?.nick;
+    const cm=_e2eRecvCaseMap(cid);
+    const recipient=line.irc_recipient||(_e2eRecvFold(line.from,cm)===_e2eRecvFold(me,cm)?peer:me);
+    if(key) result=await channelDecryptEx(name,wire,line.from,{history:true,conn_id:cid,recipient,network:line.irc_network});
     if(restoreReaction&&result?.verified&&!result.bad&&!line.reactionRef&&reactionEnabled(cid)){
       reactionRef=await hashChatReactionReference(wire);
     }
@@ -3744,46 +3938,72 @@ async function _decryptPskHistoryRow(target,line,cid,restoreReaction = false) {
   if(ready&&result&&keyCurrent){
     const row=pskHistoryRow(line,_e2ePskShown(result,line.from),true);
     if(result.bad) row._pskHistoryState='refused';
+    else if(result.legacy) row._pskHistoryState='legacy';
+    else if(result.pending||result.authFailed) row._pskHistoryState='needs-key';
     if(reactionRef) row.reactionRef=reactionRef;
     return row;
   }
   return pskHistoryRow(line,undefined,ready);
 }
 
-function dmHistoryRow(line,plaintext,ready) {
+function dmHistoryRow(line,plaintext,ready,deviceCopy=false) {
   const decoded = typeof plaintext==='string' ? e2eSplitAction(plaintext) : null;
   return Object.assign({},line,{
     _dmHistoryWire:line._dmHistoryWire||line.text,
     _dmHistoryState:decoded?'ready':ready?'unavailable':'locked',
+    _dmHistoryDeviceCopy:!!decoded&&deviceCopy,
+    reactionRef:decoded ? line.reactionRef : null,
     text:decoded ? decoded.text : ready ? DM_HISTORY_UNAVAILABLE : DM_HISTORY_LOCKED,
     kind:decoded?.action?'action':line.kind==='notice'?'notice':'privmsg',
     encrypted:true,
   });
 }
 
-async function restoreCachedDmHistory(connId,target) {
+async function restoreSignalReactionReference(cid,row) {
+  if(row.reactionRef || row._dmHistoryState!=='ready' || !window.E2E?.keyReady || !reactionEnabled(cid)) return;
+  const generation=E2E._lockGen, wire=row._dmHistoryWire;
+  const reference=await hashChatReactionReference(wire);
+  if(reference && E2E.keyReady && generation===E2E._lockGen && row._dmHistoryState==='ready' && row._dmHistoryWire===wire) row.reactionRef=reference;
+}
+
+function _stampSignalRow(connId,target,row,id){
+  row.id=id;
+  if(reactionEnabled(connId)) void restoreSignalReactionReference(connId,row).then(()=>refreshReactionRows(connId,target,null,id));
+}
+
+async function restoreCachedDmHistory(connId,target,retryOwn=false) {
   if(!window.E2E?.keyReady) return;
   const views=connId ? [[connId,target]] : Object.keys(buffers).map(_splitParse);
   const generation=E2E._lockGen;
   for(const [cid,tgt] of views){
     if(!cid||!_isDMTarget(tgt)) continue;
     const key=bk(cid,tgt), buffer=buffers[key];
-    const rows=buffer?.filter(m=>m._dmHistoryState==='locked');
+    const cm=_e2eRecvCaseMap(cid), me=_e2eRecvFold(getNick(cid),cm);
+    const pending=m=>m._dmHistoryState==='locked' || (retryOwn && m._dmHistoryState==='unavailable' && _e2eRecvFold(m.from,cm)===me);
+    const rows=buffer?.filter(pending);
     if(!rows?.length) continue;
-    const lines=rows.map(m=>({from:m.from,text:m._dmHistoryWire,kind:m.kind}));
-    const cache=await e2eReadDmHistory(cid,tgt,lines);
+    const lines=rows.map(m=>({from:m.from,text:m._dmHistoryWire,kind:m.kind,ts:m.ts,id:m.id}));
+    const deviceCopies=new Set();
+    const cache=await e2eReadDmHistory(cid,tgt,lines,{deviceCopies});
     if(!E2E.keyReady||E2E._lockGen!==generation) return;
     if(buffers[key]!==buffer) continue; // The conversation was cleared while the cache was loading.
     let changed=false;
     for(let i=0;i<rows.length;i++){
-      if(rows[i]._dmHistoryState!=='locked'||!buffer.includes(rows[i])) continue;
-      const restored=dmHistoryRow(lines[i],cache.get(lines[i]),true);
+      if(!pending(rows[i]) || !buffer.includes(rows[i]) || (rows[i]._dmHistoryState==='unavailable' && !cache.has(lines[i]))) continue;
+      const restored=dmHistoryRow(lines[i],cache.get(lines[i]),true,deviceCopies.has(lines[i]));
       rows[i].text=restored.text;
       rows[i].kind=restored.kind;
       rows[i]._dmHistoryState=restored._dmHistoryState;
+      rows[i]._dmHistoryDeviceCopy=restored._dmHistoryDeviceCopy;
+      await restoreSignalReactionReference(cid,rows[i]);
+      if(!E2E.keyReady||E2E._lockGen!==generation) return;
       changed=true;
     }
     if(!changed) continue;
+    if(typeof e2eStageSignalHistory==='function'&&e2eCanRecoverSignalHistory(tgt)){
+      for(const line of deviceCopies) cache.delete(line);
+      e2eStageSignalHistory(cid,tgt,lines,cache);
+    }
     if(isActive(cid,tgt)) renderChat();
     if(_splitActive&&_splitTarget===key) renderSplitChat();
   }
@@ -3803,27 +4023,51 @@ function lockCachedDmHistory(){
       message.text=DM_HISTORY_LOCKED;
       if(message.kind==='action') message.kind='privmsg';
       message._dmHistoryState='locked';
+      message._dmHistoryDeviceCopy=false;
+      message.reactionRef=null;
     } else if(message._pskHistoryWire) Object.assign(message,pskHistoryRow(message,undefined,false));
   }
 }
 
-function applyHeldDmHistory(connId,target,from,wire,plaintext){
+function applyHeldDmHistory(connId,target,from,wire,plaintext,deviceCopy=false){
+  if(!window.E2E?.keyReady) return false;
   const key=bk(connId,target);
-  const row=buffers[key]?.find(m=>m._dmHistoryWire===wire&&m.from.toLowerCase()===from.toLowerCase());
-  if(!row) return false;
-  const restored=dmHistoryRow(row,plaintext,true);
-  row.text=restored.text;
-  row.kind=restored.kind;
-  row._dmHistoryState=restored._dmHistoryState;
+  const cm=_e2eRecvCaseMap(connId),sender=_e2eRecvFold(from,cm);
+  const matches=m=>m._dmHistoryWire===wire&&_e2eRecvFold(m.from,cm)===sender;
+  const buffer=buffers[key]||[];
+  const rows=deviceCopy?buffer.filter(m=>m._dmHistoryState==='unavailable'&&matches(m)):[buffer.find(matches)].filter(Boolean);
+  if(!rows.length) return false;
+  for(const row of rows){
+    const restored=dmHistoryRow(row,plaintext,true,deviceCopy);
+    row.text=restored.text;
+    row.kind=restored.kind;
+    row._dmHistoryState=restored._dmHistoryState;
+    row._dmHistoryDeviceCopy=restored._dmHistoryDeviceCopy;
+    void restoreSignalReactionReference(connId,row).then(()=>{
+      if(row.reactionRef) refreshReactionRows(connId,target,row.reactionRef);
+    });
+  }
   if(isActive(connId,target)) renderChat();
   if(_splitActive&&_splitTarget===key) renderSplitChat();
   return true;
+}
+function isUnreadSignalHistory(connId,target,from,wire){
+  const cm=_e2eRecvCaseMap(connId),sender=_e2eRecvFold(from,cm);
+  return buffers[bk(connId,target)]?.some(m=>m._dmHistoryWire===wire&&
+    _e2eRecvFold(m.from,cm)===sender&&m._dmHistoryState!=='ready');
+}
+function requestVisibleDmHistorySync(sourceReady=false){
+  if(!active||!_isDMTarget(active.target)||typeof e2eSyncDmHistory!=='function') return;
+  const rows=buffers[bk(active.conn_id,active.target)];
+  if(rows?.length) e2eSyncDmHistory(active.conn_id,active.target,rows,sourceReady);
 }
 // Re-decrypt already-buffered sd8~ lines once a channel PSK finally loads —
 // covers the race where get_logs returns before e2e_channel_key arrives.
 async function redecryptChannelHistory(channel){
   if(typeof channelDecrypt!=='function'||!window.E2E||!window.E2E.channelKeys) return;
   const generation=E2E._lockGen;
+  const scope=_e2eDmScope(channel);
+  channel=_e2eDmNick(channel);
   const lc=String(channel).toLowerCase();
   // r4 (F3-4): also the buffers of other spellings of this channel (#room{ for a key
   // held as #room[) — each decided by _resolveChanKeyName on its own connection.
@@ -3831,7 +4075,7 @@ async function redecryptChannelHistory(channel){
   const fc=fold(channel);
   for(const k in buffers){
     const slash=k.lastIndexOf('/');                 // buffer key = `${conn_id}/${target.toLowerCase()}`
-    if(slash<0) continue;
+    if(slash<0||(scope&&k.slice(0,slash)!==scope[1])) continue;
     const bt=k.slice(slash+1);
     if(bt!==lc && fold(bt)!==fc) continue;
     const keyName=_resolveChanKeyName(bt,k.slice(0,slash));
@@ -3925,23 +4169,36 @@ function _idlessRowIndex(buf){
   return m;
 }
 function _historyRowKey(row){
-  const wire=row._dmHistoryWire||row._pskHistoryWire;
-  return wire ? JSON.stringify([String(row.from||'').toLowerCase(),wire]) : row.ts+'|'+row.from+'|'+(row.text||'').slice(0,50);
+  const from=String(row.from||'').toLowerCase();
+  if(row._pskHistoryWire){
+    try{
+      const {v,n,c,t,i,m}=JSON.parse(atob(row._pskHistoryWire.slice(4)));
+      return JSON.stringify([from,'psk',v,btoa(atob(n)),btoa(atob(c)),t,i,m]);
+    }catch(_){return JSON.stringify([from,row._pskHistoryWire]);}
+  }
+  if(row._dmHistoryWire) return JSON.stringify([from,row._dmHistoryWire]);
+  return row.ts+'|'+row.from+'|'+(row.text||'').slice(0,50);
 }
-function _stampIdlessRow(idx,key,id){
+function _stampIdlessRow(idx,key,id,connId,target){
   const a=idx.get(key); if(!a||!a.length) return false;
-  a.shift().id=id; return true;
+  const row=a.shift();
+  if(row._dmHistoryWire) _stampSignalRow(connId,target,row,id);
+  else row.id=id;
+  return true;
 }
 async function prependLogs(conn_id,target,lines){
   if(target==='status') lines=_splitStatusNickLines(conn_id,lines,false);
   const buf=getBuf(conn_id,target);
+  const raw=lines;
+  const generation=window.E2E?._lockGen;
   lines=await _decryptLogLines(target,lines,conn_id);
   if(buf!==getBuf(conn_id,target)) return;
+  if(generation===window.E2E?._lockGen) stageLogSignalRecovery(conn_id,target,raw,lines);
   const wasEmpty=buf.length===0;
   const _selfNick=getNick(conn_id);
   // Track highest msg_id from log lines
   for(const l of lines) trackMsgId(conn_id,target,l.id||0);
-  const newMsgs=lines.filter(l=>!l._e2eSetupLine).map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState,_pskHistoryWire:l._pskHistoryWire,_pskHistoryState:l._pskHistoryState},conn_id));
+  const newMsgs=lines.filter(l=>!l._e2eSetupLine).map(l=>_reconstructStatusFields({id:l.id||0,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState,_dmHistoryDeviceCopy:l._dmHistoryDeviceCopy,reactionRef:l.reactionRef,_pskHistoryWire:l._pskHistoryWire,_pskHistoryState:l._pskHistoryState,irc_recipient:l.irc_recipient,irc_network:l.irc_network},conn_id));
   // A device that never saw this connection's live 005 (new browser, cleared data)
   // can still learn PREFIX/CHANMODES from the logged copy in the status history.
   if(target==='status'){ for(const m of newMsgs){ if(m.from==='*'&&_isIsupportLine(m.text)) _sniffIsupport(conn_id,m.text); } }
@@ -3949,13 +4206,14 @@ async function prependLogs(conn_id,target,lines){
   const existingIds=new Set(buf.filter(m=>m.id>0).map(m=>m.id));
   const existingKeys=new Set(buf.map(_historyRowKey));
   const idless=_idlessRowIndex(buf);
+  let stamped=false;
   const unique=newMsgs.filter(m=>{
     if(_isIgnoredLogLine(m)) return false;   // /ignore also hides history (log replay on reload/switch)
     if(m.id>0&&existingIds.has(m.id)) return false;
     // r4 (IRC-H2): an id-less row already shown for this exact line takes the id.
     const rowKey=_historyRowKey(m);
-    if(m.id>0&&!_isStatusKind(m.kind)&&_stampIdlessRow(idless,rowKey,m.id)){ existingIds.add(m.id); return false; }
-    if(m._dmHistoryWire){
+    if(m.id>0&&!_isStatusKind(m.kind)&&_stampIdlessRow(idless,rowKey,m.id,conn_id,target)){ existingIds.add(m.id); stamped=true; return false; }
+    if(m._dmHistoryWire||m._pskHistoryWire){
       if(existingKeys.has(rowKey)) return false;
       existingKeys.add(rowKey);
     }
@@ -3965,11 +4223,11 @@ async function prependLogs(conn_id,target,lines){
     // Self-only: a received message can also be id-0 when the vault was locked at
     // receive time (logger.append returns 0), so gate on our own nick to never
     // collapse a genuinely-distinct same-text message from another user.
-    if(m.id>0&&m.from===_selfNick&&(!m._dmHistoryWire||m._dmHistoryState==='ready')&&_reconcileSelfRow(buf,m.from,m.text,m.id,m.ts)) return false;
+    if(m.id>0&&!m._dmHistoryWire&&m.from===_selfNick&&_reconcileSelfRow(buf,m.from,m.text,m.id,m.ts)){ stamped=true; return false; }
     // Status lines: content-dedup even when id'd, so a replayed status copy doesn't
     // double an id-less live copy already in the buffer (see _isStatusKind).
     if(m.id>0 && !_isStatusKind(m.kind)) return true;
-    return !!m._dmHistoryWire||!existingKeys.has(rowKey);
+    return !!(m._dmHistoryWire||m._pskHistoryWire)||!existingKeys.has(rowKey);
   });
   if(unique.length>0){
     buf.unshift(...unique);
@@ -3986,6 +4244,10 @@ async function prependLogs(conn_id,target,lines){
   if(isActive(conn_id,target)){
     const area=document.getElementById('chat-area');
     const key=bk(conn_id,target);
+    if(!wasEmpty&&renderedChatKey===key&&target!=='status'&&!unique.length&&!stamped){
+      _restoreMessageJump();
+      return;
+    }
     const position=wasEmpty?conversationScroll.get(key):captureChatPosition(area,unique.length>0);
     // Paging can render off the bottom, so a background history response must
     // preserve the current read marker.
@@ -4030,11 +4292,14 @@ async function appendSyncLines(conn_id,target,lines){
   if(_histFrozen()) return;
   if(target==='status') lines=_splitStatusNickLines(conn_id,lines,true);
   const buf=getBuf(conn_id,target);
+  const raw=lines;
+  const generation=window.E2E?._lockGen;
   lines=await _decryptLogLines(target,lines,conn_id);
   // Re-check after the await: decrypt can take seconds, and the user may have
   // jumped into a history window for this target meanwhile — the stale entry
   // check alone would then graft the live tail into the frozen window.
   if(_histFrozen()||buf!==getBuf(conn_id,target)) return;
+  if(generation===window.E2E?._lockGen) stageLogSignalRecovery(conn_id,target,raw,lines);
   const _selfNick=getNick(conn_id);
   const existingIds=new Set(buf.filter(m=>m.id>0).map(m=>m.id));
   const existingKeys=new Set(buf.map(_historyRowKey));
@@ -4050,14 +4315,14 @@ async function appendSyncLines(conn_id,target,lines){
     // Exact fuzzy key — catches the common case where ts/from/text match.
     const fk=_historyRowKey(l);
     // r4 (IRC-H2): an id-less row already shown for this exact line takes the id.
-    if(id>0&&!_isStatusKind(l.kind)&&_stampIdlessRow(idless,fk,id)){ existingIds.add(id); continue; }
+    if(id>0&&!_isStatusKind(l.kind)&&_stampIdlessRow(idless,fk,id,conn_id,target)){ existingIds.add(id); continue; }
     // Only fuzzy-dedup UNSTAMPED lines (id===0) — EXCEPT status lines, which are
     // fuzzy-deduped even when id'd so a replayed status copy can't double an id-less
     // live copy (see _isStatusKind). An id>0 CHAT line is already deduped by id above;
     // running the ts|from|text(50) fuzzy check on it too would drop a genuinely-distinct
     // NEW-id message whose first-50 chars collide with an existing row (e.g. two "gg"
     // in the same second) — so that stays id-only.
-    if((l._dmHistoryWire || id===0 || _isStatusKind(l.kind)) && existingKeys.has(fk)) continue;
+    if((l._dmHistoryWire || l._pskHistoryWire || id===0 || _isStatusKind(l.kind)) && existingKeys.has(fk)) continue;
     // Clock-skew + E2E fuzzy match: an optimistic self-sent entry in the
     // buffer has m.ts = client clock (Date.now()/1000) while l.ts is the
     // server clock — they diverge by 1-2s commonly, breaking the strict
@@ -4067,13 +4332,13 @@ async function appendSyncLines(conn_id,target,lines){
     let _matched=false;
     // Self-only (see prependLogs): other users' messages can also be id-0 when the
     // vault was locked at receive time, so only skew-reconcile our OWN optimistic rows.
-    const _selfLine=(l.from===_selfNick)&&(!l._dmHistoryWire||l._dmHistoryState==='ready');
+    const _selfLine=!l._dmHistoryWire&&l.from===_selfNick;
     const _tailStart=Math.max(0,buf.length-_SELF_RECONCILE_TAIL);
     const _slice=(l.text||'').slice(0,50);
     for(let i=buf.length-1;_selfLine&&i>=_tailStart;i--){
       const m=buf[i];
       if(Math.abs((m.ts||0)-l.ts)>_SELF_RECONCILE_SKEW) continue;
-      if(m.id) continue;
+      if(m.id||m._dmHistoryWire) continue;
       if(m.from!==l.from) continue;
       if((m.text||'').slice(0,50)!==_slice) continue;
       if(l.id) m.id=l.id;
@@ -4089,7 +4354,7 @@ async function appendSyncLines(conn_id,target,lines){
     // above, which were computed once before the loop.
     if(id>0) existingIds.add(id);
     existingKeys.add(fk);
-    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState,_pskHistoryWire:l._pskHistoryWire,_pskHistoryState:l._pskHistoryState},conn_id));
+    buf.push(_reconstructStatusFields({id,ts:l.ts,from:l.from,text:l.text,kind:l.kind,encrypted:l.encrypted,_tgt:target,_dmHistoryWire:l._dmHistoryWire,_dmHistoryState:l._dmHistoryState,_dmHistoryDeviceCopy:l._dmHistoryDeviceCopy,reactionRef:l.reactionRef,_pskHistoryWire:l._pskHistoryWire,_pskHistoryState:l._pskHistoryState,irc_recipient:l.irc_recipient,irc_network:l.irc_network},conn_id));
     restoreDm ||= l._dmHistoryState==='locked';
     restorePsk ||= !!l._pskHistoryWire&&l._pskHistoryState!=='ready';
     added++;
@@ -4381,7 +4646,11 @@ function restoreChatPosition(area,position){
 
 function setActive(conn_id,target,options){
   const key=bk(conn_id,target);
-  if(active&&bk(active.conn_id,active.target)!==key){
+  const viewChanged=!active||bk(active.conn_id,active.target)!==key;
+  const composer=options?.composer;
+  const followDraft=composer?.connId===conn_id&&_composerSendCurrent(composer);
+  if(active&&viewChanged){
+    if(!followDraft) _clearComposerSendAttempt();
     clearChatEffect();
     closeChatMessageActions();
     rememberChatPosition();
@@ -4391,6 +4660,8 @@ function setActive(conn_id,target,options){
   ++_messageJumpSerial;
   try{ _replyOnSwitch(conn_id,target); }catch(_){}   // r6: a reply quote stays with its conversation
   active={conn_id,target};
+  if(typeof e2eIdentityViewChanged==='function') e2eIdentityViewChanged();
+  if(followDraft) composer.target=target;
   void restoreCachedDmHistory(conn_id,target);
   if(isChanListActive()){
     renderSidebar(); renderChat(); updateTopbar(); updateLagDisplay(); updateInputPlaceholder();
@@ -4415,6 +4686,7 @@ function setActive(conn_id,target,options){
   }
   // Track the last real IRC view so files dropped/picked while on the Uploads
   // channel still associate with a sensible source for "Insert into chat".
+  if(viewChanged&&isMobileView()&&document.getElementById('sidebar')?.classList.contains('open')) closeSidebar();
   _lastIrcActive={conn_id,target};
   const savedHistory=conversationHistory.get(key);
   if(savedHistory){
@@ -4444,6 +4716,7 @@ function setActive(conn_id,target,options){
   _flushE2eSetupRow(conn_id,target);
   renderSidebar(); renderChat(renderedChatKey===key?null:conversationScroll.get(key)); updateTopbar(); updateLagDisplay();
   if(typeof updateE2EIndicator==='function') updateE2EIndicator(target);
+  if(viewChanged) _prepareVisiblePmReply();
   updateInputPlaceholder();
   const net=networks.find(n=>n.config.id===conn_id);
   const inpNick=document.getElementById('input-nick');if(inpNick)inpNick.textContent=net?.nick||net?.config.nick||currentUser||'—';
@@ -4451,7 +4724,101 @@ function setActive(conn_id,target,options){
   try{ if(typeof _restoreReloadDraft==='function') _restoreReloadDraft(conn_id,target); }catch(_){}   // r10
 }
 
+function _prepareVisiblePmReply(){
+  if(!active||!_isDMTarget(active.target)||active.target===_STATUS_NICK_Q||
+      typeof e2ePrepareChatProbe!=='function'||encryptionDeviceLocked()) return;
+  const {conn_id,target}=active;
+  if(!networks.some(n=>n.config.id===conn_id&&n.connected)) return;
+  const recent=getBuf(conn_id,target).slice(-30).some(m=>m.kind==='privmsg'&&!m.encrypted&&
+    m.from?.toLowerCase()===target.toLowerCase()&&m.ts>Date.now()/1000-600);
+  if(recent) e2ePrepareChatProbe(target,conn_id,false,true);
+}
+
+function _encryptionSetupTapCurrent(tap){
+  return tap&&tap.view===active&&tap.account===currentUser&&tap.token===sessionToken&&tap.button.isConnected&&
+    !encryptionDeviceLocked()&&getBuf(active.conn_id,active.target).includes(tap.message);
+}
+function _resumeEncryptionSetupPaint(tap){
+  tap.deferPaint=false;
+  if(!tap.repaint||!_encryptionSetupTapCurrent(tap))return;
+  tap.repaint=false;
+  const previous=_suppressLastReadAdvance;
+  _suppressLastReadAdvance||=tap.suppressReadAdvance;
+  try{renderChat(tap.position);}
+  finally{_suppressLastReadAdvance=previous;}
+}
+function _finishEncryptionSetupTap(tap){
+  if(_encryptionSetupTap!==tap)return;
+  _encryptionSetupTap=null;
+  clearTimeout(tap.timer);
+  _resumeEncryptionSetupPaint(tap);
+}
+document.addEventListener('touchstart',event=>{
+  if(!event.isTrusted)return;
+  _encryptionSetupTouchRelease=null;
+  if(_encryptionSetupTap)_finishEncryptionSetupTap(_encryptionSetupTap);
+  const button=event.target.closest?.('#chat-area .e2e-setup-button[data-e2e-unlock]:not(:disabled)');
+  const message=button?.closest('.msg-row')?._msgRef;
+  if(event.touches.length!==1||!button?.isConnected||!message||!active||!currentUser)return;
+  const touch=event.touches[0];
+  const tap={button,message,view:active,account:currentUser,token:sessionToken,id:touch.identifier,
+    action:message.e2eSetupAction,point:[touch.clientX,touch.clientY],started:performance.now(),moved:false,deferPaint:true};
+  _encryptionSetupTap=tap;
+  // Unblock repaint if the OS suspends touch delivery, while still recognizing
+  // and rejecting a later long-press release from this same gesture.
+  tap.timer=setTimeout(()=>_resumeEncryptionSetupPaint(tap),2000);
+},{capture:true,passive:true});
+document.addEventListener('touchmove',event=>{
+  const tap=_encryptionSetupTap;
+  if(!event.isTrusted||!tap)return;
+  const touch=event.touches[0];
+  if(event.touches.length!==1||touch.identifier!==tap.id||_distPts(tap.point,[touch.clientX,touch.clientY])>10)tap.moved=true;
+},{capture:true,passive:true});
+document.addEventListener('touchcancel',event=>{
+  if(event.isTrusted&&_encryptionSetupTap)_finishEncryptionSetupTap(_encryptionSetupTap);
+},{capture:true,passive:true});
+document.addEventListener('touchend',event=>{
+  const tap=_encryptionSetupTap;
+  if(!event.isTrusted||!tap)return;
+  const touch=event.changedTouches[0];
+  const point=touch&&[touch.clientX,touch.clientY];
+  const sameTouch=event.touches.length===0&&event.changedTouches.length===1&&touch.identifier===tap.id;
+  const recent=sameTouch&&performance.now()-tap.started<=500;
+  const run=event.cancelable&&recent&&!tap.moved&&_distPts(tap.point,point)<=10&&
+    _encryptionSetupTapCurrent(tap)&&tap.button.contains(event.target)&&!tap.button.disabled&&tap.message.e2eSetupAction===tap.action;
+  if(sameTouch&&event.cancelable){
+    // The browser can synthesize a click at stale coordinates after a font or
+    // keyboard changes layout. Complete a valid tap on its original action.
+    event.preventDefault();
+    _encryptionSetupTouchRelease={point,expires:performance.now()+350};
+  }
+  _finishEncryptionSetupTap(tap);
+  if(run)void e2ePromptDeviceUnlock();
+},{capture:true,passive:false});
+document.addEventListener('pointerdown',event=>{
+  if(event.isTrusted)_encryptionSetupTouchRelease=null;
+},true);
+document.addEventListener('click',event=>{
+  if(!event.isTrusted||!event.detail||!(event.pointerType==='touch'||event.sourceCapabilities?.firesTouchEvents))return;
+  const now=performance.now(), point=[event.clientX,event.clientY];
+  const release=_encryptionSetupTouchRelease;
+  const tap=_encryptionSetupTap;
+  const longPress=tap&&now-tap.started>500&&_distPts(tap.point,point)<=10;
+  const repeated=release&&now<=release.expires&&_distPts(release.point,point)<=2;
+  if(!longPress&&!repeated)return;
+  if(longPress)_finishEncryptionSetupTap(tap);
+  event.preventDefault();
+  event.stopImmediatePropagation();
+},true);
 function renderChat(position){
+  if(_composerSendAttempt&&!_composerSendCurrent(_composerSendAttempt)) _clearComposerSendAttempt();
+  const tap=_encryptionSetupTap;
+  if(tap?.deferPaint&&_encryptionSetupTapCurrent(tap)){
+    tap.repaint=true;
+    tap.position=position||tap.position;
+    tap.suppressReadAdvance||=_suppressLastReadAdvance;
+    return;
+  }
   const area=document.getElementById('chat-area');
   ++_tweetViewGeneration;
   const welcome=document.getElementById('welcome');
@@ -4478,6 +4845,7 @@ function renderChat(position){
   const _anchorKeepPos=(_jumpAnchor && _jumpAnchorBk===bk(active.conn_id,active.target) && getBuf(active.conn_id,active.target).length>0)?area.scrollTop:null;
   const key=bk(active.conn_id,active.target);
   const buf=getBuf(active.conn_id,active.target);
+  requestVisibleDmHistorySync();
   const wasRenderedHere=renderedChatKey===key;
   const keepPosition=buf.length>0
     ?(position||(wasRenderedHere&&_userScrolledAway&&captureChatPosition(area))):null;
@@ -5044,22 +5412,26 @@ function buildRow(msg,conv,tweetConv){
   const msgBody=row.querySelector('.msg-body');
   const setupConversation=conv||active;
   if(msgBody&&msg.e2eSetupAction&&setupConversation?.conn_id===msg.e2eSetupConn&&
-      _isDMTarget(setupConversation.target)&&bk(setupConversation.conn_id,setupConversation.target)===bk(msg.e2eSetupConn,msg.e2eSetupNick)){
+      _isDMTarget(setupConversation.target)&&bk(setupConversation.conn_id,setupConversation.target)===bk(msg.e2eSetupConn,_dmTarget(msg.e2eSetupNick))){
     const button=document.createElement('button');
     button.type='button';
     button.className='e2e-setup-button';
     if(msg.e2eSetupAction==='setup'||msg.e2eSetupAction==='unlock'){
       button.dataset.e2eUnlock=msg.e2eSetupAction==='setup'?'Set up encryption':'Unlock encryption';
-      button.disabled=!!window.E2E?.keyReady;
-      button.textContent=button.disabled?'Encryption ready':button.dataset.e2eUnlock;
+      button.textContent=button.dataset.e2eUnlock;
+      if(typeof e2eUpdateSetupButton==='function')e2eUpdateSetupButton(button);
       button.onclick=()=>e2ePromptDeviceUnlock();
     } else if(msg.e2eSetupAction==='methods'||msg.e2eSetupAction==='method-request'){
       button.dataset.e2eMethod='review';
       button.textContent='Review encryption';
       button.onclick=()=>{
-        setActive(msg.e2eSetupConn,msg.e2eSetupNick);
+        setActive(msg.e2eSetupConn,_dmTarget(msg.e2eSetupNick));
         showEncryptPanel();
       };
+    } else if(msg.e2eSetupAction==='verify'){
+      button.dataset.e2eVerifyIdentity='';
+      button.textContent='Verify Signal identity';
+      button.onclick=()=>void e2eReviewIncomingIdentity(msg.e2eSetupConn,_dmTarget(msg.e2eSetupNick));
     } else if(msg.e2eSetupAction==='send'){
       button.textContent='Send setup instructions';
       button.onclick=()=>{
@@ -5077,11 +5449,27 @@ function buildRow(msg,conv,tweetConv){
     }
     msgBody.append(document.createTextNode(' '),button);
   }
-  if (msg.encrypted && msgBody) {
+  if(msg._dmHistoryWire&&msgBody&&setupConversation&&typeof e2eCanReviewIncomingIdentity==='function'&&
+      e2eCanReviewIncomingIdentity(setupConversation.conn_id,setupConversation.target,msg)){
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='e2e-setup-button';
+    button.dataset.e2eVerifyIdentity='';
+    button.textContent='Verify Signal identity';
+    button.onclick=()=>void e2eReviewIncomingIdentity(setupConversation.conn_id,setupConversation.target);
+    msgBody.append(' ',button);
+  }
+  if (msg.encrypted && msgBody && (!msg._pskHistoryState || msg._pskHistoryState === 'ready')) {
     const lock = document.createElement('span');
-    lock.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2"/></svg>';
-    lock.title = 'E2E encrypted';
-    lock.style.cssText = 'opacity:.5;margin-left:4px;flex-shrink:0;color:var(--accent);';
+    if(msg._dmHistoryDeviceCopy){
+      lock.textContent='Synced copy';
+      lock.title='Restored from another unlocked device on this account';
+      lock.style.cssText='font-size:.8em;margin-left:6px;color:var(--text2);';
+    }else{
+      lock.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4" fill="none" stroke-width="2"/></svg>';
+      lock.title = 'E2E encrypted';
+      lock.style.cssText = 'opacity:.5;margin-left:4px;flex-shrink:0;color:var(--accent);';
+    }
     msgBody.appendChild(lock);
   }
   if(msgBody){
@@ -5811,12 +6199,13 @@ function isSameOriginUrl(url){
   // is safe to auto-load; foreign media is not (see mediaPlaceholder).
   try{ return new URL(url, location.href).origin===location.origin; }catch(_){ return false; }
 }
-function _mediaAutoLoad(url){
+function _mediaAutoLoad(url,fromEncrypted=false){
   // Decide whether to auto-load foreign media or show a click-to-load placeholder.
   // Same-origin (/files/) is always safe to auto-load. For foreign hosts, honor the
   // user's Appearance ▸ Media & Previews "External media" setting: 'all' auto-loads
   // everything, 'allowlist' auto-loads only matching hosts, 'off' never auto-loads.
   // (See mediaPlaceholder for why foreign auto-load is a privacy consideration.)
+  if(fromEncrypted) return false;
   if(isSameOriginUrl(url)) return true;
   const cfg=loadAppearance();
   const mode=cfg.extMedia||'all';
@@ -6066,6 +6455,7 @@ function tweetDisclosure(context){
   const policy=loadXPolicy();if(policy.load==='hidden')return 'hidden';
   if(!knownTweetConversation(context))return 'manual';
   const override=policy.conversations[bk(context.connId,context.target)]?.load;
+  if(context.encrypted!==false)return override==='hidden'?'hidden':'manual';
   if(override)return override;
   if(policy.load==='auto_public'&&context.isPrivate===false&&context.encrypted===false)return 'auto';
   return 'manual';
@@ -6871,8 +7261,10 @@ function buildTweetGenericSlot(slot,msgBody,mode){
   const generation=_tweetGeneration;
   const permitted=()=>generation===_tweetGeneration&&!tweetVaultLocked()&&!_tweetCaps.preview
     &&loadAppearance().linkPreviews!==false&&(!_tweetCaps.failed||tweetDisclosure(msgBody._tweetContext)!=='hidden');
-  const card=()=>{const node=buildLinkPreviewEl(slot.url,false,()=>permitted()&&node.isConnected,msgBody._translationContext);return node;};
-  if(mode==='auto')return registerTweetGeneric(card());
+  const encrypted=msgBody._tweetEncrypted===true;
+  if(encrypted)mode='encrypted';
+  const card=()=>{const node=buildLinkPreviewEl(slot.url,encrypted,()=>permitted()&&node.isConnected,msgBody._translationContext,true);return node;};
+  if(mode==='auto')return permitted()?registerTweetGeneric(card()):null;
   const wrap=document.createElement('div');wrap.className='msg-media';
   const btn=document.createElement('button');btn.type='button';btn.className='msg-media-load';
   let host=slot.url;try{host=new URL(slot.url).hostname;}catch(_){}
@@ -6981,7 +7373,7 @@ function buildMediaEl(url,fromEncrypted,genericOnly=false,translationContext=nul
       wrap.appendChild(img);
       return wrap;
     };
-    return _mediaAutoLoad(url)?buildImg():mediaPlaceholder('image',url,buildImg);
+    return _mediaAutoLoad(url,fromEncrypted)?buildImg():mediaPlaceholder('image',url,buildImg);
   }
   // Audio
   if(AUDIO_EXTS.test(url)){
@@ -6991,7 +7383,7 @@ function buildMediaEl(url,fromEncrypted,genericOnly=false,translationContext=nul
       wrap.appendChild(aud);
       return wrap;
     };
-    return _mediaAutoLoad(url)?buildAudio():mediaPlaceholder('audio',url,buildAudio);
+    return _mediaAutoLoad(url,fromEncrypted)?buildAudio():mediaPlaceholder('audio',url,buildAudio);
   }
   // Videos
   if(VID_EXTS.test(url)){
@@ -7001,7 +7393,7 @@ function buildMediaEl(url,fromEncrypted,genericOnly=false,translationContext=nul
       wrap.appendChild(vid);
       return wrap;
     };
-    return _mediaAutoLoad(url)?buildVideo():mediaPlaceholder('video',url,buildVideo);
+    return _mediaAutoLoad(url,fromEncrypted)?buildVideo():mediaPlaceholder('video',url,buildVideo);
   }
   // YouTube — rich card with thumbnail + info. CLICK-TO-LOAD: the card starts
   // dormant and contacts NO third party (img.youtube.com / noembed /
@@ -7092,7 +7484,7 @@ function buildMediaEl(url,fromEncrypted,genericOnly=false,translationContext=nul
     // fetches, and the YT card's thumbnail/metadata fetches are exactly that.
     // Deferred a tick: _ytReveal's getElementById lookups need the card to be
     // IN the document, and the caller appends it right after buildMediaEl returns.
-    if((loadAppearance().ytPreview||'auto')!=='click' && _mediaAutoLoad(url)) setTimeout(_ytReveal,0);
+    if((loadAppearance().ytPreview||'auto')!=='click' && _mediaAutoLoad(url,fromEncrypted)) setTimeout(_ytReveal,0);
     return wrap;
   }
   return buildLinkPreviewEl(url,fromEncrypted,null,translationContext);
@@ -7100,23 +7492,29 @@ function buildMediaEl(url,fromEncrypted,genericOnly=false,translationContext=nul
 // Link preview — fetch metadata from server for non-media HTTPS links. (Split out of
 // buildMediaEl unchanged; `guard` — used only for X links — is re-checked before the
 // asynchronous card renders and before its image loads, and must stay true.)
-function buildLinkPreviewEl(url,fromEncrypted,guard=null,translationContext=null){
+function buildLinkPreviewEl(url,fromEncrypted,guard=null,translationContext=null,approved=false){
   // r2 (codex-p3 MED app.js:4503): a link that arrived inside an END-TO-END ENCRYPTED
   // message is not sent to the CryptIRC server for a preview automatically (that would
   // disclose it to the server the encryption is meant to keep out). The user can still
   // ask for that one preview with a click.
-  if(url.startsWith('https://') && loadAppearance().linkPreviews!==false && fromEncrypted){
+  const generation=window.E2E?._lockGen;
+  const open=()=>!fromEncrypted||(window.E2E?.keyReady&&E2E._lockGen===generation);
+  if(url.startsWith('https://') && loadAppearance().linkPreviews!==false && fromEncrypted && !approved){
     const wrap=document.createElement('div');wrap.className='msg-media';
     const btn=document.createElement('button');btn.type='button';btn.className='msg-media-load';
     let host=url;try{host=new URL(url).hostname;}catch(_){}
     btn.textContent=`🔒 Load link preview — ${host}`;
     btn.title='This link came in an end-to-end encrypted message. Loading a preview sends the link to your CryptIRC server, which fetches the page.';
     btn.style.cssText='max-width:100%;padding:6px 10px;border:1px dashed var(--border,#555);border-radius:8px;background:var(--surface2,rgba(127,127,127,.12));color:var(--text2,inherit);font-size:12px;cursor:pointer;text-align:left;white-space:normal;word-break:break-all;';
-    btn.onclick=e=>{e.stopPropagation();const real=buildMediaEl(url,false,false,translationContext);if(real) wrap.replaceWith(real); else wrap.remove();};
+    btn.onclick=e=>{
+      e.stopPropagation();
+      const real=open()&&(!guard||guard())?buildLinkPreviewEl(url,true,guard,translationContext,true):null;
+      if(real)wrap.replaceWith(real);else wrap.remove();
+    };
     wrap.appendChild(btn);
     return wrap;
   }
-  if(url.startsWith('https://') && loadAppearance().linkPreviews!==false){
+  if(url.startsWith('https://') && loadAppearance().linkPreviews!==false && open()){
     const previewId='lp-'+Math.random().toString(36).slice(2,10);
     const card=document.createElement('a');
     card.href=url;card.target='_blank';card.rel='noopener noreferrer';
@@ -7129,9 +7527,9 @@ function buildLinkPreviewEl(url,fromEncrypted,guard=null,translationContext=null
     // Fetch preview asynchronously
     fetch(`/cryptirc/preview?url=${encodeURIComponent(url)}`,{headers:{'Authorization':'Bearer '+sessionToken}})
       .then(r=>r.ok?r.json():null).then(d=>{
-        if(!d||!d.title||(guard&&!guard())){dropCard();return;}
-        const el=document.getElementById(previewId);
-        if(!el)return;
+        if(!d||!d.title||!open()||(guard&&!guard())){dropCard();return;}
+        if(!card.isConnected){dropCard();return;}
+        const el=card;
         let html=`<div class="msg-link-preview-domain">${esc(d.site_name||d.domain)}</div>`;
         html+=`<div class="msg-link-preview-title">${esc(d.title)}</div>`;
         if(d.description) html+=`<div class="msg-link-preview-desc">${esc(d.description)}</div>`;
@@ -7142,7 +7540,7 @@ function buildLinkPreviewEl(url,fromEncrypted,guard=null,translationContext=null
         // click-to-load chip. Never sends a Referer.
         if(d.image&&d.image.startsWith('https://')){
           const _addImg=()=>{
-            if(guard&&!guard())return;
+            if(!open()||(guard&&!guard()))return;
             const img=document.createElement('img');
             img.className='msg-link-preview-img'; img.loading='lazy'; img.referrerPolicy='no-referrer';
             img.onload=()=>{ if(!_userScrolledAway) scrollBottom(); };
@@ -7150,7 +7548,7 @@ function buildLinkPreviewEl(url,fromEncrypted,guard=null,translationContext=null
             img.src=d.image;
             el.appendChild(img);
           };
-          if(_mediaAutoLoad(d.image)) _addImg();
+          if(_mediaAutoLoad(d.image,fromEncrypted)) _addImg();
           else{
             const chip=document.createElement('span');
             chip.className='msg-link-preview-imgload'; chip.setAttribute('role','button');
@@ -7201,19 +7599,38 @@ document.addEventListener('DOMContentLoaded',()=>{
     document.documentElement.style.setProperty('--input-bar-h',inputWrap.offsetHeight+'px');
   }).observe(inputWrap);
 
-  // iOS PWA: keyboard-dismiss reflow eats the click; send on pointerdown so the
-  // input stays focused. preventDefault also suppresses the compat click so the
-  // onclick fallback (for keyboard Enter/Space) doesn't double-fire.
+  // Submit before iOS can dismiss the keyboard and move the button. Keep click
+  // activation for keyboards, assistive technology, and non-pointer browsers.
   const _sendBtn=document.getElementById('send-btn');
   if(_sendBtn){
     _sendBtn.addEventListener('pointerdown',e=>{
       if(e.button!==0)return;
       e.preventDefault();
-      doSend();
+      void doSend();
+    });
+    _sendBtn.addEventListener('click',e=>{
+      if(!e.detail||!window.PointerEvent) void doSend();
     });
   }
 
   const inp=document.getElementById('msg-input');
+  document.getElementById('composer-encryption-action')?.addEventListener('click',()=>{
+    const attempt=_composerSendAttempt;
+    if(!_composerSendCurrent(attempt)){
+      _clearComposerSendAttempt();
+      return;
+    }
+    if(attempt.phase==='timeout') void doSend();
+    if(attempt.phase==='unlock'){
+      const readiness=_composerEncryptionReadiness(attempt);
+      if(readiness!=='unlock'&&(readiness||E2E.keyReady)){
+        _showComposerEncryptionStatus(attempt,readiness);
+        return;
+      }
+      _clearComposerSendAttempt();
+      void e2ePromptDeviceUnlock();
+    }
+  });
   inp.addEventListener('beforeinput',e=>{
     if(e.isComposing||!e.cancelable||!['insertLineBreak','insertParagraph'].includes(e.inputType))return;
     e.preventDefault();
@@ -7221,6 +7638,12 @@ document.addEventListener('DOMContentLoaded',()=>{
     inp.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}));
   });
   inp.addEventListener('input',e=>{
+    if(e.isTrusted&&active&&_isDMTarget(active.target)&&inp.value.trim()&&!inp.value.trimStart().startsWith('/')&&
+      typeof e2ePrepareChatProbe==='function'&&!encryptionDeviceLocked()){
+      e2ePrepareChatProbe(active.target,active.conn_id,active.target===_STATUS_NICK_Q);
+    }
+    _clearComposerSendAttempt();
+    if(e.isTrusted&&!e.isComposing&&!inp.value.trim()) _discardComposerDraft();
     if(e.isComposing||!/[\r\n]/.test(inp.value))return;
     // Match a single-line field when short multiline text is pasted or dictated.
     const {value,selectionStart,selectionEnd}=inp;
@@ -7244,12 +7667,14 @@ document.addEventListener('DOMContentLoaded',()=>{
       const _chanAc  = document.getElementById('chan-autocomplete');
       const _acOpen = (el) => el && el.style.display && el.style.display!=='none';
       if(_acOpen(_slashAc)||_acOpen(_nickAc)||_acOpen(_emojiAc)||_acOpen(_chanAc)) return;
-      // r9 (astra-p3 app.js:5180): a send can wait (E2E re-sync after a reconnect) while the
-      // input stays editable — only the text that was sent is cleared, never a newer draft.
-      sendTypingDone(); const _sent=inp.value; if((await handleInput(_sent))!=='keep' && inp.value===_sent) inp.value=''; historyIdx=-1;
+      sendTypingDone(); await _submitComposer(inp); historyIdx=-1;
     }
-    else if(e.key==='ArrowUp')   {if(historyIdx<inputHistory.length-1){historyIdx++;inp.value=inputHistory[inputHistory.length-1-historyIdx];}e.preventDefault();}
-    else if(e.key==='ArrowDown') {if(historyIdx>0){historyIdx--;inp.value=inputHistory[inputHistory.length-1-historyIdx];}else{historyIdx=-1;inp.value='';}e.preventDefault();}
+    else if(e.key==='ArrowUp')   {if(historyIdx<inputHistory.length-1){historyIdx++;_recallComposerHistory(inp,e.isTrusted);}e.preventDefault();}
+    else if(e.key==='ArrowDown') {
+      if(historyIdx>0){historyIdx--;_recallComposerHistory(inp,e.isTrusted);}
+      else {historyIdx=-1;inp.value='';if(e.isTrusted) _discardComposerDraft();}
+      e.preventDefault();
+    }
     else if(e.key==='Tab')       {e.preventDefault();tabComplete(inp);}
     // mIRC formatting shortcuts
     else if(e.ctrlKey&&e.key==='b'){e.preventDefault();insertAtCursor(inp,'^B');}        // Bold
@@ -7410,19 +7835,179 @@ function sendTypingActive(){
   _sendTyping('active');
 }
 function sendTypingDone(){
-  if(!active||!_wsReady()) return;
+  if(!active||!_wsReady()||!_lastTypingSent) return;
   _lastTypingSent=0;
   _sendTyping('done');
 }
 
 let _sendLock=false;
+const _sendPresses=new Set();
+let _heldSignalDraft=null, _composerRevision=0;
+let _composerSendAttempt=null;
+const _pendingComposerSends=new Set();
+const _COMPOSER_ENCRYPTION_WAIT_MS=8000;
+
+function _clearComposerSendAttempt(){
+  if(!_composerSendAttempt) return;
+  clearTimeout(_composerSendAttempt.timer);
+  clearTimeout(_composerSendAttempt.feedback);
+  _composerSendAttempt=null;
+  document.getElementById('composer-encryption-status').classList.remove('show');
+  document.getElementById('composer-encryption-status-text').textContent='';
+  document.getElementById('composer-encryption-action').hidden=true;
+}
+function _setComposerText(input,text){
+  if(input.id==='msg-input'&&input.value!==text) _clearComposerSendAttempt();
+  input.value=text;
+}
+function _composerSendCurrent(attempt){
+  return !!attempt&&attempt===_composerSendAttempt&&attempt.user===currentUser&&attempt.token===sessionToken&&
+    !!active&&bk(active.conn_id,active.target)===bk(attempt.connId,attempt.target)&&!encryptionDeviceLocked()&&
+    document.getElementById('msg-input').value===attempt.draft;
+}
+function _composerEncryptionReadiness(attempt){
+  const state=e2eTargetState(attempt.recipient||attempt.target,{conn_id:attempt.connId});
+  return state.discovery?'checking':state.readiness;
+}
+function _showComposerEncryptionStatus(attempt,readiness){
+  if(!_composerSendCurrent(attempt)){
+    if(attempt===_composerSendAttempt) _clearComposerSendAttempt();
+    return;
+  }
+  clearTimeout(attempt.timer);
+  attempt.timer=0;
+  let phase=readiness||'finished';
+  if(phase==='checking'||phase==='loading'){
+    attempt.deadline??=performance.now()+_COMPOSER_ENCRYPTION_WAIT_MS;
+    const remaining=attempt.deadline-performance.now();
+    if(remaining<=0) phase='timeout';
+    else attempt.timer=setTimeout(()=>{
+      const next=_composerSendCurrent(attempt)?_composerEncryptionReadiness(attempt):null;
+      _showComposerEncryptionStatus(attempt,next);
+    },Math.min(200,remaining));
+  }
+  if(attempt.phase===phase) return;
+  attempt.phase=phase;
+  const labels={
+    sending:'Sending…',
+    checking:`Checking encryption settings for ${attempt.recipient||attempt.target}…`,
+    loading:'Loading your encryption key…',
+    timeout:'Encryption check timed out. Your draft is still here.',
+    'peer-check':`Checking whether ${attempt.recipient||attempt.target} supports encryption…`,
+    unlock:'Unlock encrypted chats to send.',
+    finished:'Your draft is still here. Press Send to try again.',
+  };
+  document.getElementById('composer-encryption-status').classList.add('show');
+  document.getElementById('composer-encryption-status-text').textContent=labels[phase];
+  const action=document.getElementById('composer-encryption-action');
+  action.textContent=phase==='timeout'?'Retry':phase==='unlock'?'Unlock':'';
+  action.hidden=!action.textContent;
+}
+async function _submitComposer(input){
+  const draft=input.value, text=draft.trim();
+  const previous=_composerSendAttempt;
+  const composer=active&&text&&_lineSendsText(text)&&document.getElementById('composer-encryption-status')?{
+    connId:active.conn_id,target:active.target,user:currentUser,token:sessionToken,draft,
+  }:null;
+  // The same input follows the user across chats, even while a send is still running.
+  if(composer&&[..._pendingComposerSends].some(send=>send.user===composer.user&&send.draft.trim()===text)) return;
+  if(previous?.timer&&_composerSendCurrent(previous)){
+    const readiness=_composerEncryptionReadiness(previous);
+    if(readiness){
+      _showComposerEncryptionStatus(previous,readiness);
+      return;
+    }
+  }
+  _clearComposerSendAttempt();
+  _composerSendAttempt=composer;
+  if(composer){
+    _pendingComposerSends.add(composer);
+    composer.feedback=setTimeout(()=>{
+      if(!composer.phase&&_composerSendCurrent(composer)) _showComposerEncryptionStatus(composer,'sending');
+    },120);
+  }
+  const revision=_composerRevision;
+  const draftCurrent=()=>composer?_composerSendCurrent(composer):revision===_composerRevision&&input.value===draft;
+  let result;
+  try{
+    result=await handleInput(draft,composer,draftCurrent);
+    // The input is shared across conversations. Clear a sent draft even if its
+    // status was dismissed by a chat switch, while preserving any different text.
+    if(result!=='keep'&&input.value===draft&&(!composer||composer.user===currentUser)) input.value='';
+  }finally{
+    if(composer) _pendingComposerSends.delete(composer);
+    if(composer===_composerSendAttempt&&(result!=='keep'||!composer?.phase||['sending','peer-check'].includes(composer.phase))) _clearComposerSendAttempt();
+  }
+}
+function _recallComposerHistory(input,trusted){
+  _clearComposerSendAttempt();
+  const line=inputHistory[inputHistory.length-1-historyIdx];
+  input.value=line;
+  if(!trusted) return;
+  _composerRevision++;
+  const held=_histSignalHeld.get(line)?.get(currentUser);
+  _heldSignalDraft=held ? {...held,target:_dmTarget(held.target)} : null;
+}
+function _discardComposerDraft(){
+  _clearComposerSendAttempt();
+  _composerRevision++;
+  const draft=_heldSignalDraft;
+  if(!draft||draft.user!==currentUser) return;
+  _heldSignalDraft=null;
+  if(typeof e2eDiscardDisabledDraft==='function') e2eDiscardDisabledDraft(draft.target,draft.connId);
+}
+function _sameSignalDraftAt(c1,t1,c2,t2){
+  if(c1!==c2) return false;
+  const fold=_chanKeyFold(c1);
+  return fold(t1)===fold(t2);
+}
+function _signalHeldDraftFor(connId,target){
+  const d=_heldSignalDraft;
+  return currentUser&&d?.user===currentUser&&_sameSignalDraftAt(d.connId,d.target,connId,target) ? d : null;
+}
+function _releaseHeldSignalDraft(connId,target){
+  target=_dmTarget(target);
+  if(_signalHeldDraftFor(connId,target)) _heldSignalDraft=null;
+  let changed=false;
+  for(const [text,accounts] of _histSignalHeld){
+    const draft=accounts.get(currentUser);
+    if(!draft||!_sameSignalDraftAt(draft.connId,_dmTarget(draft.target),connId,target)) continue;
+    accounts.delete(currentUser);
+    if(!accounts.size) _histSignalHeld.delete(text);
+    changed=true;
+  }
+  if(changed) _saveHistLocal();
+}
+function _composerChatApproval(view,historyLine,held){
+  const user=currentUser, revision=_composerRevision;
+  const approval={view:{conn_id:view.conn_id,target:view.target},signalHeld:!!held,holdSignal:(connId,target)=>{
+    if(!user||currentUser!==user) return;
+    const draft={user,connId,target:_dmTarget(target)};
+    _histLocal.add(historyLine);
+    _rememberHistorySignalHold(historyLine,draft);
+    _histSyncOk.delete(historyLine);
+    _saveHistLocal();
+    if(revision!==_composerRevision) return;
+    _heldSignalDraft=draft;
+    approval.signalHeld=true;
+    approval.didHold=true;
+  }};
+  return approval;
+}
+function _finishHeldSignalDraft(held,raw){
+  if(held&&_heldSignalDraft===held&&document.getElementById('msg-input').value.trim()===raw)
+    _heldSignalDraft=null;
+}
 async function doSend(){
-  if(_sendLock)return;
   const inp=document.getElementById('msg-input');
   if(!inp||!inp.value.trim())return;
+  const press=JSON.stringify([currentUser,_composerRevision,inp.value]);
+  if(_sendPresses.has(press))return;
+  _sendPresses.add(press);
   _sendLock=true;
-  try{ const _sent=inp.value; if((await handleInput(_sent))!=='keep' && inp.value===_sent) inp.value=''; }   // r9: see the Enter handler
-  finally{setTimeout(()=>{_sendLock=false;},200);}
+  try{ await _submitComposer(inp); }
+  catch(_){ showToast('Could not finish sending. Check the conversation before retrying.'); }
+  finally{_sendPresses.delete(press);_sendLock=_sendPresses.size>0;}
   inp.focus();
 }
 // r3 (web side of codex C2-11): /cycle used to send PartChannel, then a keyless
@@ -7523,11 +8108,41 @@ function _lineSendsText(raw){
 function _statusWinRefuse(conn_id){
   sysMsg(conn_id,'status','⛔ Not sent: this is the server (status) window, not a conversation. Use /msg <nick> <text>, open a query, or join a channel (↑ recalls your line).','error');
 }
-async function handleInput(raw){
+async function handleInput(raw,composer=null,draftCurrent=null){
   raw=raw.trim(); if(!raw||!active)return;
   if(encryptionDeviceLocked()||isChanListActive()) return 'keep';
-  if(window.E2E && !E2E.keyReady && _lineSendsText(raw)){
-    const targets=_statusWinSendsText(raw)?[active.target]:_histTargetsOf(raw,null);
+  const sendsText=_lineSendsText(raw);
+  const targets=_statusWinSendsText(raw)?[active.target]:_histTargetsOf(raw,null).map(_dmTarget);
+  const uncheckedOff=new Set(sendsText&&typeof e2eSignalOptOutKey==='function'
+    ? targets.map(t=>e2eSignalOptOutKey(t,active.conn_id)).filter(Boolean) : []);
+  const heldSignal=_heldSignalDraft?.user===currentUser?_heldSignalDraft:null;
+  if(heldSignal&&sendsText){
+    if(!targets.length||!targets.every(t=>_signalHeldDraftFor(active.conn_id,t))){
+      showToast('This draft belongs to another conversation. Return to that chat or clear the message box to start a new draft.');
+      return 'keep';
+    }
+    if(raw.startsWith('/')){
+      const command=raw.slice(1).split(' ',1)[0].toUpperCase();
+      const sendsEncrypted=['MSG','PRIVMSG','NOTICE','QUERY'].includes(command)||
+        (_STATUS_WIN_SEND_CMDS.has(command)&&!['GIF','GIPHY','NP','NOWPLAYING','UD','URBAN'].includes(command));
+      if(!sendsEncrypted||!['dm','psk'].includes(e2eTargetState(heldSignal.target,{conn_id:heldSignal.connId}).mode)){
+        _e2eBlockedWarn(_e2eBlock(_e2eBundleFailure(heldSignal.target,'disabled-elsewhere')));
+        return 'keep';
+      }
+    }
+  }
+  if(composer&&!raw.startsWith('/')&&active.target!=='status'&&String(active.target).toLowerCase()!==OVERFLOW_Q&&
+      _e2eEngineOk()&&(!E2E.keyReady||E2E._resyncPending||E2E._bootPhase==='loading')){
+    const readiness=_composerEncryptionReadiness(composer);
+    if(!heldSignal) _prepareVisiblePmReply();
+    const scopedReply=!heldSignal&&typeof e2eCanCheckPlainReply==='function'&&
+      e2eCanCheckPlainReply(active.target,active.conn_id);
+    if(readiness&&!scopedReply){
+      _showComposerEncryptionStatus(composer,readiness);
+      return 'keep';
+    }
+  }
+  if(window.E2E && !E2E.keyReady && sendsText){
     if(targets.some(t=>_isE2eConversation(t,active.conn_id))){
       void e2ePromptDeviceUnlock();
       return 'keep';
@@ -7553,14 +8168,29 @@ async function handleInput(raw){
   try{
     _histE2eSeen();   // record E2E evidence BEFORE this line runs (it may be "/encrypt off")
     // The first DM can trigger encryption discovery after this history save.
-    const mayAutoEncrypt=_lineSendsText(raw)&&typeof e2eMayAutoEncrypt==='function';
-    const localOnly=_histTargetsOf(raw,active).some(t=>_isE2eConversation(t,active.conn_id)||
+    const mayAutoEncrypt=sendsText&&typeof e2eMayAutoEncrypt==='function';
+    const localOnly=heldSignal||_histTargetsOf(raw,active).some(t=>_isE2eConversation(t,active.conn_id,true)||
       (mayAutoEncrypt&&e2eMayAutoEncrypt(t,active.conn_id)));
     if(localOnly){ _histLocal.add(_hist); _histE2eSeen(); }
-    if(localOnly||!_e2eKnown()) _histSyncOk.delete(_hist); else _histSyncOk.add(_hist);
+    if(localOnly||uncheckedOff.size||!_e2eKnown()) _histSyncOk.delete(_hist); else _histSyncOk.add(_hist);
   }catch(_){ _histSyncOk.delete(_hist); _histLocal.add(_hist); }
+  // The edited line is a new history entry even when it inherits an existing
+  // hold. Recall must preserve the destination after a lock or app restart.
+  if(heldSignal&&sendsText) _rememberHistorySignalHold(_hist,heldSignal);
   inputHistory.push(_hist); if(inputHistory.length>500)inputHistory.splice(0,inputHistory.length-500); saveInputHistory();
   const{conn_id,target}=active;
+  const approval=_composerChatApproval(active,_hist,heldSignal);
+  if(composer) approval.composer=composer;
+  if(draftCurrent) approval.draftCurrent=draftCurrent;
+  if(uncheckedOff.size){
+    const user=currentUser;
+    // Plain input history becomes syncable only after each opted-out recipient
+    // confirms an empty slot. A protected or held line always stays local.
+    approval.confirmedOff=key=>{
+      if(currentUser!==user||!uncheckedOff.delete(key)||uncheckedOff.size||_histLocal.has(_hist)||!_e2eKnown()) return;
+      _histSyncOk.add(_hist);saveInputHistory();
+    };
+  }
   // r3 (agy-flash P3 MED app.js:1376): the status window is the server's window, not a
   // conversation — text typed there (or /me, /say, an emote, …) used to go out as a
   // PRIVMSG to whoever holds the IRC nick "status".
@@ -7572,6 +8202,15 @@ async function handleInput(raw){
   // refused here, before any row or queue entry exists (wsend refuses the rest).
   if(!_e2eEngineOk() && _lineSendsText(raw)){ _e2eEngineFailNotice(conn_id,target); return; }
   if(raw.startsWith('/')){
+    let sendFailed=false;
+    const finish=ok=>{
+      if(ok) _finishHeldSignalDraft(heldSignal,raw);
+      else sendFailed=true;
+      return ok;
+    };
+    const commandApproval=()=>({...approval,view:active&&{conn_id:active.conn_id,target:active.target}});
+    const sendSlash=async (cid,to,text,o)=>finish(await _sendChat(cid,to,text,{...o,approval:commandApproval()}));
+    const sendSlashToTargets=async (cid,verb,to,text,o)=>finish(await _e2eSendToTargets(cid,verb,to,text,{...o,approval:commandApproval()}));
     const parts=raw.slice(1).split(' ');const cmd=parts[0].toUpperCase();const args=parts.slice(1);
     // "/msg status …", "/query status": the USER "status" (its query), never the status window.
     if(['MSG','PRIVMSG','QUERY','NOTICE','CTCP'].includes(cmd)&&args[0]) args[0]=args[0].split(',').map(_dmTarget).join(',');
@@ -7610,11 +8249,11 @@ async function handleInput(raw){
         if(!queryBufs[conn_id])queryBufs[conn_id]=new Map();
         queryBufs[conn_id].set(qnick.toLowerCase(), qnick);
         saveQueryBufs(); renderSidebar();
-        setActive(conn_id,qnick);
+        setActive(conn_id,qnick,{composer});
         if(args.slice(1).length) {
           const qtext = toMircChars(args.slice(1).join(' '));
           // L2: route through E2E if session exists. r7: queued + tracked like typed lines.
-          await _sendChat(conn_id,qnick,qtext);
+          if(!await sendSlash(conn_id,qnick,qtext)) return 'keep';
         }
         break;
       }
@@ -7679,13 +8318,13 @@ async function handleInput(raw){
         const t=toMircChars(args.join(' '));
         // L3: /me goes through E2E if session is active for this target. r7: queued +
         // tracked (r4 IRC-H1: plaintext = the pieces the server sends, ACTION on each).
-        await _sendChat(conn_id,target,`\x01ACTION ${t}\x01`,{kind:'action'});
+        await sendSlash(conn_id,target,`\x01ACTION ${t}\x01`,{kind:'action'});
         break;
       }
       case 'SAY': {
         const t=toMircChars(args.join(' '));
         // L3: /say goes through E2E if active. r7: queued + tracked like typed lines.
-        await _sendChat(conn_id,target,t);
+        await sendSlash(conn_id,target,t);
         break;
       }
       case 'MSG': case 'PRIVMSG': {
@@ -7703,8 +8342,8 @@ async function handleInput(raw){
         // name ("bob,carol" has no E2E state) and went out in cleartext to both. Each
         // recipient is now checked; if any has E2E on, every recipient gets its own line
         // (encrypted where E2E is on), and if any of them is blocked nothing is sent.
-        const ok=await _e2eSendToTargets(conn_id,'PRIVMSG',to,t);
-        if(!ok) break;
+        const ok=await sendSlashToTargets(conn_id,'PRIVMSG',to,t);
+        if(!ok) return 'keep';
         const _first=_splitTargets(to)[0]||to;
         setActive(conn_id,_first);
         break;
@@ -7714,7 +8353,7 @@ async function handleInput(raw){
         if(!to||!t){sysMsg(conn_id,target,'Usage: /notice <target> <message>','error');break;}
         // r2 (codex-p3 HIGH): /notice bypassed E2E entirely. Same rules as /msg now
         // (receivers decrypt NOTICEs too); a blocked recipient blocks the send.
-        await _e2eSendToTargets(conn_id,'NOTICE',to,t,{noEcho:true}); break;
+        await sendSlashToTargets(conn_id,'NOTICE',to,t,{noEcho:true}); break;
       }
       case 'CTCP': {
         // /ctcp nick VERSION  or  /ctcp nick PING
@@ -8081,7 +8720,7 @@ async function handleInput(raw){
       }
       case 'SLAP': {
         const t=`slaps ${args[0]||'themselves'} around a bit with a large trout`;
-        await _sendChat(conn_id,target,`\x01ACTION ${t}\x01`,{kind:'action'}); break;   // r7: queued + tracked
+        await sendSlash(conn_id,target,`\x01ACTION ${t}\x01`,{kind:'action'}); break;   // r7: queued + tracked
       }
       case 'MONITOR': case 'WATCH': {
         if(!args[0]){sysMsg(conn_id,target,'Usage: /monitor <nick>','error');break;}
@@ -8095,8 +8734,8 @@ async function handleInput(raw){
       }
       case 'HELP':
         showHelp(conn_id, target, args[0]); break;
-      case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 257 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';await _sendChatLine(conn_id,target,t);break; }
+      case 'SHRUG': { const t='¯\\_(ツ)_/¯'+(args.length?' '+args.join(' '):'');await sendSlash(conn_id,target,t);break; }
+      case 'ADVERTISE': case 'AD': { const t='\x02✦ CryptIRC v'+CRYPTIRC_VERSION+' ✦\x02 End-to-end encrypted IRC client — \x02AES-256-GCM\x02 encrypted logs • \x02Signal Protocol\x02 E2E DMs (X3DH + Double Ratchet) • Channel encryption • Zero-knowledge vault (Argon2id) • 257 themes • 140 fonts • 100+ commands • https://github.com/gh0st68/CryptIRC';await sendSlash(conn_id,target,t);break; }
       case 'NP': case 'NOWPLAYING': {
         const sub=(args[0]||'').toLowerCase();
         if(sub==='set'){ const u=(args[1]||'').trim(); if(!u){ sysMsg(conn_id,target,'Usage: /np set <your-lastfm-username>','error'); break; } doSetLastfm(conn_id,target,u); break; }
@@ -8164,20 +8803,20 @@ async function handleInput(raw){
         }
         const url=await giphyFetchTop(q);
         if(!url){ sysMsg(conn_id,target,'GIF search failed — invalid key, no result, or rate-limited.','error'); break; }
-        await _sendChat(conn_id,target,url);   // r7: queued + tracked
+        await sendSlash(conn_id,target,url);   // r7: queued + tracked
         break;
       }
-      case 'TABLEFLIP': { const t='(╯°□°)╯︵ ┻━┻'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'UNFLIP': case 'UNFLIPTABLE': { const t='┬─┬ノ( º _ ºノ)'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'LENNY': { const t='( ͡° ͜ʖ ͡°)'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'DISAPPROVE': case 'LOOK': { const t='ಠ_ಠ'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'RAGE': { const t='(ノಠ益ಠ)ノ彡┻━┻'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'BEAR': { const t='ʕ•ᴥ•ʔ'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'SPARKLE': case 'SPARKLES': { const t='✧･ﾟ: *✧･ﾟ:* '+(args.length?args.join(' '):'')+'*:･ﾟ✧*:･ﾟ✧';await _sendChatLine(conn_id,target,t);break; }
-      case 'FINGER': case 'MIDDLEFINGER': { const t='╭∩╮(︶︿︶)╭∩╮'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'DANCE': { const t='♪┏(・o・)┛♪┗(・o・)┓♪'+(args.length?' '+args.join(' '):'');await _sendChatLine(conn_id,target,t);break; }
-      case 'RIP': { const t='⚰️ R.I.P. '+(args.length?args.join(' '):'')+'⚰️';await _sendChatLine(conn_id,target,t);break; }
-      case 'HUG': { const n=args[0]||'everyone';const t=`(づ｡◕‿‿◕｡)づ ${n}`;await _sendChatLine(conn_id,target,t);break; }
+      case 'TABLEFLIP': { const t='(╯°□°)╯︵ ┻━┻'+(args.length?' '+args.join(' '):'');await sendSlash(conn_id,target,t);break; }
+      case 'UNFLIP': case 'UNFLIPTABLE': { const t='┬─┬ノ( º _ ºノ)'+(args.length?' '+args.join(' '):'');await sendSlash(conn_id,target,t);break; }
+      case 'LENNY': { const t='( ͡° ͜ʖ ͡°)'+(args.length?' '+args.join(' '):'');await sendSlash(conn_id,target,t);break; }
+      case 'DISAPPROVE': case 'LOOK': { const t='ಠ_ಠ'+(args.length?' '+args.join(' '):'');await sendSlash(conn_id,target,t);break; }
+      case 'RAGE': { const t='(ノಠ益ಠ)ノ彡┻━┻'+(args.length?' '+args.join(' '):'');await sendSlash(conn_id,target,t);break; }
+      case 'BEAR': { const t='ʕ•ᴥ•ʔ'+(args.length?' '+args.join(' '):'');await sendSlash(conn_id,target,t);break; }
+      case 'SPARKLE': case 'SPARKLES': { const t='✧･ﾟ: *✧･ﾟ:* '+(args.length?args.join(' '):'')+'*:･ﾟ✧*:･ﾟ✧';await sendSlash(conn_id,target,t);break; }
+      case 'FINGER': case 'MIDDLEFINGER': { const t='╭∩╮(︶︿︶)╭∩╮'+(args.length?' '+args.join(' '):'');await sendSlash(conn_id,target,t);break; }
+      case 'DANCE': { const t='♪┏(・o・)┛♪┗(・o・)┓♪'+(args.length?' '+args.join(' '):'');await sendSlash(conn_id,target,t);break; }
+      case 'RIP': { const t='⚰️ R.I.P. '+(args.length?args.join(' '):'')+'⚰️';await sendSlash(conn_id,target,t);break; }
+      case 'HUG': { const n=args[0]||'everyone';const t=`(づ｡◕‿‿◕｡)づ ${n}`;await sendSlash(conn_id,target,t);break; }
       case 'COLOR': {
         const a=(args[0]||'').toLowerCase().trim();
         if(!a||a==='off'){ setMsgColorMode('off'); sysMsg(conn_id,target,'Message color turned off.','system'); break; }
@@ -8204,7 +8843,7 @@ async function handleInput(raw){
           else{colored+='\x03'+String(rainbowColors[ci%rainbowColors.length]).padStart(2,'0')+ch;ci++;}
         }
         colored+='\x0F'; // reset at end
-        await _sendChat(conn_id,target,colored);   // r7: queued + tracked
+        await sendSlash(conn_id,target,colored);   // r7: queued + tracked
         break;
       }
       case 'ENCRYPT': case 'E2E':
@@ -8215,10 +8854,20 @@ async function handleInput(raw){
         // D5: cap multi-line output to avoid channel-flood / server flood-throttle.
         const _lines=art.split('\n').filter(l=>l.trim());
         if(_lines.length>12){sysMsg(conn_id,target,'ASCII output too tall — try shorter text','error');break;}
+        const batchApproval=commandApproval(), parts=[];
         for(const rawline of _lines){
           const line=ircSafe(rawline).slice(0,400);
-          if(!(await _sendChat(conn_id,target,line))) break; // refused: warn once, drop the rest of the batch (r7: queued + tracked)
+          const part=await _prepChatPart(conn_id,target,line,'PRIVMSG',batchApproval);
+          if(!part) return 'keep';
+          if(parts.length&&parts[0].encrypted!==part.encrypted){
+            showToast('Encryption changed while preparing this message. Try sending it again.');
+            return 'keep';
+          }
+          parts.push(part);
         }
+        if(!_chatApprovalStillValid(batchApproval,conn_id,target)) return 'keep';
+        _queueChatParts(conn_id,target,parts);
+        finish(true);
         break;
       }
       case 'UD': case 'URBAN': {
@@ -8234,7 +8883,7 @@ async function handleInput(raw){
             // #4: UD definitions are uncontrolled user submissions — strip CR/LF/control
             // chars from the assembled line so a definition can't inject an IRC command.
             const msg=ircSafe(`📖 ${term}: ${clean}${def.definition.length>300?'...':''} (👍${def.thumbs_up} 👎${def.thumbs_down})`);
-            await _sendChat(conn_id,target,msg);   // r7: queued + tracked
+            await sendSlash(conn_id,target,msg);   // r7: queued + tracked
           } else sysMsg(conn_id,target,`No definition found for "${term}"`,'error');
         }catch(e){sysMsg(conn_id,target,`UD lookup failed — https://www.urbandictionary.com/define.php?term=${encodeURIComponent(term)}`,'error');}
         break;
@@ -8305,7 +8954,7 @@ async function handleInput(raw){
           // `/cryptircs` when the path had no trailing slash). The short-create route is `/s`.
           const r=await fetch(`${location.pathname.replace(/\/+$/,'')}/s`,{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`},body:JSON.stringify({url})});
           const d=await r.json();
-          if(d.url){document.getElementById('msg-input').value=d.url;sysMsg(conn_id,target,`Short URL: ${d.url}`,'system');}
+          if(d.url){_setComposerText(document.getElementById('msg-input'),d.url);sysMsg(conn_id,target,`Short URL: ${d.url}`,'system');}
           else sysMsg(conn_id,target,'Failed to create short URL','error');
         }catch(e){sysMsg(conn_id,target,'URL shortener error','error');}
         break;
@@ -8397,9 +9046,13 @@ async function handleInput(raw){
       default:
         wsend({type:'send',conn_id,raw:raw.slice(1)});
     }
+    if(sendFailed||approval.didHold||(heldSignal&&sendsText&&_heldSignalDraft===heldSignal)) return 'keep';
   } else {
-    const approval={view:active&&{conn_id:active.conn_id,target:active.target}};
-    const outgoing=await translateOutgoing(raw,conn_id,target);
+    const draftUser=currentUser;
+    // Automatic Signal discovery can turn this first DM into an encrypted
+    // conversation. Keep the draft local while checking the recipient.
+    const mayDiscover=uncheckedOff.size>0||typeof e2eMayAutoEncrypt==='function'&&e2eMayAutoEncrypt(target,conn_id);
+    const outgoing=heldSignal||mayDiscover||_isE2eConversation(target,conn_id,true)?raw:await translateOutgoing(raw,conn_id,target);
     if(outgoing===null) return 'keep';
     // Translate visible caret-notation formatting tokens (^B/^I/^U/^O/^R/^Cnn[,nn]) to real mIRC control chars,
     // then apply the persistent "My Messages" color (no-op when off / when the user already added codes).
@@ -8413,23 +9066,40 @@ async function handleInput(raw){
     const replyPrefix=getReplyPrefix(conn_id,target,false);
     if(replyPrefix===null) return 'keep';   // r8: reply for another conversation → nothing sent, text kept
     const parts=[];
-    approval.quoted=!!replyPrefix;
     if(replyPrefix){
       const q=await _prepChatPart(conn_id,target,replyPrefix.trim(),'PRIVMSG',approval);
       if(!q) return 'keep';
       parts.push(q);
     }
-    const body=await _prepChatPart(conn_id,target,raw2,'PRIVMSG',approval);
+    let body=await _prepChatPart(conn_id,target,raw2,'PRIVMSG',approval);
     if(!body) return 'keep';
+    if(mayDiscover&&!heldSignal&&!body.encrypted){
+      if(!_chatApprovalStillValid(approval,conn_id,target)) return 'keep';
+      const translated=await translateOutgoing(raw,conn_id,target,approval);
+      if(translated===null){
+        if(currentUser===draftUser&&active&&_sameConvAt(conn_id,target,active.conn_id,active.target))
+          _chatApprovalStillValid(approval,conn_id,target);
+        return 'keep';
+      }
+      if(translated!==raw){
+        body=await _prepChatPart(conn_id,target,_styleOutgoing(toMircChars(translated)),'PRIVMSG',approval);
+        if(!body) return 'keep';
+      }
+    }
     parts.push(body);
+    if(heldSignal&&parts.some(part=>!part.encrypted)){
+      showToast(_e2eBundleFailure(target,'disabled-elsewhere'));
+      return 'keep';
+    }
     if(!_chatApprovalStillValid(approval,conn_id,target)) return 'keep';
     _queueChatParts(conn_id,target,parts,'privmsg');
+    _finishHeldSignalDraft(heldSignal,raw);
     if(reply&&_replyTo===reply) cancelReply();
   }
 }
 function insertAtCursor(inp,text){
   const pos=inp.selectionStart;
-  inp.value=inp.value.slice(0,pos)+text+inp.value.slice(inp.selectionEnd);
+  _setComposerText(inp,inp.value.slice(0,pos)+text+inp.value.slice(inp.selectionEnd));
   inp.selectionStart=inp.selectionEnd=pos+text.length;
   inp.focus();
 }
@@ -8598,7 +9268,7 @@ function tabComplete(inp){
     _tabCycleState.index=(_tabCycleState.index+1)%_tabCycleState.matches.length;
     _tabCycleState.stamp=now;
     const next=_tabCycleState.matches[_tabCycleState.index]+_tabCycleState.suffix;
-    inp.value=val.slice(0, val.length-_tabCycleState.completed.length)+next;
+    _setComposerText(inp,val.slice(0,val.length-_tabCycleState.completed.length)+next);
     _tabCycleState.completed=next;
     _tabCycleState.value=inp.value;   // keep the exact-match anchor current for the next cycle
     _tabPlaceCursorEnd(inp);
@@ -8621,14 +9291,14 @@ function tabComplete(inp){
   const suffix=(words.length===1?': ':' ');
   const completed=nicks[0]+suffix;
   words[words.length-1]=completed;
-  inp.value=words.join(' ');
+  _setComposerText(inp,words.join(' '));
   // bufKey + value anchor the cycle to THIS buffer and the exact text we produced,
   // so a channel switch or manual typing within 3s falls through to a fresh
   // completion instead of cycling the wrong channel's / a coincidental match.
   _tabCycleState={partial,matches:nicks,index:0,stamp:now,completed,suffix,bufKey:k,value:inp.value};
   _tabPlaceCursorEnd(inp);
 }
-function insertNick(nick){const inp=document.getElementById('msg-input');if(!inp.disabled){inp.value+=nick+': ';inp.focus();}}
+function insertNick(nick){const inp=document.getElementById('msg-input');if(!inp.disabled){_setComposerText(inp,inp.value+nick+': ');inp.focus();}}
 
 // ─── Upload ───────────────────────────────────────────────────────────────────
 function _chatAllowsPublicContent(chat){
@@ -8766,7 +9436,7 @@ async function submitPaste(btn){
     const d=await r.json();
     if(!r.ok){showToast(d.error||'Failed');return;}
     const inp=document.getElementById('msg-input');
-    if(inp){inp.value=inp.value?(inp.value+' '+d.url):d.url;inp.focus();}
+    if(inp){_setComposerText(inp,inp.value?(inp.value+' '+d.url):d.url);inp.focus();}
     btn.closest('[style*=fixed]').remove();
   }catch(e){showToast('Error: '+e.message);}finally{btn.disabled=false;btn.textContent='Create Paste';}
 }
@@ -9320,7 +9990,7 @@ function insertUploadLink(id){
     if(haveNet) setActive(r.source_conn_id, r.source_target);
   }
   const inp=document.getElementById('msg-input');
-  if(inp){ inp.value = inp.value ? (inp.value+' '+text) : text; inp.focus(); }
+  if(inp){ _setComposerText(inp,inp.value?(inp.value+' '+text):text); inp.focus(); }
   showToast('Inserted into chat');
 }
 
@@ -10505,6 +11175,7 @@ function _deviceLockNow(fromOtherTab,mins){
   if(!window._appShown) return;   // not logged in yet: applied at the next 'state'
   const first=!_deviceLocked;
   _deviceLocked=true; _devLockMins=mins||_devLockFlagMins()||_devLockMins;
+  _clearComposerSendAttempt();
   document.body.classList.add('cryptirc-device-locked','cryptirc-device-locked-ui');
   if(first){
     _closeSecretPanels();
@@ -11053,16 +11724,21 @@ function _markRefusedSend(){
 // recipient with E2E on → one line per recipient, each encrypted if its E2E is on; if
 // any recipient is BLOCKED, nothing at all is sent (warned). Returns true if sent.
 async function _e2eSendToTargets(conn_id,verb,to,text,opts){
+  const account=currentUser;
   const list=_splitTargets(to);
   const kindOf=verb==='NOTICE'?'notice':'privmsg';
-  const approval={view:active&&{conn_id:active.conn_id,target:active.target}};
+  const approval=opts?.approval||{view:active&&{conn_id:active.conn_id,target:active.target}};
+  if(approval.composer&&list.length===1) approval.composer.recipient=list[0];
   // r9 (astra-p3 app.js:8450): queued and tracked like typed lines (_queueChatSend): each
   // payload is tied to its row(s) — ⏳ while offline or waiting for E2E, "not sent" when it is
   // refused or the session ends (these rows used to look sent while the queue dropped them).
   const send=(payloads,tgs,enc,t)=>{
     const rows=(!(opts&&opts.noEcho)||enc)?tgs.map(()=>({ts:Date.now()/1000|0,from:getNick(conn_id),text:(t==null?text:t),kind:kindOf,...(enc?{encrypted:true}:{})})):[];
     if(rows.length>1) _rowTwins.set(rows[0],rows.slice(1));
-    for(const p of payloads){ if(rows.length) _queueChatSend(p,rows[0]); else rateLimitedSend(p); }
+    for(const p of payloads){
+      if(!enc)_rememberQueuedPlain(p,approval);
+      if(rows.length) _queueChatSend(p,rows[0]); else rateLimitedSend(p);
+    }
     for(let i=0;i<rows.length;i++){ if(i&&rows[0].sendState) rows[i].sendState=rows[0].sendState; addMessage(conn_id,tgs[i],rows[i]); }
   };
   // r3 (w-web LOW, r2/app #8 merge seam): more recipients than the server accepts (F9) —
@@ -11075,14 +11751,20 @@ async function _e2eSendToTargets(conn_id,verb,to,text,opts){
   }
   // r6: right after a reconnect E2E re-syncs (every target blocked meanwhile) — wait for it.
   try{ if(typeof _e2eResyncWait==='function'&&window.E2E&&E2E._resyncPending){ if(typeof _e2eKickResync==='function') _e2eKickResync(); await _e2eResyncWait(8000); } }catch(_){}
-  const anyE2E=typeof e2eTargetState==='function' && list.some(x=>e2eTargetState(x,{conn_id}).mode!=='none');
+  const held=list.find(t=>_signalHeldDraftFor(conn_id,t));
+  const anyE2E=typeof e2eTargetState==='function' && list.some(x=>e2eTargetState(x,{conn_id}).mode!=='none'||
+    (typeof e2eSignalOptOutKey==='function'&&e2eSignalOptOutKey(x,conn_id)));
   if(list.length<=1 || !anyE2E){
     let wire=null; const tails=[];
     if(list.length<=1){
       // r7: the continuation pieces come back (defer) and are queued right behind the first.
       try{ wire=(window.E2E?.ready||window.E2E?.channelKeys?.[to])?await e2eEncryptOutgoing(to,text,conn_id,{verb,defer:tails,auto:true,approval}):null; }
       catch(_){ showToast('🔒 Encryption failed — message not sent.'); return false; }
-      if(_e2eBlockedWarn(wire)||!_chatApprovalStillValid(approval,conn_id,to)) return false;
+      if(_e2eBlockedWarn(wire,approval.view,account,approval.composer)||!_chatApprovalStillValid(approval,conn_id,to)) return false;
+    }
+    if(!wire&&held){
+      _e2eBlockedWarn(_e2eBlock(_e2eBundleFailure(held,'disabled-elsewhere')),approval.view,account);
+      return false;
     }
     // r4 (IRC-H1): plaintext → the pieces the server will send (≤ 4), one row each.
     const pcs=wire?[wire]:_plainChatPieces(conn_id,verb,to,text);
@@ -11100,7 +11782,11 @@ async function _e2eSendToTargets(conn_id,verb,to,text,opts){
   // 1) every recipient's E2E state and plaintext size, before any encryption;
   for(const tg of list){
     const st=e2eTargetState(tg,{conn_id});
-    if(st&&st.mode==='blocked'&&!st.waitable){ try{ window.E2E.lastBlockReason=st.reason; }catch(_){} _e2eBlockedWarn({e2eBlocked:true}); return false; }
+    if(st&&st.mode==='blocked'&&!st.waitable){
+      if(st.signalDisabled) approval.holdSignal?.(conn_id,tg);
+      try{ window.E2E.lastBlockReason=st.reason; }catch(_){}
+      _e2eBlockedWarn({e2eBlocked:true},approval.view,account); return false;
+    }
     if(st&&st.mode==='none'&&!_plainChatPieces(conn_id,verb,tg,text)) return _plainTooLong(conn_id,tg);
   }
   // 2) encrypt each one with its later pieces held back (defer), 3) send only if all succeeded.
@@ -11111,13 +11797,17 @@ async function _e2eSendToTargets(conn_id,verb,to,text,opts){
   const wires=[];
   for(const tg of list){
     let w=null; const tails=[];
-    try{ w=await e2eEncryptOutgoing(tg,text,conn_id,{verb,defer:tails}); }
+    try{ w=await e2eEncryptOutgoing(tg,text,conn_id,{verb,defer:tails,approval}); }
     catch(_){ showToast('🔒 Encryption failed — message not sent.'); return false; }
-    if(_e2eBlockedWarn(w)) return false;
+    if(_e2eBlockedWarn(w,approval.view,account)) return false;
     // r4 (IRC-H1): a plaintext recipient gets the pieces the server will send.
     const pcs=w?null:_plainChatPieces(conn_id,verb,tg,text);
     if(!w&&!pcs) return _plainTooLong(conn_id,tg);
     wires.push([tg,w,pcs,tails]);
+  }
+  if(held&&wires.some(([,wire])=>!wire)){
+    _e2eBlockedWarn(_e2eBlock(_e2eBundleFailure(held,'disabled-elsewhere')),approval.view,account);
+    return false;
   }
   for(const [tg,w,pcs,tails] of wires){
     if(w){
@@ -11140,14 +11830,21 @@ async function _e2eSendToTargets(conn_id,verb,to,text,opts){
 // → a part {encrypted, payloads, rows} or null (refused; the reason was shown).
 async function _prepChatPart(conn_id,target,text,verb,approval){
   verb=verb||'PRIVMSG';
+  const account=currentUser;
   let first=null; const tails=[];
   try{ first=(window.E2E?.ready||window.E2E?.channelKeys?.[target])?await e2eEncryptOutgoing(target,text,conn_id,{verb,defer:tails,auto:true,approval}):null; }
   catch(_){ showToast('🔒 Encryption failed — message not sent.'); return null; }
-  if(_e2eBlockedWarn(first)) return null;
+  if(_e2eBlockedWarn(first,approval?.view,account,approval?.composer)) return null;
+  if(!first&&_signalHeldDraftFor(conn_id,target)){
+    _e2eBlockedWarn(_e2eBlock(_e2eBundleFailure(target,'disabled-elsewhere')),approval?.view,account);
+    return null;
+  }
   if(first) return {encrypted:true,payloads:[{type:'send',conn_id,raw:`${verb} ${target} :${first}`},...tails.map(t=>({type:'send',conn_id:t.cid||conn_id,raw:t.raw}))],rows:[text]};
   const pcs=_plainChatPieces(conn_id,verb,target,text);   // r4 (IRC-H1)
   if(!pcs){ _plainTooLong(conn_id,target); return null; }
-  return {encrypted:false,payloads:pcs.map(p=>({type:'send',conn_id,raw:`${verb} ${target} :${p}`})),rows:pcs};
+  const payloads=pcs.map(p=>({type:'send',conn_id,raw:`${verb} ${target} :${p}`}));
+  for(const p of payloads)_rememberQueuedPlain(p,approval);
+  return {encrypted:false,payloads,rows:pcs};
 }
 // The row text for a piece: a /me shows without its CTCP ACTION wrapper.
 function _chatRowText(t,kind){ return kind==='action'?String(t).replace(/^\x01ACTION /,'').replace(/\x01$/,''):t; }
@@ -11176,7 +11873,7 @@ function _queueChatParts(conn_id,target,parts,kind){
 }
 async function _sendChat(conn_id,target,text,o){
   const verb=(o&&o.verb)||'PRIVMSG', kind=(o&&o.kind)||'privmsg';
-  const approval={view:active&&{conn_id:active.conn_id,target:active.target}};
+  const approval=o?.approval||{view:active&&{conn_id:active.conn_id,target:active.target}};
   const part=await _prepChatPart(conn_id,target,text,verb,approval);
   if(!part||!_chatApprovalStillValid(approval,conn_id,target)) return false;
   _queueChatParts(conn_id,target,[part],kind);
@@ -11699,7 +12396,7 @@ function _tlsIdSet(key){ try{ const a=JSON.parse(localStorage.getItem(key)||'[]'
 function _tlsIdSetSave(key,set){ try{ localStorage.setItem(key,JSON.stringify([...set].slice(-200))); }catch(_){} }
 // Both sets travel in the synced prefs (tlsVerify), so the undo below works on every
 // device of the account, not just the one that clicked "Turn verification on".
-function _tlsStampSync(){ try{ localStorage.setItem('cryptirc_tlsverify_ts',String(Date.now())); }catch(_){} try{ savePrefsToServer(); }catch(_){} }
+function _tlsStampSync(){ try{ stampPreference('cryptirc_tlsverify_ts'); }catch(_){} try{ savePrefsToServer(); }catch(_){} }
 function _netTlsOff(cfg){ return !!(cfg && cfg.tls && cfg.tls_accept_invalid_certs); }
 // Preset id whose host AND port match this config (the exact endpoint that was checked).
 function _presetIdForCfg(cfg){
@@ -11964,7 +12661,7 @@ function showEncryptPanel(){
 
   if(isChan){
     title.textContent=`Encryption — ${target}`;
-    const hasKey=window.E2E?.channelKeys?.[_e2eUiName(target,conn_id)];
+    const hasKey=E2E.channelKeys[_e2ePskSlot(_e2eUiName(target,conn_id),conn_id)];
     if(hasKey){
       body.innerHTML=`
         <div class="encrypt-status on">
@@ -12014,13 +12711,14 @@ function showEncryptPanel(){
     // DM
     title.textContent=`Encryption — ${target}`;
     const name=_e2eUiName(target,conn_id);
-    const hasPSK=E2E.channelKeys[name];
+    const hasPSK=E2E.channelKeys[_e2ePskSlot(name,conn_id)];
     const peerKey=_e2eDmKey(name,conn_id);
     const signalPreferred=methodControls&&_e2ePrefersSignal(peerKey);
     const session=E2E.dmSessions[peerKey];
     const state=e2eTargetState(_e2eRealTarget(target),{conn_id});
-    const hasSignal=session||E2E.state?.dm[peerKey]?.on;
-    if(!signalPreferred&&!hasPSK&&_e2eSharedKeyConfigured(name)){
+    const disabledSignal=state.signalInventory||state.signalDisabled;
+    const hasSignal=session||E2E.state?.dm[peerKey]?.on||disabledSignal;
+    if(!disabledSignal&&!signalPreferred&&!hasPSK&&_e2eSharedKeyConfigured(name,conn_id)){
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
@@ -12030,7 +12728,7 @@ function showEncryptPanel(){
           <button class="encrypt-btn" data-encrypt-fn="importKey">Import shared key</button>
           ${methodControls?'<button class="encrypt-btn" data-encrypt-cmd="use-signal">Use Signal for new messages</button>':''}
         </div>`;
-    } else if(hasPSK&&!signalPreferred){
+    } else if(!disabledSignal&&hasPSK&&!signalPreferred){
       body.innerHTML=`
         <div class="encrypt-status on">
           <span class="encrypt-status-icon">🔐</span>
@@ -12056,6 +12754,7 @@ function showEncryptPanel(){
           </button>
         </div>`;
     } else if(hasSignal){
+      const restart=!!session&&!disabledSignal;
       const detail=state.mode==='blocked'
         ? state.reason
         : session?.x3dhPending ? 'Ready to send. An encrypted reply will confirm the Signal session.' : 'Using Signal encryption.';
@@ -12066,9 +12765,9 @@ function showEncryptPanel(){
         </div>
         <div class="encrypt-actions">
           ${signalPreferred&&hasPSK?'<button class="encrypt-btn" data-encrypt-cmd="use-shared-key">Use saved shared key for new messages</button>':''}
-          <button class="encrypt-btn" data-encrypt-cmd="${session?'restart':'on'}" data-encrypt-target="1">
+          <button class="encrypt-btn" data-encrypt-cmd="${restart?'restart':'on'}" data-encrypt-target="1">
             <span class="encrypt-btn-icon">🔄</span>
-            <div class="encrypt-btn-text">${session?'Restart Signal Session':'Start Signal session'}<div class="encrypt-btn-sub">Connect with this contact while keeping encryption on</div></div>
+            <div class="encrypt-btn-text">${disabledSignal?'Resume Signal':restart?'Restart Signal Session':'Start Signal session'}<div class="encrypt-btn-sub">Connect with this contact while keeping encryption on</div></div>
           </button>
           <button class="encrypt-btn" data-encrypt-cmd="verify" data-encrypt-target="1">
             <span class="encrypt-btn-icon">✓</span>
@@ -12080,7 +12779,7 @@ function showEncryptPanel(){
           </button>
           <button class="encrypt-btn danger" data-encrypt-cmd="off" data-encrypt-target="1">
             <span class="encrypt-btn-icon">🔓</span>
-            <div class="encrypt-btn-text">End E2E Session<div class="encrypt-btn-sub">Stop encrypting messages to this user</div></div>
+            <div class="encrypt-btn-text">${disabledSignal?'Confirm unencrypted chat':'End E2E Session'}<div class="encrypt-btn-sub">Stop encrypting messages to this user</div></div>
           </button>
         </div>`;
     } else {
@@ -12108,11 +12807,20 @@ function showEncryptPanel(){
     title.textContent='Encryption';
     body.innerHTML='<div class="encrypt-note" style="text-align:center;padding:20px 0;">Select a channel or DM to manage encryption.</div>';
   }
-  if(methodControls&&target!=='status'&&!isChan&&_e2eSetupNick(target)){
+  if(methodControls&&target!=='status'&&!isChan&&_e2eSetupNick(_e2eRealTarget(target),target===_STATUS_NICK_Q)){
     const suggest=document.createElement('button');
     suggest.type='button'; suggest.className='encrypt-btn'; suggest.dataset.encryptCmd='suggest-signal';
     suggest.textContent='Ask to use Signal';
     body.querySelector('.encrypt-actions')?.prepend(suggest);
+  }
+  if(!E2E.identityReady&&typeof e2eUpdateSetupButton==='function'){
+    const actions=document.createElement('div');
+    actions.className='encrypt-actions';
+    const button=document.createElement('button');
+    button.type='button';button.className='encrypt-btn';button.dataset.encryptCmd='unlock';
+    button.dataset.e2eUnlock='Unlock encrypted chats';
+    e2eUpdateSetupButton(button);
+    actions.appendChild(button);body.prepend(actions);
   }
   document.getElementById('encrypt-overlay').classList.add('show');
   _overlayOpen('encryptPanel', closeEncryptPanel);
@@ -12165,7 +12873,11 @@ async function encryptAction(cmd,arg){
     try{await e2ePromptDeviceUnlock();}
     finally{
       clearTimeout(timeout);
-      if(button){button.dataset.encryptCmd='unlock';button.disabled=false;button.textContent=label;}
+      if(button){
+        button.dataset.encryptCmd='unlock';
+        if(button.dataset.e2eUnlock&&typeof e2eUpdateSetupButton==='function')e2eUpdateSetupButton(button);
+        else{button.disabled=false;button.textContent=label;}
+      }
     }
     return;
   }
@@ -12205,7 +12917,13 @@ async function doImportKey(){
   if(!raw){return;}
   if(!active)return;
   // Extract only valid mnemonic words from pasted text (handles extra text, emojis, channel names, etc.)
-  const tokens=raw.toLowerCase().split(/\s+/).filter(w=>w.length>1&&/^[a-z]+$/.test(w));
+  const parts=raw.toLowerCase().split(/\s+/);
+  const scopes=parts.filter(w=>w.startsWith('scope:'));
+  if(scopes.length>1||scopes.some(w=>!/^scope:[a-f0-9]{32}$/.test(w))){
+    e2eSysMsg(active.target,'❌ Paste the complete shared-key code, including its scope if shown.');
+    return;
+  }
+  const tokens=parts.filter(w=>w.length>1&&/^[a-z]+$/.test(w));
   const wl=window.WORDLIST||null;
   const filtered=wl?tokens.filter(w=>wl.includes(w)):tokens;
   const words=filtered.length===32?filtered:tokens;
@@ -12213,12 +12931,13 @@ async function doImportKey(){
     e2eSysMsg(active.target,`❌ Expected 32 mnemonic words but found ${words.length}. Please paste only the 32-word key.`);
     return;
   }
-  await handleEncryptCommand(['add',...words],active.conn_id,active.target);
+  await handleEncryptCommand(['add',...words,...scopes],active.conn_id,active.target);
   showEncryptPanel();
 }
 
 async function copyChannelKey(){
   if(!active)return;
+  const view=active;
   // r5 (security review): exporting a key resolves under the network's REAL case rules
   // (e2e.js _e2eKeyCmdName), not the panel's send-path view: a look-alike that is a
   // different channel there never gets another channel's key; another spelling of the
@@ -12231,12 +12950,16 @@ async function copyChannelKey(){
     if(r.ask&&!(await _e2eKeyCmdConfirm(r.ask+'\n\nCopy the E2E key held for '+r.name+'?','Copy')))return;
     name=r.name;
   }
-  const key=name?window.E2E?.channelKeys?.[name]:null;
+  if(active!==view)return;
+  const key=name?window.E2E?.channelKeys?.[_e2ePskSlot(name,view.conn_id)]:null;
   if(!key){showToast('No key set for this channel');return;}
   const raw=await crypto.subtle.exportKey('raw',key);
-  const words=bytesToMnemonic(new Uint8Array(raw));
-  try{await navigator.clipboard.writeText(words.join(' '));showToast('Key copied to clipboard!');}
-  catch(e){await _e2eShowSharedKey(words.join(' '));}
+  const bytes=new Uint8Array(raw);
+  const code=_e2ePskShareText(key,bytesToMnemonic(bytes).join(' '));
+  bytes.fill(0);
+  if(active!==view||window.E2E?.channelKeys?.[_e2ePskSlot(name,view.conn_id)]!==key)return;
+  try{await navigator.clipboard.writeText(code);showToast('Key copied to clipboard!');}
+  catch(e){await _e2eShowSharedKey(code);}
   closeEncryptPanel();
 }
 
@@ -14820,7 +15543,7 @@ function insertEmoji(e){
   const inp=document.getElementById('msg-input');
   if(inp.disabled)return;
   const pos=inp.selectionStart||inp.value.length;
-  inp.value=inp.value.slice(0,pos)+e+inp.value.slice(pos);
+  _setComposerText(inp,inp.value.slice(0,pos)+e+inp.value.slice(pos));
   inp.focus();
   document.getElementById('emoji-picker').style.display='none';
 }
@@ -14870,7 +15593,7 @@ document.addEventListener('click',e=>{
     const v=inp.value, pos=inp.selectionStart;
     const before=v.slice(0,pos);
     const idx=before.lastIndexOf(':');
-    inp.value=before.slice(0,idx)+em.e+v.slice(pos);
+    _setComposerText(inp,before.slice(0,idx)+em.e+v.slice(pos));
     inp.focus();
     acEl.style.display='none';acIdx=-1;
   }
@@ -14974,7 +15697,7 @@ document.addEventListener('click',e=>{
     const v=inp.value, pos=inp.selectionStart;
     const before=v.slice(0,pos);
     const idx=before.lastIndexOf('@');
-    inp.value=before.slice(0,idx)+nick+' '+v.slice(pos);
+    _setComposerText(inp,before.slice(0,idx)+nick+' '+v.slice(pos));
     inp.focus();
     nacEl.style.display='none';nacIdx=-1;
     if(active) _lastMentioned[bk(active.conn_id,active.target)]=nick;
@@ -15155,7 +15878,7 @@ document.addEventListener('click',e=>{
     });
   }
   function completeSlash(c){
-    inp.value='/'+c.cmd+' ';
+    _setComposerText(inp,'/'+c.cmd+' ');
     inp.focus();
     slashEl.style.display='none';slashIdx=-1;
   }
@@ -15198,7 +15921,7 @@ document.addEventListener('click',e=>{
           // dispatch via setTimeout(0) so the rest of the current event
           // finishes before we actually fire the command.
           const cmdToRun = inp.value.replace(/\s+$/, '');
-          inp.value = '';
+          _setComposerText(inp,'');
           setTimeout(()=>{
             if(typeof handleInput === 'function') handleInput(cmdToRun);
           }, 0);
@@ -16276,16 +16999,54 @@ function getSeen(nick){return _seenDb[nick.toLowerCase()]||null;}
 
 // ─── Client-side rate limiter ────────────────────────────────────────────────
 let _rateQueue=[],_rateTimer=null;
+let _rateDmRetry=null;
 // r8: since when the queue has held a frame (drainRateQueue) — the E2E verdict bounds
 // waiting for a pending handshake / session check by it.
 const _heldSince=new WeakMap();
+const _signalSyncSince=new WeakMap();
 function getRateLimit(){return parseInt(localStorage.getItem('cryptirc_ratelimit')||'500');}
 function setRateLimit(ms){localStorage.setItem('cryptirc_ratelimit',String(ms));savePrefsToServer();}
 function rateLimitedSend(msg){
   _rateQueue.push(msg);
   if(!_rateTimer)drainRateQueue();
 }
+function _refuseQueuedChat(v){
+  const rm=_rateQueue.shift(), m=_rateRows.get(rm);
+  if(m&&v.restoreDraft)_unsentPlainDrafts.set(m,{user:currentUser,connId:rm.conn_id,target:_dmTarget(v.target)});
+  if(m){ _rateRows.delete(rm); _setMsgSendState(m,'failed'); }
+  const why=v.cipher
+    ? `🔒 Not sent: a line queued for ${v.target} was encrypted with something that is no longer in use here — ${v.reason}. Send it again.`
+    : `🔒 Not sent: a line queued for ${v.target} before its end-to-end encryption was on (or while it could not be checked) would have gone out unencrypted — ${v.reason||'E2E is on for it now'}. Send it again.`;
+  try{ sysMsg(rm.conn_id,v.target,why,'error'); }catch(_){}
+}
+async function _retryQueuedSignal(msg,v){
+  _rateDmRetry=msg;
+  _markRateQueuePending(true);
+  let replacement;
+  try{ replacement=await e2eRetryQueuedDm(v.target,msg.conn_id,v.wire,v.retry,()=>_rateQueue[0]===msg); }catch(_){}
+  _rateDmRetry=null;
+  if(_rateQueue[0]===msg){
+    if(replacement?.wait){
+      const now=Date.now();
+      const since=_signalSyncSince.get(msg)||now;
+      _signalSyncSince.set(msg,since);
+      if(now-since<120000){_rateTimer=setTimeout(drainRateQueue,1000);return;}
+      _refuseQueuedChat({...v,reason:'its updated Signal session could not be loaded'});
+    } else if(replacement?.isCurrent()){
+      msg.raw=`${v.verb} ${v.target} :${replacement.wire}`;
+      const row=_rateRows.get(msg);
+      if(row?._dmHistoryWire===v.wire) row._dmHistoryWire=replacement.wire;
+      const headers=replacement.headers.map(wire=>({type:'send',conn_id:msg.conn_id,raw:`PRIVMSG ${v.target} :${wire}`,
+        e2e_identity_revision:replacement.identityRevision}));
+      _rateQueue.unshift(...headers);
+      replacement.markHeaderQueued();
+      _signalSyncSince.delete(msg);
+    } else _refuseQueuedChat(v);
+  }
+  _rateTimer=setTimeout(drainRateQueue,getRateLimit());
+}
 function drainRateQueue(){
+  if(_rateDmRetry) return;
   if(!_rateQueue.length){_rateTimer=null;return;}
   // Don't drop a queued send when the socket is down: peek WS readiness BEFORE
   // shifting so a disconnect mid-queue doesn't silently lose the message (it was
@@ -16294,28 +17055,89 @@ function drainRateQueue(){
   // Must be AUTHENTICATED, not just open: a line sent before the auth frame makes
   // the server drop the socket and the line with it (_wsReady, near connectWs).
   if(!_wsReady()){ _rateTimer=setTimeout(drainRateQueue,1000); return; }
+  const msg=_rateQueue[0], match=_queuedChatMatch(msg);
+  if(match?.[3]?.startsWith('[e2edm2]')&&window.E2E?.keyReady&&!E2E._resyncPending&&typeof e2eWithQueuedSignal==='function'){
+    _rateDmRetry=msg;
+    const finish=synced=>{
+      _rateDmRetry=null;
+      if(_rateQueue[0]!==msg||!_wsReady()){ _rateTimer=setTimeout(drainRateQueue,1000); return; }
+      _dispatchRateHead(synced,match);
+    };
+    void e2eWithQueuedSignal(match[2],msg.conn_id,finish).catch(()=>{if(_rateDmRetry===msg) finish(false);});
+    return;
+  }
+  const body=match?.[3];
+  if(body&&!/^(?:\[e2e(?:dm2|x3dh)\]|sd8~|\x01(?!ACTION ))/.test(body)&&typeof e2eCheckOptOutSlot==='function'){
+    const approval=_queuedPlainApprovals.get(msg);
+    const targets=match[2].split(',').filter(target=>approval||e2eSignalOptOutKey(target,msg.conn_id));
+    if(targets.length){void _drainPlainDm(msg,match,targets,approval);return;}
+  }
+  _dispatchRateHead(true,match);
+}
+async function _drainPlainDm(msg,match,targets,approval){
+  _rateDmRetry=msg;
+  const socket=ws, user=currentUser;
+  const current=()=>_rateQueue[0]===msg&&_wsReady()&&ws===socket&&currentUser===user;
+  let refusal=null;
+  for(const target of targets){
+    const key=approval?.key||e2eSignalOptOutKey(target,msg.conn_id);
+    if(!key) continue; // The normal final verdict checks the changed method.
+    let slot='unknown';
+    try{
+      if(approval?.reply){
+        const checked=e2ePlainReplyRecentlyChecked(approval,target,msg.conn_id)||
+          await e2eCheckPlainReply(approval,target,msg.conn_id,current);
+        slot=checked?'empty':'approval-expired';
+      }else if(!approval||(approval.user===user&&approval.conn_id===msg.conn_id))
+        slot=await e2eCheckOptOutSlot(target,msg.conn_id,key,current,approval);
+    }catch(_){}
+    if(slot!=='empty'){
+      if((slot==='waiting'&&Date.now()-(_heldSince.get(msg)||Date.now())<120000)||
+          (slot==='unknown'&&e2eTargetState(target,{conn_id:msg.conn_id}).discovery)) refusal='hold';
+      else refusal={refuse:true,target,restoreDraft:true,
+        reason:slot==='trusted'?'a device has confirmed this contact’s Signal identity':
+        slot==='enabling'?'another device enabled Signal for this contact':
+        slot==='active'?'another device has an active Signal session':
+        slot==='approval-expired'?'the encryption check is no longer current':
+        slot==='account-setup-changed'?'your account’s encryption setup changed. Run /encrypt unlock on this device':'the current Signal setting could not be confirmed'};
+      break;
+    }
+  }
+  if(_rateDmRetry!==msg) return;
+  _rateDmRetry=null;
+  if(!current()){_rateTimer=setTimeout(drainRateQueue,1000);return;}
+  _dispatchRateHead(true,match,refusal);
+}
+function _dispatchRateHead(synced,match,plainRefusal=null){
   // r6 (codex-p3 app.js:13275): a queued line was built (encrypted or not) when it was
   // typed. A PLAINTEXT chat line is re-checked against its target's CURRENT E2E state
   // right before it leaves — E2E may have been turned on for it since (here, on another
   // device, or learned only now after a reconnect): still unencrypted → sent; E2E status
   // being (re)discovered → held (stays first in the queue, ⏳); encrypted / blocked now →
   // NOT sent, its row is marked "not sent" with the reason.
-  const v=_queuedPlainVerdict(_rateQueue[0]);
+  const head=_rateQueue[0];
+  // The verdict consumes this wire's metadata. Keep its originating revision
+  // for the server's final identity check if this exact frame is released.
+  const signalRevision=match?.[3]?.startsWith('[e2edm2]') ? window.E2E?._wireMeta?.get(match[3])?.ownRevision : null;
+  const now=Date.now();
+  if(!synced&&!_signalSyncSince.has(head))_signalSyncSince.set(head,now);
+  const v=plainRefusal||(synced?_queuedPlainVerdict(head,match):now-_signalSyncSince.get(head)<120000?'hold':
+    {refuse:true,cipher:true,target:match[2],reason:'its updated Signal session could not be loaded'});
   // r7 (agy-flash e2e.js:3538): held lines say so — the rows (⏳ "waiting until it is known
   // whether this conversation is encrypted") and, while the vault is locked (E2E state
   // can't be read then; they go out after the unlock), the unlock screen.
   if(v==='hold'){ if(!_heldSince.has(_rateQueue[0])) _heldSince.set(_rateQueue[0],Date.now()); _markRateQueuePending(true); _queueHoldNotice(true); _rateTimer=setTimeout(drainRateQueue,1000); return; }
   _queueHoldNotice(false);
+  if(v?.retry){ void _retryQueuedSignal(_rateQueue[0],v); return; }
+  if(synced)_signalSyncSince.delete(head);
   if(v&&v.refuse){
-    const rm=_rateQueue.shift(), m=_rateRows.get(rm);
-    if(m){ _rateRows.delete(rm); _setMsgSendState(m,'failed'); }
-    const why=v.cipher
-      ? `🔒 Not sent: a line queued for ${v.target} was encrypted with something that is no longer in use here — ${v.reason}. Send it again.`
-      : `🔒 Not sent: a line queued for ${v.target} before its end-to-end encryption was on (or while it could not be checked) would have gone out unencrypted — ${v.reason||'E2E is on for it now'}. Send it again.`;
-    try{ sysMsg(rm.conn_id,v.target,why,'error'); }catch(_){}
+    _refuseQueuedChat(v);
     _rateTimer=setTimeout(drainRateQueue,getRateLimit()); return;
   }
   const msg=_rateQueue.shift();
+  if (signalRevision) msg.e2e_identity_revision=signalRevision;
+  const plainApproval=_queuedPlainApprovals.get(msg);
+  if(plainApproval?.reply) msg.e2e_plain_revision=plainApproval.checkedRevision;
   if(wsend(msg)===false && msg && _refusedFrames.has(msg)){
     // Refused for good (too many recipients / unencrypted to an E2E peer), not an outage: never retried.
     const m=_rateRows.get(msg); if(m){ _rateRows.delete(msg); _setMsgSendState(m,'failed'); }
@@ -16324,9 +17146,10 @@ function drainRateQueue(){
 }
 
 // r6: 'send' | 'hold' | {refuse, target, reason} for a queued frame (see drainRateQueue).
-function _queuedPlainVerdict(msg){
-  if(!msg||msg.type!=='send'||typeof msg.raw!=='string') return 'send';
-  const m=/^(?:@\S+ +)?(?::\S+ +)?(PRIVMSG|NOTICE) +(\S+) +:?([\s\S]*)$/i.exec(msg.raw);
+function _queuedChatMatch(msg){
+  return msg?.type==='send'&&typeof msg.raw==='string' ? /^(?:@\S+ +)?(?::\S+ +)?(PRIVMSG|NOTICE) +(\S+) +:?([\s\S]*)$/i.exec(msg.raw) : null;
+}
+function _queuedPlainVerdict(msg,m=_queuedChatMatch(msg)){
   if(!m) return 'send';
   const txt=m[3]||'';
   if(!txt||/^\x01(?!ACTION )/.test(txt)) return 'send';                 // CTCP request (as _statusNickPlainBlocked)
@@ -16337,14 +17160,19 @@ function _queuedPlainVerdict(msg){
   if(/^(\[e2edm2\]|sd8~)/.test(txt)){
     if(typeof e2eQueuedWireVerdict!=='function') return 'send';
     const _hs=_heldSince.get(msg);
-    let v=null; try{ v=e2eQueuedWireVerdict(m[2],msg.conn_id,txt,_hs?Date.now()-_hs:0); }catch(_){ v={refuse:true,reason:'its encryption state could not be checked'}; }
+    let v=null;
+    try{ v=e2eQueuedWireVerdict(m[2],msg.conn_id,txt,_hs?Date.now()-_hs:0,_rateRows.has(msg)); }
+    catch(_){ v={refuse:true,reason:'its encryption state could not be checked'}; }
     if(v==='hold'||v==='send') return v;
+    if(v?.retry) return {retry:v.retry,target:m[2],verb:m[1],wire:txt,cipher:true,reason:'the Signal session changed after it was encrypted'};
     return {refuse:true,target:m[2],cipher:true,reason:(v&&v.reason)||'its encryption changed'};
   }
   if(typeof e2eTargetState!=='function') return 'send';                 // no engine: wsend's backstop refuses
   let hold=false;
   for(const t of m[2].split(',')){
     if(!t) continue;
+    const approval=_queuedPlainApprovals.get(msg);
+    if(approval?.reply&&e2ePlainReplyRecentlyChecked(approval,t,msg.conn_id)) continue;
     let st=null; try{ st=e2eTargetState(t,{conn_id:msg.conn_id}); }catch(_){ return {refuse:true,target:t,reason:'its E2E state could not be checked'}; }
     if(!st||st.mode==='none') continue;
     if(st.mode==='blocked'&&st.discovery){ hold=true; continue; }
@@ -16561,7 +17389,7 @@ function formatBytes(b){if(b<1024)return b+' B';if(b<1048576)return(b/1024).toFi
   function completeChan(ch){
     const v=inp.value,pos=inp.selectionStart,before=v.slice(0,pos);
     const m=before.match(/(^|\s)(#[a-zA-Z0-9_\-]{0,30})$/);
-    if(m){inp.value=before.slice(0,before.length-m[2].length)+ch+' '+v.slice(pos);inp.focus();}
+    if(m){_setComposerText(inp,before.slice(0,before.length-m[2].length)+ch+' '+v.slice(pos));inp.focus();}
     chEl.style.display='none';chIdx=-1;
   }
   inp.addEventListener('keydown',e=>{
@@ -16615,14 +17443,14 @@ function isDndActive(){
 
 // ─── User notes ──────────────────────────────────────────────────────────────
 function loadUserNotes(){try{return JSON.parse(localStorage.getItem('cryptirc_user_notes')||'{}');}catch{return{};}}
-function saveUserNotes(n){localStorage.setItem('cryptirc_user_notes',JSON.stringify(n));localStorage.setItem('cryptirc_user_notes_ts',String(Date.now()));savePrefsToServer();}
+function saveUserNotes(n){localStorage.setItem('cryptirc_user_notes',JSON.stringify(n));stampPreference('cryptirc_user_notes_ts');savePrefsToServer();}
 
 // ─── Channel key manager ─────────────────────────────────────────────────────
 function loadChanKeys(){try{return JSON.parse(localStorage.getItem('cryptirc_chankeys')||'{}');}catch{return{};}}
 // F29: stamp a change timestamp and flush immediately so a channel key (which
 // drives auto-rejoin) syncs across devices on change and a stale device's snapshot
 // can't clobber it — timestamp-gated in restorePreferences like favorites/muted.
-function saveChanKeys(k){localStorage.setItem('cryptirc_chankeys',JSON.stringify(k));localStorage.setItem('cryptirc_chankeys_ts',String(Date.now()));savePrefsToServer();}
+function saveChanKeys(k){localStorage.setItem('cryptirc_chankeys',JSON.stringify(k));stampPreference('cryptirc_chankeys_ts');savePrefsToServer();}
 
 // ─── Channel stats (persistent, encrypted in vault) ─────────────────────────
 let _chanStats={};        // {channelKey: {nick: count}}
@@ -17043,7 +17871,7 @@ function smartPasteYes(){
   }).then(async r=>{
     const d=await r.json().catch(()=>({})),inp=document.getElementById('msg-input');
     if(!r.ok||!d.url){_smartPasteFailed(text,type,d.error||d.message||('HTTP '+r.status));return;}
-    inp.value=d.url;
+    _setComposerText(inp,d.url);
     const kindLabel=type==='html'?'HTML app paste':type==='markdown'?'Markdown paste':'Paste';
     showToast(expSecs?`${kindLabel} created (expires in ${expLabel.toLowerCase()}) — URL in input bar`:`${kindLabel} created — URL in input bar`);
   }).catch(()=>{_smartPasteFailed(text,type,'network error');});
@@ -17056,12 +17884,13 @@ function _smartPasteFailed(text,type,why){
   _smartPasteText=text; _smartPasteType=type;
   const dlg=document.getElementById('smart-paste-dialog');
   if(dlg) dlg.classList.add('show');
-  else { const inp=document.getElementById('msg-input'); if(inp) inp.value=text; }
+  else { const inp=document.getElementById('msg-input'); if(inp) _setComposerText(inp,text); }
   showToast('Paste failed ('+why+') — your text is kept, try again or choose No');
 }
 function smartPasteNo(){
   document.getElementById('smart-paste-dialog').classList.remove('show');
-  document.getElementById('msg-input').value+=_smartPasteText;
+  const input=document.getElementById('msg-input');
+  _setComposerText(input,input.value+_smartPasteText);
   _smartPasteText='';
 }
 
@@ -17084,6 +17913,15 @@ function importKeepNicks(){
 
 // ─── Server-side preferences sync ─────────────────────────────────────────────
 let _prefsSaveTimer=null;
+// Keep a pending local edit newer than the last snapshot this device applied,
+// including when another device's clock is ahead or two edits share a millisecond.
+function stampPreference(key){
+  const previous=Number(localStorage.getItem(key)), now=Date.now();
+  const stamp=Number.isSafeInteger(previous)&&previous>=now&&previous<Number.MAX_SAFE_INTEGER
+    ? previous+1 : now;
+  localStorage.setItem(key,String(stamp));
+}
+
 // lastRead / closedQueries keys are never pruned locally and outlive the network
 // they belong to; leave keys of networks that no longer exist out of the synced
 // snapshot (only once the network list is loaded, so nothing is dropped early).
@@ -17387,6 +18225,7 @@ function _onServerError(message){
   if(Date.now()-_netSavePendingAt<15000 && (/\(os error \d+\)\s*$/.test(m) || /^Invalid network id\b/i.test(m))){ _netSavePendingAt=0; toast('Network NOT saved — '+m); }
 }
 let _lastFlushTs=0;
+let _prefsRevision=0, _prefsRevisionUser=null;
 // Content signature (everything but the save token and the traffic counters) of the
 // last save the server CONFIRMED (its broadcast echo came back), and of the one in
 // flight. A flush whose content equals the confirmed one is skipped; a save the server
@@ -17444,7 +18283,7 @@ function flushPrefsToServer(){
       _prefsSyncWarn('Settings are too large to sync across devices ('+h.kb(h.tot)+h.what+') — saved on this device only.'+h.fix);
     } else {
       _lastFlushTs=saveTs;
-      if(wsend({type:'save_preferences',prefs:fit.json})) _prefsSentSig=sig;
+      if(wsend({type:'save_preferences',prefs:fit.json,base:_prefsRevisionUser===currentUser?_prefsRevision:0})) _prefsSentSig=sig;
     }
   }catch(e){}
   finally{ try{ _syncPushFiltersToServer(); }catch(_){} }
@@ -17483,6 +18322,8 @@ function _mergeInputHistory(serverList,localList){
 }
 function restorePreferences(p){
   if(!p)return;
+  _prefsRevisionUser=currentUser;
+  _prefsRevision=Number.isSafeInteger(p._prefsRevision)&&p._prefsRevision>=0?p._prefsRevision:0;
   // Skip if this is our own echo — the server broadcasts saved prefs back to
   // all sessions including the sender. Without this check, the echo overwrites
   // local state that the user may have changed since the save was debounced.
@@ -17501,6 +18342,7 @@ function restorePreferences(p){
         // Local is newer — keep local, don't overwrite with stale server data
       } else {
         localStorage.setItem('cryptirc_favs',JSON.stringify(p.favorites));
+        localStorage.setItem('cryptirc_favs_ts',String(serverTs));
       }
     }
     if(p.muted){
@@ -17776,7 +18618,10 @@ function restorePreferences(p){
     if(p.favsOnly!=null){
       const localTs=parseInt(localStorage.getItem('cryptirc_favs_only_ts')||'0');
       const serverTs=p._favsOnlyTs||0;
-      if(localTs<=serverTs) localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
+      if(localTs<=serverTs){
+        localStorage.setItem('cryptirc_favs_only',p.favsOnly?'true':'false');
+        localStorage.setItem('cryptirc_favs_only_ts',String(serverTs));
+      }
     }
     if(p.sidebarCollapsed!=null) localStorage.setItem('cryptirc_sidebar_collapsed',p.sidebarCollapsed?'1':'');
     if(p.nickCollapsed!=null) localStorage.setItem('cryptirc_nick_collapsed',p.nickCollapsed?'1':'');
@@ -17839,7 +18684,13 @@ function restorePreferences(p){
 
 // ─── Favorites ────────────────────────────────────────────────────────────────
 function loadFavorites(){try{return JSON.parse(localStorage.getItem('cryptirc_favs')||'[]');}catch{return[];}}
-function saveFavorites(favs){try{localStorage.setItem('cryptirc_favs',JSON.stringify(favs));localStorage.setItem('cryptirc_favs_ts',String(Date.now()));}catch(e){} flushPrefsToServer();}
+function saveFavorites(favs){
+  try{
+    localStorage.setItem('cryptirc_favs',JSON.stringify(favs));
+    stampPreference('cryptirc_favs_ts');
+  }catch(e){}
+  flushPrefsToServer();
+}
 function toggleFavorite(conn_id,target){
   let favs=loadFavorites();
   const key=`${conn_id}/${target}`;
@@ -17910,7 +18761,7 @@ function initSortable(){
       const groups=[...netList.querySelectorAll('.net-group')];
       const order=groups.map(g=>g.dataset.netId);
       localStorage.setItem('cryptirc_net_order',JSON.stringify(order));
-      localStorage.setItem('cryptirc_net_order_ts',String(Date.now()));
+      stampPreference('cryptirc_net_order_ts');
       const netMap=Object.create(null);for(const n of networks)netMap[n.config.id]=n;
       networks.length=0;for(const id of order){if(netMap[id])networks.push(netMap[id]);}
       for(const n of Object.values(netMap)){if(!order.includes(n.config.id))networks.push(n);}
@@ -18120,7 +18971,7 @@ function renderPMList(){
 function toggleFavsOnly(){
   const on=localStorage.getItem('cryptirc_favs_only')==='true';
   localStorage.setItem('cryptirc_favs_only',on?'false':'true');
-  localStorage.setItem('cryptirc_favs_only_ts',String(Date.now()));
+  stampPreference('cryptirc_favs_only_ts');
   savePrefsToServer();
   applyFavsOnly();
   renderSidebar();
@@ -18443,7 +19294,7 @@ function loadMuted(){try{return JSON.parse(localStorage.getItem('cryptirc_muted'
 // The old union merge could never propagate an UNMUTE — a stale device holding the
 // old (muted) key would resurrect it on the next merge, so a channel you un-muted
 // (to resume push) silently stayed muted across devices.
-function saveMuted(m){try{localStorage.setItem('cryptirc_muted',JSON.stringify(m));localStorage.setItem('cryptirc_muted_ts',String(Date.now()));}catch(e){} savePrefsToServer();}
+function saveMuted(m){try{localStorage.setItem('cryptirc_muted',JSON.stringify(m));stampPreference('cryptirc_muted_ts');}catch(e){} savePrefsToServer();}
 function isMuted(key){return !!loadMuted()[key];}
 function toggleMute(key){const m=loadMuted();if(m[key])delete m[key];else m[key]=true;saveMuted(m);_syncMutedChannelsToServer();renderSidebar();}
 // True when a channel/PM buffer is silenced — the buffer itself or its whole
@@ -19028,7 +19879,7 @@ async function removeNetwork(id,label){
   // Clean up unread counts
   for(const k of [...unread.keys()]){if(k.startsWith(id+'/'))unreadClear(k);}
   // Clean up stale network order entry
-  try{const no=JSON.parse(localStorage.getItem('cryptirc_net_order')||'[]').filter(x=>x!==id);localStorage.setItem('cryptirc_net_order',JSON.stringify(no));localStorage.setItem('cryptirc_net_order_ts',String(Date.now()));}catch(e){}
+  try{const no=JSON.parse(localStorage.getItem('cryptirc_net_order')||'[]').filter(x=>x!==id);localStorage.setItem('cryptirc_net_order',JSON.stringify(no));stampPreference('cryptirc_net_order_ts');}catch(e){}
 }
 
 // ─── Nick context menu ────────────────────────────────────────────────────────
@@ -19323,7 +20174,7 @@ function customPrompt(message,defaultValue,isPassword,clearOnClose=isPassword,ca
 // customConfirm — Promise-based replacement for window.confirm(), which is
 // unreliable in Electron. Resolves true on OK, false on Cancel/Escape/backdrop click.
 const _confirmDialogs=[];
-function customConfirm(message, okLabel, cancelLabel, explicitApproval=false, approvalLabel='Send unencrypted message'){
+function customConfirm(message, okLabel, cancelLabel, explicitApproval=false, approvalLabel='Send unencrypted message',expiresAt=0){
   okLabel = okLabel || 'OK';
   cancelLabel = cancelLabel || 'Cancel';
   return new Promise(resolve=>{
@@ -19368,9 +20219,13 @@ function customConfirm(message, okLabel, cancelLabel, explicitApproval=false, ap
         if(document.activeElement===okBtn||document.activeElement===cancelBtn) done(document.activeElement===okBtn);
       } else if(e.key==='Enter'){e.preventDefault();e.stopPropagation();done(document.activeElement!==cancelBtn);}
     };
-    function done(val){
-      if(_confirmDialogs.at(-1)!==ov) return;
-      _confirmDialogs.pop();document.removeEventListener('keydown',keyH,true);ov.remove();resolve(val);
+    // A time-limited decision can expire beneath another open dialog.
+    const expiry=expiresAt ? setTimeout(()=>done(false,true),Math.max(0,expiresAt-Date.now())) : null;
+    function done(val,expired=false){
+      const at=_confirmDialogs.indexOf(ov);
+      if(at<0||(!expired&&at!==_confirmDialogs.length-1)) return;
+      clearTimeout(expiry);
+      _confirmDialogs.splice(at,1);document.removeEventListener('keydown',keyH,true);ov.remove();resolve(val);
     }
     cancelBtn.onclick=()=>done(false);
     okBtn.onclick=()=>done(true);
@@ -19631,7 +20486,7 @@ async function showNotifModal() {
 function saveHighlightWords(){
   const words=getHighlightWords();
   localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));
-  localStorage.setItem('cryptirc_highlight_words_ts',String(Date.now())); // F29 change stamp
+  stampPreference('cryptirc_highlight_words_ts'); // F29 change stamp
   savePrefsToServer();
   renderHighlightTags();
 }
@@ -19640,13 +20495,13 @@ function addHighlightWord(){
   const word=inp.value.trim().toLowerCase();
   if(!word)return;
   const words=getHighlightWords();
-  if(!words.includes(word)){words.push(word);localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));localStorage.setItem('cryptirc_highlight_words_ts',String(Date.now()));savePrefsToServer();}
+  if(!words.includes(word)){words.push(word);localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));stampPreference('cryptirc_highlight_words_ts');savePrefsToServer();}
   inp.value='';renderHighlightTags();
 }
 function removeHighlightWord(word){
   const words=getHighlightWords().filter(w=>w!==word);
   localStorage.setItem('cryptirc_highlight_words',JSON.stringify(words));
-  localStorage.setItem('cryptirc_highlight_words_ts',String(Date.now())); // F29 change stamp
+  stampPreference('cryptirc_highlight_words_ts'); // F29 change stamp
   savePrefsToServer();renderHighlightTags();
 }
 function renderHighlightTags(){
@@ -20338,11 +21193,11 @@ try{
 
 // ── PM allow list + per-network settings ─────────────────────────────────────
 let pmAllowList = new Set((()=>{try{return JSON.parse(localStorage.getItem('cryptirc_pm_allow')||'[]');}catch{return[];}})());
-function savePmAllow(){localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));localStorage.setItem('cryptirc_pm_allow_ts',String(Date.now()));savePrefsToServer();}
+function savePmAllow(){localStorage.setItem('cryptirc_pm_allow',JSON.stringify([...pmAllowList]));stampPreference('cryptirc_pm_allow_ts');savePrefsToServer();}
 
 // Per-network overrides: {[conn_id]: {override:bool, enabled, cooldown, notify, deliverFirst, allowList:[]}}
 function loadPmNet(){try{return JSON.parse(localStorage.getItem('cryptirc_pm_net')||'{}');}catch{return{};}}
-function savePmNet(obj){localStorage.setItem('cryptirc_pm_net',JSON.stringify(obj));localStorage.setItem('cryptirc_pm_net_ts',String(Date.now()));savePrefsToServer();}
+function savePmNet(obj){localStorage.setItem('cryptirc_pm_net',JSON.stringify(obj));stampPreference('cryptirc_pm_net_ts');savePrefsToServer();}
 
 // Blocked PMs log — capped at 100 most recent to prevent flood
 const PM_BLOCKED_MAX = 100;
@@ -20380,6 +21235,39 @@ function recordBlockedPm(conn_id, from, text, ts, enc){
 function clearPmBlocked(){localStorage.setItem('cryptirc_pm_blocked','[]');savePrefsToServer();}
 
 // Returns effective PM protection settings for a network (network override OR global)
+let _pmInboxPrefsReady=false;
+const _pmInboxScanned=new Map();
+function _recoverPmInbox(){
+  if(!_pmInboxPrefsReady||_vaultNeedsUnlock||encryptionDeviceLocked()||!_wsReady()||_detMode) return;
+  const now=Date.now();
+  for(const {config:{id}} of networks){
+    if((_pmInboxScanned.get(id)||0)>now) continue;
+    if(wsend({type:'recent_private_threads',conn_id:id})) _pmInboxScanned.set(id,now+60000);
+  }
+}
+function _applyRecoveredPmThreads(ev){
+  const id=ev.conn_id;
+  if(!_pmInboxPrefsReady||_vaultNeedsUnlock||encryptionDeviceLocked()||!networks.some(net=>net.config.id===id)) return;
+  _pmInboxScanned.set(id,Infinity);
+  const pm=getPmSettings(id);
+  const queries=queryBufs[id]||=new Map();
+  let changed=false;
+  for(const {nick,prefix,ts} of ev.threads||[]){
+    if(typeof nick!=='string'||!nick||isIgnored(nick,prefix)||!Number.isFinite(ts)) continue;
+    const target=_dmTarget(nick), lc=target.toLowerCase();
+    if(queries.has(lc)||_strangerOverflow(id,target)||(closedQueries[id+'|'+lc]||0)>=ts) continue;
+    // Protection also covers history surfaced while offline. Where only the
+    // first PM is allowed, leave manual history access subject to the usual UI.
+    if(pm.enabled&&!isPmAllowedFor(id,nick)) continue;
+    clearQueryClosed(id,lc);
+    queries.set(lc,target);
+    changed=true;
+  }
+  if(changed){
+    saveQueryBufs(); renderSidebar();
+    if(isMessagesActive()) renderMessagesView();
+  }
+}
 function getPmSettings(conn_id){
   const net=loadPmNet();
   const n=conn_id?net[conn_id]:null;
@@ -20454,14 +21342,16 @@ const banListAccum    = {}; // "conn_id/channel" → [mask, ...]
 function addIgnore(mask) {
   ignoreList.add(mask.toLowerCase());
   localStorage.setItem('cryptirc_ignore', JSON.stringify([...ignoreList]));
-  localStorage.setItem('cryptirc_ignore_ts', String(Date.now())); // F29 change stamp
-  savePrefsToServer();
+  stampPreference('cryptirc_ignore_ts'); // F29 change stamp
+  // This decision controls which private messages may open on the next login.
+  // Queue the account write before the user can close this browser.
+  flushPrefsToServer();
 }
 function removeIgnore(mask) {
   ignoreList.delete(mask.toLowerCase());
   localStorage.setItem('cryptirc_ignore', JSON.stringify([...ignoreList]));
-  localStorage.setItem('cryptirc_ignore_ts', String(Date.now())); // F29 change stamp
-  savePrefsToServer();
+  stampPreference('cryptirc_ignore_ts'); // F29 change stamp
+  flushPrefsToServer();
 }
 function showIgnorePanel(){
   const ov=document.createElement('div');
@@ -20810,7 +21700,7 @@ function showPmProtectionPanel(){
       const v=enBtn.classList.contains('on');
       if(isGlobal){
         localStorage.setItem('cryptirc_block_pms',v?'true':'false');
-        localStorage.setItem('cryptirc_pm_settings_ts',String(Date.now()));
+        stampPreference('cryptirc_pm_settings_ts');
         savePrefsToServer();
         const sb=document.getElementById('sec-block-pms');
         if(sb){v?sb.classList.add('on'):sb.classList.remove('on');}
@@ -20821,7 +21711,7 @@ function showPmProtectionPanel(){
 
     // ── Wire up cooldown select ──
     if(cd) cd.addEventListener('change',()=>{
-      if(isGlobal){localStorage.setItem('cryptirc_pm_cooldown',cd.value);localStorage.setItem('cryptirc_pm_settings_ts',String(Date.now()));savePrefsToServer();}
+      if(isGlobal){localStorage.setItem('cryptirc_pm_cooldown',cd.value);stampPreference('cryptirc_pm_settings_ts');savePrefsToServer();}
       else pmNetPatch(_pmPanelScope,{cooldown:parseInt(cd.value)});
     });
 
@@ -20830,7 +21720,7 @@ function showPmProtectionPanel(){
     if(ntBtn) ntBtn.addEventListener('click',()=>{
       ntBtn.classList.toggle('on');
       const v=ntBtn.classList.contains('on');
-      if(isGlobal){localStorage.setItem('cryptirc_pm_notify',v?'true':'false');localStorage.setItem('cryptirc_pm_settings_ts',String(Date.now()));savePrefsToServer();}
+      if(isGlobal){localStorage.setItem('cryptirc_pm_notify',v?'true':'false');stampPreference('cryptirc_pm_settings_ts');savePrefsToServer();}
       else pmNetPatch(_pmPanelScope,{notify:v});
     });
 
@@ -20839,7 +21729,7 @@ function showPmProtectionPanel(){
     if(dvBtn) dvBtn.addEventListener('click',()=>{
       dvBtn.classList.toggle('on');
       const v=dvBtn.classList.contains('on');
-      if(isGlobal){localStorage.setItem('cryptirc_pm_deliver_first',v?'true':'false');localStorage.setItem('cryptirc_pm_settings_ts',String(Date.now()));savePrefsToServer();}
+      if(isGlobal){localStorage.setItem('cryptirc_pm_deliver_first',v?'true':'false');stampPreference('cryptirc_pm_settings_ts');savePrefsToServer();}
       else pmNetPatch(_pmPanelScope,{deliverFirst:v});
     });
 
@@ -21441,7 +22331,7 @@ async function _reloadForUpdate(force,acc){
   if((!flushNotepad()||npUnloaded())&&!acc.notepad){ abort(); return; }
   const draft=draftOf();
   if(draft&&active&&!crossReply()&&!acc.draftLost){
-    try{ sessionStorage.setItem('cryptirc_reload_draft',JSON.stringify({c:active.conn_id,g:active.target,v:draft,t:Date.now()})); }   // r11: conn + the exact target spelling
+    try{ await _saveReloadDraft(active,draft); }
     catch(_){ abort({noStore:true}); return; }   // e.g. storage full: the text would be lost
   }
   window._updateReloading=true;   // a detached window does not say "bye" to the main window for this reload
@@ -21456,6 +22346,18 @@ async function _reloadForUpdate(force,acc){
 // conversation (never another one), when that input is empty — on startup or when the
 // conversation is opened (_restoreReloadDraft). Older than a day: dropped.
 var _reloadDraft=null;
+async function _saveReloadDraft(view,draft){
+  // The same input element follows the user between views. A held message
+  // belongs to its original conversation even when the update starts elsewhere.
+  const held=_heldSignalDraft?.user===currentUser?_heldSignalDraft:null;
+  const record={c:held?.connId??view.conn_id,g:held?.target??view.target,v:draft,t:Date.now()};
+  // Keep the protection alongside the one draft already saved by this tab.
+  if(held){
+    record.heldFor=await _e2eSha256Hex(held.user);
+    if(currentUser!==held.user||window._cryptircWiping) throw new Error('The draft account changed');
+  }
+  sessionStorage.setItem('cryptirc_reload_draft',JSON.stringify(record));
+}
 try{
   const _rd=sessionStorage.getItem('cryptirc_reload_draft');
   // r11: only {c, g} records; one saved by an earlier build ({k: bk()}, Unicode lowercase)
@@ -21463,13 +22365,24 @@ try{
   if(_rd){ const d=JSON.parse(_rd); if(d&&typeof d.c==='string'&&typeof d.g==='string'&&typeof d.v==='string'&&!(Date.now()-(+d.t||0)>86400000)) _reloadDraft=d; else sessionStorage.removeItem('cryptirc_reload_draft'); }
 }catch(_){ _reloadDraft=null; }
 function _restoreReloadDraft(conn_id,target){
-  // r11: back only into the conversation it was typed in (same conn; target equal by the
-  // reply guard's rule, _sameConv).
   const d=_reloadDraft; if(!d||typeof d.c!=='string'||typeof d.g!=='string') return;
-  if(!_sameConvAt(d.c,d.g,conn_id,target)) return;
+  const sameView=d.heldFor?_sameSignalDraftAt:_sameConvAt;
+  if(!sameView(d.c,d.heldFor?_dmTarget(d.g):d.g,conn_id,target)) return;
   const i=document.getElementById('msg-input'); if(!i||i.value) return;   // not empty: kept for later
-  i.value=_reloadDraft.v; _reloadDraft=null;
-  try{ sessionStorage.removeItem('cryptirc_reload_draft'); }catch(_){}
+  const remove=()=>{
+    _reloadDraft=null;
+    try{ sessionStorage.removeItem('cryptirc_reload_draft'); }catch(_){}
+  };
+  if(!d.heldFor){ i.value=d.v; remove(); return; }
+  const user=currentUser;
+  if(user&&typeof _e2eSha256Hex==='function') void _e2eSha256Hex(user).then(hash=>{
+    if(_reloadDraft!==d||currentUser!==user||window._cryptircWiping) return;
+    if(hash!==d.heldFor){ remove(); return; }
+    if(i.value||!active||!sameView(conn_id,target,active.conn_id,active.target)) return;
+    _heldSignalDraft={user,connId:conn_id,target};
+    i.value=d.v;
+    remove();
+  }).catch(()=>{});
 }
 // Newest release first; each item tagged new|fix|sec. Add new releases on top.
 const NEWS=[
@@ -22317,7 +23230,7 @@ function markLiveTranslation(connId,target,msg){
   }
 }
 function translationProtected(ctx){
-  return ctx.protected||!_e2eKnown()||_isE2eConversation(ctx.target,ctx.connId);
+  return ctx.protected||!_e2eKnown()||_isE2eConversation(ctx.target,ctx.connId,ctx.outgoing===true);
 }
 function translationPlainText(text){
   return String(text||'').replace(/\x03\d{0,2}(?:,\d{1,2})?|\x04(?:[\da-f]{6}(?:,[\da-f]{6})?)?/gi,'')
@@ -22461,21 +23374,23 @@ function mountTranslation(root,text,ctx,label){
     });
   }
 }
-async function translateOutgoing(raw,connId,target){
+async function translateOutgoing(raw,connId,target,approval){
   const settings=translationSettings();
   if(!settings.enabled||!translationEligible(connId,target))return raw;
-  const ctx={connId,target};
+  const ctx={connId,target,outgoing:true};
   const outgoing=translationChatPrefs(settings,ctx).outgoing;
   if(!outgoing||outgoing==='off'||!translationHasWords(raw))return raw;
   if(!_e2eKnown()){showToast('Wait for encryption settings to load. Draft kept.');return null;}
   if(translationProtected(ctx))return raw;
+  const optOutKey=!approval?.plain && typeof e2eSignalOptOutKey==='function' ? e2eSignalOptOutKey(target,connId) : null;
   const generation=translationGeneration, conversation=active, token=sessionToken, reply=_replyTo;
   if(reply&&!_sameConvAt(reply.conn_id,reply.target,connId,target)){
     getReplyPrefix(connId,target);
     return null;
   }
-  const valid=()=>generation===translationGeneration&&!tweetVaultLocked()
+  const sameView=()=>generation===translationGeneration&&!tweetVaultLocked()
     &&token===sessionToken&&active===conversation&&_replyTo===reply;
+  const valid=()=>sameView()&&(!approval?.plain||_e2ePlainApprovalValid(approval.plain,connId,target));
   try{
     if(!valid())return null;
     let language=outgoing;
@@ -22486,6 +23401,16 @@ async function translateOutgoing(raw,connId,target){
       const detected=await requestTranslation(translationPlainText(recent.text),settings.language,settings);
       language=translationLanguage(detected.source);
       if(!language)throw new Error('Could not detect the other person’s language. Choose it in the chat’s Translation menu.');
+      if(!valid()||translationProtected(ctx))return null;
+    }
+    // Detecting the peer's language can span a key change on another device.
+    // Recheck the chat's encryption settings at the handoff to the provider.
+    if(approval?.plain||optOutKey){
+      const reason=await e2eConfirmPlainTranslation(approval?.plain,target,connId,()=>valid()&&!translationProtected(ctx),optOutKey);
+      if(reason){
+        if(sameView())_e2eBlockedWarn(_e2eBlock(_e2eBundleFailure(target,reason)),approval?.view||conversation,currentUser);
+        return null;
+      }
       if(!valid()||translationProtected(ctx))return null;
     }
     const value=await requestTranslation(raw,language,settings);
@@ -24002,7 +24927,7 @@ function loadMonitor(){try{return JSON.parse(localStorage.getItem('cryptirc_moni
 // `low`: status churn driven by incoming traffic (online/last-seen/last message) — a
 // background save (see savePrefsToServer), not a user change.
 function saveMonitor(m,low){try{localStorage.setItem('cryptirc_monitor',JSON.stringify(m));}catch(e){} savePrefsToServer(low===true);}
-function _stampMonitorTs(){try{localStorage.setItem('cryptirc_monitor_ts',String(Date.now()));}catch(e){}}
+function _stampMonitorTs(){try{stampPreference('cryptirc_monitor_ts');}catch(e){}}
 function monitorAdd(nick){
   const m=loadMonitor();
   const k=nick.toLowerCase();
@@ -24059,7 +24984,7 @@ function isMonitorNotifsOn(){
 function toggleMonitorNotifs(){
   const btn=document.getElementById('monitor-notif-toggle');
   const on=btn.classList.toggle('on');
-  try{localStorage.setItem('cryptirc_monitor_notifs',on?'on':'off');localStorage.setItem('cryptirc_monitor_ts',String(Date.now()));}catch(e){}
+  try{localStorage.setItem('cryptirc_monitor_notifs',on?'on':'off');stampPreference('cryptirc_monitor_ts');}catch(e){}
   savePrefsToServer();
 }
 function isMonitorPushOn(){
@@ -24068,7 +24993,7 @@ function isMonitorPushOn(){
 function toggleMonitorPush(){
   const btn=document.getElementById('monitor-push-toggle');
   const on=btn.classList.toggle('on');
-  try{localStorage.setItem('cryptirc_monitor_push',on?'on':'off');localStorage.setItem('cryptirc_monitor_ts',String(Date.now()));}catch(e){}
+  try{localStorage.setItem('cryptirc_monitor_push',on?'on':'off');stampPreference('cryptirc_monitor_ts');}catch(e){}
   savePrefsToServer();
 }
 function monitorAlert(nick,status){

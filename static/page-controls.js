@@ -106,7 +106,6 @@ document.addEventListener('DOMContentLoaded', () => bindControls(document, {
     toggleSplitView: ()=>toggleSplitView(),
     scrollForce: ()=>scrollForce(),
     cancelReply: ()=>cancelReply(),
-    doSend: ()=>doSend(),
     triggerUpload: ()=>triggerUpload(),
     showPasteModal: ()=>showPasteModal(),
     toggleMsgColorPop: event=>toggleMsgColorPop(event),

@@ -368,6 +368,14 @@ async fn handle_connection(stream: UnixStream, state: &AppState, colocated: bool
     result
 }
 
+fn enabled_reaction_label(facts: &cryptirc::ipc::RegistrationFacts) -> Option<bool> {
+    let offered = facts.caps.iter().any(|cap| cap.eq_ignore_ascii_case("labeled-response"));
+    let enabled = facts.enabled_caps.iter().any(|cap| cap.eq_ignore_ascii_case("labeled-response"));
+    // An older core omits enabled_caps altogether. Its empty default cannot
+    // erase a live CAP LIST/ACK, but a known enabled list or DEL can.
+    (enabled || !offered || !facts.enabled_caps.is_empty()).then_some(enabled)
+}
+
 /// Facts may reset the old session; the top-level mapping then corrects both the
 /// facts fallback and live 005, as it did before registration facts were added.
 pub(crate) fn apply_session_registration(c: &mut irc::IrcConnection, facts: Option<&cryptirc::ipc::RegistrationFacts>, casemapping: &str) -> bool {
@@ -377,6 +385,10 @@ pub(crate) fn apply_session_registration(c: &mut irc::IrcConnection, facts: Opti
     if let Some(facts) = facts.filter(|f| !f.truncated && f.cap_ls_done) {
         c.reactions.advertised = facts.caps.iter().any(|cap| cap == crate::reactions::CAP);
         c.reactions.dislike_advertised = facts.caps.iter().any(|cap| cap == crate::reactions::DISLIKE_CAP);
+        if let Some(enabled) = enabled_reaction_label(facts) {
+            let cap = if enabled { "labeled-response" } else { "-labeled-response" };
+            crate::reactions::note_capabilities(c, "ACK", cap);
+        }
     }
     // Choose once: temporarily applying a stale, wider facts mapping can merge
     // distinct channels before the authoritative mapping has a chance to correct it.
@@ -446,6 +458,9 @@ async fn handle_message(
                 c.registered = false;
                 c.e2e_bridge = Default::default();
                 c.reactions = Default::default();
+                c.recent_encrypted_targets.clear();
+                c.warn_pending_signal_deliveries(state, &username);
+                c.clear_signal_deliveries();
                 c.avx.reset();
                 // Drop in-flight WHO bookkeeping: the socket that owed us a
                 // 315 ENDOFWHO is gone, so those entries would never clear
@@ -482,6 +497,7 @@ async fn handle_message(
                 let evt = match lifecycle {
                     ConnLifecycle::Connecting => {
                         let mut c = conn.lock().await;
+                        c.warn_pending_signal_deliveries(state, &username);
                         c.reset_irc_session();
                         state.avatar_remote.forget_conn(&conn_id);
                         let server = c.dial_endpoint.as_ref().map_or_else(|| c.cfg.server.clone(), |(s, _)| s.clone());
@@ -491,6 +507,7 @@ async fn handle_message(
                     ConnLifecycle::Disconnected { .. } => return,
                     ConnLifecycle::Reconnecting { attempt, delay_secs, reason } => {
                         let mut c = conn.lock().await;
+                        c.warn_pending_signal_deliveries(state, &username);
                         c.reset_irc_session();
                         state.avatar_remote.forget_conn(&conn_id);
                         ServerEvent::Reconnecting { conn_id: conn_id.clone(), attempt, delay_secs, reason }
@@ -714,6 +731,13 @@ async fn handle_message(
                     resync_gen = c.resync_gen;
                     let support = crate::reactions::support(&c);
                     reaction_change = (reaction_previous != support).then_some(support);
+                    if first_in_cycle && support.0
+                        && registration.as_ref().map_or(true, |f| f.truncated || f.enabled_caps.is_empty())
+                    {
+                        // Ask once per attachment when the retained facts cannot
+                        // establish which capabilities the IRC connection enabled.
+                        let _ = c.send_raw("CAP LIST").await;
+                    }
                 }
                 // SyncSlot may move the enabling snapshot past its live ACK. Either
                 // arrival initializes once. Attach waits for continuity/record checks so
@@ -1168,7 +1192,8 @@ async fn ensure_connection_entry(state: &AppState, conn_id: &str) -> Option<(Str
         // arrive. See SessionSync's field doc comment in ipc.rs.
         message_tags: false,
         e2e_bridge: Default::default(),
-        reactions: Default::default(),
+        reactions: Default::default(), recent_encrypted_targets: Default::default(), recent_plain_targets: Default::default(),
+        signal_deliveries: Default::default(), signal_reply_batches: Default::default(), signal_expiry_running: false,
         keepnick_retry: Default::default(),
         self_userhost: String::new(),
         registered: false,
@@ -1417,6 +1442,22 @@ async fn build_dial_params(state: &AppState, username: &str, cfg: &NetworkConfig
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reattached_reaction_labels_follow_enabled_capabilities() {
+        use cryptirc::ipc::RegistrationFacts;
+        let mut facts = RegistrationFacts {
+            cap_ls_done: true, caps: vec![crate::reactions::CAP.into(), "labeled-response".into()],
+            enabled_caps: vec!["message-tags".into()], ..Default::default()
+        };
+        assert_eq!(enabled_reaction_label(&facts), Some(false));
+        facts.enabled_caps.push("labeled-response".into());
+        assert_eq!(enabled_reaction_label(&facts), Some(true));
+        facts.enabled_caps.clear();
+        assert_eq!(enabled_reaction_label(&facts), None);
+        facts.caps.pop();
+        assert_eq!(enabled_reaction_label(&facts), Some(false));
+    }
 
     #[test]
     fn dial_settings_change_detection() {

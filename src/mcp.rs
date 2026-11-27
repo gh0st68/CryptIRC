@@ -435,7 +435,7 @@ fn ready_to_send(state: &AppState, user: &str, id: &str) -> Result<(), String> {
 
 async fn dispatch(state: &AppState, user: &str, command: ClientMessage) -> ToolResult {
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-    handle_command(command, user, state, &tx, true).await;
+    handle_command(command, user, state, &tx, crate::CommandSource::Mcp).await;
     while let Ok(event) = rx.try_recv() {
         if let ServerEvent::Error { message } = event {
             return Err(message);
@@ -517,7 +517,11 @@ async fn history(state: &AppState, user: &str, name: &str, args: &Value) -> Tool
             .read_logs_view(user, &id, target, limit, view)
             .await
     };
-    let lines = result.map_err(|_| "Could not read IRC history.")?;
+    let mut lines = result.map_err(|_| "Could not read IRC history.")?;
+    for line in &mut lines {
+        line.irc_recipient = None;
+        line.irc_network = None;
+    }
     Ok(json!({"network":id,"target":target,"lines":lines}))
 }
 
@@ -539,7 +543,7 @@ async fn send(state: &AppState, user: &str, args: &Value) -> ToolResult {
         "action" => format!("PRIVMSG {target} :\u{1}ACTION {text}\u{1}"),
         _ => return Err("Invalid message kind.".into()),
     };
-    dispatch(state, user, ClientMessage::Send { conn_id: id, raw }).await
+    dispatch(state, user, ClientMessage::Send { conn_id: id, raw, e2e_identity_revision: None, e2e_plain_revision: None }).await
 }
 
 async fn check_message_target(state: &AppState, user: &str, conn_id: &str, target: &str) -> Result<(), String> {
@@ -583,6 +587,8 @@ async fn irc_command(state: &AppState, user: &str, args: &Value) -> ToolResult {
         state,
         user,
         ClientMessage::Send {
+            e2e_identity_revision: None,
+            e2e_plain_revision: None,
             conn_id: id,
             raw: line.into(),
         },
@@ -857,11 +863,11 @@ async fn preferences(state: &AppState, user: &str, update: Option<&Value>) -> To
     if !state.crypto.is_unlocked(user).await {
         return Err(VAULT_LOCKED.into());
     }
-    let mut prefs = read_preferences(state, user).await?;
+    let mut prefs = crate::preferences::load(state, user).await?;
     if let Some(Value::Object(update)) = update {
-        prefs.extend(update.clone());
+        let mut patch = update.clone();
         // A browser ignores echoes of a save it made. This save came from MCP.
-        prefs.remove("_saveTs");
+        patch.remove("_saveTs");
         // Match the browser's sync groups so clients adopt the change over their
         // previously saved local values.
         let now = json!(chrono::Utc::now().timestamp_millis());
@@ -888,42 +894,17 @@ async fn preferences(state: &AppState, user: &str, update: Option<&Value>) -> To
             ("_tlsVerifyTs", &["tlsVerify"]),
         ] {
             if fields.iter().any(|field| update.contains_key(*field)) {
-                prefs.insert(timestamp.into(), now.clone());
+                patch.insert(timestamp.into(), now.clone());
             }
         }
-        crate::save_preferences(state, user, json!(prefs).to_string()).await?;
+        prefs = crate::save_preferences(state, user, prefs, patch, None).await?;
     }
+    crate::preferences::remove_metadata(&mut prefs);
     // These settings are synced to the browser but are credentials in MCP.
     for field in ["channelKeys", "giphyKey", "tenorKey"] {
         prefs.remove(field);
     }
     Ok(json!({"settings":prefs}))
-}
-
-async fn read_preferences(
-    state: &AppState,
-    user: &str,
-) -> Result<serde_json::Map<String, Value>, String> {
-    use crate::UserSecretLoad::*;
-    let prefs = match crate::load_user_secret(state, user, "preferences.enc").await {
-        Plain(text) => text,
-        Locked => return Err(VAULT_LOCKED.into()),
-        Undecryptable(_) => return Err("Could not decrypt preferences.".into()),
-        Missing => {
-            let path = std::path::Path::new(&state.data_dir)
-                .join("users")
-                .join(user)
-                .join("preferences.json");
-            match tokio::fs::read_to_string(path).await {
-                Ok(text) => text,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    return Ok(serde_json::Map::new())
-                }
-                Err(_) => return Err("Could not read preferences.".into()),
-            }
-        }
-    };
-    serde_json::from_str(&prefs).map_err(|_| "Invalid stored preferences.".into())
 }
 
 async fn admin_settings(state: &AppState, section: &str, update: Option<&Value>) -> ToolResult {

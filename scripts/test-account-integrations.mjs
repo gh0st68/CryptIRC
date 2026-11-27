@@ -1,5 +1,7 @@
 // Runs a fresh CryptIRC web + irc_core against an already-running local testnet.
 // CRYPTIRC_BIN, CRYPTIRC_CORE_BIN, IRC_PORT and optionally IRC_LEAF_PORT are required.
+// CRYPTIRC_TEST_E2E=1, CRYPTIRC_TEST_LEGACY_SIGNAL_HANDOFF=1 and CRYPTIRC_LEGACY_BIN
+// exercise a running v2 browser before and after its account moves to recovery.
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
@@ -10,9 +12,9 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {checkSettingsSearch} from './settings-search-checks.mjs';
 import {checkTranslation, startTranslator} from './translation-checks.mjs';
-import {checkCrossInstanceE2e, checkE2eChat, checkLegacyMigration, seedLegacyE2e} from './e2e-chat-checks.mjs';
+import {checkCrossInstanceE2e, checkE2eChat, checkLegacyMigration, login, seedLegacyE2e, setUpRecovery} from './e2e-chat-checks.mjs';
 import {checkChannelList} from './channel-list-checks.mjs';
-import {checkLegacyReactionMenu, checkOrdinaryClientReactions, checkPlainReactions, checkReactionHistory} from './reaction-checks.mjs';
+import {checkLegacyReactionMenu, checkOrdinaryClientReactions, checkPlainReactions, checkReactionEchoDurability, checkReactionHistory, checkReactionMidpoint} from './reaction-checks.mjs';
 
 const {CRYPTIRC_BIN, CRYPTIRC_CORE_BIN, IRC_PORT, IRC_LEAF_PORT, CHROMIUM} = process.env;
 assert(CRYPTIRC_BIN && CRYPTIRC_CORE_BIN && Number(IRC_PORT), 'Set the test binaries and local IRC testnet port');
@@ -20,6 +22,7 @@ const tmp=await fs.mkdtemp(path.join(os.tmpdir(),'cryptirc-integrations-'));
 const children=[];
 const sockets=[];
 const tcpSockets=[];
+const fixtureServers=[];
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const check=(message,value)=>{assert(value,message);console.log('ok '+message);};
 const stamp=randomBytes(3).toString('hex');
@@ -30,7 +33,11 @@ const vault='TestOnly-Vault-92!';
 const channel='#mcp-'+stamp;
 const translationEnabled=process.env.CRYPTIRC_TEST_TRANSLATION==='1';
 const e2eEnabled=process.env.CRYPTIRC_TEST_E2E==='1';
+const composerEncryption=process.env.CRYPTIRC_TEST_COMPOSER_ENCRYPTION==='1';
 const legacyBin=process.env.CRYPTIRC_LEGACY_BIN;
+const legacySignalHandoff=process.env.CRYPTIRC_TEST_LEGACY_SIGNAL_HANDOFF==='1';
+if(legacySignalHandoff)assert(e2eEnabled&&legacyBin,'The cached-browser test needs the real previous browser release');
+const reactionMidpoint=process.env.CRYPTIRC_TEST_REACTION_MIDPOINT==='1';
 let translator;
 let reactionWindowEnds=0;
 
@@ -89,7 +96,7 @@ async function connectWebsocket(token, endpoint=base) {
   return {events,send,wait};
 }
 
-async function ordinaryIrcClient(port, nick) {
+async function ordinaryIrcClient(port, nick, messageTags=false) {
   const socket=net.createConnection(Number(port),'127.0.0.1');
   tcpSockets.push(socket);
   const lines=[];
@@ -106,13 +113,261 @@ async function ordinaryIrcClient(port, nick) {
     }
   });
   await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);});
+  if(messageTags) send('CAP REQ :message-tags');
   send('NICK '+nick);
   send(`USER ${nick} 0 * :Ordinary IRC fixture`);
+  if(messageTags){
+    await waitFor(()=>lines.some(line=>line.includes(' ACK :message-tags')),'ordinary IRC client negotiated message tags');
+    send('CAP END');
+  }
   await waitFor(()=>lines.some(line=>line.includes(` 001 ${nick} `)),'ordinary IRC client registered');
   return {lines,send,close:()=>socket.end('QUIT :Test complete\r\n')};
 }
 
-async function chromium(profile='chrome', endpoint=base) {
+async function reactionIpcGate(corePath,webPath){
+  const gate={held:null,replay:null,match:null};
+  let heldSocket;
+  const server=net.createServer(browserSocket=>{
+    const coreSocket=net.createConnection(corePath);
+    tcpSockets.push(browserSocket,coreSocket);
+    browserSocket.pipe(coreSocket);
+    browserSocket.on('error',()=>coreSocket.destroy());
+    coreSocket.on('error',()=>browserSocket.destroy());
+    browserSocket.on('close',()=>coreSocket.destroy());
+    coreSocket.on('close',()=>browserSocket.destroy());
+    let pending=Buffer.alloc(0);
+    let delayed=null;
+    coreSocket.on('data',chunk=>{
+      pending=Buffer.concat([pending,chunk]);
+      while(pending.length>=4){
+        const length=pending.readUInt32BE(0);
+        assert(length<=65536,'the fixture received an IPC frame of the expected size');
+        if(pending.length<length+4)return;
+        const frame=pending.subarray(0,length+4);
+        pending=pending.subarray(length+4);
+        if(delayed){delayed.push(frame);continue;}
+        // Later frames must stay behind the held frame so a cumulative process
+        // acknowledgement cannot mark the held echo as delivered to old web.
+        if(browserSocket===heldSocket)continue;
+        const event=JSON.parse(frame.subarray(4));
+        if(event.type==='raw_line'&&gate.delayOwnEcho?.(event)){
+          gate.delayOwnEcho=null;delayed=[frame];
+          const receivedAt=Date.now();
+          setTimeout(()=>{
+            gate.delayedMs=Date.now()-receivedAt;
+            if(!browserSocket.destroyed)for(const queued of delayed)browserSocket.write(queued);
+            delayed=null;
+          },17000);
+          continue;
+        }
+        if(event.type==='raw_line'&&gate.match?.(event)){
+          if(!gate.held&&!event.replayed){gate.held=event;heldSocket=browserSocket;continue;}
+          if(gate.held&&event.replayed)gate.replay=event;
+        }
+        browserSocket.write(frame);
+      }
+    });
+  });
+  fixtureServers.push(server);
+  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(webPath,resolve);});
+  return gate;
+}
+
+async function checkPrivacyClock(fast, slow, observer, connection) {
+  const quote=JSON.stringify, first='policyfirst'+stamp, second='policysecond'+stamp;
+  const edit=(page,fastClock)=>page.evaluate(`(async()=>{
+    const now=Date.now, fast=${fastClock}, first=${quote(first)}, next=${quote(fastClock?first:second)};
+    const click=(selector,wanted)=>{
+      const button=document.querySelector(selector);
+      if(!button)throw Error('Missing protection control '+selector);
+      if(button.classList.contains('on')===wanted)button.click();
+      button.click();
+    };
+    try {
+      if(fast)Date.now=()=>now()+300000;
+      setActive(${quote(connection)},${quote(channel)});
+      await handleInput('/ignore '+next);
+      if(fast)addPmAllow(first,null);else removePmAllow(first,null);
+      showPmProtectionPanel();
+      click('#pm-prot-enable',!fast);
+      const scope=document.querySelector('#pm-prot-scope');scope.value=${quote(connection)};
+      scope.dispatchEvent(new Event('change',{bubbles:true}));
+      const override=document.querySelector('#pm-prot-override');
+      if(!override.classList.contains('on'))override.click();
+      click('#pm-prot-notify',!fast);
+      // Both devices dismiss different reminders. The network description is a
+      // local test fixture; the dismissal itself is saved by the real UI.
+      const close=document.querySelector('#pm-prot-scope').closest('div[style*="position:fixed"]')?.querySelector('[data-ov-close]');
+      if(close)close.click();
+      else document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
+      _showTlsVerifyPopup([{config:{id:next,label:next,server:'127.0.0.1',tls:true,tls_accept_invalid_certs:true}}],false);
+      Array.from(document.querySelectorAll('#tls-verify-popup button')).find(b=>b.textContent==='Not now').click();
+      flushPrefsToServer();
+    } finally {Date.now=now;}
+  })()`);
+  const stored=(at,accept)=>waitFor(()=>{
+    for(const e of observer.events.slice(at)){
+      if(e.type!=='preferences'||!e.prefs)continue;
+      const prefs=JSON.parse(e.prefs);
+      if(accept(prefs))return prefs;
+    }
+  },'the account receives the actual protection settings save');
+  const hasSettings=(p,fastClock)=>p.ignoreList?.includes(fastClock?first:second)&&p.pmAllow?.includes(first)===fastClock&&
+    p.pmBlock===!fastClock&&p.pmNet?.[connection]?.notify===!fastClock&&p.tlsVerify?.dismissed?.includes(fastClock?first:second);
+  const local=(page,fastClock)=>page.evaluate(`({
+    ignored:ignoreList.has(${quote(fastClock?first:second)}),allow:pmAllowList.has(${quote(first)})===${fastClock},
+    block:(localStorage.getItem('cryptirc_block_pms')==='true')===${!fastClock},
+    network:loadPmNet()[${quote(connection)}]?.notify===${!fastClock},
+    certificateReminder:_tlsIdSet(_TLS_DISMISS_KEY).has(${quote(fastClock?first:second)})
+  })`);
+  let at=observer.events.length;
+  await edit(fast,true);
+  await stored(at,p=>hasSettings(p,true));
+  await waitFor(async()=>Object.values(await local(slow,true)).every(Boolean),'the second device receives the fast clock’s settings');
+  at=observer.events.length;
+  await edit(slow,false);
+  await stored(at,p=>hasSettings(p,false));
+  await waitFor(async()=>Object.values(await local(fast,false)).every(Boolean),'the faster device applies the slower device’s privacy edits',5000).catch(()=>false);
+  const applied=await local(fast,false);
+  at=observer.events.length;
+  await fast.evaluate("document.getElementById('topic-menu-btn').click();[...document.querySelectorAll('#topic-menu button')].find(b=>b.textContent==='☆ Favorite').click()");
+  const saved=await stored(at,p=>p.favorites?.some(f=>f.key===connection+'/'+channel));
+  console.log('PROTECTION-CLOCK '+JSON.stringify({applied,retained:hasSettings(saved,false)}));
+  check('the slower device’s ignore, removed PM allowance, enabled PM protection, network setting and certificate reminder survive an unrelated Favorite',
+    Object.values(applied).every(Boolean)&&hasSettings(saved,false));
+}
+
+// Hold only the ordinary Favorite button's actual serialized WebSocket frame.
+// The second account device edits its settings while that frame is in transit.
+async function checkConcurrentPreferenceSave({token, ownerWs, networkA, browser}) {
+  const tab=await chromium('concurrent-preferences');
+  const ev=tab.evaluate;
+  await ev("document.getElementById('l-user').value="+JSON.stringify(owner)+";document.getElementById('l-pass').value="+JSON.stringify(password)+";doLogin()");
+  await waitFor(()=>ev('!!sessionToken&&_wsReady()&&_prefsSeen'),'second preference browser signed in');
+  await ev("document.getElementById('vault-pass').value="+JSON.stringify(vault)+";doUnlock()");
+  await waitFor(()=>ev('E2E._vaultUp&&_prefsSeen'),'second preference browser unlocked');
+  if(process.env.CRYPTIRC_TEST_PROTECTION_CLOCK==='1')return checkPrivacyClock(tab,browser,ownerWs,networkA);
+  const patch=settings=>tool(token,'cryptirc_settings',{section:'preferences',settings});
+  const read=()=>tool(token,'cryptirc_settings',{section:'preferences'});
+  const fixtureKey='disposable-favorite-'+stamp;
+  const favoriteKey=networkA+'/'+channel;
+  const hasFavorite=prefs=>prefs.favorites?.some(f=>f.key===favoriteKey)??false;
+  const delayFavoriteEcho=process.env.CRYPTIRC_TEST_FAVORITE_PENDING_ECHO==='1';
+  await ev('setActive('+JSON.stringify(networkA)+','+JSON.stringify(channel)+')');
+  for(const adding of [true,false]){
+    const rating=adding?'pg':'g';
+    const updatedRating=adding?'g':'pg';
+    const initialKey=adding?'':fixtureKey;
+    const updatedKey=adding?fixtureKey:'';
+    await patch({giphyKey:initialKey,giphyRating:rating,autoRejoin:adding});
+    const hasLocal=(key,contentRating,rejoin)=>ev(
+      "(localStorage.getItem('cryptirc_giphy_key')||'')==="+JSON.stringify(key)+
+      "&&localStorage.getItem('cryptirc_giphy_rating')==="+JSON.stringify(contentRating)+
+      "&&(localStorage.getItem('cryptirc_autorejoin')!=='false')==="+JSON.stringify(rejoin));
+    await waitFor(()=>hasLocal(initialKey,rating,adding),'browser applied the initial preferences');
+    await ev(`(()=>{
+      const socket=ws, original=socket.send;
+      window.heldFavorite=null;
+      socket.send=function(frame){
+        const message=JSON.parse(frame);
+        if(message.type==='save_preferences'){
+          const prefs=JSON.parse(message.prefs), included=prefs.favorites?.some(f=>f.key===${JSON.stringify(favoriteKey)});
+          if(included===${adding}){
+            socket.send=original;
+            window.heldFavorite={stamp:prefs._favsTs,base:message.base,release:()=>original.call(socket,frame)};
+            return;
+          }
+        }
+        return original.call(socket,frame);
+      };
+      document.getElementById('topic-menu-btn').click();
+      const button=[...document.querySelectorAll('#topic-menu button')].find(b=>b.textContent===${JSON.stringify(adding?'☆ Favorite':'★ Unfavorite')});
+      if(!button)throw Error('Favorite menu action unavailable');
+      button.click();
+    })()`);
+    const favStamp=await waitFor(()=>ev('window.heldFavorite?.stamp'),'ordinary Favorite button submitted a preference frame');
+    if(delayFavoriteEcho&&!adding){
+      const count=await ev("favoriteEchoGate.events.length");
+      // The client loads preferences again on vault unlock. This real request
+      // reaches storage while the previous Favorite echo is still in transit.
+      await ev("wsend({type:'load_preferences'})");
+      await waitFor(()=>ev("favoriteEchoGate.events.length>"+count),'the user’s reload receives the saved Favorite');
+      check('Unfavorite was queued before this browser applied its own Favorite echo',await ev(
+        "favoriteEchoGate.events.every(e=>JSON.parse(e.prefs)._prefsRevision>heldFavorite.base)"));
+      await ev('favoriteEchoGate.release();delete window.favoriteEchoGate');
+    }
+    await patch({giphyKey:updatedKey,giphyRating:updatedRating,autoRejoin:!adding});
+    const before=(await read()).settings;
+    check('concurrent settings reached storage before '+(adding?'Favorite':'Unfavorite'),
+      before.giphyRating===updatedRating&&before.autoRejoin===!adding&&!Object.hasOwn(before,'giphyKey'));
+    await waitFor(()=>hasLocal(updatedKey,updatedRating,!adding),'browser applied the independent change');
+    if(delayFavoriteEcho&&adding)await ev(`(()=>{
+      const dispatch=handleEvent,events=[];
+      window.favoriteEchoGate={events,release:()=>{handleEvent=dispatch;events.forEach(dispatch);}};
+      handleEvent=e=>{
+        if(e.type==='preferences'&&e.prefs&&JSON.parse(e.prefs).favorites?.some(f=>f.key===${JSON.stringify(favoriteKey)})){
+          events.push(e);return;
+        }
+        return dispatch(e);
+      };
+    })()`);
+    const from=ownerWs.events.length;
+    await ev('window.heldFavorite.release();window.heldFavorite=null');
+    const saved=await waitFor(()=>{
+      for(const event of ownerWs.events.slice(from)){
+        if(event.type!=='preferences'||!event.prefs)continue;
+        const p=JSON.parse(event.prefs);
+        if(p._favsTs===favStamp&&hasFavorite(p)===adding)return p;
+      }
+    },'independent browser observed the delayed Favorite save');
+    const after=(await read()).settings;
+    check(adding?'a delayed Favorite preserves independent settings and their credential':
+      'a delayed Unfavorite cannot restore a cleared credential',
+      saved.giphyRating===updatedRating&&saved.autoRejoin===!adding&&saved.giphyKey===updatedKey&&
+      after.giphyRating===updatedRating&&after.autoRejoin===!adding&&hasFavorite(after)===adding&&
+      !Object.hasOwn(after,'giphyKey')&&!Object.hasOwn(after,'_prefsFieldVersions'));
+    await waitFor(()=>hasLocal(updatedKey,updatedRating,!adding),'originating browser converged after the delayed write');
+    await waitFor(()=>browser.evaluate('isFavorite('+JSON.stringify(networkA)+','+JSON.stringify(channel)+')==='+adding+
+      "&&Number(localStorage.getItem('cryptirc_favs_ts'))==="+favStamp),'sibling applied the Favorite list and its timestamp together');
+  }
+
+  // Real browsers decide whether to adopt channel keys using the last local
+  // device timestamp. The fast browser creates the key and the slow one clears
+  // it normally. Only the first browser's clock, not its messages, is adjusted.
+  const keyPresent=page=>page.evaluate('Boolean(loadChanKeys()['+JSON.stringify(favoriteKey)+'])');
+  const observed=(from,accept)=>waitFor(()=>{
+    for(const event of ownerWs.events.slice(from)){
+      if(event.type!=='preferences'||!event.prefs)continue;
+      const prefs=JSON.parse(event.prefs);
+      if(accept(prefs))return prefs;
+    }
+  },'account observer received the channel-key preferences');
+  let from=ownerWs.events.length;
+  await tab.evaluate(`(async()=>{
+    const original=Date.now;
+    try{
+      Date.now=()=>original()+300000;
+      await handleInput(${JSON.stringify('/key '+channel+' disposable-clock-key')});
+      flushPrefsToServer();
+    }finally{Date.now=original;}
+  })()`);
+  const first=await observed(from,p=>!!p.channelKeys?.[favoriteKey]);
+  await waitFor(()=>keyPresent(browser),'second browser received the known channel key');
+  await browser.evaluate('setActive('+JSON.stringify(networkA)+','+JSON.stringify(channel)+')');
+  from=ownerWs.events.length;
+  await browser.evaluate('(async()=>{await handleInput('+JSON.stringify('/key '+channel)+');flushPrefsToServer()})()');
+  const cleared=await observed(from,p=>Object.hasOwn(p,'channelKeys')&&!p.channelKeys?.[favoriteKey]);
+  check('a channel key cleared from a slower clock has a revision every cached browser can apply',
+    cleared._channelKeysTs>=first._channelKeysTs);
+  await waitFor(async()=>!await keyPresent(tab),'fast browser applied the other device’s channel-key clear');
+  from=ownerWs.events.length;
+  await tab.evaluate("document.getElementById('topic-menu-btn').click();[...document.querySelectorAll('#topic-menu button')].find(b=>b.textContent==='☆ Favorite').click()");
+  const after=await observed(from,hasFavorite);
+  check('an unrelated Favorite on a fast device cannot restore a cleared channel key',
+    !after.channelKeys?.[favoriteKey]&&!Object.hasOwn((await read()).settings,'channelKeys'));
+}
+
+async function chromium(profile='chrome', endpoint=base, clockOffsetMs=0) {
   const chrome=start(CHROMIUM||'/usr/bin/chromium',[
     '--headless=new','--no-sandbox','--disable-gpu','--remote-debugging-port=0',
     '--user-data-dir='+tmp+'/'+profile,'--no-first-run','about:blank'
@@ -129,10 +384,16 @@ async function chromium(profile='chrome', endpoint=base) {
   const pending=new Map();
   const errors=[];
   const frames=[];
+  const deliveryNotices=[];
   socket.onmessage=e=>{
     const m=JSON.parse(e.data);
     if(m.method==='Runtime.exceptionThrown')errors.push(m.params.exceptionDetails.text);
-    if(e2eEnabled&&m.method==='Network.webSocketFrameSent')frames.push(m.params.response.payloadData);
+    if((e2eEnabled||composerEncryption||reactionMidpoint||process.env.CRYPTIRC_TEST_REACTION_DURABILITY==='1')&&m.method==='Network.webSocketFrameSent')
+      frames.push(m.params.response.payloadData);
+    if(legacySignalHandoff&&m.method==='Network.webSocketFrameReceived'){
+      const event=JSON.parse(m.params.response.payloadData);
+      if(event.type==='irc_delivery_warning'||(event.type==='irc_message'&&event.from==='*'))deliveryNotices.push(event);
+    }
     if(!pending.has(m.id))return;
     const {resolve,reject}=pending.get(m.id);
     pending.delete(m.id);
@@ -161,6 +422,8 @@ async function chromium(profile='chrome', endpoint=base) {
   await send('Network.setBypassServiceWorker',{bypass:true});
   await send('Network.setBlockedURLs',{urls:['https://*','wss://*']});
   await send('Page.enable');
+  if(clockOffsetMs)await send('Page.addScriptToEvaluateOnNewDocument',{source:
+    `(()=>{const now=Date.now;Date.now=()=>now()+${Number(clockOffsetMs)};})()`});
   await send('Page.addScriptToEvaluateOnNewDocument',{source:
     "window.scriptPolicyViolations=[];document.addEventListener('securitypolicyviolation',e=>{if(e.effectiveDirective.startsWith('script-src'))window.scriptPolicyViolations.push(e.effectiveDirective);});"});
   await send('Page.navigate',{url:endpoint+'/'});
@@ -170,7 +433,211 @@ async function chromium(profile='chrome', endpoint=base) {
     protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,
     automaticPresenceSimulation:true,isUserVerified:true
   }});
-  return {send,evaluate,authenticatorId,errors,frames,chrome};
+  const close=async()=>{
+    process.kill(-chrome.pid,'SIGTERM');
+    await waitFor(()=>chrome.exitCode!==null||chrome.signalCode!==null,'browser exited before reopening its profile');
+    children.splice(children.indexOf(chrome),1);
+    await fs.rm(path.join(tmp,profile,'DevToolsActivePort'),{force:true});
+  };
+  const reopen=(clockOffsetMs=0)=>chromium(profile,endpoint,clockOffsetMs);
+  const relaunch=async()=>{await close();return reopen();};
+  return {send,evaluate,authenticatorId,errors,frames,deliveryNotices,chrome,close,reopen,relaunch};
+}
+
+async function checkComposerEncryption(browser, id, observer) {
+  const {evaluate:ev,send:cdp}=browser;
+  const q=JSON.stringify, view=`${q(id)},${q(channel)}`;
+  const field="document.getElementById('msg-input')";
+  const panel="document.getElementById('composer-encryption-status')";
+  const shown=`${panel}.classList.contains('show')`;
+  const status="document.getElementById('composer-encryption-status-text').textContent";
+  const action="document.getElementById('composer-encryption-action')";
+  const inputDrafts=`${shown}&&${field}.value===`;
+  const simulatePhone=send=>send('Emulation.setDeviceMetricsOverride',{
+    width:390,height:844,deviceScaleFactor:1,mobile:true,
+  });
+  const tap=async({evaluate,send},selector)=>{
+    const point=await evaluate(`(()=>{const r=${selector}.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+    await send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[point]});
+    await send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+  };
+  const draft='held for encryption check '+stamp;
+  const wire=()=>browser.frames.map(JSON.parse).filter(f=>f.type==='send'&&f.raw?.includes(draft));
+  const received=()=>observer.events.filter(e=>e.type==='irc_message'&&e.text===draft);
+  const holdSettings=async()=>ev(`window.composerGate={before:ws,events:[],handle:e2eHandleEvent};
+    e2eHandleEvent=async event=>{
+      if(event.type==='e2e_keyring'){composerGate.events.push(event);return;}
+      return composerGate.handle(event);
+    };
+    ws.close();`);
+  const releaseSettings=async()=>ev(`(async()=>{
+    e2eHandleEvent=composerGate.handle;
+    for(const event of composerGate.events) await e2eHandleEvent(event);
+    delete window.composerGate;
+  })()`);
+  await simulatePhone(cdp);
+  await holdSettings();
+  await waitFor(()=>ev('ws!==composerGate.before&&_wsReady()&&E2E._vaultUp&&!E2E._krReceived'),
+    'browser reconnects before receiving encryption settings');
+  await ev(`setActive(${view});${field}.value=${q(draft)}`);
+  const sendButton="document.getElementById('send-btn')";
+  await tap(browser,sendButton);
+  await waitFor(()=>ev(`${inputDrafts}${q(draft)}&&${status}===${q(`Checking encryption settings for ${channel}…`)}`),
+    'mobile composer shows the encryption check below the draft');
+  await waitFor(()=>ev('composerGate.events.length>0'),'real test server replies to the keyring request');
+  await ev(`${field}.dispatchEvent(new InputEvent('beforeinput',{inputType:'insertLineBreak',bubbles:true,cancelable:true}))`);
+  check('repeated mobile Send keeps one inline status and no IRC traffic or error rows',
+    await ev(`${inputDrafts}${q(draft)}&&
+      ${panel}.getBoundingClientRect().top>=${field}.getBoundingClientRect().bottom&&
+      !getBuf(${view}).some(m=>String(m.text).includes('E2E status for this account is not known'))`)&&
+    !wire().length&&!received().length);
+  await waitFor(()=>ev(`${inputDrafts}${q(draft)}&&${status}.startsWith('Encryption check timed out.')&&${action}.textContent==='Retry'`),
+    'timed out check keeps the same draft and shows Retry',12000);
+  check('the timeout leaves the draft private and shows a phone-sized Retry button',
+    !wire().length&&!received().length&&await ev(`${action}.getBoundingClientRect().height>=44`));
+  await releaseSettings();
+  await waitFor(()=>ev('E2E._krReceived'),'encryption settings finish loading');
+  check('a late keyring reply does not automatically send the timed-out draft',!wire().length&&!received().length);
+  await tap(browser,action);
+  await waitFor(()=>received().length>0&&wire().length>0,
+    'Retry sends the saved draft and DevTools records its frame');
+  check('Retry delivered the draft once and cleared the inline status',wire().length===1&&
+    await ev(`!${shown}&&${field}.value===''`));
+
+  const sending='one confirmed send '+stamp;
+  await waitFor(()=>ev('!_sendLock'),'Retry has finished processing');
+  await ev(`window.composerSendGate={prepare:_prepChatPart,calls:0};
+    _prepChatPart=async (...args)=>{
+      if(args[2]===${q(sending)}&&++composerSendGate.calls===1)
+        await new Promise(resolve=>{composerSendGate.resume=resolve;});
+      return composerSendGate.prepare(...args);
+    };
+    ${field}.value=${q(sending)};${sendButton}.click();`);
+  await waitFor(()=>ev('composerSendGate.calls===1'),'the composer is preparing an ordinary IRC send');
+  await ev(`${field}.dispatchEvent(new InputEvent('beforeinput',{inputType:'insertLineBreak',bubbles:true,cancelable:true}))`);
+  check('keyboard Send cannot resubmit the same draft while a tap is still pending',await ev('composerSendGate.calls===1'));
+  await ev(`setActive(${q(id)},'status');setActive(${view});
+    ${field}.dispatchEvent(new InputEvent('beforeinput',{inputType:'insertLineBreak',bubbles:true,cancelable:true}));`);
+  check('switching away and back does not allow a second send of an in-flight draft',await ev('composerSendGate.calls===1'));
+  await ev(`setActive(${q(id)},'status');
+    _prepChatPart=composerSendGate.prepare;composerSendGate.resume();`);
+  await waitFor(()=>observer.events.some(e=>e.type==='irc_message'&&e.text===sending),
+    'the first send reaches the original channel after navigation');
+  check('a completed send clears its old draft after switching conversations',
+    await ev(`${field}.value===''&&active.target==='status'`));
+
+  const slot=`_e2eScopedPskSlot(${q(channel)},${q(id)})`;
+  await ev('void e2ePromptDeviceUnlock()');
+  const recoveryCode=await setUpRecovery(browser,waitFor,check);
+
+  const reconnectDraft='held during encryption resync '+stamp;
+  const frameCount=browser.frames.length;
+  await holdSettings();
+  await waitFor(()=>ev('ws!==composerGate.before&&_wsReady()&&E2E.keyReady&&E2E._resyncPending'),
+    'previously unlocked device reconnects with encryption resync pending');
+  await ev(`setActive(${view});${field}.value=${q(reconnectDraft)};${sendButton}.click()`);
+  await waitFor(()=>ev(`${inputDrafts}${q(reconnectDraft)}&&${status}.startsWith('Checking encryption settings')&&composerGate.events.length`),
+    'unlocked device shows Checking while reconnecting');
+  await ev(`setActive(${q(id)},'status');setActive(${view})`);
+  check('switching conversations clears the status without discarding the draft',
+    await ev(`!${shown}&&${field}.value===${q(reconnectDraft)}`));
+  await waitFor(()=>ev('!_sendLock'),'touch send guard has cleared');
+  await ev(`${sendButton}.click()`);
+  await waitFor(()=>ev(shown),'trying again opens a new inline check');
+  await ev(`${field}.value+=' edited';${field}.dispatchEvent(new InputEvent('input',{bubbles:true}));`);
+  await releaseSettings();
+  await waitFor(()=>ev('E2E.keyReady&&!E2E._resyncPending'),'ready device completes its real reconnect');
+  check('editing while waiting cancels the old status and sends neither version of the draft',
+    await ev(`!${shown}&&${field}.value===${q(reconnectDraft+' edited')}`)&&
+    !browser.frames.slice(frameCount).map(JSON.parse).some(f=>f.type==='send'&&f.raw?.startsWith('PRIVMSG '+channel+' :')));
+
+  const requestNick='verify'+stamp, requestKey=`_e2eDmKey(${q(requestNick)},${q(id)})`;
+  const mobilePm='one mobile tap to plaintext '+stamp;
+  await cdp('Emulation.setTouchEmulationEnabled',{enabled:true});
+  await ev(`setActive(${q(id)},'status');${field}.value='';${field}.blur();openSidebar();
+    window.mobileTrust={result:null};
+    void _e2eAskIdentity(${requestKey},'test-fingerprint','Verify test identity',false,${q(id)})
+      .then(answer=>mobileTrust.result=answer);`);
+  check('the initial identity question is visible while the mobile drawer is open',
+    await ev("!!document.getElementById('e2e-id-dialog')&&document.getElementById('sidebar').classList.contains('open')"));
+  await ev(`setActive(${q(id)},${q(other)});${field}.value=${q(mobilePm)};${field}.focus()`);
+  check('opening a different private chat leaves Send reachable and preserves the pending trust decision',
+    await ev(`(()=>{const r=${sendButton}.getBoundingClientRect();
+      return ${sendButton}.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))&&
+      !document.getElementById('e2e-id-dialog')&&!document.getElementById('sidebar').classList.contains('open')&&
+      mobileTrust.result===null&&!E2E.trustStore[${requestKey}];})()`));
+  await tap(browser,sendButton);
+  await waitFor(()=>observer.events.some(e=>e.type==='irc_message'&&e.text===mobilePm),
+    'one touch sends the ordinary PM over IRC');
+  check('the touch sends plaintext exactly once and clears the composer',
+    browser.frames.map(JSON.parse).filter(f=>f.type==='send'&&f.raw===`PRIVMSG ${other} :${mobilePm}`).length===1&&
+    await ev(`${field}.value===''&&!${shown}&&mobileTrust.result===null`));
+  await ev(`setActive(${q(id)},${q(requestNick)});document.getElementById('e2e-id-cancel').click()`);
+  await waitFor(()=>ev('mobileTrust.result===false'),'the original trust request is reviewable in its own PM');
+  check('Cancel leaves the original identity untrusted',await ev(`!E2E.trustStore[${requestKey}]`));
+
+  const channelRequest='channelverify'+stamp;
+  await ev(`setActive(${view});${field}.value='unfinished channel message';${field}.focus();
+    mobileTrust.channelResult=null;
+    void _e2eAskIdentity(_e2eDmKey(${q(channelRequest)},${q(id)}),'other-fingerprint','Review in PM',false,${q(id)})
+      .then(answer=>mobileTrust.channelResult=answer);`);
+  check('an incoming identity request leaves a channel draft and its focus intact',
+    await ev(`!document.getElementById('e2e-id-dialog')&&document.activeElement===${field}&&mobileTrust.channelResult===null`));
+  await ev(`setActive(${q(id)},${q(channelRequest)});document.getElementById('e2e-id-cancel').click();${field}.value=''`);
+  await waitFor(()=>ev('mobileTrust.channelResult===false'),'the deferred channel-time request can be reviewed in its PM');
+
+  await ev(`(async()=>{const generated=await generateChannelKey();
+    await storeChannelKey(${slot},generated.key,generated.keyB64);})()`);
+  await waitFor(()=>ev(`_e2eReq({type:'e2e_load_keyring'},'e2e_keyring').then(event=>event?.channels?.includes(${slot}))`),
+    'the test server has recorded the shared channel key');
+  const locked=await chromium('composer-without-cached-key');
+  await simulatePhone(locked.send);
+  await locked.evaluate(`window.composerCache={read:_e2eIdbGetKey,started:false};
+    _e2eIdbGetKey=async (...args)=>{
+      composerCache.started=true;
+      await new Promise(resolve=>{composerCache.resume=resolve;});
+      return composerCache.read(...args);
+    };`);
+  await login(locked,owner,password,waitFor);
+  await locked.evaluate(`if(!E2E._vaultUp){document.getElementById('vault-pass').value=${q(vault)};doUnlock();}`);
+  const restoring=()=>locked.evaluate(`({lookup:composerCache.started,inventory:E2E._krReceived,
+    key:E2E._serverHints?.channels.includes(${slot}),network:networks.some(n=>n.config.id===${q(id)}&&n.connected),phase:E2E._bootPhase})`);
+  try{
+    await waitFor(async()=>{const s=await restoring();return s.lookup&&s.inventory&&s.key&&s.network;},
+      'fresh browser is restoring its saved key');
+  }catch(error){throw new Error(error.message+' '+JSON.stringify(await restoring()));}
+  const encryptedDraft='held for saved channel key '+stamp;
+  const count=observer.events.length;
+  await locked.evaluate(`setActive(${view});${field}.value=${q(encryptedDraft)};${sendButton}.click()`);
+  check('a known encrypted channel shows Loading while the device key lookup is pending',await locked.evaluate(
+    `${inputDrafts}${q(encryptedDraft)}&&${status}==='Loading your encryption key…'&&${action}.hidden`));
+  await locked.evaluate(`_e2eIdbGetKey=composerCache.read;composerCache.resume();`);
+  await waitFor(()=>locked.evaluate(`${inputDrafts}${q(encryptedDraft)}&&${status}==='Unlock encrypted chats to send.'&&${action}.textContent==='Unlock'`),
+    'a fresh device with no cached key offers Unlock');
+  check('a locked encrypted channel keeps the draft out of IRC',
+    !observer.events.slice(count).some(e=>e.type==='irc_message'&&e.from===owner&&e.target===channel));
+  await locked.evaluate(`insertEmoji('🙂')`);
+  check('using the emoji picker changes the draft and dismisses its old Unlock status',
+    await locked.evaluate(`!${shown}&&${field}.value.includes('🙂')`));
+  await waitFor(()=>locked.evaluate('!_sendLock'),'the locked composer has finished processing Send');
+  await locked.evaluate(`${field}.value=${q(encryptedDraft)};${sendButton}.click()`);
+  await waitFor(()=>locked.evaluate(`${inputDrafts}${q(encryptedDraft)}&&${action}.textContent==='Unlock'`),
+    'sending the current draft offers Unlock again');
+  await tap(locked,action);
+  await waitFor(()=>locked.evaluate("document.getElementById('custom-prompt-overlay').classList.contains('open')&&document.getElementById('custom-prompt-msg').textContent.includes('Enter your E2E recovery code')"),
+    'Unlock opens the recovery code prompt');
+  await locked.evaluate(`document.getElementById('custom-prompt-input').value=${q(recoveryCode)};
+    document.getElementById('custom-prompt-ok').click();`);
+  await waitFor(()=>locked.evaluate(`E2E._bootPhase==='ready'&&e2eTargetState(${q(channel)},{conn_id:${q(id)}}).mode==='psk'`),
+    'unlock restores the actual shared channel key');
+  check('Unlock leaves the encrypted channel draft in the composer',await locked.evaluate(`${field}.value===${q(encryptedDraft)}`));
+  await tap(locked,sendButton);
+  await waitFor(()=>observer.events.slice(count).some(e=>e.type==='irc_message'&&e.from===owner&&e.target===channel&&e.text?.startsWith('sd8~')),
+    'sending after unlock relays a shared-key ciphertext to the IRC peer');
+  check('sending after unlock clears the draft, with no cleartext on the IRC relay',
+    await locked.evaluate(`${field}.value===''&&!${shown}`)&&
+    !observer.events.slice(count).some(e=>e.type==='irc_message'&&e.text===encryptedDraft));
+  check('no unhandled browser errors during encryption status tests',!(browser.errors.length||locked.errors.length));
 }
 
 let rpcId=0;
@@ -187,14 +654,169 @@ async function tool(token,name,args={},wantError=false) {
   return wantError?result.content[0].text:result.structuredContent;
 }
 
-try {
+async function legacyObserver(nick) {
+  const login=await request('/auth/login',{method:'POST',body:{username:nick,password}});
+  assert.equal(login.status,200);
+  return connectWebsocket(login.data.token);
+}
+
+async function legacyContact(browser,nick,identity) {
+  const observer=await legacyObserver(nick);
+  const label='Legacy Signal testnet';
+  observer.send({type:'add_network',network:{id:crypto.randomUUID(),label,server:'127.0.0.1',port:Number(IRC_PORT),
+    tls:false,tls_accept_invalid_certs:false,nick,username:nick,realname:'Legacy Signal fixture',
+    auto_join:[],sasl_external:false,auto_reconnect:false}});
+  const state=await observer.wait(e=>e.type==='state'&&e.networks.some(n=>n.config.label===label),'old browser IRC network');
+  const id=state.networks.find(n=>n.config.label===label).config.id;
+  observer.send({type:'connect',id});
+  await observer.wait(e=>e.type==='connected'&&e.conn_id===id,'old browser IRC registration');
+  await waitFor(()=>browser.evaluate(`networks.some(n=>n.config.id===${JSON.stringify(id)})`),'old browser sees connected IRC network');
+  const origin=await browser.evaluate('performance.timeOrigin');
+  return {browser,nick,identity,observer,id,origin};
+}
+
+async function legacyCompose(from,to,text) {
+  await from.browser.evaluate(`setActive(${JSON.stringify(from.id)},${JSON.stringify(to.nick)});
+    document.getElementById('msg-input').focus();document.getElementById('msg-input').value=${JSON.stringify(text)};`);
+  await from.browser.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});
+  await from.browser.send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+}
+
+async function legacyAccept(from,to) {
+  await waitFor(()=>from.browser.evaluate("!!document.querySelector('#e2e-id-accept:not(:disabled)')"),'old browser identity confirmation');
+  const verified=await from.browser.evaluate(`(async()=>{
+    const fp=await computeIdentityFingerprint(...${JSON.stringify(to.identity)});
+    const dialog=document.getElementById('e2e-id-dialog');
+    if(!dialog.textContent.includes(fp)||!dialog.textContent.includes(${JSON.stringify(to.nick)}))return false;
+    dialog.querySelector('#e2e-id-accept').click();return true;
+  })()`);
+  check('the previous release confirms the other real browser identity',verified);
+}
+
+const legacyRow=(device,peer,text)=>device.browser.evaluate(
+  `getBuf(${JSON.stringify(device.id)},${JSON.stringify(peer.nick)}).some(m=>m.text===${JSON.stringify(text)})`);
+const legacyWire=(frame,nick)=>frame.type==='send'&&frame.raw.startsWith('PRIVMSG '+nick+' :[e2edm2]')
+  ?frame.raw.slice(frame.raw.indexOf(' :')+2):null;
+
+async function checkLegacyDelivery(from,to,text) {
+  const sent=from.browser.frames.length,received=to.observer.events.length,notices=from.browser.deliveryNotices.length;
+  await legacyCompose(from,to,text);
+  const wire=await waitFor(()=>from.browser.frames.slice(sent).map(f=>legacyWire(JSON.parse(f),to.nick)).find(Boolean),
+    'previous browser hands an ordinary encrypted PM to its authenticated web socket');
+  const seen=event=>event.type==='irc_message'&&event.conn_id===to.id&&event.from===from.nick;
+  const refusal=()=>from.browser.deliveryNotices.slice(notices).find(e=>e.conn_id===from.id&&e.target===to.nick&&/not sent|blocked/i.test(e.text));
+  await waitFor(()=>to.observer.events.slice(received).some(e=>seen(e)&&e.text===wire)||refusal(),
+    'actual IRC relay or a specific delivery refusal');
+  const delivered=to.observer.events.slice(received).filter(e=>seen(e)&&e.text===wire).length;
+  const clear=to.observer.events.slice(received).some(e=>seen(e)&&e.text===text);
+  const opened=delivered>0&&await waitFor(()=>legacyRow(to,from,text),'old peer reads the genuine ciphertext');
+  console.log('LEGACY-SIGNAL-HANDOFF',JSON.stringify({text,delivered,clear,opened:!!opened,refused:!!refusal(),reason:refusal()?.text}));
+  check('one genuine old-browser Signal message reaches its peer and opens',delivered===1&&opened&&!clear);
+}
+
+async function prepareLegacyHandoff(browser,nick,legacy) {
+  const peerNick='plp'+stamp;
+  check('second old-release account registered',(await request('/auth/register',{method:'POST',body:{username:peerNick,password}})).status===200);
+  const peerBrowser=await chromium('e2e-old-peer');
+  const peerLegacy=await seedLegacyE2e({browser:peerBrowser,waitFor,check,tmp,user:peerNick,password,vault,channel});
+  const sender=await legacyContact(browser,nick,legacy.identity),peer=await legacyContact(peerBrowser,peerNick,peerLegacy.identity);
+  await legacyCompose(sender,peer,'/encrypt on '+peer.nick);
+  await legacyAccept(sender,peer);
+  await waitFor(()=>browser.evaluate('Object.values(E2E.dmSessions).some(session=>!!session?.RK)'),
+    'genuine legacy outgoing ratchet');
+  const first='archived browser handshake '+stamp;
+  await legacyCompose(sender,peer,first);
+  await legacyAccept(peer,sender);
+  await waitFor(()=>legacyRow(peer,sender,first),'genuine encrypted handshake reaches the old peer');
+  await checkLegacyDelivery(peer,sender,'archived browser encrypted reply '+stamp);
+  for(const device of [sender,peer])device.beforeRestart=device.browser.frames.length;
+  return {sender,peer};
+}
+
+async function stageLegacyHandoff({sender,peer}) {
+  for(const device of [sender,peer]){
+    const connected=()=>device.browser.frames.slice(device.beforeRestart).map(f=>JSON.parse(f)).some(m=>m.type==='auth'&&m.e2e===2);
+    const status=()=>device.browser.evaluate(`({same:performance.timeOrigin===${device.origin},ready:_wsReady(),identity:!!E2E.identityReady,
+      phase:E2E._bootPhase,signIn:getComputedStyle(document.getElementById('auth-screen')).display!=='none'})`);
+    try {
+      await waitFor(async()=>{const s=await status();return connected()&&(s.ready||s.signIn);},'cached browser reconnect or sign-in form',30000);
+      if(!(await status()).ready){
+        await device.browser.evaluate(`document.getElementById('l-user').value=${JSON.stringify(device.nick)};
+          document.getElementById('l-pass').value=${JSON.stringify(password)};doLogin()`);
+        await waitFor(async()=>(await status()).ready,'the same old document signs back in');
+      }
+      check('cached browser reconnected with its old protocol and original document',(await status()).same);
+      await device.browser.evaluate(`document.getElementById('vault-pass').value=${JSON.stringify(vault)};doUnlock()`);
+      await waitFor(async()=>(await status()).identity,'previously unlocked legacy identity is ready after reconnection');
+    }catch(error){console.error('LEGACY-RECONNECT',await status(),{oldAuth:connected()});throw error;}
+    device.observer=await legacyObserver(device.nick);
+  }
+  await checkLegacyDelivery(sender,peer,'replacement web before account recovery '+stamp);
+  // Delay one fully formed browser frame at its final transport boundary.
+  // The same authenticated socket will hand it to the web process after migration.
+  await sender.browser.evaluate(`(()=>{
+    const socket=ws,write=socket.send;
+    socket.send=function(data){
+      const frame=JSON.parse(data);
+      if(frame.type==='send'&&frame.raw.startsWith(${JSON.stringify('PRIVMSG '+peer.nick+' :[e2edm2]')})){
+        socket.send=write;
+        window.releaseLegacySignal=()=>{
+          if(ws!==socket||socket.readyState!==WebSocket.OPEN)return false;
+          write.call(socket,data);return true;
+        };
+        return;
+      }
+      return write.call(socket,data);
+    };
+  })()`);
+  await legacyCompose(sender,peer,'old pending message across recovery '+stamp);
+  await waitFor(()=>sender.browser.evaluate("typeof window.releaseLegacySignal==='function'"),'the cached client has a genuine pending encrypted send');
+}
+
+async function checkMigratedHandoff({sender,peer}) {
+  const before=sender.browser.frames.length,notices=sender.browser.deliveryNotices.length,received=peer.observer.events.length;
+  check('the sender still has its original document and socket',await sender.browser.evaluate(
+    `performance.timeOrigin===${sender.origin}&&_wsReady()`));
+  check('the authenticated socket from before migration is still open',await sender.browser.evaluate(
+    '(()=>{const sent=window.releaseLegacySignal();delete window.releaseLegacySignal;return sent;})()'));
+  const wire=await waitFor(()=>sender.browser.frames.slice(before).map(f=>legacyWire(JSON.parse(f),peer.nick)).find(Boolean),
+    'the same old browser submits the genuine held ciphertext after migration');
+  const refusal=await waitFor(()=>sender.browser.deliveryNotices.slice(notices).find(e=>e.conn_id===sender.id&&e.target===peer.nick&&
+    /reload cryptirc to use encrypted chat/i.test(e.text)),'old sender receives the conversation-specific reload instruction');
+  const barrier=await ordinaryIrcClient(IRC_PORT,'plb'+stamp);
+  const mark='after old browser refusal '+stamp;
+  barrier.send('PRIVMSG '+peer.nick+' :'+mark);
+  await peer.observer.wait(e=>e.type==='irc_message'&&e.from==='plb'+stamp&&e.text===mark,'IRC recipient receives a subsequent independent message');
+  barrier.close();
+  const arrivals=peer.observer.events.slice(received).filter(e=>e.type==='irc_message'&&e.conn_id===peer.id&&e.from===sender.nick);
+  check('the authenticated old browser is refused after upgrade and the IRC peer receives neither wire nor cleartext',
+    refusal&&arrivals.every(e=>e.text!==wire&&e.text!=='old pending message across recovery '+stamp)&&
+    !await legacyRow(peer,sender,'old pending message across recovery '+stamp));
+}
+
+async function runIntegration() {
   if(translationEnabled)translator=await startTranslator();
   await fs.writeFile(path.join(tmp,'admin_settings.json'),JSON.stringify({registration_open:true,captcha_enabled:false}));
   const core=start(CRYPTIRC_CORE_BIN,[],env);
   await waitFor(()=>fs.stat(path.join(tmp,'irc-core.sock')).catch(()=>null),'isolated IRC core');
+  if(process.env.CRYPTIRC_TEST_SIGNAL_AUDIT==='divergent-web-upgrade'){
+    const {checkDivergentWebUpgrade}=await import('./signal-upgrade-checks.mjs');
+    const stop=async child=>{
+      process.kill(-child.pid,'SIGTERM');
+      await waitFor(()=>child.exitCode!==null||child.signalCode!==null,'disposable process exited');
+      children.splice(children.indexOf(child),1);
+    };
+    await checkDivergentWebUpgrade({core,base,env,tmp,owner,other,password,vault,stamp,start,stop,allocatePort,
+      request,chromium,connectWebsocket,waitFor,check});
+    return;
+  }
+  const fixtureIpcPath=path.join(tmp,'reaction-gate.sock');
+  const delayOwnEcho=process.env.CRYPTIRC_TEST_SIGNAL_ECHO_DELAY==='1';
+  const reactionGate=reactionMidpoint||delayOwnEcho?await reactionIpcGate(path.join(tmp,'irc-core.sock'),fixtureIpcPath):null;
+  const webEnv=reactionGate?{...env,CRYPTIRC_IPC_SOCK:fixtureIpcPath}:env;
   const waitWeb=()=>waitFor(()=>fetch(base+'/auth/status').then(r=>r.ok).catch(()=>false),'isolated web server');
   const legacyUser='pkl'+stamp;
-  let legacy;
+  let legacy,legacyPair;
   if(e2eEnabled&&legacyBin){
     const oldWeb=start(legacyBin,[],env);
     await waitWeb();
@@ -203,13 +825,14 @@ try {
     })).status===200);
     const oldBrowser=await chromium('e2e-old-release');
     legacy=await seedLegacyE2e({browser:oldBrowser,waitFor,check,tmp,user:legacyUser,password,vault,channel});
-    for(const child of [oldBrowser.chrome,oldWeb]){
+    if(legacySignalHandoff)legacyPair=await prepareLegacyHandoff(oldBrowser,legacyUser,legacy);
+    for(const child of (legacyPair?[oldWeb]:[oldBrowser.chrome,oldWeb])){
       process.kill(-child.pid,'SIGTERM');
       await waitFor(()=>child.exitCode!==null||child.signalCode!==null,'old test process exited');
       children.splice(children.indexOf(child),1);
     }
   }
-  let web=start(CRYPTIRC_BIN,[],env);
+  let web=start(CRYPTIRC_BIN,[],webEnv);
   await waitWeb();
   const checkPagePolicy=async route=>{
     const response=await fetch(base+route);
@@ -226,8 +849,10 @@ try {
   check('page script nonce changes across responses',mainNonce!==await checkPagePolicy('/'));
   await checkPagePolicy('/auth/reset?token=fixture');
   if(legacy){
+    if(legacyPair)await stageLegacyHandoff(legacyPair);
     const migrationBrowser=await chromium('e2e-migration');
     await checkLegacyMigration({browser:migrationBrowser,waitFor,check,tmp,user:legacyUser,password,vault,channel,legacy});
+    if(legacyPair){await checkMigratedHandoff(legacyPair);return;}
   }
   for(const username of [owner,other]){
     const res=await request('/auth/register',{method:'POST',body:{username,password}});
@@ -373,12 +998,12 @@ try {
   check('MCP key survives an ordinary web sign-out',(await rpc(token,'ping')).status===200);
 
   const second=await request('/auth/login',{method:'POST',body:{username:other,password}});
-  const otherSession=second.data.token;
+  let otherSession=second.data.token;
   const otherKeyRes=await request('/api/mcp/token',{method:'POST',headers:ownHeaders,token:otherSession,body:{password}});
   const otherKey=otherKeyRes.data.token;
   check('separate account can issue its own key',!!otherKey&&otherKey!==token);
-  const ownerWs=await connectWebsocket(ownerSession);
-  const otherWs=await connectWebsocket(otherSession);
+  let ownerWs=await connectWebsocket(ownerSession);
+  let otherWs=await connectWebsocket(otherSession);
   for(const ws of [ownerWs,otherWs]){
     ws.send({type:'unlock_vault',passphrase:vault});
     await ws.wait(e=>e.type==='vault_unlocked','test vault unlock');
@@ -427,10 +1052,188 @@ try {
   await ev("closeProfilePanel();document.getElementById('vault-pass').value="+JSON.stringify(vault)+";doUnlock()");
   await waitFor(()=>ev(`networks.some(n=>n.config.id===${JSON.stringify(networkA)}&&n.connected) &&
     !document.getElementById('vault-overlay').classList.contains('show')`),'browser websocket and vault');
+  if(process.env.CRYPTIRC_TEST_INBOX_RECOVERY==='1'){
+  await waitFor(()=>ev("E2E._krReceived&&E2E._vaultUp"),'test browser has encryption metadata');
+  await ev("void e2ePromptDeviceUnlock()");
+  await setUpRecovery(browser,waitFor,check);
+  const q=JSON.stringify;
+  const onlineNick='pml'+stamp, offlineNick='pmo'+stamp;
+  const live=await ordinaryIrcClient(IRC_PORT,onlineNick);
+  const absent=await ordinaryIrcClient(IRC_PORT,offlineNick);
+  const inbox=(device,nick)=>device.evaluate(`_msgsConversations().some(c=>c.conn_id===${q(networkA)}&&c.lc===${q(nick)})`);
+  const liveText='fresh PM while browser is connected '+stamp;
+  const offlineText='fresh PM while browser is closed '+stamp;
+  await ev("localStorage.setItem('cryptirc_block_pms','true');localStorage.setItem('cryptirc_pm_deliver_first','true');setActive(MSGS_CONN,MSGS_TARGET)");
+  live.send('PRIVMSG '+owner+' :'+liveText);
+  await waitFor(()=>inbox(browser,onlineNick),'first incoming PM adds its thread to Messages while online');
+  check('a first live inbound PM created the thread with PM Protection enabled',await inbox(browser,onlineNick));
+  const plainReply='two-way plaintext reply '+stamp;
+  await ev(`setActive(${q(networkA)},${q(onlineNick)});document.getElementById('msg-input').focus();document.getElementById('msg-input').value=${q(plainReply)};`);
+  await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});
+  await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+  await waitFor(()=>live.lines.some(line=>line.endsWith(' :'+plainReply)),'ordinary IRC peer receives the live plaintext reply');
+  check('plaintext PMs moved both ways before the disconnect',true);
+  live.close();
+  await pause(450);
+  const draft='reply after peer quits '+stamp;
+  const mark=browser.frames.length;
+  await ev(`setActive(${q(networkA)},${q(onlineNick)});document.getElementById('msg-input').focus();document.getElementById('msg-input').value=${q(draft)};`);
+  await cdp('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});
+  await cdp('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});
+  const offlineReported=await waitFor(()=>ev(`getBuf(${q(networkA)},${q(onlineNick)}).some(m=>m.text===${q(onlineNick+' is offline.')})`),
+    'online peer quit, then CryptIRC reports the nick offline',15000).catch(()=>false);
+  if(!offlineReported)console.log('TEST OFFLINE DIAGNOSTIC',JSON.stringify({
+    frames:browser.frames.slice(mark).map(JSON.parse).filter(f=>f.username===onlineNick||f.raw?.includes(onlineNick)).map(f=>f.type),
+    reply:ownerWs.events.filter(e=>e.type==='e2e_bundle_missing').slice(-2).map(e=>e.reason),
+    browser:await ev(`({ready:E2E.keyReady,reason:E2E.lastBlockReason,
+      chat:getBuf(${q(networkA)},${q(onlineNick)}).filter(m=>m.kind==='error').map(m=>m.text),
+      composer:document.getElementById('composer-encryption-status-text').textContent})`)
+  }));
+  const keptAfterDisconnect=offlineReported&&
+    await ev(`document.getElementById('msg-input').value===${q(draft)}`)&&
+    !browser.frames.slice(mark).map(JSON.parse).some(f=>f.type==='send'&&f.raw?.includes(draft));
+  console.log('DISCONNECTED REPLY '+JSON.stringify({notice:offlineReported,draftKept:keptAfterDisconnect}));
+  await ev("localStorage.setItem('cryptirc_block_pms','false');savePrefsToServer();flushPrefsToServer()");
+  await waitFor(()=>ev("_prefsPendingSince===0"),'PM protection change queued before browser closes');
+  await browser.close();
+  absent.send('PRIVMSG '+owner+' :'+offlineText);
+  await ownerWs.wait(e=>e.type==='irc_message'&&e.from===offlineNick&&e.text===offlineText,'Frozen-equivalent web receives a PM while the browser is closed');
+  const returned=await browser.reopen();
+  await waitFor(()=>returned.evaluate(`_wsReady()&&networks.some(n=>n.config.id===${q(networkA)}&&n.connected)&&
+    !document.getElementById('vault-overlay').classList.contains('show')`),'browser reconnects while the IRC core stays connected');
+  await returned.evaluate("setActive(MSGS_CONN,MSGS_TARGET)");
+  await waitFor(()=>inbox(returned,offlineNick),'Messages recovers the new conversation without opening its query');
+  const present=await inbox(returned,offlineNick);
+  check('the first PM received while the browser was closed is listed in Messages',present);
+  await returned.evaluate(`setActive(${q(networkA)},${q(offlineNick)});`);
+  await waitFor(()=>returned.evaluate(`getBuf(${q(networkA)},${q(offlineNick)}).some(m=>m.text===${q(offlineText)})`),
+    'opening the known IRC nick directly retrieves its saved first PM');
+  console.log('INBOX RECOVERY '+JSON.stringify({threadRecoveredAutomatically:present, historyRetrieved:true}));
+  absent.close();
+  check('a reply after the peer disconnects stays in the composer and sends no PRIVMSG',keptAfterDisconnect);
+  return;
+  }
+  if(composerEncryption){
+    await checkComposerEncryption(browser,networkA,otherWs);
+    return;
+  }
   const noticeNetwork=await network(token,'pkc'+stamp,IRC_PORT,'Other network');
   await tool(token,'irc_network',{action:'connect',network:noticeNetwork});
   await ownerWs.wait(e=>e.type==='connected'&&e.conn_id===noticeNetwork,'second viewer network');
   await waitFor(()=>ev(`networks.some(n=>n.config.id===${JSON.stringify(noticeNetwork)})`),'browser second network');
+  if(reactionMidpoint||process.env.CRYPTIRC_TEST_REACTION_DURABILITY==='1'){
+    const profile='reaction-durability';
+    const q=JSON.stringify;
+    const signIn=async device=>{
+      const state=await waitFor(()=>device.evaluate(`_wsReady()?'connected':
+        document.getElementById('auth-screen').style.display==='flex'?'login':null`),
+      'the reaction fixture browser is connected or offers login');
+      if(state==='login') await device.evaluate(`document.getElementById('l-user').value=${q(owner)};
+        document.getElementById('l-pass').value=${q(password)};doLogin()`);
+      await waitFor(()=>device.evaluate('!!sessionToken&&_wsReady()'),'reaction fixture browser signed in');
+    };
+    const ready=device=>waitFor(()=>device.evaluate(`window._appShown&&_wsReady()&&
+      reactionEnabled(${JSON.stringify(networkA)})&&!document.getElementById('vault-overlay').classList.contains('show')`).catch(()=>false),
+    'reaction fixture browser is authenticated on the existing IRC route');
+    const close=async device=>{
+      if(device.chrome.exitCode===null&&device.chrome.signalCode===null){
+        await device.send('Browser.close');
+        await waitFor(()=>device.chrome.exitCode!==null||device.chrome.signalCode!==null,'the reaction browser process closed');
+      }
+      await fs.rm(path.join(tmp,profile,'DevToolsActivePort'),{force:true});
+    };
+    let actor=await chromium(profile);
+    try{
+      await signIn(actor);
+      await actor.evaluate(`document.getElementById('vault-pass').value=${q(vault)};doUnlock()`);
+      await ready(actor);
+      const reopen=async(previous,restartWeb)=>{
+        await close(previous);
+        if(restartWeb){
+          const corePid=core.pid;
+          process.kill(-web.pid,reactionMidpoint?'SIGKILL':'SIGTERM');
+          await waitFor(()=>web.exitCode!==null||web.signalCode!==null,'disposable reaction web exited');
+          children.splice(children.indexOf(web),1);
+          web=start(CRYPTIRC_BIN,[],webEnv);
+          await waitWeb();
+          process.kill(corePid,0);
+          check('the reaction fixture web restarted with the original IRC core PID',
+            core.pid===corePid&&core.exitCode===null&&core.signalCode===null);
+          const freshToken=async username=>{
+            const {status,data}=await request('/auth/login',{method:'POST',body:{username,password}});
+            assert.equal(status,200,'reaction observer login after the web restart');
+            return data.token;
+          };
+          ownerSession=await freshToken(owner);
+          otherSession=await freshToken(other);
+          ownerWs=await connectWebsocket(ownerSession);
+          otherWs=await connectWebsocket(otherSession);
+          for(const [observer,network] of [[ownerWs,networkA],[otherWs,networkB]]){
+            observer.send({type:'unlock_vault',passphrase:vault});
+            await observer.wait(event=>event.type==='vault_unlocked','reaction observer unlocked after web restart');
+            let last=0;
+            await waitFor(()=>{
+              const online=observer.events.some(event=>event.type==='state'&&event.networks.some(net=>net.config.id===network&&net.connected));
+              if(!online&&Date.now()-last>=500){ last=Date.now();observer.send({type:'get_state'}); }
+              return online;
+            },'existing reaction observer route reattached');
+          }
+        }
+        actor=await chromium(profile);
+        await signIn(actor);
+        await ready(actor);
+        return {browser:actor,ownerWs,otherWs};
+      };
+      const dateReceipt=async(device,receipt,observer)=>{
+        const elapsed=14*60*60*1000;
+        const ledger=path.join(tmp,'users',owner,'reaction-receipts.json');
+        const rows=JSON.parse(await fs.readFile(ledger,'utf8'));
+        const order=row=>row.order??row.expires_at;
+        assert(rows.some(row=>row.conn_id===networkA&&row.request_id===receipt.request_id&&order(row)===order(receipt)),
+          'the genuine IRC receipt is in the disposable account ledger');
+        // Shift this idle fixture's prior timestamps together so the existing
+        // confirmed Like, Heart and removal keep their true ordering.
+        for(const row of rows){
+          if(Number.isSafeInteger(row.order)) row.order-=elapsed;
+          else row.expires_at-=elapsed;
+        }
+        await fs.writeFile(ledger+'.dated',JSON.stringify(rows),{mode:0o600});
+        await fs.rename(ledger+'.dated',ledger);
+        await device.evaluate(`(async()=>{
+          const slot=reactionHistorySlot(false), key='receipt:'+${q(receipt.request_id)};
+          const records=await readReactionHistory(slot,null), pending=records.get(key);
+          if(!pending)throw new Error('the actual pending removal is missing');
+          for(const [id,entry] of records){
+            if(id.startsWith('receipt:')) entry.until=Number.isFinite(entry.until)?entry.until-${elapsed}:Date.now()-${elapsed};
+            else if(entry.ownOrder) for(const emoji of Object.keys(entry.ownOrder))entry.ownOrder[emoji]-=${elapsed};
+          }
+          await _e2eIdbOp('readwrite',store=>store.put([...records],slot),2000);
+        })()`);
+        const at=observer.events.length;
+        observer.send({type:'get_reaction_receipts',conn_id:networkA,request_ids:[receipt.request_id]});
+        const reply=await waitFor(()=>observer.events.slice(at).find(event=>event.type==='reaction_receipts'&&event.conn_id===networkA),
+          'the actual server answers the aged reaction receipt lookup');
+        return {elapsedHours:14,serverStillConfirms:reply.receipts.some(row=>row.request_id===receipt.request_id)};
+      };
+      if(reactionGate){
+        const witness=await ordinaryIrcClient(IRC_LEAF_PORT||IRC_PORT,'pkw'+stamp);
+        try{
+          witness.send('CAP REQ :message-tags');
+          await waitFor(()=>witness.lines.some(line=>line.includes(' ACK ')&&line.includes('message-tags')),
+            'independent IRC witness negotiated message tags');
+          witness.send('JOIN '+channel);
+          await waitFor(()=>witness.lines.some(line=>line.includes(' JOIN ')&&line.includes(channel)),
+            'independent IRC witness joined the durability channel');
+          await checkReactionMidpoint({browser:actor,reopen,gate:reactionGate,witness,ownerWs,otherWs,check,waitFor,
+            networkA,networkB,channel,owner,stamp});
+        }finally{witness.close();}
+      }else{
+        await checkReactionEchoDurability({browser:actor,reopen,dateReceipt,ownerWs,otherWs,check,waitFor,networkA,networkB,channel,owner,stamp});
+      }
+      await signIn(browser);
+      await waitFor(()=>ev(`window._appShown&&_wsReady()&&reactionEnabled(${q(networkA)})`),'the original browser returned after the optional reaction web restart');
+    }finally{ await close(actor); }
+  }
   if(process.env.CRYPTIRC_TEST_REACTION_HISTORY==='1'){
     await checkReactionHistory({browser,check,waitFor,otherWs,networkA,networkB,channel,stamp});
   }
@@ -683,46 +1486,60 @@ try {
       return !files.some(name=>name.endsWith('.enc'));
     },'test plaintext policy fixture removed');
     const ownerCode=await checkE2eChat({browser,chromium,check,waitFor,pause,owner,other,password,vault,tmp,ownerWs,otherWs,
-      networkA,networkB,channel,stamp,request,ownerSession});
+      networkA,networkB,channel,stamp,request,ownerSession,echoGate:delayOwnEcho?reactionGate:null});
     if(process.env.CRYPTIRC_TEST_E2E_BRIDGE==='1'){
+      const ordinaryFirst=['first-account-plain','first-account-shared-consent'].includes(process.env.CRYPTIRC_TEST_SIGNAL_AUDIT);
+      const peerPort=Number(ordinaryFirst?process.env.IRC_UNSUPPORTED_PORT:IRC_LEAF_PORT);
+      assert(peerPort,ordinaryFirst?'Set IRC_UNSUPPORTED_PORT for the ordinary first-account check':'Set IRC_LEAF_PORT for bridge tests');
       const remote='pkx'+stamp;
       const remotePort=await allocatePort();
       const endpoint=`http://localhost:${remotePort}/cryptirc`;
       const remoteData=await fs.mkdtemp(path.join(tmp,'remote-'));
       const remoteEnv={...env,CRYPTIRC_DATA:remoteData,CRYPTIRC_PORT:String(remotePort),CRYPTIRC_BASE_URL:endpoint};
       await fs.writeFile(path.join(remoteData,'admin_settings.json'),JSON.stringify({registration_open:true,captcha_enabled:false}));
-      start(CRYPTIRC_CORE_BIN,[],remoteEnv);
+      start(process.env.CRYPTIRC_PEER_CORE_BIN||CRYPTIRC_CORE_BIN,[],remoteEnv);
       await waitFor(()=>fs.stat(path.join(remoteData,'irc-core.sock')).catch(()=>null),'separate IRC core');
-      start(CRYPTIRC_BIN,[],remoteEnv);
+      const peerWeb=start(process.env.CRYPTIRC_PEER_BIN||CRYPTIRC_BIN,[],remoteEnv);
       await waitFor(()=>fetch(endpoint+'/auth/status').then(r=>r.ok).catch(()=>false),'separate CryptIRC instance');
-      check('second CryptIRC instance registers its own account', (await request('/auth/register',{
-        method:'POST',endpoint,body:{username:remote,password}
-      })).status===200);
-      const login=await request('/auth/login',{method:'POST',endpoint,body:{username:remote,password}});
-      const remoteWs=await connectWebsocket(login.data.token,endpoint);
-      remoteWs.send({type:'unlock_vault',passphrase:vault});
-      await remoteWs.wait(e=>e.type==='vault_unlocked','second instance vault');
-      const label='Second CryptIRC instance';
-      remoteWs.send({type:'add_network',network:{id:crypto.randomUUID(),label,server:'127.0.0.1',port:Number(IRC_LEAF_PORT),
-        tls:false,tls_accept_invalid_certs:false,nick:remote,username:remote,realname:'CryptIRC bridge fixture',
-        auto_join:[],sasl_external:false,auto_reconnect:false}});
-      const state=await remoteWs.wait(e=>e.type==='state'&&e.networks.some(n=>n.config.label===label),'second instance network');
-      const remoteNetwork=state.networks.find(n=>n.config.label===label).config.id;
-      remoteWs.send({type:'connect',id:remoteNetwork});
-      await remoteWs.wait(e=>e.type==='connected'&&e.conn_id===remoteNetwork,'second instance linked IRC registration');
+      const createRemote=async nick=>{
+        check('second CryptIRC instance registers its own account',(await request('/auth/register',{method:'POST',endpoint,body:{username:nick,password}})).status===200);
+        const login=await request('/auth/login',{method:'POST',endpoint,body:{username:nick,password}});
+        const observer=await connectWebsocket(login.data.token,endpoint);
+        observer.send({type:'unlock_vault',passphrase:vault});
+        await observer.wait(e=>e.type==='vault_unlocked','second instance vault');
+        const label='Second CryptIRC instance';
+        observer.send({type:'add_network',network:{id:crypto.randomUUID(),label,server:'127.0.0.1',port:peerPort,
+          tls:false,tls_accept_invalid_certs:false,nick,username:nick,realname:'CryptIRC bridge fixture',
+          auto_join:[],sasl_external:false,auto_reconnect:false}});
+        const state=await observer.wait(e=>e.type==='state'&&e.networks.some(n=>n.config.label===label),'second instance network');
+        const id=state.networks.find(n=>n.config.label===label).config.id;
+        observer.send({type:'connect',id});
+        await observer.wait(e=>e.type==='connected'&&e.conn_id===id,'second instance linked IRC registration');
+        return {observer,id,device:await chromium('encrypted-bridge-'+nick,endpoint)};
+      };
+      const {observer:remoteWs,id:remoteNetwork,device:bridgePeer}=await createRemote(remote);
       const ordinary='pkn'+stamp;
-      const irc=await ordinaryIrcClient(IRC_LEAF_PORT,ordinary);
-      await checkCrossInstanceE2e({browser,peer:await chromium('encrypted-bridge',endpoint),chromium,ownerCode,check,waitFor,
-        owner,ownerWs,remote,password,networkA,remoteNetwork,remoteWs,stamp,otherWs,remoteData,ordinary,ordinaryLines:irc.lines});
+      const silentTagged=!ordinaryFirst&&!['bridge-ordinary','bridge-ordinary-cold'].includes(process.env.CRYPTIRC_TEST_SIGNAL_AUDIT);
+      const irc=await ordinaryIrcClient(peerPort,ordinary,silentTagged);
+      await checkCrossInstanceE2e({browser,peer:bridgePeer,createRemote,chromium,ownerCode,check,waitFor,
+        owner,ownerWs,remote,password,vault,networkA,remoteNetwork,remoteWs,stamp,otherWs,ownerData:tmp,remoteData,peerWeb,ordinary,ordinaryLines:irc.lines,ordinarySend:irc.send});
       irc.close();
+      // These audits fully close the original browser before reopening its profile.
+      if(process.env.CRYPTIRC_TEST_SIGNAL_AUDIT==='identity-reset'&&
+         ['1','on'].includes(process.env.CRYPTIRC_TEST_IDENTITY_CLOSED_SIBLING)&&
+         process.env.CRYPTIRC_TEST_DEVICE_HISTORY_SYNC==='1')return;
+      if(process.env.CRYPTIRC_TEST_SIGNAL_AUDIT==='offline-restart-history')return;
     }
   }
   await tool(token,'cryptirc_appearance',{settings:{theme:'arctic'}});
   check('MCP appearance can be updated and read',(await tool(token,'cryptirc_appearance')).settings.theme==='arctic');
+  if(process.env.CRYPTIRC_TEST_PREFERENCE_CONCURRENCY==='1')await checkConcurrentPreferenceSave({token,ownerWs,networkA,browser});
   const browserPrefCount=ownerWs.events.length;
   await tool(token,'cryptirc_settings',{section:'preferences',settings:{
-    mcpTest:stamp,giphyKey:'test-only-gif-key'
+    giphyRating:'g',giphyKey:'test-only-gif-key'
   }});
+  await waitFor(()=>ev("localStorage.getItem('cryptirc_giphy_rating')==='g'&&localStorage.getItem('cryptirc_giphy_key')==='test-only-gif-key'"),
+    'browser applied the first MCP preference patch');
   const browserSaveTs=await ev("localStorage.setItem('cryptirc_highlight_words_ts',String(Date.now()-1000));_lastFlushTs='mcp-test-browser-save';_lastFlushTs");
   await tool(token,'cryptirc_settings',{section:'preferences',settings:{
     autoRejoin:false,highlightWords:[stamp],_saveTs:browserSaveTs
@@ -732,11 +1549,11 @@ try {
   check('MCP preference updates are applied by the browser',true);
   const {settings:mcpPrefs}=await tool(token,'cryptirc_settings',{section:'preferences'});
   check('MCP patches encrypted preferences without returning saved keys',
-    mcpPrefs.mcpTest===stamp&&mcpPrefs.autoRejoin===false&&!Object.hasOwn(mcpPrefs,'giphyKey'));
+    mcpPrefs.giphyRating==='g'&&mcpPrefs.autoRejoin===false&&!Object.hasOwn(mcpPrefs,'giphyKey'));
   await waitFor(()=>ownerWs.events.slice(browserPrefCount).some(e=>{
     if(e.type!=='preferences'||!e.prefs)return false;
     const prefs=JSON.parse(e.prefs);
-    return prefs.mcpTest===stamp&&prefs.autoRejoin===false&&prefs.giphyKey==='test-only-gif-key';
+    return prefs.giphyRating==='g'&&prefs.autoRejoin===false&&prefs.giphyKey==='test-only-gif-key';
   }),'browser received synced preferences with stored credentials');
   const notifications=await tool(token,'cryptirc_settings',{section:'notifications',settings:{enabled:true,dnd:true}});
   check('MCP writes notifications through the normal API',notifications.settings.enabled&&
@@ -940,11 +1757,15 @@ try {
       e.networks.some(n=>n.config.id===keepNetwork&&n.config.keep_nick===null&&n.config.keep_nick_managed)), 'KeepNick stays stopped');
     check('an old browser’s import cannot restore an explicitly stopped nick',!!stopped);
   }
+}
+try {
+  await runIntegration();
 } catch (error) {
   for(const child of children.slice(0,2))if(child.logs)console.error(child.logs);
   throw error;
 } finally {
   translator?.close();
+  for(const server of fixtureServers)server.close();
   for(const socket of sockets)socket.close();
   for(const socket of tcpSockets)socket.destroy();
   for(const child of children)try{ process.kill(-child.pid,'SIGTERM'); }catch {}

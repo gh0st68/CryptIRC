@@ -42,11 +42,13 @@ LOCK_VER=$(grep -m1 '"version"[[:space:]]*:' "$PACKAGE_LOCK" | sed -E 's/.*"vers
 # Colour may be a shields.io name (brightgreen) OR a hex triplet (00d4aa), and the
 # badge may carry ?style=/&labelColor= params — match both without capturing them.
 README_VER=$(grep -m1 'badge/version-' "$README" | sed -E 's/.*badge\/version-([0-9A-Za-z.+-]+)-[0-9A-Za-z]+.*/\1/')
+README_ALT_VER=$(sed -nE '/badge\/version-/s/.*alt="Version ([0-9A-Za-z.+-]+)".*/\1/p' "$README" | head -n1)
 
 DRIFT=false
 [[ "$PKG_VER" != "$CANON_VER" ]] && DRIFT=true
 [[ "$LOCK_VER" != "$CANON_VER" ]] && DRIFT=true
 [[ "$README_VER" != "$CANON_VER" ]] && DRIFT=true
+[[ "$README_ALT_VER" != "$CANON_VER" ]] && DRIFT=true
 
 if [[ "$MODE" == "check" ]]; then
     if [[ "$DRIFT" == "false" ]]; then
@@ -57,6 +59,7 @@ if [[ "$MODE" == "check" ]]; then
     [[ "$PKG_VER" != "$CANON_VER" ]] && echo "    electron/package.json is v${PKG_VER:-<unreadable>}" >&2
     [[ "$LOCK_VER" != "$CANON_VER" ]] && echo "    electron/package-lock.json is v${LOCK_VER:-<unreadable>}" >&2
     [[ "$README_VER" != "$CANON_VER" ]] && echo "    README.md badge is v${README_VER:-<unreadable>}" >&2
+    [[ "$README_ALT_VER" != "$CANON_VER" ]] && echo "    README.md badge alternative text is v${README_ALT_VER:-<unreadable>}" >&2
     echo "  Fix with: scripts/sync-version.sh fix" >&2
     exit 1
 fi
@@ -70,21 +73,24 @@ if [[ "$PKG_VER" != "$CANON_VER" || "$LOCK_VER" != "$CANON_VER" ]]; then
     echo "  Electron manifests: ${PKG_VER:-<unreadable>}/${LOCK_VER:-<unreadable>} → $CANON_VER"
     CHANGED=true
 fi
-if [[ "$README_VER" != "$CANON_VER" ]]; then
+if [[ "$README_VER" != "$CANON_VER" || "$README_ALT_VER" != "$CANON_VER" ]]; then
     # Preserve the badge's existing colour and any ?style= params — only the
     # version segment is ours to rewrite (the first badge only). POSIX awk + a temp file,
     # not GNU sed's `0,/re/` range and bare `-i`, so this also runs on macOS/BSD (the
     # Electron mac builds are made on a Mac).
     _tmp=$(mktemp "$README.XXXXXX")
+    # Preserve the file metadata and replace the badge atomically for readers
+    # taking a release snapshot while version synchronization runs.
+    cp -p "$README" "$_tmp" || { rm -f "$_tmp"; exit 2; }
     if V="$CANON_VER" awk '
         !done && match($0, /badge\/version-[0-9A-Za-z.+-]+-[0-9A-Za-z]+/) {
             m = substr($0, RSTART, RLENGTH); colour = m; sub(/.*-/, "", colour)
             $0 = substr($0, 1, RSTART - 1) "badge/version-" ENVIRON["V"] "-" colour substr($0, RSTART + RLENGTH)
+            sub(/alt="Version [0-9A-Za-z.+-]+"/, "alt=\"Version " ENVIRON["V"] "\"")
             done = 1
         }
         { print }' "$README" > "$_tmp"; then
-        cat "$_tmp" > "$README"      # (keeps README.md's own mode and owner)
-        rm -f "$_tmp"
+        mv -f "$_tmp" "$README"
     else
         rm -f "$_tmp"; echo "✗ Could not rewrite the README.md badge" >&2; exit 2
     fi

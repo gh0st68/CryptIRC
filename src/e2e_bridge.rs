@@ -11,9 +11,13 @@ use tokio::sync::Mutex;
 
 pub(crate) const CAP: &str = "cryptirc.com/e2e";
 pub(crate) const TAG: &str = "+cryptirc.com/e2e";
+pub(crate) const NO_TAGS_NUMERIC: &str = "794";
 pub(crate) const SIGNAL_SUGGESTION: &str = "CryptIRC: I suggest using Signal encryption for our private chat. Open Encryption in our DM to review. This notice does not change your settings.";
 const MAX_BUNDLE: usize = 1200;
-const REQUEST_TTL: Duration = Duration::from_secs(5);
+const REQUEST_TTL: Duration = Duration::from_millis(1500);
+// IRC flood pacing can delay the answer behind the contact's preceding chat.
+// Manual setup and pinned peers can wait longer than first-contact discovery.
+const KNOWN_PEER_TTL: Duration = Duration::from_secs(25);
 const REPLY_WINDOW: Duration = Duration::from_secs(60);
 const SETUP_NOTICE_WINDOW: Duration = Duration::from_secs(600);
 // The existing b frame accepts opaque base64url data. Older clients ignore
@@ -46,6 +50,14 @@ fn supported(c: &IrcConnection) -> bool {
     c.connected && c.registered && c.message_tags && c.e2e_bridge.advertised
 }
 
+pub(crate) fn cancel_pending(state: &AppState, username: &str, c: &mut IrcConnection) {
+    for (req, _, _) in c.e2e_bridge.pending.drain(..) {
+        state.send_to_user(username, ServerEvent::E2EBundleMissing {
+            conn_id: c.conn_id.clone(), req, reason: "unavailable",
+        });
+    }
+}
+
 pub(crate) fn signal_suggestion(c: &mut IrcConnection, from: &str, target: &str) -> bool {
     if !c.connected || !c.registered || !valid_nick(from) || !valid_nick(target) { return false; }
     let sender = c.casemapping.fold(from);
@@ -74,7 +86,7 @@ pub(crate) fn notify_setup(
     });
 }
 
-pub(crate) async fn request(state: &AppState, username: &str, conn: Arc<Mutex<IrcConnection>>, nick: &str, id: &str) -> Result<bool, &'static str> {
+pub(crate) async fn request(state: &AppState, username: &str, conn: Arc<Mutex<IrcConnection>>, nick: &str, id: &str, wait_for_peer: bool) -> Result<bool, &'static str> {
     let mut c = conn.lock().await;
     if !c.connected || !c.registered { return Err("unavailable"); }
     if !c.e2e_bridge.advertised { return Ok(false); }
@@ -87,20 +99,65 @@ pub(crate) async fn request(state: &AppState, username: &str, conn: Arc<Mutex<Ir
     }
     if state.auth.check_ws_kdf_rate_limit(username, "e2e_bundle").is_err() { return Err("rate-limited"); }
     c.send_raw(&format!("@{TAG}=q.{id} TAGMSG {nick}")).await.map_err(|_| "unavailable")?;
-    let started = Instant::now();
+    let deadline = Instant::now() + if wait_for_peer { KNOWN_PEER_TTL } else { REQUEST_TTL };
+    let registration = c.registration_epoch;
     let req = id.to_owned();
-    c.e2e_bridge.pending.push((req.clone(), nick.to_owned(), started));
+    c.e2e_bridge.pending.push((req.clone(), nick.to_owned(), deadline));
     drop(c);
     let state = state.clone();
     let username = username.to_owned();
     tokio::spawn(async move {
-        tokio::time::sleep(REQUEST_TTL).await;
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
         let mut c = conn.lock().await;
-        let Some(i) = c.e2e_bridge.pending.iter().position(|(id, _, at)| id == &req && *at == started) else { return };
+        let Some(i) = c.e2e_bridge.pending.iter().position(|(id, _, expires)| id == &req && *expires == deadline) else { return };
         c.e2e_bridge.pending.swap_remove(i);
-        state.send_to_user(&username, ServerEvent::E2EBundleMissing { conn_id: c.conn_id.clone(), req, reason: "unconfirmed" });
+        let reason = if supported(&c) && c.registration_epoch == registration { "unconfirmed" } else { "unavailable" };
+        state.send_to_user(&username, ServerEvent::E2EBundleMissing { conn_id: c.conn_id.clone(), req, reason });
     });
     Ok(true)
+}
+
+/// The recipient's UnrealIRCd can confirm that the current connection cannot
+/// receive the tags this bridge requires. Silence alone never qualifies.
+pub(crate) fn accept_no_tags(state: &AppState, username: &str, c: &mut IrcConnection, line: &IrcLine) {
+    if !supported(c) || line.tags.contains_key("batch")
+        || !line.prefix.as_deref().is_some_and(|prefix| prefix.contains('.') && !prefix.contains(['!', '@']))
+    { return; }
+    let [recipient, nick, req, marker] = line.params.as_slice() else { return };
+    let mapping = c.casemapping;
+    if marker != "CRYPTIRC-NO-TAGS" || !valid_id(req) || !valid_nick(nick) || mapping.fold(recipient) != mapping.fold(&c.nick) {
+        return;
+    }
+    if let Some(index) = c.e2e_bridge.pending.iter().position(|(id, peer, deadline)|
+        id == req && mapping.fold(peer) == mapping.fold(nick) && Instant::now() < *deadline)
+    {
+        let (req, _, _) = c.e2e_bridge.pending.swap_remove(index);
+        state.send_to_user(username, ServerEvent::E2EBundleMissing {
+            conn_id: c.conn_id.clone(), req, reason: "peer-no-bridge",
+        });
+    }
+}
+
+/// Stop discovery when the live IRC server reports a missing nickname.
+pub(crate) fn refuse_offline_lookup(state: &AppState, username: &str, c: &mut IrcConnection, line: &IrcLine) {
+    if !supported(c) || line.tags.contains_key("batch")
+        || !line.prefix.as_deref().is_some_and(|prefix| !prefix.is_empty() && !prefix.contains(['!', '@']))
+    { return; }
+    let [recipient, nick, ..] = line.params.as_slice() else { return };
+    let mapping = c.casemapping;
+    if !valid_nick(nick) || mapping.fold(recipient) != mapping.fold(&c.nick) { return; }
+    let target = mapping.fold(nick);
+    let now = Instant::now();
+    let conn_id = &c.conn_id;
+    // A bare 401 identifies the nick, but carries no request ID. Leave all
+    // other lookups on this connection untouched.
+    c.e2e_bridge.pending.retain(|(req, nick, expires)| {
+        if *expires <= now || mapping.fold(nick) != target { return true; }
+        state.send_to_user(username, ServerEvent::E2EBundleMissing {
+            conn_id: conn_id.clone(), req: req.clone(), reason: "peer-offline",
+        });
+        false
+    });
 }
 
 /// Consume the bridge TAGMSG separately from regular messages and history.
@@ -163,8 +220,8 @@ pub(crate) async fn receive(state: &AppState, username: &str, conn: &Mutex<IrcCo
             parts
         };
         if !valid_id(id) || payload.len() > MAX_BUNDLE { return; }
-        let Some(index) = c.e2e_bridge.pending.iter().position(|(req, nick, at)| {
-            req == id && c.casemapping.fold(nick) == c.casemapping.fold(&from) && at.elapsed() < REQUEST_TTL
+        let Some(index) = c.e2e_bridge.pending.iter().position(|(req, nick, expires)| {
+            req == id && c.casemapping.fold(nick) == c.casemapping.fold(&from) && Instant::now() < *expires
         }) else { return };
         if kind == "n" {
             let (req, _, _) = c.e2e_bridge.pending.swap_remove(index);

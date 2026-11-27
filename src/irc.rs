@@ -8,7 +8,7 @@
 //!   L3    — stale IrcConnection removed from map on run_loop exit
 
 use anyhow::Result;
-use std::{collections::{HashMap, HashSet}, sync::Arc, time::{Duration, Instant}};
+use std::{collections::{HashMap, HashSet, VecDeque}, sync::Arc, time::{Duration, Instant}};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
@@ -122,6 +122,11 @@ pub struct IrcConnection {
     pub message_tags: bool,
     pub(crate) e2e_bridge: crate::e2e_bridge::Bridge,
     pub(crate) reactions: crate::reactions::Reactions,
+    pub(crate) recent_encrypted_targets: VecDeque<(String, Instant)>,
+    pub(crate) recent_plain_targets: VecDeque<(String, Instant)>,
+    pub(crate) signal_deliveries: VecDeque<SignalDelivery>,
+    pub(crate) signal_reply_batches: HashMap<String, String>,
+    pub(crate) signal_expiry_running: bool,
     pub(crate) keepnick_retry: crate::keepnick::Retry,
     pub self_userhost: String,
     /// Web-side idempotency guard for a replayed/duplicate 001 (mirrors the old
@@ -222,7 +227,132 @@ pub struct IrcConnection {
 /// first log directory simply counts against the day's channel budget).
 const USER_JOINS_MAX: usize = 1024;
 
+pub(crate) fn with_delivery_label(line: &str, label: &str) -> Option<String> {
+    let Some((tags, command)) = line.strip_prefix('@').and_then(|line| line.split_once(' ')) else {
+        return Some(format!("@label={label} {line}"));
+    };
+    if tags.len() + label.len() + "label=;".len() > CLIENT_TAG_DATA_MAX ||
+        tags.split(';').any(|tag| tag == "label" || tag.starts_with("label="))
+    {
+        return None;
+    }
+    Some(format!("@label={label};{tags} {command}"))
+}
+
+const SIGNAL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const SIGNAL_DELIVERY_UNKNOWN: &str = "IRC did not confirm delivery of a recent encrypted message. Check with the recipient before resending.";
+
+pub(crate) struct SignalDelivery {
+    pub(crate) label: String,
+    pub(crate) target: String,
+    pub(crate) wire: String,
+    pub(crate) sent: Instant,
+}
+
+fn signal_delivery_unknown(state: &AppState, username: &str, conn_id: &str, target: String) {
+    state.send_to_user(username, ServerEvent::IrcDeliveryWarning {
+        conn_id: conn_id.to_owned(), target, text: SIGNAL_DELIVERY_UNKNOWN.into(), unsent_wire: None,
+    });
+}
+
 impl IrcConnection {
+    pub(crate) fn track_signal_delivery(&mut self, delivery: SignalDelivery, state: &AppState, username: &str, conn: &Arc<Mutex<Self>>) {
+        if self.signal_deliveries.len() == 64 {
+            if let Some(item) = self.signal_deliveries.pop_front() {
+                signal_delivery_unknown(state, username, &self.conn_id, item.target);
+            }
+        }
+        self.signal_deliveries.push_back(delivery);
+        if self.signal_expiry_running { return; }
+        self.signal_expiry_running = true;
+        let state = state.clone();
+        let username = username.to_owned();
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            loop {
+                let until = {
+                    let mut c = conn.lock().await;
+                    let mut targets = HashSet::new();
+                    while c.signal_deliveries.front().is_some_and(|item| item.sent.elapsed() >= SIGNAL_DELIVERY_TIMEOUT) {
+                        if let Some(item) = c.signal_deliveries.pop_front() { targets.insert(item.target); }
+                    }
+                    for target in targets { signal_delivery_unknown(&state, &username, &c.conn_id, target); }
+                    if let Some(item) = c.signal_deliveries.front() {
+                        item.sent + SIGNAL_DELIVERY_TIMEOUT
+                    } else {
+                        c.signal_expiry_running = false;
+                        return;
+                    }
+                };
+                tokio::time::sleep_until(tokio::time::Instant::from_std(until)).await;
+            }
+        });
+    }
+
+    pub(crate) fn warn_pending_signal_deliveries(&self, state: &AppState, username: &str) {
+        let targets: HashSet<_> = self.signal_deliveries.iter().map(|item| &item.target).collect();
+        for target in targets { signal_delivery_unknown(state, username, &self.conn_id, target.clone()); }
+    }
+
+    pub(crate) fn clear_signal_deliveries(&mut self) {
+        self.signal_deliveries.clear();
+        self.signal_reply_batches.clear();
+    }
+
+    // Return only labels attached to this live response or to its own
+    // labeled-response batch. Never use the label of a history batch.
+    fn signal_reply_label(&mut self, line: &cryptirc::ircproto::IrcLine) -> Option<String> {
+        if line.command == "BATCH" {
+            let id = line.params.first()?;
+            if let Some(id) = id.strip_prefix('-') {
+                self.signal_reply_batches.remove(id);
+            } else if let Some(id) = id.strip_prefix('+') {
+                if line.params.get(1).is_some_and(|kind| kind == "labeled-response") &&
+                    !line.tags.contains_key("batch") && self.signal_reply_batches.len() < 64 {
+                    if let Some(label) = line.tags.get("label").filter(|label|
+                        label.strip_prefix("crs-").is_some_and(crate::e2e_bridge::valid_id))
+                    {
+                        self.signal_reply_batches.insert(id.to_owned(), label.clone());
+                    }
+                }
+            }
+            return None;
+        }
+        if let Some(batch) = line.tags.get("batch") {
+            self.signal_reply_batches.get(batch).cloned()
+        } else {
+            line.tags.get("label").cloned()
+        }
+    }
+
+    fn take_signal_delivery(&mut self, label: &str, target: &str) -> Option<SignalDelivery> {
+        let index = self.signal_deliveries.iter().position(|item|
+            item.label == label && self.casemapping.fold(target) == self.casemapping.fold(&item.target))?;
+        self.signal_deliveries.remove(index)
+    }
+
+    pub(crate) fn note_encrypted_send(&mut self, target: &str) {
+        Self::note_recent_send(&mut self.recent_encrypted_targets, self.casemapping.fold(target));
+    }
+
+    pub(crate) fn note_plain_send(&mut self, target: &str) {
+        Self::note_recent_send(&mut self.recent_plain_targets, self.casemapping.fold(target));
+    }
+
+    fn take_recent_encrypted_send(&mut self, target: &str) -> bool {
+        Self::take_recent_send(&mut self.recent_encrypted_targets, self.casemapping.fold(target))
+    }
+
+    fn note_recent_send(recent: &mut VecDeque<(String, Instant)>, target: String) {
+        recent.retain(|(other, at)| other != &target && at.elapsed() < Duration::from_secs(30));
+        if recent.len() == 64 { recent.pop_front(); }
+        recent.push_back((target, Instant::now()));
+    }
+
+    fn take_recent_send(recent: &mut VecDeque<(String, Instant)>, target: String) -> bool {
+        let Some(index) = recent.iter().position(|(other, _)| other == &target) else { return false };
+        recent.remove(index).is_some_and(|(_, at)| at.elapsed() < Duration::from_secs(30))
+    }
     /// Shared reset for lifecycle reconnects and replacements discovered on Attach.
     pub(crate) fn reset_irc_session(&mut self) {
         self.connected = false;
@@ -230,6 +360,9 @@ impl IrcConnection {
         self.list_request = None;
         self.e2e_bridge = Default::default();
         self.reactions = Default::default();
+        self.recent_encrypted_targets.clear();
+        self.recent_plain_targets.clear();
+        self.clear_signal_deliveries();
         self.keepnick_retry = Default::default();
         self.who_pending.clear();
         self.whois_seen.clear();
@@ -265,7 +398,7 @@ impl IrcConnection {
     pub(crate) fn for_test(conn_id: &str, nick: &str, server: &str, port: u16) -> IrcConnection {
         IrcConnection {
             conn_id: conn_id.into(), nick: nick.into(), connected: true, lag_ms: None,
-            channels: HashMap::new(), ipc_out: Arc::new(tokio::sync::Mutex::new(None)), message_tags: false, e2e_bridge: Default::default(), reactions: Default::default(), keepnick_retry: Default::default(),
+            channels: HashMap::new(), ipc_out: Arc::new(tokio::sync::Mutex::new(None)), message_tags: false, e2e_bridge: Default::default(), reactions: Default::default(), recent_encrypted_targets: Default::default(), recent_plain_targets: Default::default(), signal_deliveries: Default::default(), signal_reply_batches: Default::default(), signal_expiry_running: false, keepnick_retry: Default::default(),
             self_userhost: String::new(), registered: true, list_request: None, echo_message_enabled: false,
             names_buf: HashMap::new(), who_pending: HashSet::new(), who_away: HashMap::new(),
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
@@ -533,11 +666,18 @@ static HELD_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 
 /// `ack`: the daemon line this was (IPC link generation, RawLine.seq) when it came from an
 /// irc_core that keeps such a line undelivered until we say it was logged (r5, see AckCtx).
-struct HeldLine { conn_id: String, target: String, ts: i64, from: String, text: String, kind: String, ack: Option<(u64, u64)> }
+struct HeldLine {
+    conn_id: String, target: String, ts: i64, from: String, text: String, kind: String,
+    irc_recipient: Option<String>, irc_network: Option<String>, pm_prefix: Option<String>, ack: Option<(u64, u64)>,
+}
 impl HeldLine {
-    fn weight(&self) -> usize { 96 + self.conn_id.len() + self.target.len() + self.from.len() + self.text.len() + self.kind.len() }
-    fn same(&self, conn_id: &str, target: &str, ts: i64, from: &str, text: &str, kind: &str) -> bool {
-        self.ts == ts && self.conn_id == conn_id && self.target == target && self.from == from && self.text == text && self.kind == kind
+    fn weight(&self) -> usize {
+        144 + self.conn_id.len() + self.target.len() + self.from.len() + self.text.len() + self.kind.len() +
+            self.irc_recipient.as_ref().map_or(0, String::len) + self.irc_network.as_ref().map_or(0, String::len) + self.pm_prefix.as_ref().map_or(0, String::len)
+    }
+    fn same(&self, conn_id: &str, target: &str, ts: i64, from: &str, text: &str, kind: &str, irc_recipient: Option<&str>) -> bool {
+        self.ts == ts && self.conn_id == conn_id && self.target == target && self.from == from &&
+            self.text == text && self.kind == kind && self.irc_recipient.as_deref() == irc_recipient
     }
 }
 
@@ -689,7 +829,7 @@ const SERVER_TIME_MAX_FUTURE: i64 = 5 * 60;
 /// hold it for the next unlock (see above). Returns the log id (0 = not written now).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn log_line(state: &AppState, username: &str, conn_id: &str, target: &str, ts: i64, from: &str, text: &str, kind: &str) -> u64 {
-    log_line_as(state, username, conn_id, target, ts, from, text, kind, false).await
+    log_line_as(state, username, conn_id, target, ts, from, text, kind, false, None, None).await
 }
 
 /// r5 (agy P2 main.rs:6036): the user's OWN outgoing line (Send handler). It used to go to
@@ -702,17 +842,20 @@ pub(crate) async fn log_line(state: &AppState, username: &str, conn_id: &str, ta
 /// when the flushed line comes back from history, r4/web IRC-H2).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn log_own_line(state: &AppState, username: &str, conn_id: &str, target: &str, ts: i64, from: &str, text: &str, kind: &str) -> u64 {
-    log_line_as(state, username, conn_id, target, ts, from, text, kind, true).await
+    log_line_as(state, username, conn_id, target, ts, from, text, kind, true, Some(target), None).await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn log_line_as(state: &AppState, username: &str, conn_id: &str, target: &str, ts: i64, from: &str, text: &str, kind: &str, own: bool) -> u64 {
+async fn log_line_as(state: &AppState, username: &str, conn_id: &str, target: &str, ts: i64, from: &str, text: &str, kind: &str, own: bool, wire_target: Option<&str>, pm_prefix: Option<&str>) -> u64 {
     let (target, text) = if own {
         (std::borrow::Cow::Borrowed(target), std::borrow::Cow::Borrowed(text))
     } else {
         route_log_target(state, username, conn_id, target, text).await
     };
     let (target, text): (&str, &str) = (target.as_ref(), text.as_ref());
+    let shared = text.starts_with("sd8~");
+    let irc_recipient = wire_target.filter(|name| shared && !target.starts_with(['#','&','+','!']) && !name.is_empty());
+    let mut irc_network = shared.then(|| crate::e2e::network_name(conn_id)).flatten();
     let ctx = ACK_CTX.try_with(|c| c.get()).ok();
     let replay = ctx.map_or(false, |c| c.replay);
     if state.crypto.is_unlocked(username).await {
@@ -721,9 +864,10 @@ async fn log_line_as(state: &AppState, username: &str, conn_id: &str, target: &s
             // written now, once — drop the held copy.
             if replay {
                 if let Some(mut h) = held_logs().get_mut(username) {
-                    if let Some(i) = h.lines.iter().position(|l| l.same(conn_id, target, ts, from, text, kind)) {
+                    if let Some(i) = h.lines.iter().position(|l| l.same(conn_id, target, ts, from, text, kind, irc_recipient)) {
                         if let Some(old) = h.lines.remove(i) {
                             let ow = old.weight();
+                            irc_network = old.irc_network;
                             h.bytes -= ow;
                             HELD_BYTES.fetch_sub(ow, std::sync::atomic::Ordering::AcqRel);
                         }
@@ -737,13 +881,13 @@ async fn log_line_as(state: &AppState, username: &str, conn_id: &str, target: &s
         // line waited for the flush (or during the write itself) — then it is held like any
         // line arriving while locked, never handed to a logger that writes nothing.
         if state.crypto.is_unlocked(username).await {
-            let id = state.logger.append(username, conn_id, target, ts, from, text, kind).await;
+            let id = state.logger.append_irc_line(username, conn_id, target, ts, from, text, kind, irc_recipient, irc_network.as_deref(), pm_prefix).await;
             if id > 0 { return id; }
             // r8 (codex P2 irc.rs:505): a write that failed with the vault still open (disk
             // full, I/O error) is held like a locked-vault line — retried by the next flush,
             // its daemon copy kept unacknowledged — not acknowledged as processed and lost.
             // A name the logger can never write is not held.
-            if crate::logs::encode_path_component(target).is_err() { return 0; }
+            if crate::logs::encode_path_component(target).is_err() || crate::logs::encode_path_component(conn_id).is_err() { return 0; }
         }
     }
     // r5 (srv-a): nothing is held for an account whose deletion is running (its lines can
@@ -765,7 +909,7 @@ async fn log_line_as(state: &AppState, username: &str, conn_id: &str, target: &s
         let epoch = state.auth.account_epoch(username);
         if let Some(mut h) = held_logs().get_mut(username) {
             if h.epoch == epoch {
-                if let Some(l) = h.lines.iter_mut().find(|l| l.same(conn_id, target, ts, from, text, kind)) {
+                if let Some(l) = h.lines.iter_mut().find(|l| l.same(conn_id, target, ts, from, text, kind, irc_recipient)) {
                     l.ack = ack;
                     mark_held();
                     return 0;
@@ -773,7 +917,8 @@ async fn log_line_as(state: &AppState, username: &str, conn_id: &str, target: &s
             }
         }
     }
-    let line = HeldLine { conn_id: conn_id.into(), target: target.into(), ts, from: from.into(), text: text.into(), kind: kind.into(), ack };
+    let line = HeldLine { conn_id: conn_id.into(), target: target.into(), ts, from: from.into(), text: text.into(), kind: kind.into(),
+        irc_recipient: irc_recipient.map(str::to_string), irc_network, pm_prefix: pm_prefix.map(str::to_string), ack };
     let w = line.weight();
     if HELD_BYTES.fetch_add(w, std::sync::atomic::Ordering::AcqRel) + w > HELD_BYTES_TOTAL {
         HELD_BYTES.fetch_sub(w, std::sync::atomic::Ordering::AcqRel);
@@ -957,7 +1102,8 @@ pub(crate) async fn flush_held_logs(state: &AppState, username: &str) {
             aborted = true;
             break;
         }
-        if state.logger.append(username, &line.conn_id, &line.target, line.ts, &line.from, &line.text, &line.kind).await > 0 {
+        if state.logger.append_irc_line(username, &line.conn_id, &line.target, line.ts, &line.from, &line.text, &line.kind,
+            line.irc_recipient.as_deref(), line.irc_network.as_deref(), line.pm_prefix.as_deref()).await > 0 {
             written += 1;
             if let Some(a) = line.ack { released.push(a); }
         } else if !state.crypto.is_unlocked(username).await {
@@ -1044,7 +1190,7 @@ mod r5_held_tests {
     /// release it only when the last of them leaves the queue.
     #[test]
     fn a_shared_seq_is_released_by_its_last_record() {
-        let mk = |t: &str, seq: u64| HeldLine { conn_id: "c".into(), target: t.into(), ts: 1, from: "f".into(), text: "quit".into(), kind: "quit".into(), ack: Some((1, seq)) };
+        let mk = |t: &str, seq: u64| HeldLine { conn_id: "c".into(), target: t.into(), ts: 1, from: "f".into(), text: "quit".into(), kind: "quit".into(), irc_recipient: None, irc_network: None, pm_prefix: None, ack: Some((1, seq)) };
         let h = HeldLogs { lines: vec![mk("#b", 7), mk("#c", 9)].into(), bytes: 0, dropped: 0, epoch: 1 };
         assert_eq!(unshared_acks(&h, vec![(1, 7), (1, 8)]), vec![(1, 8)], "7 still has a sibling held");
         let empty = HeldLogs::default();
@@ -1056,7 +1202,7 @@ mod r5_held_tests {
     /// queue only — never into a re-registered same-name account's queue (acks are returned).
     #[test]
     fn requeue_never_crosses_an_account_generation() {
-        let mk = |seq: u64| HeldLine { conn_id: "c".into(), target: "#t".into(), ts: seq as i64, from: "f".into(), text: format!("l{seq}"), kind: "privmsg".into(), ack: Some((1, seq)) };
+        let mk = |seq: u64| HeldLine { conn_id: "c".into(), target: "#t".into(), ts: seq as i64, from: "f".into(), text: format!("l{seq}"), kind: "privmsg".into(), irc_recipient: None, irc_network: None, pm_prefix: None, ack: Some((1, seq)) };
         let fresh = || format!("rq-{}", uuid::Uuid::new_v4().simple());
         let u = fresh();
         let l3 = mk(3); let w = l3.weight();
@@ -1086,7 +1232,7 @@ mod r5_held_tests {
     #[tokio::test]
     async fn discarding_everything_removes_the_entry() {
         let u = format!("heldtest-{}", uuid::Uuid::new_v4().simple());
-        let line = HeldLine { conn_id: "c".into(), target: "#t".into(), ts: 1, from: "f".into(), text: "x".repeat(100), kind: "privmsg".into(), ack: None };
+        let line = HeldLine { conn_id: "c".into(), target: "#t".into(), ts: 1, from: "f".into(), text: "x".repeat(100), kind: "privmsg".into(), irc_recipient: None, irc_network: None, pm_prefix: None, ack: None };
         let w = line.weight();
         HELD_BYTES.fetch_add(w, std::sync::atomic::Ordering::AcqRel);
         held_logs().insert(u.clone(), HeldLogs { lines: vec![line].into(), bytes: w, dropped: 0, epoch: 7 });
@@ -1330,6 +1476,12 @@ pub async fn dispatch_line(
     recv_ts: i64,
 ) -> anyhow::Result<()> {
     let p = parse_irc(line);
+    if p.command == crate::e2e_bridge::NO_TAGS_NUMERIC && p.params.last().is_some_and(|s| s == "CRYPTIRC-NO-TAGS") {
+        if !replayed {
+            crate::e2e_bridge::accept_no_tags(state, username, &mut *conn.lock().await, &p);
+        }
+        return Ok(());
+    }
     // Correlate live nick failures with this connection's automatic attempt.
     // Only dedicated nick-change numerics can be correlated without a nick.
     if !replayed && matches!(p.command.as_str(), "432" | "433" | "435" | "436" | "437" | "438" | "447" | "484") {
@@ -1350,12 +1502,66 @@ pub async fn dispatch_line(
     // ascii server switching the web to ascii would turn such a stub (`#a{b}` for
     // `#a[b]`) into a separate phantom channel. With an old daemon nothing changes.
     let mut isupport_bouncer = false;
+    let mut delivery_warning = None;
+    let send_refusal = matches!(p.command.as_str(), "401" | "403" | "404" | "439" | "531");
+    if send_refusal && (!replayed || backlog) && !p.tags.contains_key("batch") && !p.prefix.as_deref().is_some_and(|src| src.contains('!')) {
+        if let Some(label) = p.tags.get("label") {
+            if let Err(error) = crate::reactions::refuse_labeled(state, username, conn_id, label).await {
+                tracing::warn!(%error, "could not clear refused IRC reaction");
+            }
+        }
+    }
     let promoted: Vec<String>;
     let cm = {
         let mut c = conn.lock().await;
-        if !replayed && matches!(p.command.as_str(), "401" | "403" | "404" | "439" | "531") {
+        let server_source = p.prefix.as_deref().is_some_and(|prefix|
+            !prefix.is_empty() && !prefix.contains(['!', '@']));
+        let server_reply = !replayed && server_source;
+        let batch_end = p.command == "BATCH" && p.params.first().is_some_and(|id| id.starts_with('-'));
+        let signal_label = (server_source && (!replayed || batch_end || (backlog && p.command == "BATCH")))
+            .then(|| c.signal_reply_label(&p)).flatten();
+        let signal_refusal = matches!(p.command.as_str(), "477" | "486" | "716");
+        if !replayed && (send_refusal || signal_refusal) {
+            if p.command == "401" && !p.tags.contains_key("label") {
+                crate::e2e_bridge::refuse_offline_lookup(state, username, &mut c, &p);
+            }
             if let Some(target) = p.params.get(1) {
-                crate::reactions::refuse_echo(&mut c, target);
+                let delivery = signal_label.as_deref().filter(|_| p.params.first().is_some_and(|nick|
+                    c.casemapping.fold(nick) == c.casemapping.fold(&c.nick)))
+                    .and_then(|label| c.take_signal_delivery(label, target));
+                let unlabelled = !p.tags.contains_key("label") && !p.tags.contains_key("batch");
+                if server_reply && unlabelled { crate::reactions::refuse_echo(&mut c, target); }
+                let plain_offline = p.command == "401" && server_reply && unlabelled
+                    && p.params.first().is_some_and(|nick| c.casemapping.fold(nick) == c.casemapping.fold(&c.nick))
+                    && {
+                        let folded = c.casemapping.fold(target);
+                        IrcConnection::take_recent_send(&mut c.recent_plain_targets, folded)
+                    };
+                if delivery.is_some() || (server_reply && unlabelled && c.take_recent_encrypted_send(target)) {
+                    // An unlabelled numeric identifies the target, not an individual row.
+                    let reason = match p.command.as_str() {
+                        "401" => "The recipient is not online or their nickname has changed.",
+                        "403" => "IRC could not find this channel.",
+                        "404" => "IRC does not allow you to send to this channel.",
+                        "439" => "IRC is rate-limiting messages to this conversation.",
+                        _ => "IRC refused messages to this recipient.",
+                    };
+                    delivery_warning = Some(match delivery {
+                        Some(item) => (item.target, format!("Encrypted message not sent. {reason}"), Some(item.wire)),
+                        None => (target.clone(), format!("{reason} Delivery of your recent encrypted message is unconfirmed. Check before resending."), None),
+                    });
+                } else if plain_offline {
+                    delivery_warning = Some((target.clone(), format!("{target} is offline or has changed nick."), None));
+                }
+            }
+        }
+        if p.command == "FAIL" && p.params.first().is_some_and(|verb| verb == "PRIVMSG") {
+            if let Some(label) = &signal_label {
+                if let Some(index) = c.signal_deliveries.iter().position(|item| &item.label == label) {
+                    if let Some(item) = c.signal_deliveries.remove(index) {
+                        delivery_warning = Some((item.target, "Encrypted message not sent. IRC refused this message.".into(), Some(item.wire)));
+                    }
+                }
             }
         }
         if p.command == "005" {
@@ -1427,6 +1633,9 @@ pub async fn dispatch_line(
     };
 
     if !promoted.is_empty() { send(ServerEvent::AvatarHint { conn_id: conn_id.to_string(), nicks: promoted }); }
+    if let Some((target, text, unsent_wire)) = delivery_warning {
+        send(ServerEvent::IrcDeliveryWarning { conn_id: conn_id.to_string(), target, text, unsent_wire });
+    }
     // Remote avatars: draft/metadata-2 lines about the `avatar` key (and our subscription)
     // are consumed here — learned, never shown.
     if matches!(p.command.as_str(), "760" | "761" | "766" | "770" | "771" | "772" | "774" | "METADATA" | "FAIL" | "WARN" | "NOTE") {
@@ -1457,7 +1666,10 @@ pub async fn dispatch_line(
             if !replayed && caps.split_ascii_whitespace().any(|cap| cap == crate::e2e_bridge::CAP) {
                 let mut c = conn.lock().await;
                 if matches!(sub, "LS" | "NEW") { c.e2e_bridge.advertised = true; }
-                if sub == "DEL" { c.e2e_bridge = Default::default(); }
+                if sub == "DEL" {
+                    crate::e2e_bridge::cancel_pending(state, username, &mut c);
+                    c.e2e_bridge = Default::default();
+                }
             }
             let prior_reactions = {
                 let mut c = conn.lock().await;
@@ -1488,7 +1700,13 @@ pub async fn dispatch_line(
                 "ACK" => {
                     // L43: Set capability flags on ACK, not on REQ
                     if caps.contains("echo-message") { conn.lock().await.echo_message_enabled = true; }
-                    if caps.contains("message-tags") { conn.lock().await.message_tags = true; }
+                    if caps.split_ascii_whitespace().any(|cap| cap == "message-tags") {
+                        conn.lock().await.message_tags = true;
+                    } else if !replayed && caps.split_ascii_whitespace().any(|cap| cap == "-message-tags") {
+                        let mut c = conn.lock().await;
+                        c.message_tags = false;
+                        crate::e2e_bridge::cancel_pending(state, username, &mut c);
+                    }
                     let meta_ack = { let mut c = conn.lock().await; crate::avatar::remote::note_meta2_cap(&mut c, sub, &caps, replayed) };
                     if meta_ack {
                         crate::avatar::remote::ensure_meta2_initialized(state, username, conn).await;
@@ -1503,7 +1721,10 @@ pub async fn dispatch_line(
                 "DEL" => {
                     if caps.contains("echo-message") { conn.lock().await.echo_message_enabled = false; }
                     let mut c = conn.lock().await;
-                    if !replayed && caps.split_ascii_whitespace().any(|cap| cap == "message-tags") { c.message_tags = false; }
+                    if !replayed && caps.split_ascii_whitespace().any(|cap| cap == "message-tags") {
+                        c.message_tags = false;
+                        crate::e2e_bridge::cancel_pending(state, username, &mut c);
+                    }
                     crate::avatar::remote::note_meta2_cap(&mut c, sub, &caps, replayed);
                     if !replayed && crate::avatar::remote::cap_list_has(&caps, crate::avatar::remote::META_CAP) {
                         state.avatars.set_session_meta2(conn_id, false);
@@ -1605,6 +1826,51 @@ pub async fn dispatch_line(
             // Don't suppress echo for batch messages (chathistory/+H playback).
             let in_batch = p.tags.contains_key("batch");
             let echo_message_enabled = { conn.lock().await.echo_message_enabled };
+            if echo_message_enabled && same_nick(&from, &user_nick) {
+                let (delivery, signal_label) = if first_seen &&
+                    (in_batch || p.tags.contains_key("label") || text.starts_with("[e2edm2]")) {
+                    let mut c = conn.lock().await;
+                    let label = c.signal_reply_label(&p);
+                    let matching = c.signal_deliveries.iter().position(|item| match &label {
+                        Some(label) => label == &item.label,
+                        None => !in_batch && same_nick(&target, &item.target) && item.wire == text,
+                    });
+                    (matching.and_then(|index| c.signal_deliveries.remove(index)), label)
+                } else { (None, None) };
+                if let Some(item) = delivery.as_ref().filter(|item| !same_nick(&target, &item.target) || item.wire != text) {
+                    send(ServerEvent::IrcDeliveryWarning {
+                        conn_id: conn_id.to_owned(), target: item.target.clone(), unsent_wire: Some(item.wire.clone()),
+                        text: "IRC changed this encrypted message before echoing it. The original message was not delivered intact.".into(),
+                    });
+                    return Ok(());
+                }
+                // A late IRC echo can still confirm delivery after the local timer
+                // expires. The label also survives a web-process restart in the core ring.
+                let tagged_signal_echo = text.starts_with("[e2edm2]") && crate::e2e_bridge::valid_nick(&target) &&
+                    signal_label.as_deref().and_then(|label| label.strip_prefix("crs-"))
+                        .is_some_and(crate::e2e_bridge::valid_id);
+                if delivery.is_some() || tagged_signal_echo {
+                    let destination = delivery.map_or_else(|| target.clone(), |item| item.target);
+                    if replayed && state.logger.read_logs(username, conn_id, &destination, 32)
+                        .await.is_ok_and(|lines| lines.iter().any(|line| line.kind == "privmsg" && line.text == text))
+                    {
+                        return Ok(());
+                    }
+                    let msg_id = log_own_line(state, username, conn_id, &destination, ts, &from, &text, "privmsg").await;
+                    send(ServerEvent::IrcEcho { conn_id: conn_id.to_owned(), from, target: destination.clone(),
+                        text, ts, kind: MessageKind::Privmsg, msg_id });
+                    if let Some(reference) = p.tags.get("msgid") {
+                        let mut c = conn.lock().await;
+                        if crate::reactions::available(&c) {
+                            crate::reactions::remember(&mut c, &destination, reference, true);
+                            if let Some(event) = crate::reactions::anchor_event(conn_id, &destination, msg_id, reference) {
+                                send(event);
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+            }
             if echo_message_enabled && same_nick(&from, &user_nick) && !in_batch {
                 if let Some(reference) = p.tags.get("msgid") {
                     let mut c = conn.lock().await;
@@ -1647,12 +1913,14 @@ pub async fn dispatch_line(
             // target such as `@#chan`, r4) to the channel.
             let chan_target = { let c = conn.lock().await; incoming_channel_target(&c, &target) };
             let is_statusmsg = chan_target.as_ref().map_or(false, |(_, st)| *st);
+            let pm_prefix = p.prefix.as_deref().filter(|prefix| chan_target.is_none() && prefix.contains('!')
+                && same_nick(&target, &user_nick) && !same_nick(&from, &user_nick));
             let display_target = chan_target.map_or_else(|| from.clone(), |(ch, _)| ch);
             // I1: never re-append replayed ring history to the on-disk log — it already
             // exists, and re-appending mints a fresh msg_id per unlocked re-Attach →
             // duplicate chat on the next page load + unbounded log growth. On replay,
             // msg_id 0 (the frontend routes replayed events through its silent/dedup path).
-            let msg_id = if first_seen { log_line(state, username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind)).await } else { 0 };
+            let msg_id = if first_seen { log_line_as(state, username, conn_id, &display_target, ts, &from, &clean, kind_str(&kind), false, Some(&target), pm_prefix).await } else { 0 };
             send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from: from.clone(), target: display_target.clone(), text: clean.clone(), ts, kind, msg_id, prefix: p.prefix.clone() });
             if (first_seen || replayed) && !in_batch && !is_statusmsg && !from.contains('.') && from != "*" && crate::reactions::anchorable_wire(&clean) {
                 if let Some(reference) = p.tags.get("msgid") {
@@ -1748,7 +2016,7 @@ pub async fn dispatch_line(
             }
             let routed = { let c = conn.lock().await; notice_display_target(&c, &from, &target, p.prefix.is_some(), replayed, in_batch) };
             let Some(display_target) = routed else { return Ok(()) };   // our own echo
-            let msg_id = if first_seen { log_line(state, username, conn_id, &display_target, ts, &from, &text, "notice").await } else { 0 };
+            let msg_id = if first_seen { log_line_as(state, username, conn_id, &display_target, ts, &from, &text, "notice", false, Some(&target), None).await } else { 0 };
             send(ServerEvent::IrcMessage { replayed: false, conn_id: conn_id.to_string(), from, target: display_target, text, ts, kind: MessageKind::Notice, msg_id, prefix: None });
         }
 
@@ -2120,7 +2388,7 @@ pub async fn dispatch_line(
             }
             let from = nick_from_prefix(&p.prefix);
             let target = p.params.get(0).cloned().unwrap_or_default();
-            if let Some(event) = crate::reactions::receive(&*conn.lock().await, &p, &from, replayed || p.tags.contains_key("batch")) {
+            if let Some(event) = crate::reactions::receive(state, username, conn, &p, &from, replayed, backlog, recv_ts).await {
                 send(event);
             }
             // Remote avatars: an invisible announce (a join announce to a channel, or a
@@ -3054,7 +3322,7 @@ mod tests {
     fn test_conn() -> IrcConnection {
         IrcConnection {
             conn_id: "c0".into(), nick: "me".into(), connected: true, lag_ms: None,
-            channels: HashMap::new(), ipc_out: Arc::new(Mutex::new(None)), message_tags: false, e2e_bridge: Default::default(), reactions: Default::default(), keepnick_retry: Default::default(),
+            channels: HashMap::new(), ipc_out: Arc::new(Mutex::new(None)), message_tags: false, e2e_bridge: Default::default(), reactions: Default::default(), recent_encrypted_targets: Default::default(), recent_plain_targets: Default::default(), signal_deliveries: Default::default(), signal_reply_batches: Default::default(), signal_expiry_running: false, keepnick_retry: Default::default(),
             self_userhost: String::new(), registered: true, list_request: None, echo_message_enabled: false,
             names_buf: HashMap::new(), who_pending: HashSet::new(), who_away: HashMap::new(),
             resync_busy: false, resync_gen: 0, resync_recent: HashMap::new(),
@@ -3062,6 +3330,22 @@ mod tests {
             statusmsg: None, daemon_channels: Vec::new(), user_joins: HashSet::new(), chanmodes: ChanModes::default(),
             whois_seen: Default::default(), seen_userhosts: Default::default(), synced_link: 0, cap_ls_done: false, behind_bouncer: false, daemon_registration: false, registration_epoch: 0, live_registration_link: None, replay_view: None, avx: Default::default(), cfg: NetworkConfig::default(),
         }
+    }
+
+    #[test]
+    fn delivery_warnings_are_scoped_to_recent_encrypted_targets_on_one_connection() {
+        let mut conn = test_conn();
+        let mut other = test_conn();
+        conn.note_encrypted_send("MiXeD");
+        assert!(!other.take_recent_encrypted_send("mixed"));
+        assert!(!conn.take_recent_encrypted_send("elsewhere"));
+        assert!(conn.take_recent_encrypted_send("mixed"));
+        assert!(!conn.take_recent_encrypted_send("mixed"));
+        conn.recent_encrypted_targets.push_back(("expired".into(), Instant::now() - Duration::from_secs(31)));
+        assert!(!conn.take_recent_encrypted_send("expired"));
+        conn.note_encrypted_send("reset");
+        conn.reset_irc_session();
+        assert!(!conn.take_recent_encrypted_send("reset"));
     }
 
     #[tokio::test]

@@ -1432,7 +1432,22 @@ html[data-theme='irssi'] ::-webkit-scrollbar-thumb{background:#333333}
 #input-wrap {
   padding:0 0 var(--sab);
   background:var(--bg1); border-top:1px solid var(--border);
-  display:flex; align-items:center; flex-shrink:0;
+  display:flex; flex-wrap:wrap; align-items:center; flex-shrink:0;
+}
+#composer-encryption-status {
+  flex:0 0 100%; min-width:0; box-sizing:border-box;
+  display:flex; align-items:center; gap:8px; padding:4px 8px;
+  color:var(--panel-text,var(--text)); font-size:13px; overflow-wrap:anywhere;
+}
+/* Keep the live region mounted so assistive technology can observe text changes. */
+#composer-encryption-status:not(.show) {
+  position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%);
+}
+#composer-encryption-status-text { flex:1; min-width:0; }
+#composer-encryption-action {
+  flex-shrink:0; min-height:44px; padding:0 12px; border:1px solid var(--border);
+  border-radius:8px; background:var(--bg2); color:var(--panel-text,var(--text));
+  font:inherit; cursor:pointer;
 }
 #input-wrap #send-btn, #input-wrap .upload-btn { background:var(--bg1); }
 #input-nick { display:none; }
@@ -2067,16 +2082,18 @@ html[data-theme='irssi'] #msg-input::placeholder { color:#999; }
     transition:transform .28s cubic-bezier(.4,0,.2,1);
     padding-top:var(--sat); padding-bottom:var(--sab); padding-right:var(--sar);
     border-left:1px solid var(--border);
+    pointer-events:none;
   }
-  #nick-panel.open { transform:translateX(0); }
+  #nick-panel.open { transform:translateX(0); pointer-events:auto; }
   #sidebar {
     position:fixed; left:0; top:0; bottom:0; z-index:50;
     width:min(280px, 80vw); min-width:0;
     transition:transform .28s cubic-bezier(.4,0,.2,1);
     transform:translateX(-100%);
     padding-left:var(--sal);
+    pointer-events:none;
   }
-  #sidebar.open { transform:translateX(0); }
+  #sidebar.open { transform:translateX(0); pointer-events:auto; }
   #sidebar-backdrop.show { display:block; }
   /* Mobile: inline flow layout */
   .msg-row { display:block; padding:2px 8px; }
@@ -3972,7 +3989,7 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
           rows="1" wrap="off" autocomplete="off" aria-autocomplete="none"
           data-1p-ignore data-lpignore="true" data-protonpass-ignore="true" data-bwignore data-form-type="other"
           spellcheck="true" autocorrect="on" autocapitalize="none" enterkeyhint="send" inputmode="text"></textarea>
-        <button id="send-btn" data-cryptirc-click="doSend" title="Send" aria-label="Send message">
+        <button id="send-btn" type="button" title="Send" aria-label="Send message">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="pointer-events:none" aria-hidden="true" focusable="false"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
         </button>
         <button class="upload-btn" id="btn-upload" title="Upload file" data-cryptirc-click="triggerUpload" aria-label="Upload file">
@@ -3986,6 +4003,10 @@ r.setProperty('--accent','#00d4aa');r.setProperty('--accent2','#0099ff');r.setPr
         </button>
       </div>
       <input type="file" id="file-input" multiple accept="*/*" data-cryptirc-change="handleFileSelect">
+      <div id="composer-encryption-status">
+        <span id="composer-encryption-status-text" role="status"></span>
+        <button type="button" id="composer-encryption-action" hidden></button>
+      </div>
     </div>
     <div id="emoji-picker" style="display:none">
       <input id="emoji-search" placeholder="Search emoji…" autocomplete="off">

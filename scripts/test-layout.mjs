@@ -17,7 +17,11 @@ const server=http.createServer(async(req,res)=>{
   const file=path.resolve(staticRoot,u.pathname.replace(/^\/cryptirc\//,'')||'index.html');
   if(!file.startsWith(staticRoot+'/')){res.writeHead(403).end();return;}
   let data=await fs.readFile(file);
-  if(file.endsWith('app.js'))data=Buffer.from(data.toString().replaceAll('__CRYPTIRC_VERSION__','test').replaceAll('__CRYPTIRC_BUILD__','test'));
+  if(file.endsWith('/app.js')){
+   const controls=await fs.readFile(path.join(staticRoot,'page-controls.js'),'utf8');
+   const reactions=await fs.readFile(path.join(staticRoot,'reactions.js'),'utf8');
+   data=Buffer.from((controls+'\n'+reactions+'\n'+data.toString()).replaceAll('__CRYPTIRC_VERSION__','test').replaceAll('__CRYPTIRC_BUILD__','test'));
+  }
   res.setHeader('Content-Type',({'.html':'text/html','.js':'application/javascript','.svg':'image/svg+xml','.json':'application/json','.ttf':'font/ttf','.otf':'font/otf'})[path.extname(file)]||'application/octet-stream');res.end(data);
  }catch{res.writeHead(404).end();}
 });

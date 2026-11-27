@@ -45,6 +45,7 @@ mod notifications;
 mod paste;
 mod paste_render;
 mod preview;
+mod preferences;
 mod sysstatus;
 mod twitter;
 mod upload;
@@ -591,6 +592,14 @@ impl AppState {
 
 // ─── Protocol types ───────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistorySyncKind {
+    Ready,
+    Request,
+    Reply,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -605,6 +614,7 @@ pub enum ClientMessage {
     UpdateNetwork    { network: NetworkConfig },
     KeepNick         { conn_id: String, nick: Option<String>, #[serde(default)] stop: bool, #[serde(default)] import: bool },
     React            { conn_id: String, target: String, request_id: String, reaction: reactions::ReactionSend },
+    GetReactionReceipts { conn_id: String, request_ids: Vec<String> },
     RemoveNetwork    { id: String },
     Connect          { id: String },
     // `reason` carries the reason typed with `/quit <msg>`. Additive and
@@ -617,7 +627,8 @@ pub enum ClientMessage {
     // (app.js _lockVaultNow, every app.js version), so a vault lock is not recorded as the
     // user's explicit Disconnect. See mark_lock_burst.
     Disconnect       { id: String, #[serde(default)] reason: Option<String>, #[serde(skip)] from_lock: bool },
-    Send             { conn_id: String, raw: String },
+    Send             { conn_id: String, raw: String, #[serde(default)] e2e_identity_revision: Option<String>,
+                       #[serde(default)] e2e_plain_revision: Option<String> },
     ListChannels     { conn_id: String, request_id: String, pattern: String },
     JoinChannel      { conn_id: String, channel: String, key: Option<String> },
     PartChannel      { conn_id: String, channel: String },
@@ -626,6 +637,7 @@ pub enum ClientMessage {
     // `status_view` (optional, additive): "server" | "query" — for target "status" only,
     // return just the server's own output or just the DMs of a user nicked `status`
     // (they share one log). Absent = both, as before. See logs::StatusView.
+    RecentPrivateThreads { conn_id: String },
     GetLogs          { conn_id: String, target: String, limit: Option<usize>, before: Option<i64>, #[serde(default)] before_id: Option<u64>, #[serde(default)] status_view: Option<String> },
     SearchLogs       { conn_id: String, target: String, query: String, limit: Option<usize> },
     Sync             { conn_id: String, target: String, after_id: u64, #[serde(default)] status_view: Option<String> },
@@ -647,21 +659,39 @@ pub enum ClientMessage {
     // `id_hash` (r3, optional): SHA-256 hex of the identity blob this bundle belongs to;
     // the publish is refused when the stored identity is a different one.
     #[serde(rename = "e2e_publish_bundle")]
-    E2EPublishBundle  { bundle: KeyBundle, #[serde(default)] v: u32, #[serde(default)] id_hash: Option<String> },
+    E2EPublishBundle  { bundle: KeyBundle, #[serde(default)] v: u32, #[serde(default)] id_hash: Option<String>,
+                        #[serde(default)] repair_spk: Option<(String, String)> },
     #[serde(rename = "e2e_add_otpks")]
     E2EAddOTPKs       { keys: Vec<OneTimePrekey>, #[serde(default)] v: u32 },
     // conn_id (optional, F11): the connection the nick was seen on, so the lookup
     // prefers the account actually holding that nick on that network.
     #[serde(rename = "e2e_fetch_bundle")]
-    E2EFetchBundle    { username: String, #[serde(default)] conn_id: Option<String>, #[serde(default)] req: Option<String> },
+    E2EFetchBundle    { username: String, #[serde(default)] conn_id: Option<String>, #[serde(default)] req: Option<String>,
+                       #[serde(default)] wait_for_peer: bool },
     #[serde(rename = "e2e_suggest_signal")]
     E2ESuggestSignal { conn_id: String, nick: String },
     #[serde(rename = "e2e_store_session")]
     E2EStoreSession   { partner: String, blob: String,
                         // r2 (NEW-7): sending device id + "this save follows a send".
-                        #[serde(default)] dv: Option<String>, #[serde(default)] snd: bool },
+                        #[serde(default)] dv: Option<String>, #[serde(default)] snd: bool,
+                        #[serde(default)] req: Option<String>, #[serde(default)] id_hash: Option<String>,
+                        #[serde(default)] expect: Option<String> },
+    #[serde(rename = "e2e_commit_session")]
+    E2ECommitSession  { partner: String, blob: String, expect: String, req: String, dv: String,
+                        #[serde(default)] snd: bool, #[serde(default)] create: bool, #[serde(default)] floor_expect: Option<String>,
+                        #[serde(default)] id_hash: Option<String>, #[serde(default)] live_receive: bool },
+    #[serde(rename = "e2e_live_receipt")]
+    E2ELiveReceipt { partner: String, digest: String, blob: String, id_hash: String },
+    #[serde(rename = "e2e_history_sync")]
+    E2EHistorySync { id: String, kind: HistorySyncKind, blob: String },
+    #[serde(rename = "e2e_close_session")]
+    E2ECloseSession   { partner: String, req: String, v: u32, expect: String,
+                        #[serde(default)] floor_expect: Option<String>, #[serde(default)] floor_blob: Option<String>, #[serde(default)] id_hash: Option<String> },
     #[serde(rename = "e2e_load_session")]
-    E2ELoadSession    { partner: String },
+    E2ELoadSession    { partner: String, #[serde(default)] req: Option<String>, #[serde(default)] with_floor: bool,
+                        #[serde(default)] resume_peer: Option<String> },
+    #[serde(rename = "e2e_check_plain_reply")]
+    E2ECheckPlainReply { conn_id: String, target: String, req: String, #[serde(default)] cold: bool },
     #[serde(rename = "e2e_delete_session")]
     E2EDeleteSession  { partner: String, #[serde(default)] v: u32, #[serde(default)] req: Option<String> },
     #[serde(rename = "e2e_store_channel_key")]
@@ -669,7 +699,7 @@ pub enum ClientMessage {
     #[serde(rename = "e2e_load_channel_key")]
     E2ELoadChannelKey   { channel: String, #[serde(default)] req: Option<String> },
     #[serde(rename = "e2e_delete_channel_key")]
-    E2EDeleteChannelKey { channel: String, #[serde(default)] v: u32, #[serde(default)] req: Option<String> },
+    E2EDeleteChannelKey { channel: String, #[serde(default)] v: u32, #[serde(default)] req: Option<String>, #[serde(default)] scoped_off: bool },
     #[serde(rename = "e2e_list_channel_keys")]
     E2EListChannelKeys  {},
     #[serde(rename = "e2e_update_trust", alias = "e2e_load_trust")]
@@ -677,7 +707,8 @@ pub enum ClientMessage {
     // conn_id (optional, F10): the sender's connection; from_nick and the target
     // lookup are taken from / scoped to that network.
     #[serde(rename = "e2e_relay_x3dh")]
-    E2ERelayX3DH      { target_nick: String, header: serde_json::Value, #[serde(default)] conn_id: Option<String> },
+    E2ERelayX3DH      { target_nick: String, header: serde_json::Value, #[serde(default)] conn_id: Option<String>,
+                        #[serde(default)] e2e_identity_revision: Option<String> },
     #[serde(rename = "e2e_check_otpk_count")]
     E2ECheckOTPKCount {},
     // C1: client-held keyring (wrapped E2E master key) + migration support.
@@ -694,7 +725,7 @@ pub enum ClientMessage {
     // Appearance
     SaveAppearance    { settings: String },
     LoadAppearance    {},
-    SavePreferences   { prefs: String },
+    SavePreferences   { prefs: String, #[serde(default)] base: Option<u64> },
     LoadPreferences   {},
     /// Save/replace this user's server-side bot config (JSON of bots::BotConfig).
     SaveBotConfig     { config: String },
@@ -742,7 +773,7 @@ pub enum ServerEvent {
     AuthRequired     {},
     // r10: `assets` = frontend_id() of this server (see there); a page served by an earlier
     // deploy compares it with its own CRYPTIRC_ASSETS on every (re)connect.
-    AuthOk           { username: String, assets: String },
+    AuthOk           { username: String, assets: String, #[serde(default, skip_serializing_if = "std::ops::Not::not")] history_sync: bool },
     AuthFailed       { message: String },
     VaultLocked      {},
     /// vault_verified distinguishes a passphrase-proven response from a state refresh.
@@ -753,6 +784,7 @@ pub enum ServerEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")] e2e_legacy_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")] e2e_pepper: Option<String>,
         #[serde(default)] e2e_migrated: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")] e2e_storage_unavailable: bool,
         #[serde(default)] vault_verified: bool,
     },
     VaultError       { message: String },
@@ -826,14 +858,18 @@ pub enum ServerEvent {
     ReactionSupport  { conn_id: String, enabled: bool, dislike: bool },
     ReactionAnchor   { conn_id: String, target: String, msg_id: u64, reference: String },
     ReactionResult   { request_id: String, error: Option<String> },
-    IrcReaction      { conn_id: String, target: String, reference: String, from: String, prefix: Option<String>, emoji: String, remove: bool, own: bool },
-    SealedReaction   { conn_id: String, target: String, from: String, prefix: Option<String>, body: String, own: bool },
+    ReactionReceipts { conn_id: String, receipts: Vec<reactions::ReactionReceipt>, #[serde(skip_serializing_if = "Option::is_none")] retry_after_ms: Option<u32> },
+    IrcReaction      { conn_id: String, target: String, reference: String, from: String, prefix: Option<String>, emoji: String, remove: bool, own: bool,
+        #[serde(skip_serializing_if = "Option::is_none")] receipt: Option<reactions::ReactionReceipt> },
+    SealedReaction   { conn_id: String, target: String, from: String, prefix: Option<String>, body: String, own: bool,
+        #[serde(skip_serializing_if = "Option::is_none")] receipt: Option<reactions::ReactionReceipt> },
     SaslStatus       { conn_id: String, success: bool, message: String },
     Connected        { conn_id: String, server: String, nick: String },
     Disconnected     { conn_id: String, reason: String },
     Connecting       { conn_id: String, server: String },
     Reconnecting     { conn_id: String, attempt: u32, delay_secs: u64, reason: String },
     State            { networks: Vec<NetworkState>, vault_unlocked: bool },
+    RecentPrivateThreads { conn_id: String, threads: Vec<PrivateThread> },
     LogLines         { conn_id: String, target: String, lines: Vec<LogLine> },
     SearchResults    { conn_id: String, target: String, query: String, lines: Vec<LogLine> },
     SyncLines        { conn_id: String, target: String, lines: Vec<LogLine> },
@@ -851,24 +887,31 @@ pub enum ServerEvent {
     #[serde(rename = "e2e_signal_suggestion")]
     E2ESignalSuggestion { conn_id: String, nick: String, #[serde(skip_serializing_if = "Option::is_none")] prefix: Option<String>, sent: bool },
     #[serde(rename = "e2e_identity_blob")]
-    E2EIdentityBlob  { blob: String },
+    E2EIdentityBlob  { blob: String, #[serde(default)] published_identity: Option<(String,String)> },
+    #[serde(rename = "e2e_identity_moved")]
+    E2EIdentityMoved { revision: String },
     #[serde(rename = "e2e_session")]
-    E2ESession       { partner: String, blob: String },
+    E2ESession       { partner: String, blob: String, #[serde(skip_serializing_if = "Option::is_none")] req: Option<String>,
+                       #[serde(skip_serializing_if = "Option::is_none")] floor_blob: Option<String>,
+                       #[serde(skip_serializing_if = "Option::is_none")] resume_blob: Option<String>,
+                       #[serde(default, skip_serializing_if = "std::ops::Not::not")] account_unconfigured: bool },
+    #[serde(rename = "e2e_plain_reply_checked")]
+    E2EPlainReplyChecked { req: String, settings: Option<String>, #[serde(skip_serializing_if = "Option::is_none")] keyring: Option<String> },
     #[serde(rename = "e2e_channel_key")]
     E2EChannelKey    { channel: String, blob: String, #[serde(default, skip_serializing_if = "Option::is_none")] req: Option<String> },
     #[serde(rename = "e2e_key_deleted")]
     E2EKeyDeleted { req: String, ok: bool },
     #[serde(rename = "e2e_channel_list")]
-    E2EChannelList   { channels: Vec<String> },
+    E2EChannelList   { channels: Vec<String>, #[serde(default, skip_serializing_if = "Vec::is_empty")] disabled_channels: Vec<String> },
     #[serde(rename = "e2e_otpk_low")]
     E2EOTPKLow       { remaining: usize },
     #[serde(rename = "e2e_x3dh_header")]
-    E2EX3DHHeader    { from_nick: String, header: serde_json::Value },
+    E2EX3DHHeader    { from_nick: String, header: serde_json::Value, conn_id: String },
     // C1: reply to e2e_load_keyring. has_identity / peers / channels let a browser that
     // can't unlock E2E yet know which targets were encrypted (so it blocks rather than
     // sends cleartext) and whether to prompt for the passphrase.
     #[serde(rename = "e2e_keyring")]
-    E2EKeyring       { blob: String, migrated: bool, has_identity: bool, #[serde(default)] needs_legacy: bool, peers: Vec<String>, channels: Vec<String> },
+    E2EKeyring       { blob: String, migrated: bool, has_identity: bool, #[serde(default)] needs_legacy: bool, peers: Vec<String>, channels: Vec<String>, #[serde(default, skip_serializing_if = "Vec::is_empty")] disabled_channels: Vec<String> },
     #[serde(rename = "e2e_keyring_stored")]
     E2EKeyringStored { migrated: bool,
                        // r2: CAS lost — nothing written; `blob` is the keyring to adopt.
@@ -879,7 +922,22 @@ pub enum ServerEvent {
     // r2 (NEW-7): another device of this user advanced the ratchet for `partner` by
     // SENDING (dv = that device's random id). Other devices re-sync before they send.
     #[serde(rename = "e2e_session_moved")]
-    E2ESessionMoved  { partner: String, dv: String },
+    E2ESessionMoved  { partner: String, dv: String, #[serde(skip_serializing_if = "Option::is_none")] initial: Option<String> },
+    #[serde(rename = "e2e_live_receive")]
+    E2ELiveReceive { partner: String, previous: String },
+    #[serde(rename = "e2e_live_receipt")]
+    E2ELiveReceipt { partner: String, digest: String, blob: String },
+    #[serde(rename = "e2e_history_sync")]
+    E2EHistorySync { id: String, kind: HistorySyncKind, blob: String },
+    #[serde(rename = "e2e_session_committed")]
+    E2ESessionCommitted { partner: String, req: String, ok: bool, storage_retry: bool, identity_changed: bool,
+        #[serde(skip_serializing_if = "Option::is_none")] conflict: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")] floor_blob: Option<String> },
+    #[serde(rename = "e2e_session_closed")]
+    E2ESessionClosed { partner: String, req: String, ok: bool, identity_changed: bool, #[serde(skip_serializing_if = "Option::is_none")] conflict: Option<String>,
+                       #[serde(skip_serializing_if = "Option::is_none")] floor_blob: Option<String> },
+    IrcDeliveryWarning { conn_id: String, target: String, text: String,
+                         #[serde(default, skip_serializing_if = "Option::is_none")] unsent_wire: Option<String> },
     #[serde(rename = "e2e_session_list")]
     E2ESessionList   { partners: Vec<String> },
     Appearance       { settings: String },
@@ -1022,13 +1080,24 @@ pub struct NetworkState {
     /// channel-key spelling is "this channel" the way the server does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub casemapping:  Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelState { pub name: String, pub topic: String, pub names: Vec<String> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogLine { pub id: u64, pub ts: i64, pub from: String, pub text: String, pub kind: String }
+pub struct LogLine {
+    pub id: u64, pub ts: i64, pub from: String, pub text: String, pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub irc_recipient: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub irc_network: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PrivateThread { nick: String, prefix: String, ts: i64 }
 
 // ─── HTTP types ───────────────────────────────────────────────────────────────
 
@@ -5660,11 +5729,14 @@ fn canonicalize_cmd_ids(mut cmd: ClientMessage) -> ClientMessage {
         | ClientMessage::Connect { id }
         | ClientMessage::Disconnect { id, .. } => *id = canonical_network_id(id),
         ClientMessage::Send { conn_id, .. }
+        | ClientMessage::E2ECheckPlainReply { conn_id, .. }
         | ClientMessage::React { conn_id, .. }
+        | ClientMessage::GetReactionReceipts { conn_id, .. }
         | ClientMessage::KeepNick { conn_id, .. }
         | ClientMessage::ListChannels { conn_id, .. }
         | ClientMessage::JoinChannel { conn_id, .. }
         | ClientMessage::PartChannel { conn_id, .. }
+        | ClientMessage::RecentPrivateThreads { conn_id }
         | ClientMessage::GetLogs { conn_id, .. }
         | ClientMessage::SearchLogs { conn_id, .. }
         | ClientMessage::Sync { conn_id, .. }
@@ -5869,7 +5941,8 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
     info!("WS authenticated: {}", username);
     // r2 (codex-p3 HIGH main.rs:4697 / v-e2e NEW-1): a browser socket that did not
     // announce the current E2E protocol is an outdated cached app.js.
-    let legacy_web = browser && client_e2e_proto < 3;
+    let legacy_web = browser && client_e2e_proto < 4;
+    let supports_history_sync = browser && !legacy_web;
     // r6 (codex P1 main.rs:4989): SUBSCRIBE FIRST, then re-validate the session (and with
     // it the account generation, r4 V3S-1) immediately before EVERY account-data snapshot
     // is built and written, and once more before anything is forwarded.
@@ -5908,7 +5981,12 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
         };
     }
     session_still_valid!();
-    if !ws_send_bounded(&mut sender, serde_json::to_string(&ServerEvent::AuthOk { username: username.clone(), assets: frontend_id().to_string() }).unwrap()).await {
+    let auth_ok = ServerEvent::AuthOk {
+        username: username.clone(),
+        assets: frontend_id().to_string(),
+        history_sync: supports_history_sync,
+    };
+    if !ws_send_bounded(&mut sender, serde_json::to_string(&auth_ok).unwrap()).await {
         abort_handshake!(None::<&str>);
     }
     session_still_valid!();
@@ -5999,6 +6077,7 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
             tokio::select! {
                 evt = event_rx.recv() => {
                     match evt {
+                        Ok(ServerEvent::E2EHistorySync { .. }) if !supports_history_sync => continue,
                         // #103: serialize gracefully — a serialization regression in a
                         // future ServerEvent variant should skip that event, not panic
                         // and drop the socket.
@@ -6061,6 +6140,7 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
         let mut parse_logs_suppressed: u64 = 0;
         // r3 WW-2: inside a "lock burst" of this socket since… (see mark_lock_burst).
         let mut lock_burst: Option<tokio::time::Instant> = None;
+        let mut preferences_basis = preferences::SocketBasis::default();
         loop {
             // F3: bounded wait for the next frame (see WS_IDLE_READ_TIMEOUT). Any frame
             // counts — the Pong to our 30 s Ping included — so only a dead link or a
@@ -6156,7 +6236,9 @@ async fn handle_ws(socket: WebSocket, state: AppState, _conn_guard: WsConnGuard,
                         } else if e2e_send_blocked(&state2, &user2, &socket_tx2, &cmd, legacy_web).await {
                             // The client has been told why the encrypted target was blocked.
                         } else {
-                            handle_command(cmd, &user2, &state2, &socket_tx2, false).await;
+                            handle_command(cmd, &user2, &state2, &socket_tx2, CommandSource::WebSocket {
+                                outdated_browser: legacy_web, supports_history_sync, preferences_basis: &mut preferences_basis,
+                            }).await;
                         }
                         // F14: a full reply queue means this client is not reading its
                         // socket at all — close it rather than queue without bound.
@@ -6273,21 +6355,24 @@ fn user_bulk_prune(username: &str) {
 /// The unlock response supplies older key material only for migration.
 async fn e2e_vault_unlocked_event(state: &AppState, username: &str, proven: bool) -> ServerEvent {
     let b64 = |k: [u8; 32]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, k);
-    let keyring = state.e2e_store.load_keyring(username).await;
+    let keyring = state.e2e_store.read_keyring(username).await;
     let migrated = match &keyring {
-        Some((_, migrated)) => *migrated,
-        None => state.e2e_store.identity_is_v2(username).await,
+        Ok(Some((_, migrated))) => Some(*migrated),
+        Ok(None) => state.e2e_store.stored_identity_version(username).await.map(|version| version != 1),
+        Err(_) => None,
     };
-    let v2_keyring = matches!(keyring, Some((ref blob, _)) if blob.starts_with("e2k2."));
-    let legacy = if !migrated && proven && state.e2e_store.needs_legacy_key(username).await.unwrap_or(true) {
+    let v2_keyring = matches!(keyring, Ok(Some((ref blob, _))) if blob.starts_with("e2k2."));
+    let legacy_required = if proven && migrated == Some(false) { state.e2e_store.needs_legacy_key(username).await.ok() } else { Some(false) };
+    let storage_unavailable = migrated.is_none() || legacy_required.is_none();
+    let legacy = if legacy_required == Some(true) {
         state.crypto.derive_e2e_enc_key(username).await.ok().map(b64)
     } else { None };
-    let e2e_pepper = if proven && v2_keyring {
+    let e2e_pepper = if proven && v2_keyring && !storage_unavailable {
         state.crypto.derive_e2e_kek_pepper(username).await.ok().map(b64)
     } else { None };
     ServerEvent::VaultUnlocked {
         e2e_enc_key: String::new(), e2e_legacy_key: legacy, e2e_pepper,
-        e2e_migrated: migrated, vault_verified: proven,
+        e2e_migrated: migrated.unwrap_or(true), e2e_storage_unavailable: storage_unavailable, vault_verified: proven,
     }
 }
 
@@ -6406,21 +6491,37 @@ async fn e2e_send_blocked(
     state: &AppState, username: &str,
     socket_tx: &tokio::sync::mpsc::Sender<ServerEvent>, cmd: &ClientMessage, outdated_browser: bool,
 ) -> bool {
-    let ClientMessage::Send { conn_id, raw } = cmd else { return false };
+    if let ClientMessage::React { request_id, reaction: reactions::ReactionSend::Sealed { .. }, .. } = cmd {
+        if outdated_browser && state.e2e_store.minimum_slot_version(username).await.is_none_or(|v| v >= 3) {
+            let _ = socket_tx.try_send(ServerEvent::ReactionResult { request_id: request_id.clone(),
+                error: Some("Reload CryptIRC before sending an encrypted reaction.".into()) });
+            return true;
+        }
+        return false;
+    }
+    let ClientMessage::Send { conn_id, raw, e2e_plain_revision, .. } = cmd else { return false };
     let Some((_verb, targets, text)) = e2e_split_chat_line(&strip_crlf(raw)) else { return false };
     let outdated_recovery = outdated_browser && !text.starts_with('\u{1}')
-        && matches!(state.e2e_store.load_keyring(username).await,
-            Some((blob, _)) if blob.starts_with("e2k3."));
+        && state.e2e_store.minimum_slot_version(username).await.is_none_or(|v| v >= 3);
+    if e2e_plain_revision.is_some() && !outdated_recovery {
+        // The send handler checks the exact settings and protected slots under
+        // the write lock, keeping that lock through handoff to IRC.
+        return false;
+    }
     if !outdated_recovery && !e2e_text_is_cleartext(&text) { return false; }
     let conn_id = &canonical_network_id(conn_id);
     if !state.owns_conn(username, conn_id) { return true; }
-    let protected = match state.e2e_store.protected_names(username).await {
+    // On first contact a cached browser can try to send the handshake even
+    // though its obsolete store command was rejected and no peer slot exists.
+    let protected = if outdated_recovery && (text.starts_with("[e2edm") || text.starts_with("[e2ex3dh]") || text.starts_with("sd8~")) {
+        Some(targets.split(',').next().unwrap_or("status").to_owned())
+    } else { match state.e2e_store.protected_names(username).await {
         Ok((channels, peers)) => match_e2e_target(&targets, conn_id, channels, peers),
         Err(_) => {
             let _ = socket_tx.try_send(ServerEvent::Error { message: "Unable to verify encryption for this conversation. Message blocked.".into() });
             return true;
         }
-    };
+    }};
     if let Some(bare) = protected {
         let shown = if is_plausible_target(&bare) { bare } else { "status".to_string() };
         let message = if outdated_browser {
@@ -6444,22 +6545,70 @@ async fn e2e_send_blocked(
     false
 }
 
+const PSK_OFF_PREFIX: &str = "~off:";
+
+fn scoped_psk_name(slot: &str) -> Option<(&str, &str)> {
+    let (scope, name) = slot.strip_prefix('@')?.split_once(':')?;
+    (validate_uuid(scope).is_some() && !name.is_empty()).then_some((scope, name))
+}
+
+fn live_receipt_network<'a>(partner: &'a str, digest: &str, blob: &str, identity: &str) -> Option<&'a str> {
+    let (network, nick) = scoped_psk_name(partner)?;
+    let sha256 = |s: &str| s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !e2e::valid_peer_revision(nick, digest) || !sha256(digest) || !sha256(identity)
+        || nick.starts_with(['#', '+', '&', '!']) || nick.chars().any(|c| c.is_control() || c.is_whitespace())
+        || blob.len() > 4096
+    {
+        return None;
+    }
+    let ciphertext = blob.strip_prefix("e2e3.")?;
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, ciphertext).ok()?;
+    (bytes.len() >= 28).then_some(network)
+}
+
+fn split_psk_slots(slots: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let mut channels = Vec::new();
+    let mut disabled = Vec::new();
+    for slot in slots {
+        if let Some(name) = slot.strip_prefix(PSK_OFF_PREFIX) {
+            if scoped_psk_name(name).is_some() { disabled.push(name.to_string()); }
+        } else {
+            channels.push(slot);
+        }
+    }
+    (channels, disabled)
+}
+
 fn match_e2e_target(targets: &str, conn_id: &str, channels: Vec<String>, peers: Vec<String>) -> Option<String> {
-    let channels: std::collections::HashSet<String> = channels.into_iter()
-        .map(|c| e2e_fold_all(&c)).collect();
-    let peers: std::collections::HashSet<String> = peers.into_iter()
-        .filter(|p| !p.starts_with("__"))
+    let (channels, disabled) = split_psk_slots(channels);
+    let disabled: std::collections::HashSet<String> = disabled.iter()
+        .filter_map(|slot| scoped_psk_name(slot))
+        .filter(|(scope, _)| scope.eq_ignore_ascii_case(conn_id))
+        .map(|(_, name)| name.to_lowercase()).collect();
+    let names: std::collections::HashSet<String> = channels.into_iter()
+        .filter(|slot| scoped_psk_name(slot).is_some() || !disabled.contains(&slot.to_lowercase()))
+        .chain(peers.into_iter().filter(|p| !p.starts_with("__")))
         .filter_map(|p| {
-            if let Some((scope, nick)) = p.strip_prefix('@').and_then(|s| s.split_once(':')) {
-                if validate_uuid(scope).is_some() {
-                    return (conn_id.is_empty() || scope.eq_ignore_ascii_case(conn_id)).then(|| e2e_fold_all(nick));
-                }
+            if let Some((scope, nick)) = scoped_psk_name(&p) {
+                return (conn_id.is_empty() || scope.eq_ignore_ascii_case(conn_id)).then(|| e2e_fold_all(nick));
             }
             Some(e2e_fold_all(&p))
         }).collect();
     targets.split(',').flat_map(e2e_target_names)
-        .find(|(_, key)| channels.contains(key) || peers.contains(key))
+        .find(|(_, key)| names.contains(key))
         .map(|(name, _)| name)
+}
+
+#[test]
+fn legacy_psk_off_is_limited_to_its_scoped_irc_network() {
+    let first = "10000000-0000-4000-8000-000000000001";
+    let second = "10000000-0000-4000-8000-000000000002";
+    let mut keys = vec!["#test".to_string(), format!("{PSK_OFF_PREFIX}@{first}:#test")];
+    assert_eq!(match_e2e_target("#test", first, keys.clone(), vec![]), None);
+    assert_eq!(match_e2e_target("#test", second, keys.clone(), vec![]).as_deref(), Some("#test"));
+    assert!(match_e2e_target("#test", "", keys.clone(), vec![]).is_some());
+    keys.push(format!("@{first}:#test"));
+    assert!(match_e2e_target("#test", first, keys, vec![]).is_some());
 }
 
 // Apply edits under the same lock as joins, parts, connects, and network removal.
@@ -6480,6 +6629,7 @@ async fn edit_network(
     let network = edit(&existing)?;
     let dial_changed = ipc_client::dial_settings_differ(&existing, &network);
     state.save_network_with_vault_policy(&network, username, require_vault).await.map_err(|e| e.to_string())?;
+    if existing.server != network.server || existing.port != network.port { e2e::forget_network_name(id); }
     state.avatars.forget_session(id);
     // Auto-generate client cert if SASL EXTERNAL is enabled and no cert exists
     if network.sasl_external && state.crypto.is_unlocked(username).await {
@@ -6542,61 +6692,42 @@ fn preferences_lock(username: &str) -> Arc<tokio::sync::Mutex<()>> {
 
 const PREFERENCES_VAULT_LOCKED: &str = "Unlock the vault in CryptIRC first.";
 
-async fn save_preferences(state: &AppState, username: &str, mut prefs: String) -> Result<(), String> {
-    if prefs.len() > 1_000_000 {
-        return Err("Preferences too large (max 1MB) — not saved".into());
-    }
-    let mut incoming: serde_json::Value = serde_json::from_str(&prefs)
-        .map_err(|_| "Preferences not valid JSON")?;
-    if !state.crypto.is_unlocked(username).await {
-        return Err(PREFERENCES_VAULT_LOCKED.into());
-    }
-    let dir = std::path::PathBuf::from(&state.data_dir)
-        .join("users").join(safe_username(username));
-    let path = dir.join("preferences.enc");
-    // Callers hold the per-user preferences lock. Preserve a newer Clear when
-    // an older tab saves its whole preferences snapshot after that Clear.
-    if let Some(next) = incoming.as_object_mut() {
-        if let Ok(stored) = tokio::fs::read_to_string(&path).await {
-            if let Ok(previous) = state.crypto.decrypt(username, stored.trim()).await {
-                if let Ok(mut saved) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&previous) {
-                    let notices_version = |obj: &serde_json::Map<String, serde_json::Value>| {
-                        let read = |key| obj.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
-                        (read("_mentionsClearTs"), read("_mentionsTs"))
-                    };
-                    if notices_version(&saved) > notices_version(next) {
-                        for field in ["mentions", "_mentionsTs", "_mentionsClearTs"] {
-                            if let Some(value) = saved.remove(field) { next.insert(field.into(), value); }
-                        }
-                        // A tab ignores its own unchanged save echo. It must see this correction.
-                        next.remove("_saveTs");
-                        prefs = incoming.to_string();
-                        if prefs.len() > 1_000_000 { return Err("Preferences too large (max 1MB) — not saved".into()); }
-                    }
-                }
-            }
-        }
-    }
-    let encrypted = state.crypto.encrypt(username, prefs.as_bytes()).await
+async fn save_preferences(state: &AppState, username: &str, stored: preferences::Fields,
+                          incoming: preferences::Fields, socket: Option<(&mut preferences::SocketBasis, Option<u64>)>)
+                          -> Result<preferences::Fields, String> {
+    if !state.crypto.is_unlocked(username).await { return Err(PREFERENCES_VAULT_LOCKED.into()); }
+    let merged = preferences::merge(stored, incoming, socket.as_ref().map(|(s, base)| (&**s, *base)));
+    let prefs = preferences::browser_json(merged.fields.clone());
+    if prefs.len() > 1_000_000 { return Err("Preferences too large (max 1MB) — not saved".into()); }
+    let disk = serde_json::to_vec(&merged.fields).map_err(|_| "Could not serialize preferences.")?;
+    let encrypted = state.crypto.encrypt(username, &disk).await
         .map_err(|e| format!("Prefs encrypt failed: {e}"))?;
-    tokio::fs::create_dir_all(&dir).await
-        .map_err(|e| format!("Prefs save failed: {e}"))?;
-    write_user_file_atomic(&path, encrypted.as_bytes()).await
+    let dir = std::path::PathBuf::from(&state.data_dir).join("users").join(safe_username(username));
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("Prefs save failed: {e}"))?;
+    write_user_file_atomic(&dir.join("preferences.enc"), encrypted.as_bytes()).await
         .map_err(|e| format!("Prefs save failed: {e}"))?;
     let _ = tokio::fs::remove_file(dir.join("preferences.json")).await;
+    if let Some((s, _)) = socket { merged.acknowledge(s); }
     send_bulk_to_user(username, ServerEvent::Preferences { prefs });
-    Ok(())
+    Ok(merged.fields)
 }
 
 // ─── Command handler ──────────────────────────────────────────────────────────
+
+enum CommandSource<'a> {
+    WebSocket { outdated_browser: bool, supports_history_sync: bool, preferences_basis: &'a mut preferences::SocketBasis },
+    Mcp,
+}
 
 async fn handle_command(
     cmd: ClientMessage,
     username: &str,
     state: &AppState,
     socket_tx: &tokio::sync::mpsc::Sender<ServerEvent>,
-    report_command_errors: bool,
+    mut source: CommandSource<'_>,
 ) {
+    let report_command_errors = matches!(source, CommandSource::Mcp);
+    let outdated_browser = matches!(&source, CommandSource::WebSocket { outdated_browser: true, .. });
     let send = |evt: ServerEvent| {
         if report_command_errors && matches!(evt, ServerEvent::Error { .. }) {
             let _ = socket_tx.try_send(evt.clone());
@@ -6822,11 +6953,19 @@ async fn handle_command(
         ClientMessage::React { conn_id, target, request_id, reaction } => {
             if !reactions::valid_request_id(&request_id) { return; }
             let result = if state.auth.check_ws_kdf_rate_limit(username, "reactions").is_ok() {
-                reactions::send(state, username, &conn_id, &target, reaction).await
+                reactions::send(state, username, &conn_id, &target, request_id.clone(), reaction, outdated_browser).await
             } else {
                 Err("Too many reactions. Try again in a minute.")
             };
             send_self(ServerEvent::ReactionResult { request_id, error: result.err().map(str::to_owned) });
+        }
+        ClientMessage::GetReactionReceipts { conn_id, request_ids } => {
+            if state.auth.check_ws_kdf_rate_limit(username, "reaction_receipts").is_err() {
+                send_self(ServerEvent::ReactionReceipts { conn_id, receipts: Vec::new(), retry_after_ms: Some(61_000) });
+                return;
+            }
+            let receipts = reactions::requested_receipts(state, username, &conn_id, &request_ids).await;
+            send_self(ServerEvent::ReactionReceipts { conn_id, receipts, retry_after_ms: None });
         }
         ClientMessage::RemoveNetwork { id } => {
             if !state.owns_network(username, &id).await { return; }
@@ -7005,7 +7144,7 @@ async fn handle_command(
             }
         }
 
-        ClientMessage::Send { conn_id, raw } => {
+        ClientMessage::Send { conn_id, raw, e2e_identity_revision, e2e_plain_revision } => {
             if !state.owns_conn(username, &conn_id) {
                 if report_command_errors {
                     send_self(ServerEvent::Error { message: "This network is offline.".into() });
@@ -7041,6 +7180,40 @@ async fn handle_command(
                 // first bytes, so a tagged / prefixed / double-spaced line went to IRC
                 // but skipped all of them.
                 let out = OutgoingLine::parse(&safe);
+                let plain_permit = if let Some(revision) = e2e_plain_revision.as_deref() {
+                    let [target, body] = out.params.as_slice() else { return; };
+                    if !matches!(out.verb.as_str(), "PRIVMSG" | "NOTICE") || !e2e_bridge::valid_nick(target)
+                        || !e2e_text_is_cleartext(body) { return; }
+                    let permit = if state.crypto.is_unlocked(username).await {
+                        state.e2e_store.plain_reply_permit(username, revision, |channels, peers| {
+                            match_e2e_target(target, &conn_id, channels, peers).is_none()
+                        }).await.ok().flatten()
+                    } else { None };
+                    let Some(permit) = permit else {
+                        send_self(ServerEvent::IrcDeliveryWarning { conn_id: conn_id.clone(), target: target.to_string(),
+                            unsent_wire: Some(body.to_string()), text: "Encryption changed before the message was sent.".into() });
+                        return;
+                    };
+                    Some(permit)
+                } else { None };
+                // A previously committed message can wait in a paced browser
+                // queue across an identity reset. Serialize its actual IRC
+                // handoff with rotation, including when the socket stayed up.
+                let signal_wire = out.params.get(1).filter(|text| matches!(out.verb.as_str(), "PRIVMSG" | "NOTICE")
+                    && (text.starts_with("[e2edm2]") || text.starts_with("[e2ex3dh]")));
+                let identity_permit = if let Some(wire) = signal_wire {
+                    let Ok(permit) = state.e2e_store.signal_delivery_permit(username, e2e_identity_revision.as_deref(), outdated_browser).await else {
+                        // Setup fragments have no chat rows. Report the refusal
+                        // once, on the encrypted message that follows the offer.
+                        if wire.starts_with("[e2edm2]") {
+                            send_self(ServerEvent::IrcDeliveryWarning { conn_id: conn_id.clone(), target: out.params[0].to_owned(),
+                                unsent_wire: Some(out.params[1].to_owned()),
+                                text: "Message not sent. Your encryption identity could not be confirmed. Check this conversation, then resend.".into() });
+                        }
+                        return;
+                    };
+                    Some(permit)
+                } else { None };
                 let is_tagmsg = out.verb == "TAGMSG";
                 // Silently drop TAGMSG for connections that don't support message-tags
                 if is_tagmsg {
@@ -7102,14 +7275,49 @@ async fn handle_command(
                 let live = c.connected && c.registered;
                 let deferred_join_part = !live && matches!(out.verb.as_str(), "JOIN" | "PART");
                 let mut handed_off = live || deferred_join_part;
+                let mut signal_labelled = false;
                 if handed_off {
-                    for l in &wire {
-                        if c.send_raw(&format!("{}\r\n", l)).await.is_err() { handed_off = false; break; }
+                    for line in &wire {
+                        let parsed = OutgoingLine::parse(line);
+                        let signal = live && c.echo_message_enabled && c.reactions.labeled_response && parsed.verb == "PRIVMSG"
+                            && parsed.params.first().is_some_and(|target| e2e_bridge::valid_nick(target))
+                            && parsed.params.get(1).is_some_and(|text| text.starts_with("[e2edm2]"));
+                        let labelled = signal.then(|| {
+                            let label = format!("crs-{}", uuid::Uuid::new_v4().simple());
+                            irc::with_delivery_label(line, &label).map(|tagged| (label, tagged))
+                        }).flatten();
+                        let result = if let Some((label, tagged)) = labelled {
+                            let result = c.send_raw(&format!("{tagged}\r\n")).await;
+                            if result.is_ok() {
+                                signal_labelled = true;
+                                c.track_signal_delivery(irc::SignalDelivery {
+                                    label, target: parsed.params[0].to_owned(), wire: parsed.params[1].to_owned(),
+                                    sent: std::time::Instant::now(),
+                                }, state, username, &conn);
+                            }
+                            result
+                        } else {
+                            c.send_raw(&format!("{line}\r\n")).await
+                        };
+                        if result.is_err() { handed_off = false; break; }
                     }
                 }
+                drop(identity_permit);
+                drop(plain_permit);
                 // codex P2 irc.rs:102: no IPC link = not sent, even though the flags above
                 // still say connected (they only change when the daemon tells us).
                 let connected = live && handed_off;
+                if matches!(out.verb.as_str(), "PRIVMSG" | "NOTICE") && out.params.get(1).is_some_and(|text| crate::reactions::encrypted_wire(text)) {
+                    for target in out.params[0].split(',').filter(|target| is_plausible_target(target)).take(MAX_SEND_TARGETS) {
+                        if connected && !signal_labelled { c.note_encrypted_send(target); }
+                        else if !connected { send_self(ServerEvent::IrcDeliveryWarning { conn_id: conn_id.clone(), target: target.into(), unsent_wire: None,
+                            text: "The IRC connection dropped before delivery was confirmed. Check this conversation after reconnecting, then resend if needed.".into() }); }
+                    }
+                } else if connected && out.verb == "PRIVMSG" && out.params.len() >= 2 {
+                    for target in out.params[0].split(',').filter(|target| e2e_bridge::valid_nick(target)) {
+                        c.note_plain_send(target);
+                    }
+                }
                 drop(c);
                 // (Not for TAGMSG typing indicators: one per keystroke burst would flood
                 // the status buffer while the link is down.)
@@ -7142,6 +7350,9 @@ async fn handle_command(
                     for out in wire.iter().map(|l| OutgoingLine::parse(l)) {
                     let is_privmsg = out.verb == "PRIVMSG";
                     let is_notice_out = out.verb == "NOTICE";
+                    if signal_labelled && is_privmsg && out.params.get(1).is_some_and(|text| text.starts_with("[e2edm2]")) {
+                        continue; // The IRC echo or a labeled refusal resolves this send.
+                    }
                     if is_privmsg || is_notice_out {
                         if out.params.len() >= 2 {
                             let targets = out.params[0].to_string();
@@ -7353,6 +7564,22 @@ async fn handle_command(
                 });
             }
         }
+        ClientMessage::RecentPrivateThreads { conn_id } => {
+            if !state.crypto.is_unlocked(username).await || !state.owns_network(username, &conn_id).await
+                || state.auth.check_ws_kdf_rate_limit(username, &format!("pm_inbox:{conn_id}")).is_err() {
+                return;
+            }
+            let state = state.clone();
+            let username = username.to_owned();
+            let socket_tx = socket_tx.clone();
+            tokio::spawn(async move {
+                let Ok(threads) = state.logger.recent_private_threads(&username, &conn_id).await else { return };
+                if state.crypto.is_unlocked(&username).await && state.owns_network(&username, &conn_id).await {
+                    let event = ServerEvent::RecentPrivateThreads { conn_id, threads };
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), socket_tx.send(event)).await;
+                }
+            });
+        }
         ClientMessage::GetLogs { conn_id, target, limit, before, before_id, status_view } => {
             if !state.owns_network(username, &conn_id).await { return; }
             let view = status_view_for(&target, status_view.as_deref());
@@ -7508,14 +7735,17 @@ async fn handle_command(
             // Reply ONLY to the requesting socket (was a broadcast to every session of the
             // user, which handed other tabs an identity blob they never asked for — and an
             // older app.js reacted to an unreadable one by generating a new identity).
-            match state.e2e_store.load_identity_enc(username).await {
-                Some(blob) => send_self(ServerEvent::E2EIdentityBlob { blob }),
-                None       => send_self(ServerEvent::E2EIdentityBlob { blob: String::new() }),
-            }
+            let Ok(identity) = state.e2e_store.read_identity(username).await else {
+                send_self(ServerEvent::Error { message: "Could not read your encryption identity. Reconnect after storage is available again.".into() });
+                return;
+            };
+            let blob = identity.unwrap_or_default();
+            let published_identity = state.e2e_store.bundle_identity_keys(username).await;
+            send_self(ServerEvent::E2EIdentityBlob { blob, published_identity });
         }
 
         // ── E2E: public key bundle + one-time prekeys ─────────────────────────
-        ClientMessage::E2EPublishBundle { mut bundle, v, id_hash } => {
+        ClientMessage::E2EPublishBundle { mut bundle, v, id_hash, repair_spk } => {
             tracing::debug!("[E2E] publish_bundle");
             // #14: only an unlocked vault can produce a valid bundle — reject while locked so
             // a locked/stale/XSS'd client can't overwrite the live published bundle.
@@ -7547,8 +7777,17 @@ async fn handle_command(
                     bundle.one_time_prekeys.len());
                 bundle.one_time_prekeys.truncate(256);
             }
-            match state.e2e_store.store_bundle(username, &bundle).await {
+            let published = match repair_spk {
+                Some((by_id,current)) if v == 3 && id_hash.is_some() =>
+                    state.e2e_store.repair_bundle(username, &bundle, &by_id, &current).await,
+                Some(_) => Err(anyhow::anyhow!("missing identity revision for bundle repair")),
+                None => state.e2e_store.store_bundle(username, &bundle).await,
+            };
+            match published {
                 Ok(_) => {
+                    if let Some(revision) = id_hash {
+                        state.send_to_user(username, ServerEvent::E2EIdentityMoved { revision });
+                    }
                     // L5: use same threshold as client OTPK_REFILL_BELOW = 10
                     let remaining = state.e2e_store.otpk_count(username).await;
                     if remaining < 10 {
@@ -7594,7 +7833,7 @@ async fn handle_command(
                 send_self(ServerEvent::Error { message: "Could not send the encryption suggestion. Check the IRC connection.".into() });
             }
         }
-        ClientMessage::E2EFetchBundle { username: target_user, conn_id, req } => {
+        ClientMessage::E2EFetchBundle { username: target_user, conn_id, req, wait_for_peer } => {
             // The IRC nick as typed (used only for an in-memory comparison against live
             // connection nicks, and echoed back so the client keys the session by the
             // same nick it is talking to — `[bob]` must not come back as `bob`).
@@ -7696,7 +7935,7 @@ async fn handle_command(
                 let reason = if needs_setup { "peer-setup" }
                     else if local_peer { "unavailable" }
                     else if let Some(conn) = state.connections.get(&cid).map(|c| c.clone()) {
-                        match e2e_bridge::request(state, username, conn, &nick, &id).await {
+                        match e2e_bridge::request(state, username, conn, &nick, &id, wait_for_peer).await {
                             Ok(true) => return,
                             Ok(false) => "unsupported",
                             Err(reason) => reason,
@@ -7709,7 +7948,88 @@ async fn handle_command(
         }
 
         // ── E2E: ratchet session state ────────────────────────────────────────
-        ClientMessage::E2EStoreSession { partner, blob, dv, snd } => {
+        ClientMessage::E2ECommitSession { partner, blob, expect, req, dv, snd, create, floor_expect, id_hash, live_receive } => {
+            let Some(req) = validate_uuid(&req) else { return; };
+            let valid = e2e::valid_peer_revision(&partner, &expect) && !blob.is_empty() && blob.len() <= WS_MAX_MSG_BYTES;
+            let mut previous = String::new();
+            let notify_receivers = live_receive && !snd && !create && blob.starts_with("e2e3.") &&
+                state.user_events.get(username).is_some_and(|tx| tx.receiver_count() > 1);
+            let (ok, conflict, floor_blob, storage_retry, identity_changed) = if valid && state.crypto.is_unlocked(username).await {
+                match state.e2e_store.commit_session(username, &partner, &blob, &expect, create && !snd,
+                        floor_expect.as_deref(), id_hash.as_deref(), notify_receivers.then_some(&mut previous)).await {
+                    Ok(None) => (true, None, None, false, false),
+                    Ok(Some(c)) => (false, Some(c.current), c.floor_blob, false, false),
+                    Err(error) => (false, None, None, error.is::<std::io::Error>(), error.is::<e2e::SessionIdentityChanged>()),
+                }
+            } else { (false, None, None, false, false) };
+            send_self(ServerEvent::E2ESessionCommitted { partner: partner.clone(), req, ok, conflict, floor_blob, storage_retry, identity_changed });
+            if ok && !previous.is_empty() && previous.len() <= WS_MAX_MSG_BYTES {
+                // This revision was already on this account's server. Deliver it
+                // only on the live account bus, without writing a history record.
+                state.send_to_user(username, ServerEvent::E2ELiveReceive { partner: partner.clone(), previous });
+            }
+            let first = create && !snd && blob.starts_with("e2e3.");
+            if ok && (snd || first) && !dv.is_empty() && dv.len() <= 32 && dv.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+                // A currently connected sibling can see the initial sealed state
+                // before the first send replaces it, including after a restart
+                // replaces an existing revision. This event has no disk history.
+                state.send_to_user(username, ServerEvent::E2ESessionMoved { partner, dv, initial:first.then_some(blob) });
+            }
+        }
+        ClientMessage::E2ELiveReceipt { partner, digest, blob, id_hash } => {
+            let Some(network) = live_receipt_network(&partner, &digest, &blob, &id_hash) else { return; };
+            if !matches!(source, CommandSource::WebSocket { .. }) || !state.owns_conn(username, network)
+                || !state.user_events.get(username).is_some_and(|tx| tx.receiver_count() > 1)
+                || !state.crypto.is_unlocked(username).await
+            {
+                return;
+            }
+            let Ok(_identity) = state.e2e_store.signal_delivery_permit(username, Some(&id_hash), outdated_browser).await
+            else { return; };
+            // Deliver only to this account's live sockets. The server never
+            // opens the receipt or adds it to chat history.
+            state.send_to_user(username, ServerEvent::E2ELiveReceipt { partner, digest, blob });
+        }
+        ClientMessage::E2EHistorySync { id, kind, blob } => {
+            if !matches!(source, CommandSource::WebSocket { supports_history_sync: true, .. })
+                || !state.user_events.get(username).is_some_and(|tx| tx.receiver_count() > 1)
+                || blob.len() > 16_384
+                || validate_uuid(&id).as_deref() != Some(id.as_str())
+            {
+                return;
+            }
+            let Some(ciphertext) = blob.strip_prefix("e2e3.") else { return; };
+            let action = match kind {
+                HistorySyncKind::Ready => "e2e_history_ready",
+                HistorySyncKind::Request => "e2e_history_request",
+                HistorySyncKind::Reply => "e2e_history_reply",
+            };
+            if state.auth.check_ws_kdf_rate_limit(username, action).is_err()
+                || !state.crypto.is_unlocked(username).await
+                || base64::Engine::decode(&base64::engine::general_purpose::STANDARD, ciphertext)
+                    .map_or(true, |bytes| bytes.len() < 28)
+            {
+                return;
+            }
+            // The request, conversation and readable copy stay inside the
+            // authenticated envelope. Forward it only to this account's live sockets.
+            state.send_to_user(username, ServerEvent::E2EHistorySync { id, kind, blob });
+        }
+        ClientMessage::E2ECloseSession { partner, req, v, expect, floor_expect, floor_blob, id_hash } => {
+            let Some(req) = validate_uuid(&req) else { return; };
+            // A migrated peer can also have a legacy-history slot. Other
+            // reserved slots contain account state or prekeys and are ineligible.
+            let peer = partner.strip_prefix("__legacy__").unwrap_or(&partner);
+            let (ok, conflict, floor_blob, identity_changed) = if (1..=3).contains(&v) && e2e::valid_peer_revision(peer, &expect) && state.crypto.is_unlocked(username).await {
+                match state.e2e_store.close_session(username, &partner, v, &expect, floor_expect.as_deref(), floor_blob.as_deref(),id_hash.as_deref()).await {
+                    Ok(None) => (true, None, None, false),
+                    Ok(Some(c)) => (false, Some(c.current), c.floor_blob, false),
+                    Err(error) => (false, None, None, error.is::<e2e::SessionIdentityChanged>()),
+                }
+            } else { (false, None, None, false) };
+            send_self(ServerEvent::E2ESessionClosed { partner, req, ok, conflict, floor_blob, identity_changed });
+        }
+        ClientMessage::E2EStoreSession { partner, blob, dv, snd, req, id_hash, expect } => {
             // #14: session blobs are only producible by an unlocked vault — reject writes
             // while locked, and reject empty/oversized blobs, to prevent self-DoS/corruption.
             if !state.crypto.is_unlocked(username).await {
@@ -7718,11 +8038,30 @@ async fn handle_command(
             if blob.is_empty() || blob.len() > WS_MAX_MSG_BYTES {
                 send(ServerEvent::Error { message: "E2E session blob rejected (empty or too large)".into() }); return;
             }
+            if blob.starts_with("e2e3.") && !partner.starts_with("__") {
+                send_self(ServerEvent::Error { message: "Reload CryptIRC to sync this encrypted conversation before sending.".into() });
+                return;
+            }
             // C1: no legacy-format writes after migration (stale app.js). r3: checked
             // atomically with the write (permit held until it is done).
-            let Some(_permit) = state.e2e_store.write_permit(username, e2e_blob_version(&blob)).await else {
+            let Some(permit) = state.e2e_store.write_permit(username, e2e_blob_version(&blob)).await else {
                 send_self(ServerEvent::Error { message: "E2E: this app version is out of date — reload the page".into() }); return;
             };
+            if partner == "__state__" && blob.starts_with("e2e3.") {
+                let (ok, conflict, storage_retry, identity_changed) = match state.e2e_store
+                    .store_account_state(username, &blob, expect.as_deref(), id_hash.as_deref(), permit).await {
+                    Ok(None) => (true, None, false, false),
+                    Ok(Some(current)) => (false, Some(current), false, false),
+                    Err(error) => (false, None, error.is::<std::io::Error>(), error.is::<e2e::SessionIdentityChanged>()),
+                };
+                if let Some(req) = req {
+                    send_self(ServerEvent::E2ESessionCommitted { partner, req, ok, storage_retry,
+                        identity_changed, conflict, floor_blob: None });
+                } else if !ok {
+                    send_self(ServerEvent::Error { message: "Reload CryptIRC to synchronize your encryption settings.".into() });
+                }
+                return;
+            }
             // #13: pass the RAW partner through; the single canonical injective sanitizer
             // lives in e2e::safe_partner (applied inside store_session), so client cache,
             // on-disk stem, and other devices never diverge for non-ASCII/bracket nicks.
@@ -7735,22 +8074,57 @@ async fn handle_command(
                     if snd && !partner.starts_with("__") {
                         let dv: String = dv.unwrap_or_default().chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(32).collect();
                         if !dv.is_empty() {
-                            state.send_to_user(username, ServerEvent::E2ESessionMoved { partner, dv });
+                            state.send_to_user(username, ServerEvent::E2ESessionMoved { partner, dv, initial:None });
                         }
                     }
                 }
                 Err(e) => send(ServerEvent::Error { message: format!("E2E store session: {}", e) }),
             }
         }
-        ClientMessage::E2ELoadSession { partner } => {
+        ClientMessage::E2ELoadSession { partner, req, with_floor, resume_peer } => {
             // #13: pass/echo the RAW partner (client keys dmSessions by the raw nick);
             // e2e::safe_partner does the sole, injective filename derivation.
             // Reply only to the requesting socket (it is a request/response; broadcasting
             // it pushed other tabs session state they never asked for).
-            match state.e2e_store.load_session(username, &partner).await {
-                Some(blob) => send_self(ServerEvent::E2ESession { partner, blob }),
-                None       => send_self(ServerEvent::E2ESession { partner, blob: String::new() }),
-            }
+            let req = req.as_deref().and_then(validate_uuid);
+            // An explicit Resume can span another device reading a live reply.
+            // Return the existing sealed ratchet at the start of the settings
+            // check to this socket. The final session read still governs sends.
+            let resume_blob = if let Some(peer) = resume_peer.filter(|peer| {
+                req.is_some() && !with_floor && partner == "__state__" && e2e::valid_peer_revision(peer, "")
+            }) {
+                if state.crypto.is_unlocked(username).await {
+                    state.e2e_store.load_session(username, &peer).await
+                        .filter(|blob| blob.starts_with("e2e3.") && blob.len() <= WS_MAX_MSG_BYTES)
+                } else { None }
+            } else { None };
+            let (blob, floor_blob, account_unconfigured) = if with_floor {
+                if e2e::valid_peer_revision(&partner, "") && state.crypto.is_unlocked(username).await {
+                    match state.e2e_store.load_session_with_floor(username, &partner).await {
+                        Ok((blob, floor, unconfigured)) => (blob, Some(floor), unconfigured),
+                        Err(_) => (String::new(), None, false),
+                    }
+                } else { (String::new(), None, false) }
+            } else { (state.e2e_store.load_session(username, &partner).await.unwrap_or_default(), None, false) };
+            send_self(ServerEvent::E2ESession { partner, blob, req, floor_blob, resume_blob, account_unconfigured });
+        }
+        ClientMessage::E2ECheckPlainReply { conn_id, target, req, cold } => {
+            let Some(req) = validate_uuid(&req) else { return; };
+            let checked = async {
+                if !e2e_bridge::valid_nick(&target) || !state.owns_conn(username, &conn_id)
+                    || !state.crypto.is_unlocked(username).await
+                    || !matches!(state.resolve_e2e_peer(&target, username, &conn_id).await, Ok(None)) {
+                    return None;
+                }
+                state.e2e_store.check_plain_reply(username, cold, |channels, peers| {
+                    match_e2e_target(&target, &conn_id, channels, peers).is_none()
+                }).await.ok().flatten()
+            }.await;
+            let (settings, keyring) = match checked {
+                Some((settings, keyring)) => (Some(settings), keyring),
+                None => (None, None),
+            };
+            send_self(ServerEvent::E2EPlainReplyChecked { req, settings, keyring });
         }
         ClientMessage::E2EDeleteSession { partner, v, req } => {
             let permit = if state.crypto.is_unlocked(username).await {
@@ -7763,6 +8137,7 @@ async fn handle_command(
 
         // ── E2E: channel pre-shared keys ──────────────────────────────────────
         ClientMessage::E2EStoreChannelKey { channel, blob } => {
+            if channel.starts_with(PSK_OFF_PREFIX) { return; }
             // #14: channel-key blobs are only producible by an unlocked vault — reject writes
             // while locked, and reject empty/oversized blobs (self-DoS/corruption).
             if !state.crypto.is_unlocked(username).await {
@@ -7782,6 +8157,9 @@ async fn handle_command(
             // non-canonical names are rejected as an Err below.
             match state.e2e_store.store_channel_key(username, &channel, &blob).await {
                 Ok(_)  => {
+                    if scoped_psk_name(&channel).is_some() {
+                        let _ = state.e2e_store.delete_channel_key(username, &format!("{PSK_OFF_PREFIX}{channel}")).await;
+                    }
                     // Notify ALL sessions so other devices load the new key
                     state.send_to_user(username, ServerEvent::E2EChannelKey {
                         channel, blob, req: None,
@@ -7796,15 +8174,35 @@ async fn handle_command(
                 send_self(ServerEvent::E2EChannelKey { channel, blob: blob.unwrap_or_default(), req });
             }
         }
-        ClientMessage::E2EDeleteChannelKey { channel, v, req } => {
+        ClientMessage::E2EDeleteChannelKey { channel, v, req, scoped_off } => {
             let permit = if state.crypto.is_unlocked(username).await {
                 state.e2e_store.write_permit(username, v.max(1)).await
             } else { None };
-            let ok = permit.is_some() && state.e2e_store.delete_channel_key(username, &channel).await.is_ok();
+            let ok = if permit.is_none() || channel.starts_with(PSK_OFF_PREFIX) {
+                false
+            } else if scoped_off {
+                if let Some((scope, _)) = scoped_psk_name(&channel) {
+                    if !state.owns_network(username, scope).await { false } else {
+                        let slots = state.e2e_store.list_channel_keys(username).await;
+                        let canonical = channel.to_lowercase();
+                        let mut removed = true;
+                        for slot in slots.iter().filter(|slot| slot.to_lowercase() == canonical) {
+                            if state.e2e_store.delete_channel_key(username, slot).await.is_err() {
+                                removed = false;
+                                break;
+                            }
+                        }
+                        // The legacy key continues protecting this network until all
+                        // scoped key spellings are gone and the explicit opt-out is saved.
+                        removed && state.e2e_store.store_channel_key(username,
+                            &format!("{PSK_OFF_PREFIX}{canonical}"), "e2e3.").await.is_ok()
+                    }
+                } else { false }
+            } else { state.e2e_store.delete_channel_key(username, &channel).await.is_ok() };
             if let Some(req) = req { send_self(ServerEvent::E2EKeyDeleted { req, ok }); }
             else if !ok { send_self(ServerEvent::Error { message: "E2E: could not remove shared key; unlock the vault and reload if needed".into() }); }
             if !ok { return; }
-            let channels = state.e2e_store.list_channel_keys(username).await;
+            let (channels, disabled_channels) = split_psk_slots(state.e2e_store.list_channel_keys(username).await);
             // r2 (v-e2e NEW-1): the upgraded client re-stores a mixed-case legacy PSK
             // (#MixCase) under its lowercased name and then deletes the original. The
             // channel still HAS a key, so this is not a key removal: broadcasting the list
@@ -7813,20 +8211,20 @@ async fn handle_command(
             // case-insensitive copy left) is announced to the other sessions.
             let still_keyed = channels.iter().any(|c| c.to_lowercase() == channel.to_lowercase());
             if still_keyed {
-                send_self(ServerEvent::E2EChannelList { channels });
+                send_self(ServerEvent::E2EChannelList { channels, disabled_channels });
             } else {
                 // Notify ALL sessions of this user so other devices update the lock icon
-                state.send_to_user(username, ServerEvent::E2EChannelList { channels });
+                state.send_to_user(username, ServerEvent::E2EChannelList { channels, disabled_channels });
             }
         }
         ClientMessage::E2EListChannelKeys {} => {
-            let channels = state.e2e_store.list_channel_keys(username).await;
-            send_self(ServerEvent::E2EChannelList { channels });
+            let (channels, disabled_channels) = split_psk_slots(state.e2e_store.list_channel_keys(username).await);
+            send_self(ServerEvent::E2EChannelList { channels, disabled_channels });
         }
 
         // Stale tabs can still send these. Confirmed pins sync in encrypted state.
         ClientMessage::E2ELegacyTrust {} => {}
-        ClientMessage::E2ERelayX3DH { target_nick, header, conn_id } => {
+        ClientMessage::E2ERelayX3DH { target_nick, header, conn_id, e2e_identity_revision } => {
             // Per-caller rate limit (mirrors E2EFetchBundle #27): this is the only
             // unthrottled high-volume, large-payload (<=64KiB) cross-user WRITE primitive.
             // Without a cap, an authenticated caller can flood a victim's 128-slot
@@ -7837,29 +8235,25 @@ async fn handle_command(
                 send_self(ServerEvent::Error { message: "Too many relay requests — slow down".into() });
                 return;
             }
-            // #49 + F10: bind the relayed X3DH header to the sender's OWN published bundle,
-            // and REQUIRE one: a sender with no bundle could otherwise relay a header with
-            // arbitrary identity keys and get them pinned on first contact. A legitimate
-            // initiator always has a bundle (the responder needs it) and always builds the
-            // header from the identity it published, so this only rejects forgeries.
-            match state.e2e_store.bundle_identity_keys(username).await {
-                Some((dh, sign)) => {
-                    let hdr_ik   = header.get("sender_ik").and_then(|v| v.as_str()).unwrap_or("");
-                    let hdr_sign = header.get("sender_sign_ik").and_then(|v| v.as_str()).unwrap_or("");
-                    if hdr_ik != dh.as_str() || hdr_sign != sign.as_str() {
-                        warn!("[E2E] refusing X3DH relay: header identity != published bundle");
-                        send_self(ServerEvent::Error { message: "E2E relay refused: identity mismatch".into() });
-                        return;
-                    }
-                }
-                None => {
-                    send_self(ServerEvent::Error { message: "E2E relay refused: no published key bundle".into() });
-                    return;
-                }
-            }
             // Bound the header: a real X3DH header is ~500 bytes of JSON.
             if serde_json::to_string(&header).map(|s| s.len()).unwrap_or(usize::MAX) > 4096 {
                 send_self(ServerEvent::Error { message: "E2E relay refused: header too large".into() });
+                return;
+            }
+            // Check the originating revision and both public keys together.
+            // Resolve the recipient only after authenticating the sender. Keep the
+            // permit through delivery so a concurrent reset cannot retire the offer.
+            let Ok(_permit) = state.e2e_store.signal_delivery_permit(username, e2e_identity_revision.as_deref(), outdated_browser).await else {
+                send_self(ServerEvent::Error { message: "E2E relay refused: encryption identity changed or unavailable".into() });
+                return;
+            };
+            let Some((dh, sign)) = state.e2e_store.bundle_identity_keys(username).await else {
+                send_self(ServerEvent::Error { message: "E2E relay refused: no published key bundle".into() });
+                return;
+            };
+            if header.get("sender_ik").and_then(|v| v.as_str()) != Some(dh.as_str()) ||
+               header.get("sender_sign_ik").and_then(|v| v.as_str()) != Some(sign.as_str()) {
+                send_self(ServerEvent::Error { message: "E2E relay refused: identity mismatch".into() });
                 return;
             }
             let target: String = target_nick.chars().filter(|c| !c.is_control() && *c != ' ').take(64).collect();
@@ -7899,7 +8293,7 @@ async fn handle_command(
                         send_self(ServerEvent::Error { message: "E2E relay refused: that connection is not registered on IRC yet".into() });
                         return;
                     };
-                    (nick, state.resolve_nick_on_network(&target, username, cid).await)
+                    (nick, state.resolve_e2e_peer(&target, username, cid).await.ok().flatten())
                 }
                 None => {
                     let mut conn_ids: Vec<String> = state.conn_owners.iter()
@@ -7907,14 +8301,14 @@ async fn handle_command(
                         .map(|e| e.key().clone()).collect();
                     conn_ids.sort();
                     let mut any_registered = false;
-                    let mut hits: Vec<(String, String)> = Vec::new();   // (sender nick, recipient)
+                    let mut hits = Vec::new();
                     for cid in conn_ids {
                         // #20: clone the Arc out and drop the DashMap Ref before awaiting.
                         let conn = state.connections.get(&cid).map(|c| c.clone());
                         let Some(conn) = conn else { continue };
                         let Some(nick) = registered_nick(&*conn.lock().await) else { continue };
                         any_registered = true;
-                        if let Some(t) = state.resolve_nick_on_network(&target, username, &cid).await {
+                        if let Ok(Some(t)) = state.resolve_e2e_peer(&target, username, &cid).await {
                             hits.push((nick, t));
                         }
                     }
@@ -7922,10 +8316,9 @@ async fn handle_command(
                         send_self(ServerEvent::Error { message: "E2E relay refused: that connection is not registered on IRC yet".into() });
                         return;
                     }
-                    let mut recipients: Vec<&str> = hits.iter().map(|(_, t)| t.as_str()).collect();
-                    recipients.sort();
-                    recipients.dedup();
-                    if recipients.len() > 1 {
+                    hits.sort();
+                    hits.dedup();
+                    if hits.len() > 1 {
                         send_self(ServerEvent::Error { message: "E2E relay refused: that nick belongs to different users on your networks — reload the page to update CryptIRC".into() });
                         return;
                     }
@@ -7935,12 +8328,13 @@ async fn handle_command(
                     }
                 }
             };
-            if let Some(target_user) = target_user {
+            if let Some((target_user, recipient_conn)) = target_user {
                 // F17: no INFO log of who relays to whom.
                 tracing::debug!("[E2E] relaying x3dh header");
                 state.send_to_user(&target_user, ServerEvent::E2EX3DHHeader {
                     from_nick: sender_nick,
                     header,
+                    conn_id: recipient_conn,
                 });
             }
         }
@@ -7953,16 +8347,33 @@ async fn handle_command(
         }
         // ── C1: client-held keyring ───────────────────────────────────────────
         ClientMessage::E2ELoadKeyring {} => {
-            let (blob, migrated) = state.e2e_store.load_keyring(username).await.unwrap_or_default();
-            let has_identity = state.e2e_store.load_identity_enc(username).await.map(|b| !b.is_empty()).unwrap_or(false);
+            let Ok(keyring) = state.e2e_store.read_keyring(username).await else {
+                send_self(ServerEvent::Error { message: "Could not read your encryption keyring. Reconnect after storage is available again.".into() });
+                return;
+            };
+            let (blob, migrated) = keyring.unwrap_or_default();
+            let Ok(identity) = state.e2e_store.read_identity(username).await else {
+                send_self(ServerEvent::Error { message: "Could not read your encryption identity. Reconnect after storage is available again.".into() });
+                return;
+            };
+            let has_identity = identity.is_some();
             // Which DM peers / channels have stored E2E state. A browser that can't unlock
             // E2E yet uses this to BLOCK sends to them instead of sending cleartext. (The
             // server already knows these names: they are its own file names.)
-            let peers: Vec<String> = state.e2e_store.list_sessions(username).await
-                .into_iter().filter(|p| !p.starts_with("__")).collect();
-            let channels = state.e2e_store.list_channel_keys(username).await;
-            let needs_legacy = !migrated && state.e2e_store.needs_legacy_key(username).await.unwrap_or(true);
-            send_self(ServerEvent::E2EKeyring { blob, migrated, has_identity, needs_legacy, peers, channels });
+            let Ok((channels, sessions)) = state.e2e_store.protected_names(username).await else {
+                send_self(ServerEvent::Error { message: "Could not read the saved encrypted conversations. Reconnect after storage is available again.".into() });
+                return;
+            };
+            let peers: Vec<String> = sessions.into_iter().filter(|p| !p.starts_with("__")).collect();
+            let (channels, disabled_channels) = split_psk_slots(channels);
+            let needs_legacy = if migrated { false } else {
+                let Ok(required) = state.e2e_store.needs_legacy_key(username).await else {
+                    send_self(ServerEvent::Error { message: "Could not check older encrypted data. Reconnect after storage is available again.".into() });
+                    return;
+                };
+                required
+            };
+            send_self(ServerEvent::E2EKeyring { blob, migrated, has_identity, needs_legacy, peers, channels, disabled_channels });
         }
         ClientMessage::E2EStoreKeyring { blob, migrated, expect } => {
             if !blob.starts_with("e2k3.") {
@@ -8026,16 +8437,35 @@ async fn handle_command(
                 send(ServerEvent::Appearance { settings: data });
             }
         }
-        ClientMessage::SavePreferences { prefs } => {
+        ClientMessage::SavePreferences { prefs, base } => {
             let lock = preferences_lock(username);
             let _guard = lock.lock().await;
-            if let Err(message) = save_preferences(state, username, prefs).await {
+            if !state.crypto.is_unlocked(username).await { return; }
+            let result = async {
+                if prefs.len() > 1_000_000 { return Err("Preferences too large (max 1MB) — not saved".to_string()); }
+                let incoming = serde_json::from_str(&prefs).map_err(|_| "Preferences not valid JSON")?;
+                let stored = preferences::load(state, username).await?;
+                let socket = match source {
+                    CommandSource::WebSocket { preferences_basis, .. } => Some((preferences_basis, base)),
+                    CommandSource::Mcp => None,
+                };
+                save_preferences(state, username, stored, incoming, socket).await
+            }.await;
+            if let Err(message) = result {
                 if message != PREFERENCES_VAULT_LOCKED { send(ServerEvent::Error { message }); }
             }
         }
         ClientMessage::LoadPreferences {} => {
             let lock = preferences_lock(username);
             let _guard = lock.lock().await;
+            let mut publish = |data: &str| {
+                if let Ok(fields) = serde_json::from_str::<preferences::Fields>(data) {
+                    if let CommandSource::WebSocket { ref mut preferences_basis, .. } = source {
+                        preferences_basis.reset(preferences::revision(&fields));
+                    }
+                    send_bulk_to_user(username, ServerEvent::Preferences { prefs: preferences::browser_json(fields) });
+                }
+            };
             if state.crypto.is_unlocked(username).await {
                 let dir = std::path::PathBuf::from(&state.data_dir)
                     .join("users").join(&safe_username(username));
@@ -8043,7 +8473,7 @@ async fn handle_command(
                 // Prefer the encrypted file if present
                 if tokio::fs::metadata(&enc_path).await.is_ok() {
                     match load_user_secret(state, username, "preferences.enc").await {
-                        UserSecretLoad::Plain(p) => send_bulk_to_user(username, ServerEvent::Preferences { prefs: p }),
+                        UserSecretLoad::Plain(p) => publish(&p),
                         // F8: an undecryptable file is moved aside (not silently replaced
                         // by the client's next save) and the user is told; the empty
                         // payload keeps every client's load flow unchanged.
@@ -8060,7 +8490,7 @@ async fn handle_command(
                     // trigger a save on next prefs change which re-writes .enc too.
                     let legacy = dir.join("preferences.json");
                     if let Ok(data) = tokio::fs::read_to_string(&legacy).await {
-                        send_bulk_to_user(username, ServerEvent::Preferences { prefs: data.clone() });
+                        publish(&data);
                         if let Ok(enc) = state.crypto.encrypt(username, data.as_bytes()).await {
                             // F8: delete the plaintext only once the encrypted copy is
                             // durably on disk (a failed write used to lose both).
@@ -8068,6 +8498,8 @@ async fn handle_command(
                                 let _ = tokio::fs::remove_file(&legacy).await;
                             }
                         }
+                    } else {
+                        publish("{}");
                     }
                 }
             } else {
@@ -8343,6 +8775,7 @@ async fn handle_command(
             if state.auth.check_user_create_rate_limit(username, "cleardata").is_err() { return; }
             info!("Clearing all data for user: {}", username);
             crate::irc::discard_held_logs(username, None, None).await;
+            if let Err(error) = reactions::clear_receipts(state, username).await { warn!(%error, "could not clear reaction confirmations"); }
             // Delete logs for all this user's connections (F16: by config-file id, so a
             // config that fails to parse still has its logs cleared, plus F2 variants).
             for id in state.user_network_ids(username).await {
@@ -8602,10 +9035,6 @@ impl AppState {
     ///    suffixes. Only the best tier that has any holder is used, so a look-alike ircd
     ///    can neither be preferred over nor make ambiguous the real holder on the
     ///    caller's own server. Within that tier: exactly one distinct owner, or None.
-    async fn resolve_nick_on_network(&self, nick: &str, caller: &str, caller_conn: &str) -> Option<String> {
-        self.resolve_e2e_peer(nick, caller, caller_conn).await.ok().flatten().map(|(owner, _)| owner)
-    }
-
     async fn resolve_e2e_peer(&self, nick: &str, caller: &str, caller_conn: &str) -> Result<Option<(String, String)>, ()> {
         if nick.is_empty() || !self.owns_conn(caller, caller_conn) { return Err(()); }
         let scope = self.e2e_conn_ident(caller_conn, caller).await.ok_or(())?;
@@ -8696,7 +9125,8 @@ impl AppState {
             } else { None };
 
             let casemapping = crate::irc::known_casemapping(&cfg.id).map(|m| m.token().to_string());
-            out.push(NetworkState { config: cfg, connected, reactions, reaction_dislike, nick, channels, lag_ms, has_cert, cert_fingerprint, casemapping });
+            let network_name = if connected { e2e::network_name(&cfg.id) } else { None };
+            out.push(NetworkState { config: cfg, connected, reactions, reaction_dislike, nick, channels, lag_ms, has_cert, cert_fingerprint, casemapping, network_name });
         }
         out
     }
@@ -10069,8 +10499,10 @@ mod app_js_template_tests {
         assert_eq!(raw.matches("__CRYPTIRC_ASSETS__").count(), 1, "exactly one placeholder (the CRYPTIRC_ASSETS const)");
         let served = render_app_js(raw, "/cryptirc", "dev", env!("CARGO_PKG_VERSION")).replace("__CRYPTIRC_ASSETS__", frontend_id());
         assert!(served.contains(&format!("const CRYPTIRC_ASSETS='{}';", frontend_id())));
-        let ev = serde_json::to_string(&ServerEvent::AuthOk { username: "u".into(), assets: frontend_id().into() }).unwrap();
+        let auth_ok = |history_sync| ServerEvent::AuthOk { username: "u".into(), assets: frontend_id().into(), history_sync };
+        let ev = serde_json::to_string(&auth_ok(false)).unwrap();
         assert_eq!(ev, format!("{{\"type\":\"auth_ok\",\"username\":\"u\",\"assets\":\"{}\"}}", frontend_id()));
+        assert_eq!(serde_json::to_value(auth_ok(true)).unwrap()["history_sync"], true);
     }
 }
 
@@ -10160,7 +10592,7 @@ mod ws_fix_tests {
         assert!(!is_noncanonical_network_id("status"));
         let cmd = canonicalize_cmd_ids(ClientMessage::Connect { id: up.into() });
         assert!(matches!(cmd, ClientMessage::Connect { ref id } if id == "13dac991-6798-4923-9421-e6a174f9a8ef"));
-        let cmd = canonicalize_cmd_ids(ClientMessage::Send { conn_id: up.into(), raw: "x".into() });
+        let cmd = canonicalize_cmd_ids(ClientMessage::Send { conn_id: up.into(), raw: "x".into(), e2e_identity_revision: None, e2e_plain_revision: None });
         assert!(matches!(cmd, ClientMessage::Send { ref conn_id, .. } if conn_id == "13dac991-6798-4923-9421-e6a174f9a8ef"));
     }
 
@@ -10211,13 +10643,13 @@ mod ws_fix_tests {
         assert!(checked >= 15, "found only {checked} conn_id variants — parser out of date?");
         let up = "13DAC991-6798-4923-9421-E6A174F9A8EF";
         let lo = "13dac991-6798-4923-9421-e6a174f9a8ef";
-        let c = canonicalize_cmd_ids(ClientMessage::E2EFetchBundle { username: "bob".into(), conn_id: Some(up.into()), req: None });
+        let c = canonicalize_cmd_ids(ClientMessage::E2EFetchBundle { username: "bob".into(), conn_id: Some(up.into()), req: None, wait_for_peer: false });
         assert!(matches!(c, ClientMessage::E2EFetchBundle { conn_id: Some(ref id), .. } if id == lo));
-        let c = canonicalize_cmd_ids(ClientMessage::E2ERelayX3DH { target_nick: "bob".into(), header: serde_json::json!({}), conn_id: Some(up.into()) });
+        let c = canonicalize_cmd_ids(ClientMessage::E2ERelayX3DH { target_nick: "bob".into(), header: serde_json::json!({}), conn_id: Some(up.into()), e2e_identity_revision: None });
         assert!(matches!(c, ClientMessage::E2ERelayX3DH { conn_id: Some(ref id), .. } if id == lo));
         let c = canonicalize_cmd_ids(ClientMessage::E2ESuggestSignal { conn_id: up.into(), nick: "bob".into() });
         assert!(matches!(c, ClientMessage::E2ESuggestSignal { ref conn_id, .. } if conn_id == lo));
-        let c = canonicalize_cmd_ids(ClientMessage::E2EFetchBundle { username: "bob".into(), conn_id: None, req: None });
+        let c = canonicalize_cmd_ids(ClientMessage::E2EFetchBundle { username: "bob".into(), conn_id: None, req: None, wait_for_peer: false });
         assert!(matches!(c, ClientMessage::E2EFetchBundle { conn_id: None, .. }));
     }
 
@@ -10288,8 +10720,8 @@ mod ws_fix_tests {
     #[test]
     fn large_frames_only_for_self_capped_saves() {
         assert!(cmd_allows_large_frame(&ClientMessage::SaveStats { data: String::new() }));
-        assert!(cmd_allows_large_frame(&ClientMessage::SavePreferences { prefs: String::new() }));
-        assert!(!cmd_allows_large_frame(&ClientMessage::Send { conn_id: String::new(), raw: String::new() }));
+        assert!(cmd_allows_large_frame(&ClientMessage::SavePreferences { prefs: String::new(), base: None }));
+        assert!(!cmd_allows_large_frame(&ClientMessage::Send { conn_id: String::new(), raw: String::new(), e2e_identity_revision: None, e2e_plain_revision: None }));
         assert!(!cmd_allows_large_frame(&ClientMessage::E2EStoreIdentity { blob: String::new(), expect: None }));
         // The transport cap must carry the largest handler cap even fully quote-escaped.
         assert!(WS_MAX_FRAME_BYTES >= 2 * 2_000_000);
@@ -10418,6 +10850,25 @@ mod e2e_r2_protocol_tests {
     use super::*;
 
     #[test]
+    fn live_receipt_requires_a_scoped_peer_and_bounded_sealed_bytes() {
+        let network = "75d20d79-45bb-4496-8bc5-708ee44d5263";
+        let partner = format!("@{network}:peer");
+        let digest = "a".repeat(64);
+        let identity = "b".repeat(64);
+        let sealed = format!(
+            "e2e3.{}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0u8; 128]),
+        );
+        assert_eq!(live_receipt_network(&partner, &digest, &sealed, &identity), Some(network));
+        assert!(live_receipt_network("peer", &digest, &sealed, &identity).is_none());
+        assert!(live_receipt_network(&format!("@{network}:#channel"), &digest, &sealed, &identity).is_none());
+        assert!(live_receipt_network(&partner, "", &sealed, &identity).is_none());
+        assert!(live_receipt_network(&partner, &digest, "e2e3.bad!", &identity).is_none());
+        assert!(live_receipt_network(&partner, &digest, &"a".repeat(4097), &identity).is_none());
+        assert!(live_receipt_network(&partner, &digest, &sealed, "").is_none());
+    }
+
+    #[test]
     fn legacy_trust_commands_parse_as_no_ops() {
         for frame in [
             r#"{"type":"e2e_load_trust"}"#,
@@ -10438,7 +10889,9 @@ mod e2e_r2_protocol_tests {
         let m: ClientMessage = serde_json::from_str(r#"{"type":"e2e_store_keyring","blob":"e2k2.x","migrated":true}"#).unwrap();
         assert!(matches!(m, ClientMessage::E2EStoreKeyring { expect: None, .. }));
         let m: ClientMessage = serde_json::from_str(r#"{"type":"e2e_store_session","partner":"bob","blob":"e2e2.x"}"#).unwrap();
-        assert!(matches!(m, ClientMessage::E2EStoreSession { dv: None, snd: false, .. }));
+        assert!(matches!(m, ClientMessage::E2EStoreSession { dv: None, snd: false, expect: None, .. }));
+        let m: ClientMessage = serde_json::from_str(r#"{"type":"e2e_store_session","partner":"__state__","blob":"e2e3.x","expect":""}"#).unwrap();
+        assert!(matches!(m, ClientMessage::E2EStoreSession { expect: Some(ref value), .. } if value.is_empty()));
         // the stored reply keeps its old shape unless there was a conflict
         let s = serde_json::to_string(&ServerEvent::E2EKeyringStored { migrated: true, conflict: false, blob: None }).unwrap();
         assert_eq!(s, r#"{"type":"e2e_keyring_stored","migrated":true}"#);

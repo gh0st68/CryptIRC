@@ -139,6 +139,23 @@ pub struct E2EStore {
     otpk_pair_rate: Arc<DashMap<(String, String), (Instant, u32)>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct SessionConflict {
+    pub current: String,
+    pub floor_blob: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct SessionIdentityChanged;
+
+impl std::fmt::Display for SessionIdentityChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the account encryption identity changed")
+    }
+}
+
+impl std::error::Error for SessionIdentityChanged {}
+
 /// #41: outcome of an OTPK rate-budget check. `Blocked { first }` carries whether
 /// this is the FIRST over-budget hit in the current window, so the per-victim warn
 /// is emitted at most once per window (prevents log-spam keyed on victim identity).
@@ -253,10 +270,22 @@ impl E2EStore {
         let path = dir.join("identity.enc");
         let lock = slot_lock(&path);
         let _g = lock.lock().await;
-        if let Some(exp) = expect {
-            let cur = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-            if cur == blob { return Ok(None); }
-            if cur != exp { return Ok(Some(cur)); }
+        let cur = match tokio::fs::read_to_string(&path).await {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error.into()),
+        };
+        if cur == blob { return Ok(None); }
+        if expect.is_some_and(|exp| cur != exp) { return Ok(Some(cur)); }
+        if cur.starts_with("e2e3.") && blob.starts_with("e2e3.") {
+            // Once an identity has rotated, cached clients must prove which
+            // stored identity their ratchet uses. Persist this before rotation.
+            write_secret(&dir.join("identity-rotated"), b"1").await?;
+            // Stop advertising the retired identity even if the rotating
+            // browser closes before it can publish the new bundle.
+            remove_secret_checked(&dir.join("bundle.json")).await?;
+            #[cfg(unix)]
+            tokio::fs::File::open(&dir).await?.sync_all().await?;
         }
         write_secret_locked(&path, blob.as_bytes()).await?;
         Ok(None)
@@ -273,7 +302,16 @@ impl E2EStore {
     }
 
     pub async fn load_identity_enc(&self, username: &str) -> Option<String> {
-        tokio::fs::read_to_string(self.user_dir(username).join("identity.enc")).await.ok()
+        self.read_identity(username).await.ok().flatten()
+    }
+
+    pub async fn read_identity(&self, username: &str) -> Result<Option<String>> {
+        match tokio::fs::read_to_string(self.user_dir(username).join("identity.enc")).await {
+            Ok(blob) if blob.is_empty() => anyhow::bail!("empty encryption identity"),
+            Ok(blob) => Ok(Some(blob)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// An existing or unreadable identity/bundle is an unavailable-key case,
@@ -295,12 +333,26 @@ impl E2EStore {
     }
 
     /// Returns (blob, migrated) when the user has stored a client keyring.
-    pub async fn load_keyring(&self, username: &str) -> Option<(String, bool)> {
-        let json = tokio::fs::read_to_string(self.keyring_path(username)).await.ok()?;
-        let v: serde_json::Value = serde_json::from_str(&json).ok()?;
-        let blob = v.get("blob")?.as_str()?.to_string();
-        let migrated = v.get("migrated").and_then(|m| m.as_bool()).unwrap_or(false);
-        Some((blob, migrated))
+    #[cfg(test)]
+    async fn load_keyring(&self, username: &str) -> Option<(String, bool)> {
+        self.read_keyring(username).await.ok().flatten()
+    }
+
+    pub async fn read_keyring(&self, username: &str) -> Result<Option<(String, bool)>> {
+        let json = match tokio::fs::read_to_string(self.keyring_path(username)).await {
+            Ok(json) => json,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        #[derive(serde::Deserialize)]
+        struct Keyring {
+            blob: String,
+            #[serde(default)]
+            migrated: bool,
+        }
+        let record: Keyring = serde_json::from_str(&json)?;
+        anyhow::ensure!(record.blob.starts_with("e2k2.") || record.blob.starts_with("e2k3."), "unrecognized encryption keyring");
+        Ok(Some((record.blob, record.migrated)))
     }
 
     /// True once the user's E2E data was re-wrapped under the client-held key.
@@ -314,13 +366,19 @@ impl E2EStore {
     async fn is_migrated(&self, username: &str) -> bool {
         match self.load_keyring(username).await {
             Some((_, m)) => m,
-            None => self.identity_is_v2(username).await,
+            None => self.stored_identity_version(username).await != Some(1),
         }
     }
 
-    /// The identity blob is in the client-held-key ("e2e2.") format.
-    pub async fn identity_is_v2(&self, username: &str) -> bool {
-        matches!(read_prefix(&self.user_dir(username).join("identity.enc")).await, Some(p) if p.starts_with(b"e2e2.") || p.starts_with(b"e2e3."))
+    /// A missing identity allows first setup. An unreadable file leaves the version unknown.
+    pub async fn stored_identity_version(&self, username: &str) -> Option<u32> {
+        let prefix = read_blob_prefix(&self.user_dir(username).join("identity.enc")).await.ok()?;
+        match prefix.as_deref() {
+            Some([]) => None,
+            Some(p) if p.starts_with(b"e2e3.") => Some(3),
+            Some(p) if p.starts_with(b"e2e2.") => Some(2),
+            _ => Some(1),
+        }
     }
 
     /// r3 (codex-p3 HIGH main.rs:5003 / agy-P1 main.rs:5170): has an upgraded client
@@ -330,7 +388,7 @@ impl E2EStore {
     async fn has_upgraded_e2e(&self, username: &str) -> bool {
         // keyring.json present at all (even unparseable) counts.
         tokio::fs::metadata(self.keyring_path(username)).await.is_ok()
-            || self.identity_is_v2(username).await
+            || self.stored_identity_version(username).await != Some(1)
     }
 
     /// Serializes keyring changes with encrypted slot writes.
@@ -343,24 +401,19 @@ impl E2EStore {
 
     pub async fn write_permit(&self, username: &str, version: u32) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         let permit = self.slot_update_lock(username).await;
-        let keyring = self.load_keyring(username).await;
-        let (recovery, migrated) = match keyring {
-            Some((blob, migrated)) if blob.starts_with("e2k3.") => (true, migrated),
-            Some((blob, migrated)) if blob.starts_with("e2k2.") => (false, migrated),
-            Some(_) => return None,
-            None => {
-                match tokio::fs::metadata(self.keyring_path(username)).await {
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => return None,
-                }
-                let identity = read_prefix(&self.user_dir(username).join("identity.enc")).await;
-                let recovery = identity.as_ref().is_some_and(|p| p.starts_with(b"e2e3."));
-                let migrated = recovery || identity.as_ref().is_some_and(|p| p.starts_with(b"e2e2."));
-                (recovery, migrated)
-            }
-        };
-        let min_version = if recovery { 3 } else if migrated { 2 } else { 1 };
-        (version >= min_version && (version < 3 || recovery)).then_some(permit)
+        let minimum = self.minimum_slot_version(username).await?;
+        (version >= minimum && (version < 3 || minimum == 3)).then_some(permit)
+    }
+
+    // Call with the slot lock held so a migration cannot change the answer
+    // between this check and the protected operation.
+    pub(crate) async fn minimum_slot_version(&self, username: &str) -> Option<u32> {
+        match self.read_keyring(username).await.ok()? {
+            Some((blob, _)) if blob.starts_with("e2k3.") => Some(3),
+            Some((_, true)) => Some(2),
+            Some((_, false)) => Some(1),
+            None => self.stored_identity_version(username).await,
+        }
     }
 
     /// Replace an old ciphertext only while it is still the current slot value.
@@ -462,11 +515,11 @@ impl E2EStore {
             anyhow::bail!("invalid keyring");
         }
         let _g = self.slot_update_lock(username).await;
-        let cur = self.load_keyring(username).await;
+        let cur = self.read_keyring(username).await?;
         let prev_migrated = matches!(cur, Some((_, true)));
         if blob.starts_with("e2k3.") {
             if expect.is_none() { anyhow::bail!("E2E recovery keyring requires a compare-and-swap"); }
-            if cur.is_none() && self.identity_is_v2(username).await {
+            if cur.is_none() && self.stored_identity_version(username).await != Some(1) {
                 anyhow::bail!("E2E keyring is missing for an existing identity");
             }
         } else if matches!(&cur, Some((old, _)) if old.starts_with("e2k3.")) {
@@ -602,6 +655,24 @@ impl E2EStore {
     }
 
     // ── Public key bundle ─────────────────────────────────────────────────────
+
+    /// Called with the account write permit. Concurrent recovering devices
+    /// must leave a matching live bundle and its signed prekey together.
+    pub async fn repair_bundle(&self, username: &str, bundle: &KeyBundle, by_id: &str, current: &str) -> Result<()> {
+        anyhow::ensure!(valid_key_field(&bundle.identity_sign_key) && valid_key_field(&bundle.identity_dh_key)
+            && valid_signed_prekey(&bundle.signed_prekey) && bundle.one_time_prekeys.is_empty(), "invalid repair bundle");
+        anyhow::ensure!([by_id,current].iter().all(|blob| blob.starts_with("e2e3.") && blob.len() <= 4096),
+            "invalid sealed signed prekey");
+        if self.bundle_identity_keys(username).await.as_ref().is_some_and(|(dh, sign)|
+            *dh == bundle.identity_dh_key && *sign == bundle.identity_sign_key) { return Ok(()); }
+        let slot = format!("__spk__{}",bundle.signed_prekey.key_id);
+        let dir = self.user_dir(username).join("sessions");
+        let existing = read_session_revision(&dir, &slot_name(&slot, partner_is_safe)).await?;
+        anyhow::ensure!(existing.is_empty() || existing == by_id, "signed prekey ID is already in use");
+        self.store_session(username, &slot, by_id).await?;
+        self.store_session(username, "__spk__", current).await?;
+        self.store_bundle(username, bundle).await
+    }
 
     pub async fn store_bundle(&self, username: &str, bundle: &KeyBundle) -> Result<()> {
         // #88: reject malformed/oversized key material before persisting it.
@@ -810,12 +881,190 @@ impl E2EStore {
         self.store_slot(username, "sessions", partner, partner_is_safe, blob, MAX_SESSION_FILES, "session").await
     }
 
+    /// Keep the identity check, revision comparison and write under the account's
+    /// existing write permit. Older clients omit their document revision.
+    pub(crate) async fn store_account_state(&self, username: &str, blob: &str, expected: Option<&str>,
+                                            identity_revision: Option<&str>, _permit: tokio::sync::OwnedMutexGuard<()>)
+                                            -> Result<Option<String>> {
+        self.check_session_identity(username, identity_revision).await?;
+        let Some(expected) = expected else {
+            self.store_session(username, "__state__", blob).await?;
+            return Ok(None);
+        };
+        anyhow::ensure!(valid_session_revision(expected), "invalid account state revision");
+        let dir = self.user_dir(username).join("sessions");
+        let current = read_session_revision(&dir, &slot_name("__state__", partner_is_safe)).await?;
+        if current != blob {
+            if !session_revision_matches(&current, expected) {
+                return Ok(Some(current));
+            }
+            self.store_session(username, "__state__", blob).await?;
+        }
+        // A retry can find its own completed rename after a directory sync failed.
+        #[cfg(unix)]
+        {
+            sync_slot_directory(&dir).await?;
+            if expected.is_empty() { sync_slot_directory(&self.user_dir(username)).await?; }
+        }
+        Ok(None)
+    }
+
+    /// One acknowledged transition of a peer ratchet. The same per-user permit also
+    /// serializes migration and deletion. Only an authenticated browser can open the blob.
+    pub async fn commit_session(&self, username: &str, partner: &str, blob: &str, expected: &str, create: bool,
+                                floor_expect: Option<&str>, identity_revision: Option<&str>,
+                                mut previous_for_live_receivers: Option<&mut String>) -> Result<Option<SessionConflict>> {
+        if let Some(previous) = previous_for_live_receivers.as_deref_mut() { previous.clear(); }
+        let version = if blob.starts_with("e2e3.") { 3 } else if blob.starts_with("e2e2.") { 2 } else { anyhow::bail!("invalid session format") };
+        let _permit = self.write_permit(username, version).await.ok_or_else(|| anyhow::anyhow!("outdated session format"))?;
+        if version == 3 { self.check_session_identity(username, identity_revision).await?; }
+        let dir = self.user_dir(username).join("sessions");
+        let slot = slot_name(partner, partner_is_safe);
+        let current = read_session_revision(&dir, &slot).await?;
+        if current != blob {
+            if (current.is_empty() && !create) || !session_revision_matches(&current, expected) {
+                return Ok(Some(SessionConflict { current, floor_blob: None }));
+            }
+            // A close can race a fresh launch on a different device or contact.
+            // A live ratchet keeps its own epoch regardless of other conversations.
+            if current.is_empty() && create {
+                let floor = self.read_close_floor(username).await?;
+                if !session_revision_matches(&floor, floor_expect.unwrap_or("")) {
+                    return Ok(Some(SessionConflict { current, floor_blob: Some(floor) }));
+                }
+            }
+            self.store_session(username, partner, blob).await?;
+        }
+        // The rename may have succeeded before a directory write failed. An
+        // idempotent retry must confirm that the new ratchet will survive reboot
+        // before the browser can release its ciphertext.
+        #[cfg(unix)]
+        {
+            sync_slot_directory(&dir).await?;
+            // At first use, the sessions directory itself may also be new.
+            // Confirm its entry in the account directory on creation and retry.
+            if create { sync_slot_directory(&self.user_dir(username)).await?; }
+        }
+        // A sibling may already be handling this live IRC message while its
+        // explicit Resume request is still in flight. The web process can
+        // forward the exact opaque revision it just replaced to open sockets.
+        if let Some(previous) = previous_for_live_receivers {
+            if current != blob && current.starts_with("e2e3.") { *previous = current; }
+        }
+        Ok(None)
+    }
+
+    /// Retire the exact observed revision. Persist the account's encrypted
+    /// generation floor before removing the last record of the old ratchet.
+    pub async fn close_session(&self, username: &str, partner: &str, version: u32, expected: &str,
+                               floor_expect: Option<&str>, next_floor: Option<&str>, identity_revision: Option<&str>) -> Result<Option<SessionConflict>> {
+        let _permit = self.write_permit(username, version).await.ok_or_else(|| anyhow::anyhow!("outdated session format"))?;
+        if version == 3 { self.check_session_identity(username, identity_revision).await?; }
+        let dir = self.user_dir(username).join("sessions");
+        let slot = slot_name(partner, partner_is_safe);
+        let current = read_session_revision(&dir, &slot).await?;
+        let canonical = !partner.starts_with("__legacy__");
+        let floor = if canonical { Some(self.read_close_floor(username).await?) } else { None };
+        if !session_revision_matches(&current, expected)
+            || floor.as_ref().is_some_and(|value| !session_revision_matches(value, floor_expect.unwrap_or(""))) {
+            return Ok(Some(SessionConflict { current, floor_blob: floor }));
+        }
+        if let Some(floor) = floor {
+            let account = self.user_dir(username);
+            if !current.is_empty() && version == 3 && (floor_expect.is_none() || (floor.is_empty() && next_floor.is_none())) {
+                anyhow::bail!("reload CryptIRC to close this encrypted conversation");
+            }
+            if let Some(blob) = next_floor {
+                anyhow::ensure!(!current.is_empty() && version == 3 && floor_expect.is_some() && valid_close_floor(blob),
+                                "invalid session close floor");
+                create_dir_secure(&account).await?;
+                write_secret(&account.join("session-close-floor.enc"), blob).await?;
+            }
+            // A prior attempt may have written this exact floor and failed its
+            // directory sync. A retry must confirm durability before deleting
+            // the live slot, even when the floor no longer needs rewriting.
+            #[cfg(unix)]
+            if !current.is_empty() && version == 3 {
+                tokio::fs::File::open(&account).await?.sync_all().await?;
+            }
+        } else {
+            anyhow::ensure!(floor_expect.is_none() && next_floor.is_none(), "unexpected floor for archived session");
+        }
+        delete_slot(&dir, &slot).await?;
+        // A repeated close can find an already unlinked slot after the first
+        // directory sync failed. Confirm the deletion on both attempts.
+        #[cfg(unix)]
+        if let Err(error) = sync_slot_directory(&dir).await {
+            if error.kind() != std::io::ErrorKind::NotFound { return Err(error.into()); }
+        }
+        Ok(None)
+    }
+
+    /// Keep identity rotation ordered with the final IRC handoff of a queued
+    /// Signal message or reaction. Callers hold the permit through that write.
+    pub(crate) async fn signal_delivery_permit(&self, username: &str, revision: Option<&str>, outdated_browser: bool) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        let permit = self.slot_update_lock(username).await;
+        let minimum = self.minimum_slot_version(username).await.ok_or_else(|| anyhow::anyhow!("identity unavailable"))?;
+        anyhow::ensure!(!outdated_browser || minimum < 3, "reload CryptIRC before sending");
+        self.check_session_identity(username, revision).await?;
+        Ok(permit)
+    }
+
+    pub(crate) async fn check_session_identity(&self, username: &str, expected: Option<&str>) -> Result<()> {
+        let dir = self.user_dir(username);
+        if let Some(revision) = expected {
+            let current = tokio::fs::read_to_string(dir.join("identity.enc")).await?;
+            if !current.is_empty() && session_revision_matches(&current, revision) { return Ok(()); }
+        } else if !tokio::fs::try_exists(dir.join("identity-rotated")).await? {
+            return Ok(()); // A cached client on an account which has never rotated.
+        }
+        Err(SessionIdentityChanged.into())
+    }
+
+    async fn read_close_floor(&self, username: &str) -> Result<String> {
+        let path = self.user_dir(username).join("session-close-floor.enc");
+        match tokio::fs::read_to_string(path).await {
+            Ok(blob) if valid_close_floor(&blob) => Ok(blob),
+            Ok(_) => anyhow::bail!("unreadable session close floor"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub async fn load_session_with_floor(&self, username: &str, partner: &str) -> Result<(String, String, bool)> {
+        let _guard = self.slot_update_lock(username).await;
+        let unconfigured = match self.minimum_slot_version(username).await {
+            Some(3) => false,
+            Some(1) if self.read_keyring(username).await?.is_none() && self.read_identity(username).await?.is_none() => true,
+            _ => anyhow::bail!("could not confirm current session format"),
+        };
+        let dir = self.user_dir(username).join("sessions");
+        let current = read_session_revision(&dir, &slot_name(partner, partner_is_safe)).await?;
+        let floor = self.read_close_floor(username).await?;
+        // A new account can confirm a deliberate plaintext send before setting up
+        // encryption. Existing slot data or a close floor contradicts that state.
+        if unconfigured {
+            let (channels, sessions) = self.protected_names(username).await?;
+            anyhow::ensure!(current.is_empty() && floor.is_empty() && channels.is_empty() && sessions.is_empty(), "unexpected encrypted account data");
+        }
+        Ok((current, floor, unconfigured))
+    }
+
     pub async fn load_session(&self, username: &str, partner: &str) -> Option<String> {
         load_slot(&self.user_dir(username).join("sessions"), &slot_name(partner, partner_is_safe)).await
     }
 
     pub async fn delete_session(&self, username: &str, partner: &str) -> Result<()> {
-        delete_slot(&self.user_dir(username).join("sessions"), &slot_name(partner, partner_is_safe)).await
+        let dir = self.user_dir(username).join("sessions");
+        let slot = slot_name(partner, partner_is_safe);
+        // Cached clients may still request an unconditional delete. Keep this
+        // operation for migrations and private prekeys. A live v3 peer ratchet
+        // can only be retired by the revision-checked close operation.
+        if !partner.starts_with("__") {
+            let current = read_session_revision(&dir, &slot).await?;
+            anyhow::ensure!(!current.starts_with("e2e3."), "reload CryptIRC to close this encrypted conversation");
+        }
+        delete_slot(&dir, &slot).await
     }
 
     // ── Channel PSKs ──────────────────────────────────────────────────────────
@@ -845,6 +1094,42 @@ impl E2EStore {
             self.protected_slots(dir.join("channels"), channel_is_safe, MAX_CHANNEL_KEY_FILES).await?,
             self.protected_slots(dir.join("sessions"), partner_is_safe, MAX_SESSION_FILES).await?,
         ))
+    }
+
+    pub(crate) async fn check_plain_reply(&self, username: &str, cold: bool,
+        unprotected: impl FnOnce(Vec<String>, Vec<String>) -> bool,
+    ) -> Result<Option<(String, Option<String>)>> {
+        let _guard = self.slot_update_lock(username).await;
+        let (channels, peers) = self.protected_names(username).await?;
+        if !unprotected(channels, peers) { return Ok(None); }
+        let keyring = if cold {
+            let Some((blob, true)) = self.read_keyring(username).await? else { return Ok(None); };
+            if !blob.starts_with("e2k3.") { return Ok(None); }
+            Some(blob)
+        } else { None };
+        let slots = self.user_dir(username).join("sessions");
+        let settings = read_session_revision(&slots, &slot_name("__state__", partner_is_safe)).await?;
+        Ok(Some((settings, keyring)))
+    }
+
+    pub(crate) async fn plain_reply_permit(&self, username: &str, revision: &str,
+        unprotected: impl FnOnce(Vec<String>, Vec<String>) -> bool,
+    ) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>> {
+        let (settings_revision, ring_revision) = revision.split_once('.')
+            .map_or((revision, None), |(settings, ring)| (settings, Some(ring)));
+        if !valid_session_revision(settings_revision) || ring_revision.is_some_and(|ring| ring.len()!=64 || !valid_session_revision(ring)) {
+            return Ok(None);
+        }
+        let guard = self.slot_update_lock(username).await;
+        if let Some(ring) = ring_revision {
+            let Some((blob, true)) = self.read_keyring(username).await? else { return Ok(None); };
+            if !blob.starts_with("e2k3.") || !session_revision_matches(&blob, ring) { return Ok(None); }
+        }
+        let slots = self.user_dir(username).join("sessions");
+        let settings = read_session_revision(&slots, &slot_name("__state__", partner_is_safe)).await?;
+        if !session_revision_matches(&settings, settings_revision) { return Ok(None); }
+        let (channels, peers) = self.protected_names(username).await?;
+        Ok(unprotected(channels, peers).then_some(guard))
     }
 
     async fn protected_slots(&self, dir: PathBuf, is_safe: fn(u8) -> bool, cap: usize) -> Result<Vec<String>> {
@@ -983,7 +1268,7 @@ pub fn note_isupport(conn_id: &str, params: &[String]) {
                 }
             }
         }
-        if let Some(name) = p.strip_prefix("NETWORK=") {
+        if let Some((_, name)) = p.split_once('=').filter(|(key, _)| key.eq_ignore_ascii_case("NETWORK")) {
             let name: String = name.chars().filter(|c| !c.is_control()).take(64).collect::<String>().to_lowercase();
             if name.is_empty() || crate::auth::validate_uuid(conn_id).is_none() { continue; }
             let m = network_names();
@@ -1018,6 +1303,10 @@ fn persist_network_names_soon() {
 
 pub fn network_name(conn_id: &str) -> Option<String> {
     network_names().get(conn_id).map(|v| v.clone())
+}
+
+pub(crate) fn forget_network_name(conn_id: &str) {
+    if network_names().remove(conn_id).is_some() { persist_network_names_soon(); }
 }
 
 /// r2 (security review, option B): NO registrable-domain / public-suffix guessing —
@@ -1182,11 +1471,6 @@ async fn remove_secret_checked(path: &std::path::Path) -> Result<()> {
     }
 }
 
-/// The first bytes (≤ 8) of a file, or None if it can't be read.
-async fn read_prefix(path: &std::path::Path) -> Option<Vec<u8>> {
-    read_blob_prefix(path).await.ok().flatten()
-}
-
 async fn read_blob_prefix(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
     use tokio::io::AsyncReadExt;
     let file = match tokio::fs::File::open(path).await {
@@ -1239,6 +1523,32 @@ struct SlotName {
     hashed: bool,
 }
 
+fn session_revision_matches(blob: &str, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    if blob.is_empty() { expected.is_empty() } else { format!("{:x}", Sha256::digest(blob.as_bytes())) == expected }
+}
+
+fn valid_close_floor(blob: &str) -> bool {
+    // Twelve nonce bytes, a decimal safe integer and a 16-byte GCM tag.
+    blob.len() <= 128 && blob.strip_prefix("e2e3.").is_some_and(|body|
+        STANDARD.decode(body).is_ok_and(|sealed| (29..=44).contains(&sealed.len())))
+}
+
+async fn read_session_revision(dir: &std::path::Path, slot: &SlotName) -> Result<String> {
+    match read_slot(dir, slot).await? {
+        Some(value) if value.is_empty() => anyhow::bail!("empty session file"),
+        value => Ok(value.unwrap_or_default()),
+    }
+}
+
+pub(crate) fn valid_peer_revision(partner: &str, expected: &str) -> bool {
+    !partner.is_empty() && !partner.starts_with("__") && partner.len() <= 256 && valid_session_revision(expected)
+}
+
+fn valid_session_revision(expected: &str) -> bool {
+    expected.is_empty() || (expected.len() == 64 && expected.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 fn slot_name(name: &str, is_safe: fn(u8) -> bool) -> SlotName {
     use sha2::{Digest, Sha256};
     let full = fs_encode_full(name, is_safe);
@@ -1273,9 +1583,23 @@ async fn write_slot(dir: &std::path::Path, sn: &SlotName, name: &str, blob: &str
 }
 
 async fn load_slot(dir: &std::path::Path, sn: &SlotName) -> Option<String> {
-    if let Ok(b) = tokio::fs::read_to_string(dir.join(format!("{}.enc", sn.stem))).await { return Some(b); }
-    let l = sn.legacy.as_ref()?;
-    tokio::fs::read_to_string(dir.join(format!("{}.enc", l))).await.ok()
+    read_slot(dir, sn).await.ok().flatten()
+}
+
+async fn read_slot(dir: &std::path::Path, sn: &SlotName) -> std::io::Result<Option<String>> {
+    for name in std::iter::once(&sn.stem).chain(sn.legacy.as_ref()) {
+        match tokio::fs::read_to_string(dir.join(format!("{name}.enc"))).await {
+            Ok(blob) => return Ok(Some(blob)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+async fn sync_slot_directory(dir: &std::path::Path) -> std::io::Result<()> {
+    tokio::fs::File::open(dir).await?.sync_all().await
 }
 
 async fn delete_slot(dir: &std::path::Path, sn: &SlotName) -> Result<()> {
@@ -1517,6 +1841,326 @@ mod keyring_tests {
     }
 
     #[tokio::test]
+    async fn account_state_writers_merge_independent_edits_after_a_revision_conflict() {
+        use sha2::{Digest, Sha256};
+
+        async fn save(store: &E2EStore, blob: &str, expected: Option<&str>) -> Result<Option<String>> {
+            let permit = store.write_permit("alice", 3).await.unwrap();
+            store.store_account_state("alice", blob, expected, None, permit).await
+        }
+
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        store.store_identity_enc("alice", "e2e3.fixture-identity").await.unwrap();
+        let digest = |s: &str| format!("{:x}", Sha256::digest(s.as_bytes()));
+        let base = "e2e3.initial-settings";
+        let base_revision = digest(base);
+        let left = "e2e3.first-display-flag";
+        let right = "e2e3.second-display-flag";
+        let merged = "e2e3.both-display-flags";
+        assert_eq!(save(&store, left, Some(&base_revision)).await.unwrap().as_deref(), Some(""));
+        assert_eq!(save(&store, base, Some("")).await.unwrap(), None);
+        assert_eq!(save(&store, left, Some("")).await.unwrap().as_deref(), Some(base));
+
+        let (a, b) = tokio::join!(save(&store, left, Some(&base_revision)), save(&store, right, Some(&base_revision)));
+        let winner = match (a.unwrap(), b.unwrap()) {
+            (None, Some(current)) if current == left => current,
+            (Some(current), None) if current == right => current,
+            other => panic!("expected one commit and the winning document in the other reply: {other:?}"),
+        };
+        assert_eq!(store.load_session("alice", "__state__").await.as_deref(), Some(winner.as_str()));
+        let winning_revision = digest(&winner);
+        assert_eq!(save(&store, merged, Some(&winning_revision)).await.unwrap(), None);
+        assert_eq!(save(&store, merged, Some(&winning_revision)).await.unwrap(), None);
+        assert_eq!(store.load_session("alice", "__state__").await.as_deref(), Some(merged));
+
+        let permit = store.write_permit("alice", 3).await.unwrap();
+        let rejected = store.store_account_state("alice", left, Some(&base_revision), Some(&digest("retired")), permit).await;
+        assert!(rejected.unwrap_err().is::<SessionIdentityChanged>());
+        assert_eq!(save(&store, base, None).await.unwrap(), None);
+        let file = store.user_dir("alice").join("sessions").join("__state__.enc");
+        let backup = file.with_extension("original");
+        std::fs::rename(&file, &backup).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(save(&store, left, Some("")).await.unwrap_err().is::<std::io::Error>());
+        assert!(file.is_dir());
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), base);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_close_cannot_discard_a_newer_ratchet_that_the_device_has_never_seen() {
+        use sha2::{Digest, Sha256};
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        store.store_identity_enc("alice", "e2e3.identity").await.unwrap();
+        let revision = |s: &str| format!("{:x}", Sha256::digest(s.as_bytes()));
+        let old = "e2e3.epoch_three";
+        let new = "e2e3.epoch_seven";
+        let old_revision = revision(old);
+        let new_revision = revision(new);
+        let floor = format!("e2e3.{}", STANDARD.encode([7u8; 40]));
+        let floor_revision = revision(&floor);
+        for n in 0..16 {
+            let peer = format!("peer-{n}");
+            let account = format!("user{n}");
+            store.store_identity_enc(&account, "e2e3.identity").await.unwrap();
+            store.commit_session(&account, &peer, old, "", true, Some(""), None, None).await.unwrap();
+            let (sent, closed) = tokio::join!(
+                store.commit_session(&account, &peer, new, &old_revision, false, None, None, None),
+                store.close_session(&account, &peer, 3, &old_revision, Some(""), Some(&floor), None),
+            );
+            match (sent.unwrap(), closed.unwrap()) {
+                (None, Some(current)) => {
+                    assert_eq!(current.current, new);
+                    assert_eq!(current.floor_blob.as_deref(), Some(""));
+                    assert_eq!(store.load_session(&account, &peer).await.as_deref(), Some(new));
+                    assert_eq!(store.close_session(&account, &peer, 3, &new_revision, Some(""), Some(&floor), None).await.unwrap(), None);
+                }
+                (Some(missing), None) => assert!(missing.current.is_empty()),
+                other => panic!("send and close both accepted or both refused: {other:?}"),
+            }
+            let conflict = store.close_session(&account, &peer, 3, &new_revision, Some(""), None, None).await.unwrap().unwrap();
+            assert_eq!(conflict.current, "");
+            assert_eq!(conflict.floor_blob.as_deref(), Some(floor.as_str()));
+            assert_eq!(store.close_session(&account, &peer, 3, "", Some(&floor_revision), None, None).await.unwrap(), None);
+        }
+        let unreadable = store.user_dir("alice").join("sessions").join("broken.enc");
+        tokio::fs::create_dir_all(&unreadable).await.unwrap();
+        assert!(store.close_session("alice", "broken", 3, "", Some(""), None, None).await.is_err());
+        assert!(unreadable.is_dir());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_receivers_get_the_exact_revision_replaced_by_a_successful_commit() {
+        use sha2::{Digest, Sha256};
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        let old = "e2e3.before";
+        let new = "e2e3.after";
+        let expected = format!("{:x}", Sha256::digest(old.as_bytes()));
+        let mut previous = String::new();
+        store.store_identity_enc("alice", "e2e3.identity").await.unwrap();
+        assert!(store.commit_session("alice", "bob", old, "", true, None, None, Some(&mut previous)).await.unwrap().is_none());
+        assert!(previous.is_empty());
+        assert!(store.commit_session("alice", "bob", new, "", false, None, None, Some(&mut previous)).await.unwrap().is_some());
+        assert!(previous.is_empty());
+        assert!(store.commit_session("alice", "bob", new, &expected, false, None, None, Some(&mut previous)).await.unwrap().is_none());
+        assert_eq!(previous, old);
+        assert!(store.commit_session("alice", "bob", new, &expected, false, None, None, Some(&mut previous)).await.unwrap().is_none());
+        assert!(previous.is_empty());
+        assert_eq!(store.load_session("alice", "bob").await.as_deref(), Some(new));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn identity_rotation_retires_writes_from_open_devices_before_session_cleanup() {
+        use sha2::{Digest, Sha256};
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        let revision = |blob: &str| format!("{:x}",Sha256::digest(blob.as_bytes()));
+        let previous = "e2e3.previous_identity";
+        let current = "e2e3.current_identity";
+        let session = "e2e3.session";
+        store.store_identity_enc("alice", previous).await.unwrap();
+        store.store_identity_enc("carol", previous).await.unwrap();
+        assert_eq!(store.commit_session("alice","bob",session,"",true,None,Some(&revision(previous)), None).await.unwrap(),None);
+        assert_eq!(store.store_identity_enc_cas("alice",current,Some(previous)).await.unwrap(),None);
+        drop(store);
+        let store = E2EStore::new(&dir);
+        for stale in [None,Some(revision(previous))] {
+            assert!(store.commit_session("alice","bob","e2e3.stale",&revision(session),false,None,stale.as_deref(), None)
+                .await.unwrap_err().is::<SessionIdentityChanged>());
+            assert!(store.close_session("alice","bob",3,&revision(session),Some(""),None,stale.as_deref())
+                .await.unwrap_err().is::<SessionIdentityChanged>());
+            assert_eq!(store.load_session("alice","bob").await.as_deref(),Some(session));
+        }
+        assert_eq!(store.commit_session("alice","bob","e2e3.replacement",&revision(session),true,None,Some(&revision(current)), None).await.unwrap(),None);
+        assert_eq!(store.commit_session("carol","bob",session,"",true,None,None, None).await.unwrap(),None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn signal_handoff_tracks_migration_and_interrupted_bundle_publication() {
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        store.store_identity_enc("legacy","legacy").await.unwrap();
+        assert!(store.signal_delivery_permit("legacy",None,true).await.is_ok());
+        store.store_keyring("v2","e2k2.test",true,Some("")).await.unwrap();
+        assert!(store.signal_delivery_permit("v2",None,true).await.is_ok());
+        let old = "e2e3.first";
+        let new = "e2e3.second";
+        store.store_identity_enc("alice",old).await.unwrap();
+        plant_bundle(&dir,"alice",0);
+        assert!(store.signal_delivery_permit("alice",None,true).await.is_err());
+        store.store_identity_enc_cas("alice",new,Some(old)).await.unwrap();
+        assert!(store.fetch_bundle("alice","bob").await.is_none());
+        assert!(store.signal_delivery_permit("alice",None,false).await.is_err());
+        let revision = store.identity_blob_hash("alice").await.unwrap();
+        let permit = store.signal_delivery_permit("alice",Some(&revision),false).await.unwrap();
+        let bundle = KeyBundle {identity_sign_key:"U0lH".into(),identity_dh_key:"REg=".into(),
+            signed_prekey:SignedPrekey {key_id:27,public_key:"U1BL".into(),signature:"U0lH".into()},one_time_prekeys:vec![]};
+        store.repair_bundle("alice",&bundle,"e2e3.numbered","e2e3.current").await.unwrap();
+        store.repair_bundle("alice",&bundle,"e2e3.other","e2e3.other-current").await.unwrap();
+        assert_eq!(store.load_session("alice","__spk__27").await.as_deref(),Some("e2e3.numbered"));
+        assert_eq!(store.load_session("alice","__spk__").await.as_deref(),Some("e2e3.current"));
+        assert_eq!(store.bundle_identity_keys("alice").await,Some((bundle.identity_dh_key,bundle.identity_sign_key)));
+        drop(permit);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_account_can_confirm_only_an_empty_contact_slot() {
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        assert_eq!(store.load_session_with_floor("new", "bob").await.unwrap(), (String::new(), String::new(), true));
+        assert!(store.write_permit("new", 3).await.is_none());
+        store.store_channel_key("orphan", "other-peer", "old-channel-key").await.unwrap();
+        assert!(store.load_session_with_floor("orphan", "bob").await.is_err());
+        assert!(store.store_keyring("enrolled", &recovery_keyring(60), true, Some("")).await.unwrap().0);
+        assert_eq!(store.load_session_with_floor("enrolled", "bob").await.unwrap(), (String::new(), String::new(), false));
+        store.store_session("new", "bob", "legacy-slot").await.unwrap();
+        assert!(store.load_session_with_floor("new", "bob").await.is_err());
+        tokio::fs::create_dir_all(store.user_dir("legacy")).await.unwrap();
+        tokio::fs::write(store.user_dir("legacy").join("identity.enc"), "legacy-identity").await.unwrap();
+        assert!(store.load_session_with_floor("legacy", "bob").await.is_err());
+        tokio::fs::create_dir_all(store.user_dir("broken")).await.unwrap();
+        tokio::fs::write(store.keyring_path("broken"), "{}").await.unwrap();
+        assert!(store.load_session_with_floor("broken", "bob").await.is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sealed_close_floor_survives_restart_and_only_guards_new_ratchets() {
+        use sha2::{Digest, Sha256};
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        let seal = |n: u8| format!("e2e3.{}", STANDARD.encode([n; 40]));
+        let revision = |s: &str| format!("{:x}", Sha256::digest(s.as_bytes()));
+        let first = seal(1);
+        let later = seal(2);
+        for account in ["alice", "carol"] {
+            store.store_identity_enc(account, "e2e3.identity").await.unwrap();
+            for peer in ["bob", "dave"] {
+                assert_eq!(store.commit_session(account, peer, "e2e3.live", "", true, None, None, None).await.unwrap(), None);
+            }
+        }
+        let live = revision("e2e3.live");
+        assert!(store.close_session("alice", "bob", 3, &live, None, None, None).await.is_err());
+        assert!(store.close_session("alice", "bob", 3, &live, Some(""), Some("unsealed"), None).await.is_err());
+        assert_eq!(store.load_session_with_floor("alice", "bob").await.unwrap(), ("e2e3.live".into(), "".into(), false));
+        assert_eq!(store.close_session("alice", "bob", 3, &live, Some(""), Some(&first), None).await.unwrap(), None);
+        drop(store); // All process-local locks and caches are gone.
+        let store = E2EStore::new(&dir);
+        assert_eq!(store.load_session_with_floor("alice", "bob").await.unwrap(), ("".into(), first.clone(), false));
+        assert!(store.close_session("alice", "bob", 3, "", Some(&revision(&first)), Some(&later), None).await.is_err());
+        assert_eq!(store.load_session_with_floor("alice", "bob").await.unwrap(), ("".into(), first.clone(), false));
+        assert_eq!(store.load_session_with_floor("carol", "bob").await.unwrap(), ("e2e3.live".into(), "".into(), false));
+        let stale = store.close_session("alice", "dave", 3, &live, Some(""), Some(&later), None).await.unwrap().unwrap();
+        assert_eq!(stale.current, "e2e3.live");
+        assert_eq!(stale.floor_blob.as_deref(), Some(first.as_str()));
+        for stale_floor in [None, Some("")] {
+            let stale = store.commit_session("alice", "bob", "e2e3.too_old", "", true, stale_floor, None, None).await.unwrap().unwrap();
+            assert!(stale.current.is_empty());
+            assert_eq!(stale.floor_blob.as_deref(), Some(first.as_str()));
+        }
+        assert_eq!(store.commit_session("alice", "bob", "e2e3.fresh", "", true, Some(&revision(&first)), None, None).await.unwrap(), None);
+        assert_eq!(store.commit_session("alice", "dave", "e2e3.next", &live, false, None, None, None).await.unwrap(), None);
+        assert_eq!(store.close_session("alice", "dave", 3, &revision("e2e3.next"), Some(&revision(&first)), Some(&later), None).await.unwrap(), None);
+        // An earlier successful create can retry its identical sealed revision.
+        assert_eq!(store.commit_session("alice", "bob", "e2e3.fresh", "", true, Some(&revision(&first)), None, None).await.unwrap(), None);
+        assert_eq!(store.load_session_with_floor("alice", "bob").await.unwrap(), ("e2e3.fresh".into(), later, false));
+        assert!(store.list_sessions("alice").await.iter().all(|peer| peer == "bob"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unreadable_close_floor_leaves_the_live_session_in_place() {
+        use sha2::{Digest, Sha256};
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        store.store_identity_enc("alice", "e2e3.identity").await.unwrap();
+        store.store_session("alice", "bob", "e2e3.live").await.unwrap();
+        let path = store.user_dir("alice").join("session-close-floor.enc");
+        let live = format!("{:x}", Sha256::digest(b"e2e3.live"));
+        let floor = format!("e2e3.{}", STANDARD.encode([3; 40]));
+        tokio::fs::create_dir(&path).await.unwrap();
+        assert!(store.close_session("alice", "bob", 3, &live, Some(""), Some(&floor), None).await.is_err());
+        assert!(store.load_session_with_floor("alice", "other").await.is_err());
+        tokio::fs::remove_dir(&path).await.unwrap();
+        tokio::fs::write(&path, b"").await.unwrap();
+        assert!(store.close_session("alice", "bob", 3, &live, Some(""), Some(&floor), None).await.is_err());
+        assert!(store.commit_session("alice", "other", "e2e3.new", "", true, Some(""), None, None).await.is_err());
+        assert_eq!(store.load_session("alice", "bob").await.as_deref(), Some("e2e3.live"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn closing_a_legacy_peer_revision_is_scoped_to_its_account_and_slot() {
+        use sha2::{Digest, Sha256};
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        let archived = "__legacy__bob";
+        let blob = "e2e3.archived";
+        let revision = format!("{:x}", Sha256::digest(blob.as_bytes()));
+        for account in ["alice", "carol"] {
+            store.store_identity_enc(account, "e2e3.identity").await.unwrap();
+            store.store_session(account, archived, blob).await.unwrap();
+            store.store_session(account, "bob", "e2e3.active").await.unwrap();
+        }
+        assert_eq!(store.close_session("alice", archived, 3, &revision, None, None, None).await.unwrap(), None);
+        assert_eq!(store.load_session("alice", archived).await, None);
+        assert_eq!(store.load_session("carol", archived).await.as_deref(), Some(blob));
+        for account in ["alice", "carol"] {
+            assert_eq!(store.load_session(account, "bob").await.as_deref(), Some("e2e3.active"));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn peer_session_commits_are_conditional_and_retryable() {
+        use sha2::{Digest, Sha256};
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        store.store_identity_enc("alice", "e2e3.identity").await.unwrap();
+        let (a, b) = tokio::join!(
+            store.commit_session("alice", "bob", "e2e3.left", "", true, None, None, None),
+            store.commit_session("alice", "bob", "e2e3.right", "", true, None, None, None),
+        );
+        let stored = store.load_session("alice", "bob").await.unwrap();
+        let outcomes = [a.unwrap(), b.unwrap()];
+        assert_eq!(outcomes.iter().filter(|result| result.is_none()).count(), 1);
+        assert_eq!(outcomes.into_iter().flatten().map(|r| r.current).collect::<Vec<_>>(), [stored.clone()]);
+        assert_eq!(store.commit_session("alice", "bob", &stored, "", true, None, None, None).await.unwrap(), None);
+        let revision = format!("{:x}", Sha256::digest(stored.as_bytes()));
+        assert_eq!(store.commit_session("alice", "bob", "e2e3.next", &revision, false, None, None, None).await.unwrap(), None);
+        assert_eq!(store.commit_session("alice", "bob", "e2e3.stale", &revision, false, None, None, None).await.unwrap().map(|c| c.current).as_deref(), Some("e2e3.next"));
+        assert!(store.delete_session("alice", "bob").await.is_err());
+        let floor = format!("e2e3.{}", STANDARD.encode([8u8; 40]));
+        let last_revision = format!("{:x}", Sha256::digest(b"e2e3.next"));
+        store.close_session("alice", "bob", 3, &last_revision, Some(""), Some(&floor), None).await.unwrap();
+        let floor_revision = format!("{:x}", Sha256::digest(floor.as_bytes()));
+        assert_eq!(store.commit_session("alice", "bob", "e2e3.stale", &revision, false, None, None, None).await.unwrap().map(|c| c.current).as_deref(), Some(""));
+        // A previously saved device record without a revision is still a
+        // continuation. It cannot recreate a session deleted on another device.
+        assert_eq!(store.commit_session("alice", "bob", "e2e3.unversioned", "", false, None, None, None).await.unwrap().map(|c| c.current).as_deref(), Some(""));
+        assert_eq!(store.load_session("alice", "bob").await, None);
+        assert!(store.load_session("alice", "bob").await.is_none());
+        let contenders: Vec<_> = (0..50).map(|i| format!("e2e3.contender-{i}")).collect();
+        let results = futures_util::future::join_all(contenders.iter().map(|blob|
+            store.commit_session("alice", "other", blob, "", true, Some(&floor_revision), None, None))).await;
+        let chosen = store.load_session("alice", "other").await.unwrap();
+        let outcomes: Vec<_> = results.into_iter().map(Result::unwrap).collect();
+        assert_eq!(outcomes.iter().filter(|r| r.is_none()).count(), 1);
+        assert!(outcomes.iter().flatten().all(|conflict| conflict.current == chosen));
+        let file = store.user_dir("alice").join("sessions").join("bob.enc");
+        tokio::fs::create_dir(&file).await.unwrap();
+        assert!(store.commit_session("alice", "bob", "e2e3.new", "", true, None, None, None).await.is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn recovery_keyring_rewrap_preserves_current_slots_and_refuses_downgrades() {
         let dir = tmpdir();
         let store = E2EStore::new(&dir);
@@ -1574,7 +2218,30 @@ mod keyring_tests {
         std::fs::write(store.keyring_path("alice"), "invalid keyring").unwrap();
         assert!(store.write_permit("alice", 2).await.is_none());
         assert!(store.write_permit("alice", 3).await.is_none());
+        assert!(store.store_keyring("alice", "e2k2.replacement", false, Some("")).await.is_err());
+        assert_eq!(std::fs::read_to_string(store.keyring_path("alice")).unwrap(), "invalid keyring");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unknown_identity_format_holds_legacy_operations_until_storage_recovers() {
+        let dir = tmpdir();
+        let store = E2EStore::new(&dir);
+        let identity = store.user_dir("alice").join("identity.enc");
+        std::fs::create_dir_all(&identity).unwrap();
+        assert!(store.write_permit("alice", 1).await.is_none());
+        assert!(store.signal_delivery_permit("alice", None, true).await.is_err());
+        assert!(store.needs_legacy_key("alice").await.is_err());
+
+        std::fs::remove_dir(&identity).unwrap();
+        std::fs::write(&identity, []).unwrap();
+        assert!(store.stored_identity_version("alice").await.is_none());
+        assert!(store.read_identity("alice").await.is_err());
+        store.store_identity_enc("alice", "bGVnYWN5").await.unwrap();
+        assert!(store.write_permit("alice", 1).await.is_some());
+        assert!(store.signal_delivery_permit("alice", None, true).await.is_ok());
+        assert!(store.needs_legacy_key("alice").await.unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

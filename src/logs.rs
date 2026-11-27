@@ -1,7 +1,7 @@
 /// logs.rs — Encrypted append-only log storage (per-user encryption)
 
 use anyhow::Result;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
@@ -359,6 +359,15 @@ impl EncryptedLogger {
         &self, username: &str, conn_id: &str, target: &str,
         ts: i64, from: &str, text: &str, kind: &str,
     ) -> u64 {
+        self.append_irc_line(username, conn_id, target, ts, from, text, kind, None, None, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn append_irc_line(
+        &self, username: &str, conn_id: &str, target: &str,
+        ts: i64, from: &str, text: &str, kind: &str,
+        irc_recipient: Option<&str>, irc_network: Option<&str>, pm_prefix: Option<&str>,
+    ) -> u64 {
         if !self.crypto.is_unlocked(username).await { return 0; }
         // F2: a network UUID is always logged under its canonical (lower-case)
         // spelling, so no new re-cased `logs/<Variant>/` dir can ever be created.
@@ -373,7 +382,10 @@ impl EncryptedLogger {
             return 0;
         }
         let id = self.next_id(username).await;
-        let record    = serde_json::json!({ "id": id, "ts": ts, "from": from, "text": text, "kind": kind });
+        let mut record = serde_json::json!({ "id": id, "ts": ts, "from": from, "text": text, "kind": kind });
+        if let Some(nick) = irc_recipient { record["irc_recipient"] = serde_json::Value::String(nick.into()); }
+        if let Some(name) = irc_network { record["irc_network"] = serde_json::Value::String(name.into()); }
+        if let Some(prefix) = pm_prefix { record["pm_prefix"] = serde_json::Value::String(prefix.into()); }
         let plaintext = record.to_string();
         let path = self.log_path(conn_id, target, ts);
         // Bind the ciphertext to conn/target/date so it can't be relocated
@@ -415,6 +427,73 @@ impl EncryptedLogger {
         }
         // Only now is the line durably appended — safe to report its id.
         id
+    }
+
+    /// Discover recent incoming PMs without sending any message bodies. Only
+    /// records bound to their original network, conversation and day qualify.
+    pub(crate) async fn recent_private_threads(&self, username: &str, conn_id: &str) -> std::io::Result<Vec<crate::PrivateThread>> {
+        let Ok(conn) = encode_path_component(conn_id) else { return Ok(Vec::new()) };
+        let mut dirs = match tokio::fs::read_dir(Path::new(&self.data_dir).join("logs").join(conn)).await {
+            Ok(dirs) => dirs,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let _slot = self.read_slot(username).await;
+        let now = chrono::Utc::now();
+        let cutoff = now - chrono::Duration::days(2);
+        let names: Vec<_> = (0..=2).map(|offset| {
+            let day = (now - chrono::Duration::days(offset)).date_naive();
+            format!("{day}.log")
+        }).collect();
+        let mut paths = Vec::new();
+        // Scan names before charging the smaller budget for PM directories.
+        let mut candidates = 0;
+        for _ in 0..16384 {
+            let Some(dir) = dirs.next_entry().await? else { break };
+            // Exclude channel, status, and overflow directories before opening files.
+            let name = dir.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if ["_23", "_26", "_2B", "_21", "_2A"].iter().any(|prefix| name.starts_with(prefix))
+                || !dir.file_type().await.is_ok_and(|ty| ty.is_dir())
+            { continue; }
+            if candidates == 4096 { break; }
+            candidates += 1;
+            for name in &names {
+                let path = dir.path().join(name);
+                if let Ok(md) = tokio::fs::symlink_metadata(&path).await {
+                    if md.is_file() {
+                        if let Ok(at) = md.modified() { paths.push((at, path)); }
+                    }
+                }
+            }
+        }
+        paths.sort_unstable_by(|a,b| b.0.cmp(&a.0));
+        let mut found = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (_, path) in paths.into_iter().take(96) {
+            let Some(dir) = path.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()) else { continue };
+            if seen.contains(dir) { continue; }
+            let aad = file_aad(&path);
+            let mut lines = BudgetLines::open(&path, 16, 64 * 1024).await;
+            while let Some(enc) = lines.next().await {
+                let Ok(plain) = self.crypto.decrypt_aad(username, &enc, &aad).await else { continue };
+                let Ok(record) = serde_json::from_slice::<serde_json::Value>(&plain) else { continue };
+                let (Some(nick), Some(prefix), Some(ts)) =
+                    (record["from"].as_str(), record["pm_prefix"].as_str(), record["ts"].as_i64())
+                    else { continue };
+                if ts < cutoff.timestamp()
+                    || !matches!(record["kind"].as_str(), Some("privmsg" | "action"))
+                    || record["text"].as_str().is_none_or(|text| text.starts_with("[e2ex3dh]"))
+                    || !crate::is_plausible_target(nick) || nick.starts_with(['#', '&', '+', '!', '*'])
+                    || !encode_path_component(nick).is_ok_and(|encoded| encoded == dir)
+                { continue; }
+                seen.insert(dir.to_owned());
+                found.push(crate::PrivateThread { nick: nick.to_owned(), prefix: prefix.to_owned(), ts });
+                break;
+            }
+            if found.len() == 32 { break; }
+        }
+        Ok(found)
     }
 
     pub async fn read_logs(&self, username: &str, conn_id: &str, target: &str, limit: usize) -> Result<Vec<LogLine>> {
@@ -743,6 +822,8 @@ impl EncryptedLogger {
             from: v["from"].as_str().unwrap_or("").to_string(),
             text: v["text"].as_str().unwrap_or("").to_string(),
             kind: v["kind"].as_str().unwrap_or("privmsg").to_string(),
+            irc_recipient: v["irc_recipient"].as_str().map(str::to_string),
+            irc_network: v["irc_network"].as_str().map(str::to_string),
         })
     }
 
