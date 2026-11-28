@@ -3000,6 +3000,61 @@ export async function checkCrossInstanceE2e({browser,peer,createRemote,chromium,
     check('one explicit verification opens the original message',true);
     return;
   }
+  if(mode==='bridge-superseded-plain'){
+    const first='superseded ordinary draft '+stamp;
+    const latest='replacement ordinary draft '+stamp;
+    const incoming='ordinary reply during lookup '+stamp;
+    await browser.evaluate(`(()=>{
+      setActive(${q(networkA)},${q(ordinary)});
+      const handle=e2eHandleEvent;
+      window.ordinaryLookup={event:null,release:async()=>{
+        e2eHandleEvent=handle;
+        if(ordinaryLookup.event) await handle(ordinaryLookup.event);
+      }};
+      e2eHandleEvent=event=>{
+        if(event.type==='e2e_bundle_missing'&&event.reason==='unconfirmed'&&event.conn_id===${q(networkA)}){
+          ordinaryLookup.event=event;
+          return Promise.resolve();
+        }
+        return handle(event);
+      };
+    })()`);
+    const from=browser.frames.length;
+    await compose(browser,networkA,ordinary,first);
+    await waitFor(()=>browser.evaluate('!!ordinaryLookup.event'),'ordinary client’s capability check is in flight');
+    ordinarySend('PRIVMSG '+owner+' :'+incoming);
+    const incomingText=await waitFor(()=>browser.evaluate(`getBuf(${q(networkA)},${q(ordinary)})
+      .find(message=>message.text.includes(${q(incoming)}))?.text`),'ordinary client sends during the check');
+    await compose(browser,networkA,ordinary,latest);
+    await browser.evaluate('ordinaryLookup.release()');
+    const delivered=await waitFor(()=>ordinaryLines.some(line=>line.endsWith(' :'+latest)),
+      'the replacement draft reaches the ordinary peer',5500).catch(()=>false);
+    const errors=await browser.evaluate(`getBuf(${q(networkA)},${q(ordinary)})
+      .filter(message=>message.kind==='error'&&message.text.includes('Message not sent')).length`);
+    check('ordinary chat stays plaintext while discovery is pending',incomingText===incoming);
+    check('one Send of the replacement draft delivers it without a stale-check error',delivered&&errors===0&&
+      !ordinaryLines.some(line=>line.endsWith(' :'+first))&&
+      ordinaryLines.filter(line=>line.endsWith(' :'+latest)).length===1);
+    check('replacement draft reuses the original capability check',browser.frames.slice(from).map(JSON.parse)
+      .filter(frame=>frame.type==='e2e_fetch_bundle'&&frame.username===ordinary).length===1);
+    const manualFrom=browser.frames.length;
+    await compose(browser,networkA,ordinary,'/encrypt on '+ordinary);
+    await waitFor(()=>browser.frames.slice(manualFrom).map(JSON.parse)
+      .some(frame=>frame.type==='e2e_fetch_bundle'&&frame.username===ordinary&&frame.wait_for_peer),
+      'explicit Signal setup requests a key');
+    const manualIncoming='ordinary text during explicit Signal setup '+stamp;
+    ordinarySend('PRIVMSG '+owner+' :'+manualIncoming);
+    await waitFor(()=>row(browser,networkA,ordinary,'⚠️ [NOT ENCRYPTED] '+manualIncoming),
+      'plaintext is labeled while explicit Signal setup is pending');
+    const protectedDraft='draft during explicit Signal setup '+stamp;
+    await compose(browser,networkA,ordinary,protectedDraft);
+    await waitFor(()=>browser.evaluate(`!_sendLock&&document.getElementById('msg-input').value===${q(protectedDraft)}`),
+      'explicit Signal setup keeps the protected draft');
+    check('waiting for an explicitly requested key never sends the protected draft in plaintext',
+      !browser.frames.slice(manualFrom).map(JSON.parse).some(frame=>frame.raw?.endsWith(' :'+protectedDraft))&&
+      !ordinaryLines.some(line=>line.endsWith(' :'+protectedDraft)));
+    return;
+  }
   if(mode==='bridge-plain-uncertain'){
     await peer.evaluate(openEncryptionSettings);
     await setUpRecovery(peer,waitFor,check);

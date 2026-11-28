@@ -1690,7 +1690,7 @@ let _encryptionSetupTouchRelease=null;
 function _e2eBlocked(w){ return !!(w && w.e2eBlocked===true); }
 function _e2eBlockedWarn(w,view=active,account=currentUser,composer=null){
   if(!_e2eBlocked(w)) return false;
-  if(account!==currentUser||!view) return true;
+  if(account!==currentUser||!view||w.readiness==='superseded') return true;
   const reason=w.reason||window.E2E?.lastBlockReason;
   if(w.readiness==='offline'){
     sysMsg(view.conn_id,view.target,reason,'error');

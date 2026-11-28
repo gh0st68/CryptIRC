@@ -6178,8 +6178,11 @@ function _e2eTargetStateOf(k, t, opts) {
   // setup. Sending, first contact and disputed identities still wait.
   const receiveOnPinnedSession = opts?.receivedReaction && stDm?.on===1 && !!tr?.fingerprint &&
     !tr.keyChanged && _e2eSessFpCached(s)===tr.fingerprint;
+  // Checking an ordinary nick for the first time does not turn the chat on.
+  const receivingDuringDiscovery = opts?.incomingPlain && pend?.settled && !pend.answered &&
+    !s && !stDm?.on && !tr?.fingerprint && !E2E.state?.trust?.[k]?.fp && !srvPeers.includes(k);
   if (pend?.checking && !receiveOnPinnedSession) return {mode:'blocked',signalDisabled:enablingDisabled,reason:`Checking the saved Signal session with ${t} — message held. Try again when encryption is ready.`};
-  if (pend && !receiveOnPinnedSession && (pend.answered || Date.now() - pend.t < 120000)) {
+  if (pend && !receiveOnPinnedSession && !receivingDuringDiscovery && (pend.answered || Date.now() - pend.t < 120000)) {
     return { mode:'blocked', signalDisabled:enablingDisabled, reason: pend.answered ? `Encryption with ${t} is still being set up (confirm ${t}'s identity first) — message not sent` : `Encryption with ${t} is still being set up (waiting for ${t}'s key bundle) — message not sent; try again in a moment` };
   }
   if (!E2E.keyReady) {
@@ -6580,7 +6583,15 @@ async function e2eEncryptOutgoing(target, plaintext, connId, opts) {
   let k = isDM ? _e2eDmKey(canonical, cid) : canonical;
   // A manual enable can fail while the send waits for a stored session.
   // Retain the protected draft before that wait can hide the pending enable.
-  const pending = isDM && E2E._pendingOn?.[k];
+  let pending = isDM && E2E._pendingOn?.[k];
+  const draftCurrent = opts?.approval?.draftCurrent;
+  if (pending?.settled && draftCurrent && pending.draftCurrent && !pending.draftCurrent()) {
+    // An edited and resubmitted draft can use the in-flight discovery after the
+    // previous attempt releases it. Keep manual Signal setup independent.
+    await pending.settled;
+    if (!draftCurrent()) return _e2eBlock(null, 'superseded');
+    pending = E2E._pendingOn?.[k];
+  }
   if (pending && !pending.done) {
     const state=e2eTargetState(target,{conn_id:cid});
     if (!pending.closing && state.mode==='blocked') opts?.approval?.holdSignal?.(cid,target);
@@ -6646,6 +6657,7 @@ async function e2eEncryptOutgoing(target, plaintext, connId, opts) {
   if (!approvedPart && st.mode === 'none' && isDM && opts?.auto && (!String(plaintext).startsWith('\x01') || String(plaintext).startsWith('\x01ACTION '))) {
     const gen = E2E._lockGen;
     const result = await _e2eAutoStart(target, k, cid, opts.approval, opts.namedStatusQuery);
+    if (result === 'approval-expired' && draftCurrent && !draftCurrent()) return _e2eBlock(null, 'superseded');
     if (result === 'unlock') {
       void e2ePromptDeviceUnlock();
       return _e2eBlock('Unlock encrypted chats, then send this message again.');
@@ -7172,7 +7184,7 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
   // the flag and was shown (delimiters invisible) like encrypted chat. It is flagged and
   // shown as what it is ("CTCP PING: …", "CTCP VERSION reply: …"); the CTCP replies
   // themselves are produced server-side and are not affected.
-  if (isDM && text && fromNick !== me && e2eTargetState(from, { incoming: true, conn_id: opts.conn_id }).mode !== 'none') {
+  if (isDM && text && fromNick !== me && e2eTargetState(from, { incoming: true, incomingPlain: true, conn_id: opts.conn_id }).mode !== 'none') {
     if (text.startsWith('\x01')) {
       const m = /^\x01([A-Za-z0-9_-]{1,32})(?:[ ]([^\x01]*))?\x01?$/.exec(text);
       const reply = String(opts.kind || '').toLowerCase() === 'notice';
@@ -7757,7 +7769,9 @@ async function _e2eAutoStart(nick, k, cid, approval = null, namedStatusQuery=fal
   // A result only authorizes sending after the checks below have completed.
   const startedProbe=e2ePrepareChatProbe(nick,cid,namedStatusQuery);
   const now = Date.now();
-  const pending = { t:now, target:nick, nick, cid, req:_e2eBundleRequestId() };
+  let finish;
+  const settled = new Promise(resolve => { finish = resolve; });
+  const pending = { t:now, target:nick, nick, cid, req:_e2eBundleRequestId(), settled, draftCurrent:approval?.draftCurrent };
   const account = _e2eUser();
   if (!_e2ePlainConnections.has(netId)) _e2ePlainConnections.set(netId,{});
   const plain = {conn_id:cid,key:k,user:account,keyReady:E2E.keyReady,unconfigured:!E2E.keyReady,generation:E2E._lockGen,expires:now+60000,
@@ -7866,6 +7880,7 @@ async function _e2eAutoStart(nick, k, cid, approval = null, namedStatusQuery=fal
   } finally {
     clearTimeout(timer);
     if (E2E._pendingOn[k] === pending) delete E2E._pendingOn[k];
+    finish();
   }
 }
 
