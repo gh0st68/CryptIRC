@@ -4671,11 +4671,11 @@ function _e2eRecheckWrittenPsk(slot) {
   return true;
 }
 
-async function _e2eDeleteSlot(msg) {
+async function _e2eDeleteSlot(msg, stillPending = null) {
   const req = crypto.randomUUID();
   const gen = E2E._lockGen;
   // Retrying a delete could remove a replacement key saved after a lost reply.
-  const event = await _e2eReq({ ...msg, req, v: E2E_STORAGE_VERSION }, 'e2e_key_deleted', 6000, e => e.req === req, 0);
+  const event = await _e2eReq({ ...msg, req, v: E2E_STORAGE_VERSION }, 'e2e_key_deleted', 6000, e => e.req === req, 0, stillPending);
   return !!event?.ok && !_e2eBootStale(gen);
 }
 
@@ -4764,17 +4764,33 @@ async function _e2eCloseSessionSlot(key, partner, gen, disposition = null, allow
   return false;
 }
 
-async function removeChannelKey(k, storedNames, scopedOff = false) {
+async function _e2eReadChannelInventory(current) {
+  const deadline = Date.now()+6000;
+  while (current() && Date.now()<deadline) {
+    if (_wsReady()) {
+      const socket=ws, req=crypto.randomUUID();
+      const pending=()=>current() && _wsReady() && ws===socket;
+      const list=await _e2eReq({type:'e2e_list_channel_keys',req},'e2e_channel_list',1500,e=>e.req===req,0,pending);
+      if (pending() && Array.isArray(list?.channels)) return {list,socket};
+    }
+    await new Promise(resolve=>setTimeout(resolve,150));
+  }
+  return null;
+}
+
+async function removeChannelKey(k, storedNames, scopedOff = false, stillPending = null) {
   const generation = E2E._lockGen;
+  const current = () => !_e2eBootStale(generation) && (!stillPending || stillPending());
   const remove = async () => {
-    if (_e2eBootStale(generation)) return false;
+    if (!current()) return false;
     const channels = scopedOff ? [k] : new Set([k,...storedNames.filter(name=>_e2eK(name)===k)]);
     for (const channel of channels) {
-      if (await _e2eDeleteSlot({type:'e2e_delete_channel_key',channel,...(scopedOff?{scoped_off:true}:{})})) continue;
-      if (!scopedOff || _e2eBootStale(generation)) return false;
+      if (await _e2eDeleteSlot({type:'e2e_delete_channel_key',channel,...(scopedOff?{scoped_off:true}:{})},stillPending)) continue;
+      if (!scopedOff || !current()) return false;
       // An acknowledged state snapshot can confirm a scoped disable whose reply was lost.
-      const updated = await _e2eReq({type:'e2e_load_keyring'},'e2e_keyring');
-      if (_e2eBootStale(generation) || !updated?.disabled_channels?.includes(k) ||
+      const updated = stillPending ? (await _e2eReadChannelInventory(current))?.list :
+        await _e2eReq({type:'e2e_load_keyring'},'e2e_keyring');
+      if (!current() || !updated?.disabled_channels?.includes(k) ||
           updated.channels?.some(name=>_e2eK(name)===k)) return false;
     }
     if (_e2eBootStale(generation)) return false;
@@ -5655,6 +5671,7 @@ async function e2eHandleEvent(ev) {
     }
 
     case 'e2e_channel_list': {
+      if (ev.req) { _e2eResolveWaiter(ev); break; }
       const listed = new Set((Array.isArray(ev.channels) ? ev.channels : []).map(_e2eK));
       if (E2E._serverHints) E2E._serverHints.disabledPsk = (ev.disabled_channels || []).map(_e2eK);
       // MEDIUM: the server's list can no longer DELETE keys. A key we hold that is
@@ -8226,7 +8243,10 @@ async function _e2eRunEncryptCommand(args, conn_id, target, viewTarget, migratio
         pending?.finishResume?.('blocked');
       }
       try {
-        const stored = await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
+        const account = _e2eUser();
+        const current = () => E2E.keyReady && !E2E._serverLocked && !_e2eBootStale(gen) && _e2eUser()===account;
+        const inventory = isChannel ? await _e2eReadChannelInventory(current) : null;
+        const stored = isChannel ? inventory?.list : await _e2eReq({ type: 'e2e_load_keyring' }, 'e2e_keyring');
         if (_e2eBootStale(gen)) return;
         if (!stored) { e2eSysMsg(target, '🔐 Could not check stored keys. Encryption stays on.'); return; }
         const channels = Array.isArray(stored.channels) ? stored.channels : [];
@@ -8239,7 +8259,8 @@ async function _e2eRunEncryptCommand(args, conn_id, target, viewTarget, migratio
         const shared = hasKey(scoped) || legacy;
         const storedSessions = peers.filter(name => _e2eK(name) === k);
         const session = !isChannel && (E2E.dmSessions[k] || E2E.state?.dm[k]?.on || sh?.peers.includes(k) || h.dm.includes(k) || storedSessions.length);
-        if (shared && !(await removeChannelKey(scoped,channels,legacy))) {
+        const sameSocket = inventory ? () => current() && _wsReady() && ws===inventory.socket : null;
+        if (shared && !(await removeChannelKey(scoped,channels,legacy,sameSocket))) {
           e2eSysMsg(target, '🔐 Could not confirm shared-key removal. Encryption stays on.');
           return;
         }

@@ -1526,7 +1526,25 @@ export async function checkE2eChat({
     })()`);
     await waitFor(()=>ownerWs.events.slice(start).some(e=>e.type==='e2e_channel_key'&&e.channel==='@'+networkA+':'+offFixture),
       'server stores the scoped shared key');
-    await browser.evaluate(`handleEncryptCommand(['off'],${q(networkA)},${q(offFixture)})`);
+    if(process.env.CRYPTIRC_TEST_CHANNEL_OFF_RECONNECT==='1'){
+      await browser.evaluate(`(()=>{
+        const connect=connectWs;
+        connectWs=()=>{};
+        window.resumeChannelOff=()=>{connectWs=connect;_onResume();};
+        ws.close();
+      })()`);
+      await waitFor(()=>browser.evaluate('!_wsReady()&&E2E.keyReady'),'the channel key remains available during the reconnect');
+      const frames=browser.frames.length;
+      await browser.evaluate(`void (window.channelOffAttempt=handleEncryptCommand(['off'],${q(networkA)},${q(offFixture)}))`);
+      await pause(250);
+      await browser.evaluate('window.resumeChannelOff();');
+      await browser.evaluate('window.channelOffAttempt');
+      const requests=browser.frames.slice(frames).map(JSON.parse);
+      check('one channel-off action survives an actual WebSocket reconnect and reads only channel inventory',
+        requests.some(e=>e.type==='e2e_list_channel_keys'&&typeof e.req==='string')&&
+        requests.filter(e=>e.type==='e2e_delete_channel_key').length===1);
+      await waitFor(()=>browser.evaluate('!E2E._resyncPending'),'normal encryption resync finishes after channel-off acknowledgment');
+    }else await browser.evaluate(`handleEncryptCommand(['off'],${q(networkA)},${q(offFixture)})`);
     check('switching off a scoped chat preserves shared-key protection on another network',
       await browser.evaluate(`e2eTargetState(${q(offFixture)},{conn_id:${q(networkA)}}).mode==='none'&&
         e2eTargetState(${q(offFixture)},{conn_id:${q(elsewhere)}}).mode==='psk'`));

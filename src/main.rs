@@ -701,7 +701,7 @@ pub enum ClientMessage {
     #[serde(rename = "e2e_delete_channel_key")]
     E2EDeleteChannelKey { channel: String, #[serde(default)] v: u32, #[serde(default)] req: Option<String>, #[serde(default)] scoped_off: bool },
     #[serde(rename = "e2e_list_channel_keys")]
-    E2EListChannelKeys  {},
+    E2EListChannelKeys  { #[serde(default)] req: Option<String> },
     #[serde(rename = "e2e_update_trust", alias = "e2e_load_trust")]
     E2ELegacyTrust    {},
     // conn_id (optional, F10): the sender's connection; from_nick and the target
@@ -902,7 +902,8 @@ pub enum ServerEvent {
     #[serde(rename = "e2e_key_deleted")]
     E2EKeyDeleted { req: String, ok: bool },
     #[serde(rename = "e2e_channel_list")]
-    E2EChannelList   { channels: Vec<String>, #[serde(default, skip_serializing_if = "Vec::is_empty")] disabled_channels: Vec<String> },
+    E2EChannelList   { channels: Vec<String>, #[serde(default, skip_serializing_if = "Vec::is_empty")] disabled_channels: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")] req: Option<String> },
     #[serde(rename = "e2e_otpk_low")]
     E2EOTPKLow       { remaining: usize },
     #[serde(rename = "e2e_x3dh_header")]
@@ -8211,15 +8212,25 @@ async fn handle_command(
             // case-insensitive copy left) is announced to the other sessions.
             let still_keyed = channels.iter().any(|c| c.to_lowercase() == channel.to_lowercase());
             if still_keyed {
-                send_self(ServerEvent::E2EChannelList { channels, disabled_channels });
+                send_self(ServerEvent::E2EChannelList { channels, disabled_channels, req: None });
             } else {
                 // Notify ALL sessions of this user so other devices update the lock icon
-                state.send_to_user(username, ServerEvent::E2EChannelList { channels, disabled_channels });
+                state.send_to_user(username, ServerEvent::E2EChannelList { channels, disabled_channels, req: None });
             }
         }
-        ClientMessage::E2EListChannelKeys {} => {
-            let (channels, disabled_channels) = split_psk_slots(state.e2e_store.list_channel_keys(username).await);
-            send_self(ServerEvent::E2EChannelList { channels, disabled_channels });
+        ClientMessage::E2EListChannelKeys { req } => {
+            let slots = if let Some(id) = &req {
+                if validate_uuid(id).is_none() { return; }
+                let Ok(slots) = state.e2e_store.protected_channel_names(username).await else {
+                    send_self(ServerEvent::Error { message: "Could not read your saved shared keys.".into() });
+                    return;
+                };
+                slots
+            } else {
+                state.e2e_store.list_channel_keys(username).await
+            };
+            let (channels, disabled_channels) = split_psk_slots(slots);
+            send_self(ServerEvent::E2EChannelList { channels, disabled_channels, req });
         }
 
         // Stale tabs can still send these. Confirmed pins sync in encrypted state.

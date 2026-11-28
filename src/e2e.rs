@@ -1091,9 +1091,13 @@ impl E2EStore {
     pub(crate) async fn protected_names(&self, username: &str) -> Result<(Vec<String>, Vec<String>)> {
         let dir = self.user_dir(username);
         Ok((
-            self.protected_slots(dir.join("channels"), channel_is_safe, MAX_CHANNEL_KEY_FILES).await?,
+            self.protected_channel_names(username).await?,
             self.protected_slots(dir.join("sessions"), partner_is_safe, MAX_SESSION_FILES).await?,
         ))
+    }
+
+    pub(crate) async fn protected_channel_names(&self, username: &str) -> Result<Vec<String>> {
+        self.protected_slots(self.user_dir(username).join("channels"), channel_is_safe, MAX_CHANNEL_KEY_FILES).await
     }
 
     pub(crate) async fn check_plain_reply(&self, username: &str, cold: bool,
