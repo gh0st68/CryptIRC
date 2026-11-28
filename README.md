@@ -22,6 +22,24 @@
 
 CryptIRC keeps your IRC networks connected on your server while you move between devices. Catch up on encrypted history, join the conversation from a browser or app, and make the interface your own.
 
+<p align="center">
+  <img src="screenshots/chat-reactions.webp" width="960" alt="CryptIRC on desktop and mobile showing likes, hearts, and laughs in the same IRC channel">
+</p>
+
+<p align="center">
+  <a href="screenshots/desktop.png">Desktop screenshot</a> &nbsp;·&nbsp;
+  <a href="screenshots/mobile.png">Mobile screenshot</a>
+</p>
+
+<details>
+<summary>Watch a heart reaction on mobile</summary>
+
+<p align="center">
+  <img src="screenshots/mobile-reactions.gif" width="320" alt="A tap on a message opens the action menu, and choosing Heart adds a heart beneath the message">
+</p>
+
+</details>
+
 **[Get started](#get-started)** · **[Clients](#clients)** · **[Features](#features)** · **[Privacy](#privacy-and-encryption)** · **[CryptIRC MCP](#cryptirc-mcp)** · **[Translation](#translation)** · **[Passkeys](#passkey-sign-in)** · **[Commands](#commands-and-shortcuts)** · **[Configuration](#configuration)**
 
 <a id="quick-start"></a>
@@ -48,10 +66,6 @@ On Arch Linux, run `sudo bash deploy/deploy-arch.sh` from the same checkout.
 The installer sets up both Rust services, Caddy, and systemd. It walks you through HTTPS, registration, and creating your first account. Email setup is optional. The web service and IRC daemon run separately, so routine web updates can keep IRC connections open.
 
 See the [installation guide](INSTALL.md) for requirements and manual setup, or follow the [web install and update guide](https://cryptirc.com/install/). The [deployment guide](deploy/README.md) covers prebuilt binaries and service updates.
-
-<p align="center">
-  <img src="screenshots/desktop.png?v=20261016" width="960" alt="CryptIRC desktop interface preview with example conversations and a grouped user list">
-</p>
 
 ## CryptIRC MCP
 
@@ -136,11 +150,7 @@ For self-hosters, MCP token setup and passkeys use the canonical HTTPS URL confi
 Desktop releases support 64-bit Windows, macOS 13 or newer (Intel / Apple Silicon), and Linux.
 
 <details>
-<summary><strong>See mobile and terminal previews</strong></summary>
-
-<p align="center">
-  <img src="screenshots/mobile.png?v=20261016" width="280" alt="CryptIRC mobile interface preview with an example conversation">
-</p>
+<summary><strong>See terminal previews</strong></summary>
 
 The terminal client includes a network and channel list, wrapped scrollback, a member list, mouse support, and tab completion. It has **52 terminal themes**, switchable with `/theme`.
 
