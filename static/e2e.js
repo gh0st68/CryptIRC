@@ -4175,7 +4175,16 @@ async function _ratchetDecryptInner(nick, envelope, {useAlt = false, reaction = 
       }
     }
     _e2eMarkConsumed(skipKey);
-    if (confirmed && !restartBase && !useAlt && !_e2eBootStale(gen)) updateE2EIndicator(_e2eDmNick(nick));
+    if (confirmed && !restartBase && !useAlt && !_e2eBootStale(gen)) {
+      const pending=E2E._pendingOn?.[nick];
+      // A real reply can confirm the original session while its automatic
+      // migration is waiting for a bundle. Explicit restarts still run.
+      if (pending?.migration?.confirmed(E2E.dmSessions[nick])) {
+        delete E2E._pendingOn[nick];
+        pending.done('ready');
+      }
+      updateE2EIndicator(_e2eDmNick(nick));
+    }
   };
   // r2: another tab of this browser already decrypted this very message (and advanced
   // the shared ratchet): read it with the key it left behind — once per tab, no state
@@ -6533,8 +6542,13 @@ async function _e2eRefreshLegacyRestart(target,peer,cid) {
     E2E.state?.dm?.[peer]?.on===1 && pin && E2E.trustStore[peer]?.fingerprint===pin && !E2E.trustStore[peer].keyChanged;
   const current=()=>trusted() && E2E.dmSessions[peer]?.startEph===previous.startEph &&
     _e2eLegacyPendingStart(E2E.dmSessions[peer])===anchor && _e2eSessPinMismatch(peer,E2E.dmSessions[peer])===false;
-  if (!current() || !await _e2eUsesCurrentIdentity(previous) || !current()) return false;
-  const migration={current};
+  const valid=session=>trusted() && !!session?.startEph && _e2eSameSessionIdentity(previous,session) &&
+    _e2eSessPinMismatch(peer,session)===false;
+  const confirmed=session=>valid(session) && session.startEph===previous.startEph && !!session.CKr && !session.x3dhPending;
+  const ready=()=>e2eTargetState(target,{conn_id:cid}).mode==='dm';
+  if (!await _e2eUsesCurrentIdentity(previous)) return false;
+  if (!current()) return confirmed(E2E.dmSessions[peer]) && ready();
+  const migration={current,confirmed};
   const result=new Promise(resolve=>{migration.done=resolve;});
   let timer;
   try {
@@ -6543,9 +6557,7 @@ async function _e2eRefreshLegacyRestart(target,peer,cid) {
       await Promise.race([result,new Promise(resolve=>{timer=setTimeout(resolve,E2E_BRIDGE_CLIENT_WAIT+5000);})]);
     }
     const next=E2E.dmSessions[peer];
-    return trusted() && !!next?.startEph && next.startEph!==previous.startEph &&
-      _e2eSameSessionIdentity(previous,next) && _e2eSessPinMismatch(peer,next)===false &&
-      !_e2eLegacyPendingStart(next) && e2eTargetState(target,{conn_id:cid}).mode==='dm';
+    return (confirmed(next) || (valid(next) && next.startEph!==previous.startEph && !_e2eLegacyPendingStart(next))) && ready();
   } finally {
     clearTimeout(timer);
     if (migration.pending && E2E._pendingOn?.[peer]===migration.pending) {

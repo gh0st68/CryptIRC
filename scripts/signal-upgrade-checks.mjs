@@ -163,6 +163,56 @@ export async function checkDivergentWebUpgrade({core,base,env,tmp,owner,other,pa
   }));
   console.log('BEFORE-FIRST-UPGRADED-PM '+JSON.stringify({cold,unanswered,firstRole,original:restored[0],peer:restored[1]}));
   if(unanswered)check('recipient still reads the originally unanswered PM after the web upgrade',await visible(b,a,original));
+  const foregroundRace=opts.CRYPTIRC_TEST_FOREGROUND_LEGACY_RACE;
+  if(foregroundRace){
+    assert(unanswered && ['preflight','bundle'].includes(foregroundRace));
+    const duringBundle=foregroundRace==='bundle';
+    const key=slot(a,b), before=await state(a,b);
+    check('phone restored an original unconfirmed offer from the earlier release',before.pending&&
+      await a.page.evaluate(`!!_e2eLegacyPendingStart(E2E.dmSessions[${key}])`));
+    await a.page.evaluate(`(()=>{
+      const run=_e2eRunEncryptCommand, handle=e2eHandleEvent, connect=connectWs;
+      window.foregroundRace={resume:()=>{connectWs=connect;_onResume();},finish:async()=>{
+        _e2eRunEncryptCommand=run;e2eHandleEvent=handle;
+        await foregroundRace.release();
+      }};
+      if(${duringBundle}) e2eHandleEvent=event=>{
+        const pending=E2E._pendingOn?.[${key}];
+        if(event.type==='e2e_bundle'&&pending?.migration&&event.req===pending.req){
+          foregroundRace.release=()=>handle(event);
+          return Promise.resolve();
+        }
+        return handle(event);
+      };
+      else _e2eRunEncryptCommand=async(...args)=>{
+        if(args[4]) await new Promise(resolve=>{foregroundRace.release=resolve;});
+        return run(...args);
+      };
+      connectWs=()=>{};ws.close();
+    })()`);
+    await waitFor(()=>a.page.evaluate('!_wsReady()'),'the phone WebSocket closes in the background');
+    await a.page.evaluate('foregroundRace.resume()');
+    await waitFor(()=>a.page.evaluate('_wsReady() && !E2E._resyncPending'),'the foregrounded phone reconnects');
+    const draft='resume '+stamp, reply='reply '+stamp;
+    const from=a.page.frames.length, observed=b.observer.events.length;
+    await compose(a.page,a.cid,b.nick,draft);
+    await waitFor(()=>a.page.evaluate('!!foregroundRace.release'),'automatic migration waits at '+foregroundRace);
+    await compose(b.page,b.cid,a.nick,reply);
+    await waitFor(()=>visible(a,b,reply),'the phone reads the real first reply during migration');
+    await waitFor(()=>a.page.evaluate(`E2E.dmSessions[${key}]?.CKr&&!E2E.dmSessions[${key}]?.x3dhPending`),
+      'the authenticated reply confirms the original ratchet');
+    if(!duringBundle) await a.page.evaluate('foregroundRace.finish()');
+    const opened=await waitFor(()=>visible(b,a,draft),'the peer reads the new draft without a restart',5500).catch(()=>false);
+    if(duringBundle) await a.page.evaluate('foregroundRace.finish()');
+    const events=b.observer.events.slice(observed).filter(e=>e.type==='irc_message'&&e.from===a.nick);
+    const frames=a.page.frames.slice(from).map(JSON.parse);
+    const after=await state(a,b);
+    check('the confirmed session delivers the foreground draft once and ignores a redundant restart',opened&&
+      after.start===before.start&&after.pin===before.pin&&!after.pending&&
+      frames.filter(e=>e.type==='e2e_fetch_bundle').length===Number(duringBundle)&&
+      events.filter(e=>e.text?.startsWith('[e2edm2]')).length===1&&!events.some(e=>e.text===draft));
+    return;
+  }
   const [sender,recipient]=firstRole==='original'?[a,b]:[b,a];
   const firstText='new first '+stamp,replyText='new reply '+stamp;
   const first=await send(sender,recipient,firstText),reply=await send(recipient,sender,replyText);
