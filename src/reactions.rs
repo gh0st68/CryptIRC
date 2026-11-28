@@ -632,11 +632,15 @@ pub(crate) async fn send(
                     .map_err(|_| "Reaction not sent. Your encryption identity changed. Reopen the conversation and try again.")?),
         _ => None,
     };
-    let (channels, peers) = state
-        .e2e_store
-        .protected_names(username)
-        .await
-        .map_err(|_| REFUSED)?;
+    // Without an identity permit (which already holds the account's slot lock), read
+    // the protected names under that lock and keep it through the IRC handoff, so a
+    // concurrent protection change is ordered before or after this reaction.
+    let (_protection_permit, (channels, peers)) = if _identity_permit.is_some() {
+        (None, state.e2e_store.protected_names(username).await.map_err(|_| REFUSED)?)
+    } else {
+        let (guard, channels, peers) = state.e2e_store.protected_names_permit(username).await.map_err(|_| REFUSED)?;
+        (Some(guard), (channels, peers))
+    };
     let protected = crate::match_e2e_target(target, conn_id, channels, peers).is_some();
     let mut c = conn.lock().await;
     let channel_target = incoming_channel_target(&c, target);

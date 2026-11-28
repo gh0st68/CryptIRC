@@ -581,6 +581,10 @@ async fn irc_command(state: &AppState, user: &str, args: &Value) -> ToolResult {
             .params
             .first()
             .ok_or("A message target is required.")?;
+        // MCP sends no E2E wire (the send handler refuses it as well).
+        if crate::e2e_line_carries_wire(line) {
+            return Err("MCP cannot send end-to-end encrypted messages. Send from CryptIRC.".into());
+        }
         check_message_target(state, user, &id, target).await?;
     }
     dispatch(

@@ -6390,6 +6390,12 @@ fn e2e_blob_version(blob: &str) -> u32 {
 /// `PRIVMSG  #chan :x` as an empty target (and `PRIVMSG #chan  :x` as text " :x"), so
 /// the outdated-tab guard let such a line through to the server in cleartext.
 fn e2e_split_chat_line(raw: &str) -> Option<(String, String, String)> {
+    e2e_chat_line(raw).filter(|(verb, _, _)| verb != "TAGMSG")
+}
+
+/// e2e_split_chat_line, and also TAGMSG (text "") — the lines that can carry content or
+/// client tags to a conversation.
+fn e2e_chat_line(raw: &str) -> Option<(String, String, String)> {
     // One space-delimited token, and the rest after the spaces that follow it.
     fn token(s: &str) -> (&str, &str) {
         let s = s.trim_start_matches(' ');
@@ -6403,10 +6409,12 @@ fn e2e_split_chat_line(raw: &str) -> Option<(String, String, String)> {
     if rest.starts_with(':') { rest = token(rest).1; }
     let (verb, rest) = token(rest);
     let verb = verb.to_ascii_uppercase();
-    if verb != "PRIVMSG" && verb != "NOTICE" { return None; }
+    if verb != "PRIVMSG" && verb != "NOTICE" && verb != "TAGMSG" { return None; }
     let (targets, tail) = token(rest);
+    // TAGMSG has no text: its target may be written as the trailing parameter.
+    let targets = if verb == "TAGMSG" { targets.strip_prefix(':').unwrap_or(targets) } else { targets };
     if targets.is_empty() { return None; }
-    let text = tail.strip_prefix(':').unwrap_or(tail).to_string();
+    let text = if verb == "TAGMSG" { String::new() } else { tail.strip_prefix(':').unwrap_or(tail).to_string() };
     Some((verb, targets.to_string(), text))
 }
 
@@ -6485,6 +6493,96 @@ fn e2e_text_is_cleartext(text: &str) -> bool {
     true
 }
 
+/// E2E wire a browser sends to a protected conversation: shared-key ciphertext and
+/// Signal messages / X3DH setup (whose IRC handoff holds the identity permit).
+fn e2e_wire_text(text: &str) -> bool {
+    text.starts_with("sd8~") || text.starts_with("[e2edm") || text.starts_with("[e2ex3dh]")
+}
+
+/// A payload-free CTCP discovery request (/version, /time, /ping, /ctcp nick
+/// CLIENTINFO): it carries no user text, so it may reach a protected peer.
+fn e2e_ctcp_discovery_request(text: &str) -> bool {
+    let Some(body) = text.strip_prefix('\u{1}').and_then(|t| t.strip_suffix('\u{1}')) else { return false };
+    match body.split_once(' ') {
+        None => matches!(body, "VERSION" | "TIME" | "CLIENTINFO" | "SOURCE" | "PING"),
+        Some(("PING", stamp)) => (1..=20).contains(&stamp.len()) && stamp.bytes().all(|b| b.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+/// The targets of an outgoing line that must not reach an E2E-protected conversation
+/// in this form, or None when the line may go anywhere. One policy for every sender:
+/// PRIVMSG / NOTICE (any text, CTCP included) and TAGMSG (client tags such as typing
+/// notices are metadata of the protected conversation) are guarded. The browser
+/// (`strict == false`) may still send E2E wire and payload-free CTCP discovery
+/// requests; MCP, which cannot encrypt, sends neither. IRC discovery and other
+/// commands (NAMES, WHO, MODE, TOPIC, ...) are not chat lines. Native reactions do not
+/// use this path: they go through `reactions::send`, which applies the same protected
+/// names (plain only where unprotected, sealed only where protected).
+fn e2e_guarded_targets(raw: &str, strict: bool) -> Option<String> {
+    let (verb, targets, text) = e2e_chat_line(raw)?;
+    let allowed = verb != "TAGMSG" && !strict
+        && (text.is_empty() || e2e_wire_text(&text) || (verb == "PRIVMSG" && e2e_ctcp_discovery_request(&text)));
+    (!allowed).then_some(targets)
+}
+
+/// Does this outgoing line carry E2E wire (shared-key ciphertext, a Signal message or
+/// X3DH setup) as PRIVMSG / NOTICE text? Read with both outgoing-line parsers.
+fn e2e_line_carries_wire(raw: &str) -> bool {
+    let out = OutgoingLine::parse(raw);
+    e2e_chat_line(raw).is_some_and(|(verb, _, text)| verb != "TAGMSG" && e2e_wire_text(&text))
+        || (matches!(out.verb.as_str(), "PRIVMSG" | "NOTICE") && out.params.get(1).is_some_and(|text| e2e_wire_text(text)))
+}
+
+/// A strict (MCP) send that must be refused before any permit is taken: one carrying
+/// E2E wire or a revision binding (approved plaintext, Signal identity). Such a line
+/// would otherwise skip the protected-target check that every MCP chat line takes.
+fn strict_send_refused(strict: bool, raw: &str, revision_bound: bool) -> bool {
+    strict && (revision_bound || e2e_line_carries_wire(raw))
+}
+
+/// Remove user-supplied IRCv3 client-only tags (`+name[=value]`) from a line's `@tags`
+/// prefix; server tags are kept. Used on chat lines that may reach a protected
+/// conversation without a protected-target check (E2E wire, payload-free CTCP, empty
+/// text), where client tags would be unencrypted metadata. CryptIRC's browser sends
+/// no client tags on such lines; tags the server adds itself (remote-avatar announce,
+/// delivery label) are added later and unaffected.
+fn strip_client_tags(raw: &str) -> String {
+    let line = raw.trim_start_matches(' ');
+    let Some(tagged) = line.strip_prefix('@') else { return raw.to_string() };
+    let Some(i) = tagged.find(' ') else { return raw.to_string() };
+    let (tags, rest) = (&tagged[..i], tagged[i..].trim_start_matches(' '));
+    let kept: Vec<&str> = tags.split(';').filter(|tag| !tag.is_empty() && !tag.starts_with('+')).collect();
+    if kept.is_empty() { rest.to_string() } else { format!("@{} {rest}", kept.join(";")) }
+}
+
+/// Why an ordinary send was refused before its IRC handoff.
+#[derive(Debug, PartialEq)]
+enum OrdinarySendRefusal {
+    /// The line names this protected target (as written).
+    Protected(String),
+    /// The protected conversations could not be read.
+    Unverified,
+}
+
+/// Check an ordinary (revision-less) outgoing line against the protected conversations
+/// under the account's slot lock. An allowed line gets that lock back: the caller holds
+/// it through the IRC handoff, so protection saved meanwhile (another tab, a device,
+/// MCP) is ordered strictly before or after the send, never between check and send.
+async fn e2e_ordinary_send_permit(
+    store: &e2e::E2EStore, username: &str, conn_id: &str, raw: &str, strict: bool, revision_permit_held: bool,
+) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, OrdinarySendRefusal> {
+    // A revision-specific permit (approved plaintext, Signal identity) already holds
+    // the account's slot lock and checked its own policy: never wait for it again.
+    if revision_permit_held { return Ok(None); }
+    let Some(targets) = e2e_guarded_targets(raw, strict) else { return Ok(None) };
+    let (guard, channels, peers) = store.protected_names_permit(username).await.map_err(|_| OrdinarySendRefusal::Unverified)?;
+    match match_e2e_target(&targets, conn_id, channels, peers) {
+        Some(name) => Err(OrdinarySendRefusal::Protected(name)),
+        None => Ok(Some(guard)),
+    }
+}
+
 /// Protect known encrypted targets from plaintext sends, including from clients
 /// that do not implement E2E. Outdated browsers on recovery-keyring accounts
 /// also need to reload before sending ciphertext from a stale ratchet.
@@ -6501,15 +6599,18 @@ async fn e2e_send_blocked(
         return false;
     }
     let ClientMessage::Send { conn_id, raw, e2e_plain_revision, .. } = cmd else { return false };
-    let Some((_verb, targets, text)) = e2e_split_chat_line(&strip_crlf(raw)) else { return false };
-    let outdated_recovery = outdated_browser && !text.starts_with('\u{1}')
+    let line = strip_crlf(raw);
+    let Some((verb, targets, text)) = e2e_chat_line(&line) else { return false };
+    let outdated_recovery = outdated_browser && verb != "TAGMSG" && !text.starts_with('\u{1}')
         && state.e2e_store.minimum_slot_version(username).await.is_none_or(|v| v >= 3);
     if e2e_plain_revision.is_some() && !outdated_recovery {
         // The send handler checks the exact settings and protected slots under
         // the write lock, keeping that lock through handoff to IRC.
         return false;
     }
-    if !outdated_recovery && !e2e_text_is_cleartext(&text) { return false; }
+    // An early, friendly refusal. The send handler repeats the check under the slot
+    // lock and keeps that lock through the handoff to IRC.
+    if !outdated_recovery && e2e_guarded_targets(&line, false).is_none() { return false; }
     let conn_id = &canonical_network_id(conn_id);
     if !state.owns_conn(username, conn_id) { return true; }
     // On first contact a cached browser can try to send the handshake even
@@ -6524,33 +6625,82 @@ async fn e2e_send_blocked(
         }
     }};
     if let Some(bare) = protected {
-        let shown = if is_plausible_target(&bare) { bare } else { "status".to_string() };
-        let message = if outdated_browser {
-            format!("🔒 Message to {shown} blocked. Reload CryptIRC to use encrypted chat.")
-        } else {
-            format!("🔒 Plaintext message to {shown} blocked. Unlock encrypted chat to send.")
-        };
-        let _ = socket_tx.try_send(ServerEvent::IrcMessage {
-            replayed: false,
-            conn_id: conn_id.clone(),
-            from: "*".into(),
-            target: shown,
-            text: message,
-            ts: chrono::Utc::now().timestamp(),
-            kind: MessageKind::Notice,
-            msg_id: 0,
-            prefix: None,
-        });
+        // Typing notices and other client tags are dropped silently.
+        if verb != "TAGMSG" { let _ = socket_tx.try_send(e2e_blocked_notice(conn_id, bare, outdated_browser)); }
         return true;
     }
     false
 }
 
-const PSK_OFF_PREFIX: &str = "~off:";
+fn e2e_blocked_notice(conn_id: &str, bare: String, outdated_browser: bool) -> ServerEvent {
+    let shown = if is_plausible_target(&bare) { bare } else { "status".to_string() };
+    let message = if outdated_browser {
+        format!("🔒 Message to {shown} blocked. Reload CryptIRC to use encrypted chat.")
+    } else {
+        format!("🔒 Plaintext message to {shown} blocked. Unlock encrypted chat to send.")
+    };
+    ServerEvent::IrcMessage {
+        replayed: false,
+        conn_id: conn_id.to_owned(),
+        from: "*".into(),
+        target: shown,
+        text: message,
+        ts: chrono::Utc::now().timestamp(),
+        kind: MessageKind::Notice,
+        msg_id: 0,
+        prefix: None,
+    }
+}
+
+use e2e::PSK_OFF_PREFIX;
 
 fn scoped_psk_name(slot: &str) -> Option<(&str, &str)> {
     let (scope, name) = slot.strip_prefix('@')?.split_once(':')?;
     (validate_uuid(scope).is_some() && !name.is_empty()).then_some((scope, name))
+}
+
+/// Turn a scoped (`@<network>:<channel>`) shared key off for its network. The caller
+/// holds the slot write permit and has checked the network's ownership.
+///
+/// Fails closed and commits atomically for every reader (send guards, MCP, reactions,
+/// other devices' inventories): the explicit opt-out is saved durably FIRST — while
+/// every scoped spelling still protects the channel, since an opt-out only disables
+/// the legacy unscoped key — and the scoped spellings (any case) are removed after it.
+/// Removing the last spelling is the single commit point. If the opt-out cannot be
+/// saved nothing is removed; if a spelling cannot be removed, an opt-out saved by this
+/// call is withdrawn again, so the legacy key keeps protecting this network as well.
+/// The opt-out may use the store's bounded marker reserve, so this also works when the
+/// channel-key directory is at its file cap.
+async fn disable_scoped_psk(store: &e2e::E2EStore, username: &str, channel: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(scoped_psk_name(channel).is_some(), "not a scoped shared key");
+    let canonical = channel.to_lowercase();
+    let marker = format!("{PSK_OFF_PREFIX}{canonical}");
+    // The strict inventory: an unreadable slot directory refuses instead of skipping a key.
+    let slots = store.protected_channel_names(username).await?;
+    let saved_before = slots.contains(&marker);
+    // (Re)written even when listed: the removals below need the opt-out durably saved now.
+    store.store_psk_off_marker(username, &canonical).await?;
+    for slot in slots.iter().filter(|slot| !slot.starts_with(PSK_OFF_PREFIX) && slot.to_lowercase() == canonical) {
+        if let Err(error) = store.delete_channel_key(username, slot).await {
+            if !saved_before { let _ = store.delete_channel_key(username, &marker).await; }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// Drop a scoped shared key's network opt-out in every spelling: after the key is
+/// stored again (so the opt-out cannot outlive the key it replaced), and before a
+/// scoped key is removed outright (so the legacy key protects that network again).
+/// Reads the strict inventory and reports any failure: Ok only when no opt-out of this
+/// key is left. The caller holds the slot write permit.
+async fn clear_scoped_psk_off(store: &e2e::E2EStore, username: &str, channel: &str) -> anyhow::Result<()> {
+    if scoped_psk_name(channel).is_none() { return Ok(()); }
+    let marker = format!("{PSK_OFF_PREFIX}{channel}").to_lowercase();
+    for slot in store.protected_channel_names(username).await?.iter().filter(|slot| slot.to_lowercase() == marker) {
+        store.delete_channel_key(username, slot).await?;
+    }
+    Ok(())
 }
 
 fn live_receipt_network<'a>(partner: &'a str, digest: &str, blob: &str, identity: &str) -> Option<&'a str> {
@@ -7180,6 +7330,18 @@ async fn handle_command(
                 // hook and the JOIN/PART auto_join persistence used to test the raw line's
                 // first bytes, so a tagged / prefixed / double-spaced line went to IRC
                 // but skipped all of them.
+                // MCP cannot encrypt, hold Signal sessions or approve plaintext: E2E wire and
+                // revision-bound sends from it are refused outright, so every MCP chat line
+                // takes the strict protected-target check under the slot lock below.
+                if strict_send_refused(report_command_errors, &safe, e2e_plain_revision.is_some() || e2e_identity_revision.is_some()) {
+                    send_self(ServerEvent::Error { message: "MCP cannot send end-to-end encrypted messages. Send from CryptIRC.".into() });
+                    return;
+                }
+                // Chat lines allowed to a protected conversation without the target check
+                // carry no user-supplied client tags.
+                let safe = if e2e_chat_line(&safe).is_some() && e2e_guarded_targets(&safe, report_command_errors).is_none() {
+                    strip_client_tags(&safe)
+                } else { safe };
                 let out = OutgoingLine::parse(&safe);
                 let plain_permit = if let Some(revision) = e2e_plain_revision.as_deref() {
                     let [target, body] = out.params.as_slice() else { return; };
@@ -7200,7 +7362,7 @@ async fn handle_command(
                 // A previously committed message can wait in a paced browser
                 // queue across an identity reset. Serialize its actual IRC
                 // handoff with rotation, including when the socket stayed up.
-                let signal_wire = out.params.get(1).filter(|text| matches!(out.verb.as_str(), "PRIVMSG" | "NOTICE")
+                let signal_wire = out.params.get(1).filter(|text| !report_command_errors && matches!(out.verb.as_str(), "PRIVMSG" | "NOTICE")
                     && (text.starts_with("[e2edm2]") || text.starts_with("[e2ex3dh]")));
                 let identity_permit = if let Some(wire) = signal_wire {
                     let Ok(permit) = state.e2e_store.signal_delivery_permit(username, e2e_identity_revision.as_deref(), outdated_browser).await else {
@@ -7215,6 +7377,25 @@ async fn handle_command(
                     };
                     Some(permit)
                 } else { None };
+                let ordinary_permit = match e2e_ordinary_send_permit(&state.e2e_store, username, &conn_id, &safe,
+                    report_command_errors, plain_permit.is_some() || identity_permit.is_some()).await {
+                    Ok(permit) => permit,
+                    Err(refusal) => {
+                        if report_command_errors {
+                            send_self(ServerEvent::Error { message: match refusal {
+                                OrdinarySendRefusal::Protected(_) => "This conversation is protected by end-to-end encryption. Send from CryptIRC.".into(),
+                                OrdinarySendRefusal::Unverified => "CryptIRC could not verify the conversation's encryption settings.".into(),
+                            } });
+                        } else if out.verb != "TAGMSG" {
+                            send_self(match refusal {
+                                OrdinarySendRefusal::Protected(bare) => e2e_blocked_notice(&conn_id, bare, outdated_browser),
+                                OrdinarySendRefusal::Unverified => ServerEvent::Error {
+                                    message: "Unable to verify encryption for this conversation. Message blocked.".into() },
+                            });
+                        }
+                        return;
+                    }
+                };
                 let is_tagmsg = out.verb == "TAGMSG";
                 // Silently drop TAGMSG for connections that don't support message-tags
                 if is_tagmsg {
@@ -7305,6 +7486,7 @@ async fn handle_command(
                 }
                 drop(identity_permit);
                 drop(plain_permit);
+                drop(ordinary_permit);
                 // codex P2 irc.rs:102: no IPC link = not sent, even though the flags above
                 // still say connected (they only change when the daemon tells us).
                 let connected = live && handed_off;
@@ -8158,8 +8340,13 @@ async fn handle_command(
             // non-canonical names are rejected as an Err below.
             match state.e2e_store.store_channel_key(username, &channel, &blob).await {
                 Ok(_)  => {
-                    if scoped_psk_name(&channel).is_some() {
-                        let _ = state.e2e_store.delete_channel_key(username, &format!("{PSK_OFF_PREFIX}{channel}")).await;
+                    // The key is saved (and protects its network regardless of an opt-out),
+                    // so other devices still load it. A stale opt-out left behind would let
+                    // a later removal of this key skip the legacy key: report it, never
+                    // treat it as cleared. The next store or removal retries it.
+                    if let Err(error) = clear_scoped_psk_off(&state.e2e_store, username, &channel).await {
+                        warn!("[E2E] could not clear a shared-key network opt-out for '{}': {}", username, error);
+                        send(ServerEvent::Error { message: "E2E: shared key saved, but its earlier network opt-out could not be cleared. Re-add the key to retry.".into() });
                     }
                     // Notify ALL sessions so other devices load the new key
                     state.send_to_user(username, ServerEvent::E2EChannelKey {
@@ -8184,22 +8371,15 @@ async fn handle_command(
             } else if scoped_off {
                 if let Some((scope, _)) = scoped_psk_name(&channel) {
                     if !state.owns_network(username, scope).await { false } else {
-                        let slots = state.e2e_store.list_channel_keys(username).await;
-                        let canonical = channel.to_lowercase();
-                        let mut removed = true;
-                        for slot in slots.iter().filter(|slot| slot.to_lowercase() == canonical) {
-                            if state.e2e_store.delete_channel_key(username, slot).await.is_err() {
-                                removed = false;
-                                break;
-                            }
-                        }
-                        // The legacy key continues protecting this network until all
-                        // scoped key spellings are gone and the explicit opt-out is saved.
-                        removed && state.e2e_store.store_channel_key(username,
-                            &format!("{PSK_OFF_PREFIX}{canonical}"), "e2e3.").await.is_ok()
+                        disable_scoped_psk(&state.e2e_store, username, &channel).await.is_ok()
                     }
                 } else { false }
-            } else { state.e2e_store.delete_channel_key(username, &channel).await.is_ok() };
+            } else {
+                // Removing a scoped key outright: clear any stale opt-out of it first, so the
+                // legacy key protects that network again. If that fails nothing is removed.
+                clear_scoped_psk_off(&state.e2e_store, username, &channel).await.is_ok()
+                    && state.e2e_store.delete_channel_key(username, &channel).await.is_ok()
+            };
             if let Some(req) = req { send_self(ServerEvent::E2EKeyDeleted { req, ok }); }
             else if !ok { send_self(ServerEvent::Error { message: "E2E: could not remove shared key; unlock the vault and reload if needed".into() }); }
             if !ok { return; }
@@ -11768,5 +11948,367 @@ mod tweet_route_tests {
             site_name: None,
         };
         assert_eq!(serde_json::to_value(preview).unwrap().as_object().unwrap().len(), 6);
+    }
+}
+
+#[cfg(test)]
+mod e2e_send_policy_tests {
+    use super::*;
+    use std::time::Duration;
+
+    const NET_A: &str = "10000000-0000-4000-8000-00000000000a";
+    const NET_B: &str = "10000000-0000-4000-8000-00000000000b";
+
+    fn tmpdir() -> String {
+        let d = std::env::temp_dir().join(format!("cryptirc-send-policy-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d.to_string_lossy().into_owned()
+    }
+
+    fn guarded(raw: &str, strict: bool) -> Option<String> { e2e_guarded_targets(raw, strict) }
+
+    // ── Finding 1: one protection policy for browser and MCP sends ────────────
+
+    #[test]
+    fn browser_guard_covers_tagmsg_and_ctcp_payloads_to_protected_targets() {
+        for strict in [false, true] {
+            assert_eq!(guarded("@+typing=active TAGMSG #enc", strict).as_deref(), Some("#enc"));
+            assert_eq!(guarded("@+draft/react=👍;+reply=m1 TAGMSG bob", strict).as_deref(), Some("bob"));
+            assert_eq!(guarded("@+typing=active  tagmsg  bob,#enc", strict).as_deref(), Some("bob,#enc"));
+            assert_eq!(guarded("@+typing=active TAGMSG :#enc", strict).as_deref(), Some("#enc"));
+            assert_eq!(guarded("PRIVMSG #enc :\u{1}FOO a secret\u{1}", strict).as_deref(), Some("#enc"));
+            assert_eq!(guarded("PRIVMSG bob :\u{1}PING a secret\u{1}", strict).as_deref(), Some("bob"));
+            assert_eq!(guarded("PRIVMSG bob :\u{1}VERSION please read this\u{1}", strict).as_deref(), Some("bob"));
+            assert_eq!(guarded("NOTICE bob :\u{1}VERSION CryptIRC\u{1}", strict).as_deref(), Some("bob"));
+            assert_eq!(guarded("PRIVMSG #enc :hello", strict).as_deref(), Some("#enc"));
+            assert_eq!(guarded("PRIVMSG #enc :\u{1}ACTION waves\u{1}", strict).as_deref(), Some("#enc"));
+        }
+    }
+
+    #[test]
+    fn browser_guard_keeps_encrypted_flows_discovery_and_non_chat_commands() {
+        // Encrypted and authenticated E2E wire from the browser.
+        for wire in ["sd8~eyJ2IjoxfQ==", "[e2edm2]eyJ9", "[e2ex3dh]~abcd~1~2~AAAA"] {
+            assert_eq!(guarded(&format!("PRIVMSG bob :{wire}"), false), None);
+            assert_eq!(guarded(&format!("PRIVMSG bob :{wire}"), true).as_deref(), Some("bob"));
+        }
+        // Payload-free CTCP discovery requests (/version, /time, /ping, /ctcp CLIENTINFO).
+        for ctcp in ["\u{1}VERSION\u{1}", "\u{1}TIME\u{1}", "\u{1}CLIENTINFO\u{1}", "\u{1}PING 1700000000000\u{1}"] {
+            assert_eq!(guarded(&format!("PRIVMSG bob :{ctcp}"), false), None);
+            assert_eq!(guarded(&format!("PRIVMSG bob :{ctcp}"), true).as_deref(), Some("bob"));
+        }
+        // IRC discovery and channel management are not chat lines.
+        for line in ["NAMES #enc", "WHO #enc", "WHOIS bob", "MODE #enc +b", "TOPIC #enc", "LIST #enc", "JOIN #enc",
+                     "CHATHISTORY LATEST #enc * 50", "MONITOR + bob"] {
+            assert_eq!(guarded(line, false), None, "{line}");
+            assert_eq!(guarded(line, true), None, "{line}");
+        }
+        assert_eq!(guarded("PRIVMSG bob :", false), None);
+    }
+
+    #[tokio::test]
+    async fn guard_only_refuses_protected_targets() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        store.store_channel_key("alice", "#enc", "e2e3.channel").await.unwrap();
+        for raw in ["@+typing=active TAGMSG #enc", "PRIVMSG #enc :\u{1}FOO x\u{1}"] {
+            assert_eq!(e2e_ordinary_send_permit(&store, "alice", NET_A, raw, false, false).await.err(),
+                Some(OrdinarySendRefusal::Protected("#enc".into())), "{raw}");
+        }
+        for raw in ["@+typing=active TAGMSG #open", "PRIVMSG #open :\u{1}FOO x\u{1}", "PRIVMSG #open :hello",
+                    "PRIVMSG #enc :sd8~eyJ2IjoxfQ==", "PRIVMSG #enc :\u{1}VERSION\u{1}"] {
+            assert!(e2e_ordinary_send_permit(&store, "alice", NET_A, raw, false, false).await.is_ok(), "{raw}");
+        }
+        // MCP keeps its stricter policy on the same protected names.
+        assert!(e2e_ordinary_send_permit(&store, "alice", NET_A, "PRIVMSG #enc :\u{1}VERSION\u{1}", true, false).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Re-audit: MCP lines reserved for E2E wire never skip the strict check ──
+
+    #[test]
+    fn mcp_refuses_e2e_wire_and_revision_bound_sends() {
+        for wire in ["[e2edm2]eyJ9", "[e2ex3dh]~abcd~1~2~AAAA", "[e2edm]x", "sd8~eyJ2IjoxfQ=="] {
+            for line in [format!("PRIVMSG bob :{wire}"), format!("NOTICE #open :{wire}"),
+                         format!("@+x=1 :me PRIVMSG  bob  :{wire}"), format!("privmsg bob {wire}")] {
+                assert!(strict_send_refused(true, &line, false), "{line}");
+                assert!(!strict_send_refused(false, &line, false), "browser keeps its E2E wire: {line}");
+            }
+        }
+        assert!(strict_send_refused(true, "PRIVMSG bob :hello", true), "MCP never sends revision-bound lines");
+        for line in ["PRIVMSG #open :hello", "PRIVMSG bob :says [e2edm2] later", "NAMES #enc", "WHO #enc",
+                     "MODE #enc +b x", "@+typing=active TAGMSG #open"] {
+            assert!(!strict_send_refused(true, line, false), "{line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_check_covers_signal_looking_lines_to_protected_targets() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        store.store_channel_key("alice", "#enc", "e2e3.channel").await.unwrap();
+        for raw in ["PRIVMSG #enc :[e2edm2]eyJ9", "NOTICE #enc :[e2ex3dh]~a~1~2~AA"] {
+            assert_eq!(e2e_ordinary_send_permit(&store, "alice", NET_A, raw, true, false).await.err(),
+                Some(OrdinarySendRefusal::Protected("#enc".into())), "{raw}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Re-audit: no user-supplied client tags on unchecked protected sends ───
+
+    #[test]
+    fn client_tags_are_stripped_and_server_tags_kept() {
+        assert_eq!(strip_client_tags("@+x=1;+draft/reply=m1 PRIVMSG #enc :sd8~abc"), "PRIVMSG #enc :sd8~abc");
+        assert_eq!(strip_client_tags("@label=a;+x=1 PRIVMSG bob :[e2edm2]x"), "@label=a PRIVMSG bob :[e2edm2]x");
+        assert_eq!(strip_client_tags("  @+x  :me PRIVMSG bob :\u{1}VERSION\u{1}"), ":me PRIVMSG bob :\u{1}VERSION\u{1}");
+        assert_eq!(strip_client_tags("PRIVMSG #enc :sd8~abc"), "PRIVMSG #enc :sd8~abc");
+        assert_eq!(strip_client_tags("PRIVMSG #enc :@+x not a tag"), "PRIVMSG #enc :@+x not a tag");
+        // The stripped line keeps its command, targets and text for every parser.
+        let stripped = strip_client_tags("@+x=1 PRIVMSG #enc,bob :sd8~abc");
+        assert_eq!(e2e_chat_line(&stripped), Some(("PRIVMSG".into(), "#enc,bob".into(), "sd8~abc".into())));
+        let out = OutgoingLine::parse(&stripped);
+        assert_eq!(out.verb.as_str(), "PRIVMSG");
+        assert_eq!(out.params.as_slice(), ["#enc,bob", "sd8~abc"]);
+    }
+
+    // ── Finding 2: the check and the IRC handoff are one critical section ─────
+
+    #[tokio::test]
+    async fn ordinary_plaintext_waits_for_a_concurrent_protection_change() {
+        let dir = tmpdir();
+        let store = Arc::new(e2e::E2EStore::new(&dir));
+        // A concurrent settings change (e.g. another tab enabling a shared key) holds the
+        // slot write permit while it saves the new protection.
+        let permit = store.write_permit("alice", 1).await;
+        let sender = {
+            let store = store.clone();
+            tokio::spawn(async move {
+                e2e_ordinary_send_permit(&store, "alice", NET_A, "PRIVMSG #chat :plain", false, false).await.map(|g| g.is_some())
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        store.store_channel_key("alice", "#chat", "e2e1.channel").await.unwrap();
+        drop(permit);
+        assert_eq!(sender.await.unwrap(), Err(OrdinarySendRefusal::Protected("#chat".into())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_allowed_send_holds_the_slot_lock_through_its_handoff() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        store.store_channel_key("alice", "#enc", "e2e3.channel").await.unwrap();
+        // Untracked (revision-less) ordinary plaintext to an unprotected target is allowed,
+        // and protection cannot be added until the caller has handed the line to IRC.
+        let guard = e2e_ordinary_send_permit(&store, "alice", NET_A, "PRIVMSG #open :hello", false, false).await
+            .expect("plaintext to an unprotected target stays allowed")
+            .expect("the check returns the held slot lock");
+        assert!(tokio::time::timeout(Duration::from_millis(50), store.write_permit("alice", 1)).await.is_err());
+        drop(guard);
+        assert!(tokio::time::timeout(Duration::from_secs(5), store.write_permit("alice", 1)).await.is_ok());
+        // An account that never configured E2E.
+        assert!(e2e_ordinary_send_permit(&store, "nobody", NET_A, "PRIVMSG bob :hi", false, false).await.unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_held_revision_permit_is_respected_without_deadlock() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        // The revision-specific permit already holds the per-account slot lock.
+        let held = store.write_permit("alice", 1).await;
+        let result = tokio::time::timeout(Duration::from_secs(5),
+            e2e_ordinary_send_permit(&store, "alice", NET_A, "PRIVMSG #open :approved plaintext", false, true)).await;
+        assert!(matches!(result, Ok(Ok(None))));
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unreadable_protection_state_blocks_plaintext() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        store.store_channel_key("alice", "#enc", "e2e3.channel").await.unwrap();
+        let invalid = store.channel_slot_file("alice", "#enc").with_file_name("invalid~slot.enc");
+        std::fs::write(&invalid, "test").unwrap();
+        assert_eq!(e2e_ordinary_send_permit(&store, "alice", NET_A, "PRIVMSG #open :x", false, false).await.err(),
+            Some(OrdinarySendRefusal::Unverified));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Finding 4: scoped channel-off fails closed and commits atomically ─────
+
+    fn scoped(net: &str, chan: &str) -> String { format!("@{net}:{chan}") }
+
+    async fn protects(store: &e2e::E2EStore, net: &str, chan: &str) -> bool {
+        let (channels, peers) = store.protected_names("alice").await.unwrap();
+        match_e2e_target(chan, net, channels, peers).is_some()
+    }
+
+    #[tokio::test]
+    async fn scoped_off_commits_and_keeps_other_networks_across_restart() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        store.store_channel_key("alice", "#test", "e2e3.legacy").await.unwrap();
+        store.store_channel_key("alice", &scoped(NET_A, "#test"), "e2e3.scoped").await.unwrap();
+        store.store_channel_key("alice", &scoped(NET_A, "#Test"), "e2e3.mixed").await.unwrap();
+        disable_scoped_psk(&store, "alice", &scoped(NET_A, "#Test")).await.unwrap();
+        for store in [store, e2e::E2EStore::new(&dir)] {   // a restarted server / reconnected client
+            assert!(!protects(&store, NET_A, "#test").await);
+            assert!(!protects(&store, NET_A, "#TEST").await);
+            assert!(protects(&store, NET_B, "#test").await, "the legacy key keeps protecting another network");
+            let (channels, disabled) = split_psk_slots(store.list_channel_keys("alice").await);
+            assert_eq!(channels, ["#test"]);
+            assert_eq!(disabled, [scoped(NET_A, "#test")]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn scoped_off_keeps_the_key_when_the_opt_out_cannot_be_saved() {
+        for legacy in [false, true] {
+            let dir = tmpdir();
+            let store = e2e::E2EStore::new(&dir);
+            if legacy { store.store_channel_key("alice", "#test", "e2e3.legacy").await.unwrap(); }
+            store.store_channel_key("alice", &scoped(NET_A, "#test"), "e2e3.scoped").await.unwrap();
+            // Simulated storage write failure: the opt-out's file name is occupied.
+            let marker = store.channel_slot_file("alice", &format!("{PSK_OFF_PREFIX}{}", scoped(NET_A, "#test")));
+            std::fs::create_dir_all(marker.join("occupied")).unwrap();
+            assert!(disable_scoped_psk(&store, "alice", &scoped(NET_A, "#test")).await.is_err());
+            assert_eq!(store.load_channel_key("alice", &scoped(NET_A, "#test")).await.as_deref(), Some("e2e3.scoped"));
+            assert!(protects(&store, NET_A, "#test").await);
+            assert!(protects(&store, NET_B, "#test").await == legacy);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_key_removal_restores_the_previous_protection() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        store.store_channel_key("alice", "#test", "e2e3.legacy").await.unwrap();
+        store.store_channel_key("alice", &scoped(NET_A, "#test"), "e2e3.scoped").await.unwrap();
+        // The second scoped spelling cannot be removed.
+        let stuck = store.channel_slot_file("alice", &scoped(NET_A, "#TEST"));
+        std::fs::create_dir_all(stuck.join("occupied")).unwrap();
+        assert!(disable_scoped_psk(&store, "alice", &scoped(NET_A, "#test")).await.is_err());
+        assert!(protects(&store, NET_A, "#test").await);
+        let (_, disabled) = split_psk_slots(store.list_channel_keys("alice").await);
+        assert!(disabled.is_empty(), "an unfinished opt-out is not left behind: {disabled:?}");
+        std::fs::remove_dir_all(&stuck).unwrap();
+        // The legacy key still protects the network once the stuck spelling is gone.
+        assert!(protects(&store, NET_A, "#test").await);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readers_never_see_an_unprotected_intermediate_state() {
+        let dir = tmpdir();
+        let store = Arc::new(e2e::E2EStore::new(&dir));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut spellings = Vec::new();
+        for (i, chan) in ["#test", "#Test", "#TEST", "#tEst"].into_iter().enumerate() {
+            store.store_channel_key("alice", &scoped(NET_A, chan), &format!("e2e3.{i}")).await.unwrap();
+            spellings.push(chan);
+        }
+        let reader = {
+            let (store, done, reads) = (store.clone(), done.clone(), reads.clone());
+            tokio::spawn(async move {
+                let mut seen = 0usize;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let (channels, peers) = store.protected_names("alice").await.unwrap();
+                    let (keys, disabled) = split_psk_slots(channels.clone());
+                    let protected = match_e2e_target("#test", NET_A, channels, peers).is_some();
+                    let keyed = keys.iter().any(|k| k.eq_ignore_ascii_case(&scoped(NET_A, "#test")));
+                    // Either a key still protects the channel, or the deliberate opt-out is
+                    // fully committed (saved, every spelling gone).
+                    assert!(protected || (!keyed && !disabled.is_empty()), "unprotected intermediate state");
+                    seen += 1;
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                }
+                seen
+            })
+        };
+        while reads.load(std::sync::atomic::Ordering::SeqCst) == 0 { tokio::task::yield_now().await; }
+        let permit = store.write_permit("alice", 3).await;
+        disable_scoped_psk(&store, "alice", &scoped(NET_A, "#test")).await.unwrap();
+        drop(permit);
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(reader.await.unwrap() > 0);
+        assert!(!protects(&store, NET_A, "#test").await);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn storing_a_scoped_key_again_clears_every_spelling_of_its_opt_out() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        store.store_channel_key("alice", "#test", "e2e3.legacy").await.unwrap();
+        store.store_channel_key("alice", &scoped(NET_A, "#test"), "e2e3.scoped").await.unwrap();
+        disable_scoped_psk(&store, "alice", &scoped(NET_A, "#test")).await.unwrap();
+        // Re-enabled with a mixed-case spelling (cached client).
+        let again = scoped(NET_A, "#Test");
+        store.store_channel_key("alice", &again, "e2e3.again").await.unwrap();
+        clear_scoped_psk_off(&store, "alice", &again).await.unwrap();
+        let (_, disabled) = split_psk_slots(store.list_channel_keys("alice").await);
+        assert!(disabled.is_empty(), "{disabled:?}");
+        // Removing that key later without the scoped opt-out restores the legacy key.
+        store.delete_channel_key("alice", &again).await.unwrap();
+        assert!(protects(&store, NET_A, "#test").await);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Fill alice's channel-key directory with `n` ordinary keys (written directly).
+    fn fill_channel_keys(store: &e2e::E2EStore, n: usize) {
+        let first = store.channel_slot_file("alice", "#fill0");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        for i in 0..n { std::fs::write(store.channel_slot_file("alice", &format!("#fill{i}")), "e2e3.k").unwrap(); }
+    }
+
+    #[tokio::test]
+    async fn scoped_off_works_at_the_channel_key_file_cap_with_bounded_markers() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        store.store_channel_key("alice", "#test", "e2e3.legacy").await.unwrap();
+        store.store_channel_key("alice", &scoped(NET_A, "#test"), "e2e3.scoped").await.unwrap();
+        fill_channel_keys(&store, 4096 - 2);
+        assert!(store.store_channel_key("alice", "#another", "e2e3.k").await.is_err(), "ordinary keys stop at the cap");
+        disable_scoped_psk(&store, "alice", &scoped(NET_A, "#test")).await.unwrap();
+        assert!(!protects(&store, NET_A, "#test").await);
+        assert!(protects(&store, NET_B, "#test").await, "the legacy key keeps protecting another network");
+        assert!(store.store_channel_key("alice", "#another", "e2e3.k").await.is_err(), "a marker does not free key room");
+        // Markers are bounded: the reserve fills up, and the strict inventory stays readable.
+        let mut saved = 0;
+        while store.store_psk_off_marker("alice", &scoped(NET_B, &format!("#m{saved}"))).await.is_ok() {
+            saved += 1;
+            assert!(saved <= 64, "opt-out markers are not bounded");
+        }
+        assert!(saved > 0);
+        assert!(store.protected_channel_names("alice").await.is_ok());
+        assert!(protects(&store, NET_B, "#test").await);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_stale_opt_out_that_cannot_be_cleared_is_reported() {
+        let dir = tmpdir();
+        let store = e2e::E2EStore::new(&dir);
+        store.store_channel_key("alice", "#test", "e2e3.legacy").await.unwrap();
+        store.store_channel_key("alice", &scoped(NET_A, "#test"), "e2e3.scoped").await.unwrap();
+        // Simulated storage failure: the opt-out slot exists but cannot be removed.
+        let marker = store.channel_slot_file("alice", &format!("{PSK_OFF_PREFIX}{}", scoped(NET_A, "#test")));
+        std::fs::create_dir_all(marker.join("occupied")).unwrap();
+        assert!(clear_scoped_psk_off(&store, "alice", &scoped(NET_A, "#test")).await.is_err());
+        // The scoped key still protects its network regardless of the stale opt-out.
+        assert!(protects(&store, NET_A, "#test").await);
+        std::fs::remove_dir_all(&marker).unwrap();
+        assert!(clear_scoped_psk_off(&store, "alice", &scoped(NET_A, "#test")).await.is_ok());
+        // An unreadable inventory is a failure too, never "nothing to clear".
+        let invalid = store.channel_slot_file("alice", "#test").with_file_name("invalid~slot.enc");
+        std::fs::write(&invalid, "test").unwrap();
+        assert!(clear_scoped_psk_off(&store, "alice", &scoped(NET_A, "#test")).await.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

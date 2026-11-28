@@ -1,5 +1,17 @@
 # CryptIRC changelog
 
+## v0.5.28 (November 2026)
+
+- Apply one protection policy to browser and MCP sends to encrypted chats. The server now also blocks TAGMSG (typing notices, silently) and CTCP with text. From the browser, encrypted messages, Signal setup and payload-free CTCP VERSION, TIME, CLIENTINFO, SOURCE and PING requests still go through. NAMES, WHO, MODE and other IRC commands are unchanged, and reactions keep their own encrypted and plain rules.
+- Check plaintext sends and plain reactions under the account's encryption lock and hold it until IRC has the line, so protection added at the same moment by another tab, device or MCP always applies.
+- Pin new contacts with a versioned fingerprint over both validated identity keys, shown as `v2:` followed by 16 groups of hex digits. Contacts pinned by earlier releases keep their pins with no migration or new prompt. `/encrypt fingerprint` and `/encrypt verify` also show the earlier form so you can compare with older clients. Contacts pinned before both identity keys were covered show a key-change confirmation once. An open tab running an earlier release treats a contact first pinned in this release as changed until it reloads. `/encrypt trust` now requires a session with both identity keys.
+- Turn a shared key off for one network only after the opt-out is saved. If saving or removing a key fails, the channel stays protected. Re-enabling clears the opt-out in any letter case.
+- Refuse encrypted-message and Signal setup lines from MCP, so every MCP message goes through the protection check before IRC gets it.
+- Remove user-supplied client tags from lines that can reach an encrypted chat without a target check: encrypted messages, Signal setup, and payload-free CTCP requests.
+- Allow turning a shared key off for one network even when the channel-key storage limit is reached. Opt-out records may use a small, fixed reserve beyond the limit.
+- Report when a stale network opt-out cannot be cleared after a key is saved, and clear it before removing a scoped key outright. If clearing fails, nothing is removed.
+- `/encrypt verify` now shows the contact's `v2:` fingerprint when no pin exists. It also shows a safety phrase covering both identity keys of both sides. The earlier DH-key-only phrase and fingerprint still appear, labelled as what earlier releases show.
+
 ## v0.5.20 (November 2026)
 
 - Add eight inline reactions in channels and PMs on supported IRC connections. Choose a reaction again to remove it, and keep counts for the current browser session.

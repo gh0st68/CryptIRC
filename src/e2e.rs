@@ -70,6 +70,14 @@ const MAX_OTPK_WRITES_PER_CALL: usize = 256;
 const MAX_SESSION_FILES: usize = 4096;
 const MAX_OTPK_TOTAL: usize = 1024;
 const MAX_CHANNEL_KEY_FILES: usize = 4096;
+/// Name prefix of a scoped shared key's network opt-out marker (`~off:@<network>:<chan>`).
+pub(crate) const PSK_OFF_PREFIX: &str = "~off:";
+/// Opt-out markers may use this many slots beyond MAX_CHANNEL_KEY_FILES, so a scoped key
+/// can still be turned off when the channel-key directory is full: the marker is saved
+/// before the key is removed. Bounded, so the directory can never exceed
+/// MAX_CHANNEL_SLOT_FILES; ordinary keys still stop at MAX_CHANNEL_KEY_FILES.
+const PSK_OFF_MARKER_RESERVE: usize = 64;
+const MAX_CHANNEL_SLOT_FILES: usize = MAX_CHANNEL_KEY_FILES + PSK_OFF_MARKER_RESERVE;
 /// r8 (codex P1 e2e.rs:658): the private half of a one-time prekey is the session slot
 /// `__otpk__<key_id>`. A private half whose public half is no longer published (consumed
 /// by a bundle fetch whose handshake never came, or never published) used to stay forever,
@@ -1074,6 +1082,13 @@ impl E2EStore {
         self.store_slot(username, "channels", channel, channel_is_safe, blob, MAX_CHANNEL_KEY_FILES, "channel key").await
     }
 
+    /// Save the network opt-out marker of a scoped shared key (`channel` without the
+    /// prefix). Unlike store_channel_key it may use the bounded marker reserve.
+    pub(crate) async fn store_psk_off_marker(&self, username: &str, channel: &str) -> Result<()> {
+        let marker = format!("{PSK_OFF_PREFIX}{channel}");
+        self.store_slot(username, "channels", &marker, channel_is_safe, "e2e3.", MAX_CHANNEL_SLOT_FILES, "channel key opt-out").await
+    }
+
     pub async fn load_channel_key(&self, username: &str, channel: &str) -> Option<String> {
         load_slot(&self.user_dir(username).join("channels"), &slot_name(channel, channel_is_safe)).await
     }
@@ -1085,7 +1100,13 @@ impl E2EStore {
     pub async fn list_channel_keys(&self, username: &str) -> Vec<String> {
         // #89: only real `.enc` channel-key files (skip strays) and a capped vector so a
         // reconnect can't trigger an unbounded fan-out of load round-trips.
-        list_slots(&self.user_dir(username).join("channels"), channel_is_safe, MAX_CHANNEL_KEY_FILES).await
+        list_slots(&self.user_dir(username).join("channels"), channel_is_safe, MAX_CHANNEL_SLOT_FILES).await
+    }
+
+    /// The file a channel-key slot is stored in (for storage-failure fixtures).
+    #[cfg(test)]
+    pub(crate) fn channel_slot_file(&self, username: &str, channel: &str) -> PathBuf {
+        self.user_dir(username).join("channels").join(format!("{}.enc", slot_name(channel, channel_is_safe).stem))
     }
 
     pub(crate) async fn protected_names(&self, username: &str) -> Result<(Vec<String>, Vec<String>)> {
@@ -1096,8 +1117,18 @@ impl E2EStore {
         ))
     }
 
+    /// protected_names, read under the slot lock that every protection change holds.
+    /// The caller keeps the guard through the operation the snapshot authorizes. Never
+    /// call this while already holding a permit of the same account (not reentrant).
+    pub(crate) async fn protected_names_permit(&self, username: &str)
+        -> Result<(tokio::sync::OwnedMutexGuard<()>, Vec<String>, Vec<String>)> {
+        let guard = self.slot_update_lock(username).await;
+        let (channels, peers) = self.protected_names(username).await?;
+        Ok((guard, channels, peers))
+    }
+
     pub(crate) async fn protected_channel_names(&self, username: &str) -> Result<Vec<String>> {
-        self.protected_slots(self.user_dir(username).join("channels"), channel_is_safe, MAX_CHANNEL_KEY_FILES).await
+        self.protected_slots(self.user_dir(username).join("channels"), channel_is_safe, MAX_CHANNEL_SLOT_FILES).await
     }
 
     pub(crate) async fn check_plain_reply(&self, username: &str, cold: bool,

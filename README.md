@@ -7,7 +7,7 @@
 <p align="center"><strong>IRC that stays connected.</strong><br>Self-hosted. Encrypted history. All your devices.</p>
 
 <p align="center">
-  <a href="https://cryptirc.com/news/"><img src="https://img.shields.io/badge/version-0.5.27-00b894?style=flat-square" alt="Version 0.5.27"></a>
+  <a href="https://cryptirc.com/news/"><img src="https://img.shields.io/badge/version-0.5.28-00b894?style=flat-square" alt="Version 0.5.28"></a>
   <img src="https://img.shields.io/badge/server-Linux-5a7085?style=flat-square" alt="Linux server">
   <img src="https://img.shields.io/badge/client-desktop%20%C2%B7%20mobile%20%C2%B7%20terminal-5a7085?style=flat-square" alt="Desktop, mobile, and terminal clients">
 </p>

@@ -2466,8 +2466,14 @@ async function _e2ePublicIdentity(keys) {
   }
   return pair;
 }
+// The fingerprint peers pin for this identity (v2), shown by /encrypt fingerprint.
 async function _e2eOwnFingerprint() {
   return computeIdentityFingerprint(...await _e2ePublicIdentity(E2E.identityKeys));
+}
+// The account setting `idfp` that names the identity in use keeps the form every
+// release (and every open tab) already compares; it is never a peer pin.
+async function _e2eOwnIdfp() {
+  return e2eLegacyIdentityFingerprint(...await _e2ePublicIdentity(E2E.identityKeys));
 }
 function _e2eSessionBoundTo(session, publicKeys) {
   return !!publicKeys && !!session?.identityAD && !!session.theirIdentityPub &&
@@ -2521,7 +2527,8 @@ async function _e2eLoadIdentity(kr, gen) {
     const { pt, legacy } = await aesDecryptBlobEx(blob, 'identity');
     const obj = JSON.parse(new TextDecoder().decode(pt));
     const keys = await importIdentityKeys(obj);
-    const fp = await computeIdentityFingerprint(await exportPub(keys.dhKeyPair.publicKey, 'ECDH'), await exportPub(keys.signKeyPair.publicKey, 'ECDSA'));
+    // The `idfp` account setting's form (see _e2eOwnIdfp).
+    const fp = await e2eLegacyIdentityFingerprint(await exportPub(keys.dhKeyPair.publicKey, 'ECDH'), await exportPub(keys.signKeyPair.publicKey, 'ECDSA'));
     if (gen !== undefined && _e2eBootStale(gen)) return;
     // r5 (codex-p3 e2e.js:1333): an identity whose fingerprint differs from the one
     // this account's authenticated E2E state says it uses now is NOT adopted silently —
@@ -2636,7 +2643,7 @@ async function e2eGenerateAndPublishIdentity(opts = null) {
         }
         const adopted = E2E.identityKeys;
         const stillAdopted = () => E2E.keyReady && !_e2eBootStale(gen) && _e2eUser()===user && E2E.identityKeys===adopted;
-        const fp = await _e2eOwnFingerprint();
+        const fp = await _e2eOwnIdfp();
         if (!stillAdopted()) return;
         if (E2E.state && E2E.state.idfp !== fp) {
           E2E.state.idfp = fp;
@@ -2662,7 +2669,7 @@ async function e2eGenerateAndPublishIdentity(opts = null) {
     E2E.identityKeys = keys;
     _e2eIdentityRevisions.set(E2E.identityKeys,hash);
     if (E2E.state) {
-      E2E.state.idfp = await _e2eOwnFingerprint();
+      E2E.state.idfp = await _e2eOwnIdfp();
       if (replace) {
         E2E.state.identityRotated = true;
         E2E.state.idfpGeneration = (E2E.state.idfpGeneration || 0)+1;
@@ -3111,14 +3118,16 @@ async function _e2eEstablishInner(from, header, opts = {}) {
   // #25: REQUIRE a non-empty signing identity key so the pin always covers BOTH keys.
   // #47: verify the header before using it or asking the user to trust a new identity.
   if (!await _e2eVerifyOffer(header)) return { ok:false, why:'invalid' };
-  // #11/#25: pin BOTH identity keys (dh + sign).
-  const fp    = await computeIdentityFingerprint(header.sender_ik, header.sender_sign_ik);
-  if (opts.expectedFingerprint && (fp !== opts.expectedFingerprint || E2E.trustStore[nk]?.fingerprint !== fp ||
+  // #11/#25: pin BOTH identity keys (dh + sign), validated P-256 points.
+  const fp    = await computeIdentityFingerprint(header.sender_ik, header.sender_sign_ik).catch(() => null);
+  if (!fp) return { ok:false, why:'invalid' };
+  if (opts.expectedFingerprint && (!await e2ePinMatchesIdentity(opts.expectedFingerprint, header.sender_ik, header.sender_sign_ik) ||
+      E2E.trustStore[nk]?.fingerprint !== opts.expectedFingerprint ||
       E2E.trustStore[nk].keyChanged || E2E.state?.dm?.[nk]?.on === 0 || _e2eBootStale(gen))) return {ok:false,why:'invalid'};
   // A delayed setup frame may belong to an identity the contact has already
   // replaced. Wait for the accompanying message before revisiting a live pin.
   if (_existing && !_existing._unusable && !opts.envelope) return {ok:false,why:'deferred'};
-  const trust = await e2eCheckTrust(from, fp, { connId: opts.connId, peerKey: nk });
+  const trust = await e2eCheckTrust(from, fp, { connId: opts.connId, peerKey: nk, keys: [header.sender_ik, header.sender_sign_ik] });
 
   // #1/C2: a changed identity must NOT silently re-establish. Warn and refuse; the pin
   // and the live session (if any) stay exactly as they were.
@@ -3477,7 +3486,7 @@ async function _e2eInstallStoredInner(nk, blob, slot = null, opts = null) {
         // receive chain. This candidate is never installed or saved.
         if (!enableCandidate || E2E.dmSessions[nk]!==live || !live.startEph || session.startEph!==live.startEph ||
             !Number.isSafeInteger(live.epoch) || session.epoch>live.epoch || !_e2eSameSessionIdentity(session,live) ||
-            _e2eSessFpCached(session)!==E2E.trustStore[nk]?.fingerprint) return null;
+            _e2eSessPinIs(session,E2E.trustStore[nk]?.fingerprint)!==true) return null;
         delete session.CKs;
         delete session.restartPrev;
         return session;
@@ -3505,12 +3514,11 @@ async function _e2eInstallStoredInner(nk, blob, slot = null, opts = null) {
           // then set up this session with it.
           const tr = E2E.trustStore[nk];
           const pinNow = tr?.fingerprint || null;
-          const newFp = await _e2eSessFp(session), curFp = await _e2eSessFp(cur);
-          // r8 (agy-flash e2e.js:2076): a pre-#11 pin hashes the DH key only — the same
-          // fallback as _e2eSessPinMismatch.
-          const dhFp = async (x) => x && x.theirIdentityPub ? computeIdentityFingerprint(x.theirIdentityPub, null) : null;
-          const newOk = !!pinNow && (newFp === pinNow || await dhFp(session) === pinNow);
-          const curOk = !!pinNow && (curFp === pinNow || await dhFp(cur) === pinNow);
+          await _e2eSessFp(session); await _e2eSessFp(cur);
+          // Either pin format over both keys; a pre-#11 DH-only pin confirms neither
+          // binding (see _e2eSessPinIs), so the hint is ignored.
+          const newOk = !!pinNow && _e2eSessPinIs(session,pinNow) === true;
+          const curOk = !!pinNow && _e2eSessPinIs(cur,pinNow) === true;
           if (!current() || E2E.dmSessions[nk] !== cur || (session.epoch || 0) <= floor() ||
               E2E.trustStore[nk]?.fingerprint !== pinNow || !(newOk && !curOk)) {
             console.warn('[E2E] ignoring a "session moved" hint: different identity binding for', nk);
@@ -3604,7 +3612,8 @@ function _e2eMovedPending(k) { return !!((E2E._moved && E2E._moved[k]) || (E2E._
 // account pins for the peer NOW. Accepting a peer's replacement identity on another
 // device reaches this one as a new pin (re-sync / state merge) — but the old session
 // stayed and kept encrypting to (and authenticating) the previous identity.
-E2E._fpCache = new Map();
+E2E._fpCache = new Map();         // session identity keys → v2 fingerprint (null: invalid keys)
+E2E._fpLegacyCache = new Map();   // the same keys → an earlier release's full-pin form
 function _e2eSessFpKey(s) { return s && s.theirIdentityPub && s.theirSignPub ? s.theirIdentityPub + '|' + s.theirSignPub : null; }
 function _e2eSessFpCached(s) { const key = _e2eSessFpKey(s); return key ? E2E._fpCache.get(key) : undefined; }
 async function _e2eSessFp(s) {
@@ -3612,14 +3621,30 @@ async function _e2eSessFp(s) {
   if (!key) return null;
   let fp = E2E._fpCache.get(key);
   if (fp === undefined) {
-    // (also the pre-#11 dh-only form of the same identity: a pin made before both keys
-    // were pinned matches it — never a false "replaced")
-    E2E._fpCache.set('dh|' + s.theirIdentityPub, await computeIdentityFingerprint(s.theirIdentityPub, null));
-    fp = await computeIdentityFingerprint(s.theirIdentityPub, s.theirSignPub);
+    const valid = await e2eValidIdentityKeys(s.theirIdentityPub, s.theirSignPub);
+    fp = valid ? await computeIdentityFingerprint(s.theirIdentityPub, s.theirSignPub) : null;
+    const legacy = valid ? await e2eLegacyIdentityFingerprint(s.theirIdentityPub, s.theirSignPub) : null;
+    // Paired entries, inserted and evicted together.
+    E2E._fpLegacyCache.set(key, legacy);
     E2E._fpCache.set(key, fp);
-    while (E2E._fpCache.size > 1000) E2E._fpCache.delete(E2E._fpCache.keys().next().value);
+    while (E2E._fpCache.size > 1000) {
+      const oldest = E2E._fpCache.keys().next().value;
+      E2E._fpCache.delete(oldest); E2E._fpLegacyCache.delete(oldest);
+    }
   }
   return fp;
+}
+// Does the session use the identity `pin` confirms? A v2 pin, or a full pin made by an
+// earlier release over the same two validated keys. Never the DH key alone: a pre-#11
+// pin does not vouch for the session's signing key (the user confirms it once through
+// the key-change flow). undefined = not computed yet (call _e2eSessFp first).
+function _e2eSessPinIs(s, pin) {
+  const key = _e2eSessFpKey(s);
+  if (!key || typeof pin !== 'string' || !pin) return false;
+  const fp = E2E._fpCache.get(key);
+  if (fp === undefined) return undefined;
+  if (fp === null) return false;
+  return pin === fp || (e2eIsLegacyFingerprint(pin) && pin === E2E._fpLegacyCache.get(key));
 }
 // true = the session is bound to ANOTHER identity than the current (locally owned) pin;
 // null = not known yet (being computed); false = same, or nothing to compare (no pin, a
@@ -3627,9 +3652,9 @@ async function _e2eSessFp(s) {
 function _e2eSessPinMismatch(k, s) {
   const tr = E2E.trustStore[k];
   if (!s || s._unusable || !tr || !tr.fingerprint || !_e2eSessFpKey(s)) return false;
-  const fp = _e2eSessFpCached(s);
-  if (fp === undefined) { _e2eSessFp(s).catch(() => {}); return null; }
-  return fp !== tr.fingerprint && E2E._fpCache.get('dh|' + s.theirIdentityPub) !== tr.fingerprint;
+  const same = _e2eSessPinIs(s, tr.fingerprint);
+  if (same === undefined) { _e2eSessFp(s).catch(() => {}); return null; }
+  return !same;
 }
 // r2 (NEW-7, cross-device): another device of this account SENT on the session with
 // `k`, so its send chain moved past ours. The server's "session moved" event is only a
@@ -4892,7 +4917,7 @@ async function saveSession(nick, session, opts = null) {
     !!restart.restartFrom && _e2eRestartFrom(previous)===restart.restartFrom && _e2eRestartFrom(session)===restart.restartFrom &&
     _e2eSameSessionIdentity(previous,session) && E2E.state?.dm?.[nick]?.on===1 &&
     !E2E._sessionSyncRepair.has(nick) && !E2E.trustStore[nick]?.keyChanged &&
-    E2E.trustStore[nick]?.fingerprint===fingerprint && _e2eSessFpCached(session)===fingerprint;
+    E2E.trustStore[nick]?.fingerprint===fingerprint && _e2eSessPinIs(session,fingerprint)===true;
   const confirmFailure = 'Could not confirm the encrypted session update. Try again when connected.';
   const establishing = opts?.create && !opts?.snd;
   // Restarting from a different device can replace a ratchet whose identity
@@ -5229,8 +5254,14 @@ async function e2eReviewIncomingIdentity(connId,target) {
 // refused and every message warns — until the user explicitly accepts (/encrypt accept,
 // fingerprints shown) or rejects it. The old code overwrote the pin on the first
 // (header) PRIVMSG, so the second (envelope) PRIVMSG "matched" and was silently trusted.
+// opts.keys = [dh, sign]: the presented identity keys; `fingerprint` must be their v2
+// fingerprint. The result's `pin` is the pin now in force (an earlier release's full
+// pin of the same keys stays as it is: no silent rewrite of the account setting).
 async function e2eCheckTrust(nick, fingerprint, opts = null) {
   const k = opts?.peerKey || _e2eDmKey(nick, opts?.connId);
+  const [dhKey, signKey] = opts?.keys || [];
+  if (!fingerprint || !await e2eValidIdentityKeys(dhKey, signKey) ||
+      fingerprint !== await computeIdentityFingerprint(dhKey, signKey)) return { status:'rejected', keyChanged:false };
   const existing = E2E.trustStore[k];
   if (!existing) {
     const gen = E2E._lockGen;
@@ -5239,17 +5270,20 @@ async function e2eCheckTrust(nick, fingerprint, opts = null) {
     if (E2E.trustStore[k]) return e2eCheckTrust(nick, fingerprint, opts);
     E2E.trustStore[k] = { fingerprint, verified:false, keyChanged:false, pendingFingerprint:null };
     _e2eStateSetTrust(k);
-    return { status:'tofu', keyChanged:false };
+    return { status:'tofu', keyChanged:false, pin:fingerprint };
   }
-  if (existing.fingerprint !== fingerprint) {
+  const pin = existing.fingerprint;
+  if (!await e2ePinMatchesIdentity(pin, dhKey, signKey)) {
+    if (E2E.trustStore[k] !== existing || existing.fingerprint !== pin) return e2eCheckTrust(nick, fingerprint, opts);
     const firstWarning = existing.pendingFingerprint !== fingerprint;
     existing.keyChanged = true;
     existing.pendingFingerprint = fingerprint;
     return { status:'changed', keyChanged:true, firstWarning };
   }
+  if (E2E.trustStore[k] !== existing || existing.fingerprint !== pin) return e2eCheckTrust(nick, fingerprint, opts);
   // The PINNED key is presented again: any pending (unaccepted) change is moot.
   if (existing.keyChanged || existing.pendingFingerprint) { existing.keyChanged = false; existing.pendingFingerprint = null; }
-  return { status: existing.verified ? 'verified' : 'trusted', keyChanged:false };
+  return { status: existing.verified ? 'verified' : 'trusted', keyChanged:false, pin };
 }
 
 function e2eMarkVerified(nick, cid) {
@@ -5268,16 +5302,53 @@ async function computeFingerprint(b64PubKey) {
 }
 
 // #11: TOFU must pin BOTH identity keys (sign + dh) so that swapping the sign
-// key (while keeping the dh key) also trips the key-change warning. The pinned
-// fingerprint hashes the canonical concatenation dhKey||signKey of the raw key
-// bytes. Both the pin-creation and compare paths call this so they stay in sync.
-// Inputs are base64 raw EC public keys.
+// key (while keeping the dh key) also trips the key-change warning.
+// Identity fingerprint v2 (every pin made from now on, and what peers are shown):
+// SHA-256 over a domain label and both raw P-256 identity keys, each 4-byte
+// big-endian length-prefixed, displayed as "v2:" + 16 groups of 4 hex digits. Both
+// keys must be valid uncompressed P-256 points. Local only: no wire format carries it.
+// Pins made by earlier releases (the unprefixed digest of dhKey||signKey, or of the
+// DH key alone before #11) are matched by e2ePinMatchesIdentity / _e2eSessPinIs.
+const E2E_FP_V2_DOMAIN = 'CryptIRC identity fingerprint v2';
+const E2E_FP_V2_PREFIX = 'v2:';
+function _e2eFingerprintHex(digest) {
+  const hex = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
+  return hex.match(/.{1,4}/g).join(' ').toUpperCase();
+}
+async function e2eValidIdentityKeys(b64DhKey, b64SignKey) {
+  try {
+    if (typeof b64DhKey !== 'string' || typeof b64SignKey !== 'string') return false;
+    const dh = base64ToBytes(b64DhKey), sign = base64ToBytes(b64SignKey);
+    if (dh.length !== 65 || sign.length !== 65 || dh[0] !== 4 || sign[0] !== 4) return false;
+    await importPub(b64DhKey, 'ECDH');      // WebCrypto refuses points off the curve
+    await importPub(b64SignKey, 'ECDSA');
+    return true;
+  } catch (_) { return false; }
+}
 async function computeIdentityFingerprint(b64DhKey, b64SignKey) {
+  if (!await e2eValidIdentityKeys(b64DhKey, b64SignKey)) throw new Error('invalid identity keys');
+  const field = bytes => { const n = bytes.length; return concat(new Uint8Array([n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]), bytes); };
+  const digest = await crypto.subtle.digest('SHA-256', concat(field(new TextEncoder().encode(E2E_FP_V2_DOMAIN)),
+    field(base64ToBytes(b64DhKey)), field(base64ToBytes(b64SignKey))));
+  return E2E_FP_V2_PREFIX + _e2eFingerprintHex(digest);
+}
+// The fingerprint earlier releases pinned (and still record as this account's own
+// `idfp` setting, which older open tabs compare). Compatibility only: never a new pin.
+// A null signing key gives the pre-#11 DH-only form (see /encrypt accept).
+async function e2eLegacyIdentityFingerprint(b64DhKey, b64SignKey) {
   const dh   = base64ToBytes(b64DhKey);
   const sign = b64SignKey ? base64ToBytes(b64SignKey) : new Uint8Array(0);
-  const digest = await crypto.subtle.digest('SHA-256', concat(dh, sign));
-  const hex    = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
-  return hex.match(/.{1,4}/g).join(' ').toUpperCase();
+  return _e2eFingerprintHex(await crypto.subtle.digest('SHA-256', concat(dh, sign)));
+}
+function e2eIsLegacyFingerprint(fp) { return typeof fp === 'string' && /^[0-9A-F]{4}( [0-9A-F]{4}){15}$/.test(fp); }
+// Does `pin` confirm exactly these two identity keys? A v2 pin by its own digest; a
+// full pin from an earlier release by the earlier digest — unambiguous only because
+// both keys are validated 65-byte points first. A DH-only pin never matches: it says
+// nothing about the signing key, which the user confirms through the key-change flow.
+async function e2ePinMatchesIdentity(pin, b64DhKey, b64SignKey) {
+  if (typeof pin !== 'string' || !pin || !await e2eValidIdentityKeys(b64DhKey, b64SignKey)) return false;
+  if (pin.startsWith(E2E_FP_V2_PREFIX)) return pin === await computeIdentityFingerprint(b64DhKey, b64SignKey);
+  return e2eIsLegacyFingerprint(pin) && pin === await e2eLegacyIdentityFingerprint(b64DhKey, b64SignKey);
 }
 
 // #12: Canonical encoding of BOTH peer identities (initiator + responder), used
@@ -5320,6 +5391,28 @@ async function safetyPhrase(pubKeyA, pubKeyB) {
   }
   const ikm = cmp ? concat(a, b) : concat(b, a);
   const digest = await crypto.subtle.digest('SHA-256', ikm);
+  return bytesToMnemonic(new Uint8Array(digest).slice(0, 16)).slice(0, 12).join(' ');
+}
+
+// Safety phrase v2: covers BOTH identity keys of BOTH sides (the DH-only phrase above
+// says nothing about the signing keys). Each identity is encoded as its length-prefixed
+// DH key then signing key; the two encodings are sorted so both sides hash the same
+// bytes, after a domain label. Both identities must be valid P-256 key pairs. Shown
+// next to the earlier DH-only phrase, which stays labelled as the value earlier
+// releases display.
+const E2E_PHRASE_V2_DOMAIN = 'CryptIRC safety phrase v2';
+async function safetyPhraseV2(myDh, mySign, theirDh, theirSign) {
+  if (!await e2eValidIdentityKeys(myDh, mySign) || !await e2eValidIdentityKeys(theirDh, theirSign))
+    throw new Error('invalid identity keys');
+  const field = bytes => { const n = bytes.length; return concat(new Uint8Array([n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255]), bytes); };
+  const mine = concat(field(base64ToBytes(myDh)), field(base64ToBytes(mySign)));
+  const theirs = concat(field(base64ToBytes(theirDh)), field(base64ToBytes(theirSign)));
+  let mineFirst = mine.length <= theirs.length;
+  for (let i = 0; i < Math.min(mine.length, theirs.length); i++) {
+    if (mine[i] !== theirs[i]) { mineFirst = mine[i] < theirs[i]; break; }
+  }
+  const digest = await crypto.subtle.digest('SHA-256', concat(field(new TextEncoder().encode(E2E_PHRASE_V2_DOMAIN)),
+    mineFirst ? mine : theirs, mineFirst ? theirs : mine));
   return bytesToMnemonic(new Uint8Array(digest).slice(0, 16)).slice(0, 12).join(' ');
 }
 
@@ -5468,9 +5561,11 @@ async function e2eHandleEvent(ev) {
         const { sharedSecret, ephemeralPub, usedOTPKId, identityAD } = await x3dhInitiate(bundle);
         if (!stillPending()) break;
 
-        // #11: TOFU pins BOTH identity keys (dh + sign).
-        const fp    = await computeIdentityFingerprint(bundle.identity_dh_key, bundle.identity_sign_key);
-        const trust = await e2eCheckTrust(nick, fp, { solicited: !pend.done, bridge: ev.bridge, connId: pend.cid, peerKey: k });
+        // #11: TOFU pins BOTH identity keys (dh + sign), validated P-256 points.
+        const fp    = await computeIdentityFingerprint(bundle.identity_dh_key, bundle.identity_sign_key).catch(() => null);
+        if (!fp) { e2eSysMsg(nick, `🔐 Encryption with ${nick} cancelled — the published identity keys are invalid`, pend.cid); return; }
+        const trust = await e2eCheckTrust(nick, fp, { solicited: !pend.done, bridge: ev.bridge, connId: pend.cid, peerKey: k,
+          keys: [bundle.identity_dh_key, bundle.identity_sign_key] });
 
         if (trust.keyChanged) {
           e2eShowKeyChangeWarning(nick, fp, trust.firstWarning, pend.cid);
@@ -5495,7 +5590,7 @@ async function e2eHandleEvent(ev) {
         const saved=settings?.blob && await _e2eDecodeState(settings.blob);
         if (!stillPending()) break;
         const on=saved?.dm?.[k]?.on;
-        if (saved?.trust?.[k]?.fp!==fp || on===0 || (requireOn && on!==1)) {
+        if (!trust.pin || saved?.trust?.[k]?.fp!==trust.pin || on===0 || (requireOn && on!==1)) {
           e2eSysMsg(nick,`🔐 Could not confirm that this chat switched to Signal. Check Encryption and retry /encrypt on ${nick}.`,pend.cid);
           break;
         }
@@ -6004,7 +6099,7 @@ async function _e2eRecoverRecentSignal(key,connId,target,expectedFingerprint = n
   const liveOffer = _e2ePendingHeader(key) || null;
   const currentOffer = () => current() && (_e2ePendingHeader(key) || null) === liveOffer;
   if (liveOffer && expectedFingerprint &&
-      await computeIdentityFingerprint(liveOffer.sender_ik,liveOffer.sender_sign_ik) !== expectedFingerprint) return false;
+      !await e2ePinMatchesIdentity(expectedFingerprint,liveOffer.sender_ik,liveOffer.sender_sign_ik)) return false;
   if (!currentOffer()) return false;
   if ((liveOffer || (!expectedFingerprint && E2E._orphans?.[key]?.some(o=>o.envelope.x3dh_header))) &&
       await _e2eRetryHeldDm(key,connId,expectedFingerprint)) return true;
@@ -6034,7 +6129,7 @@ async function _e2eRecoverRecentSignal(key,connId,target,expectedFingerprint = n
       }
     } catch (_) { continue; }
     if (liveOffer || !hdr || _e2eSessionHasOffer(E2E.dmSessions[key],hdr) || !await _e2eVerifyOffer(hdr)) continue;
-    if (expectedFingerprint && await computeIdentityFingerprint(hdr.sender_ik,hdr.sender_sign_ik) !== expectedFingerprint) continue;
+    if (expectedFingerprint && !await e2ePinMatchesIdentity(expectedFingerprint,hdr.sender_ik,hdr.sender_sign_ik)) continue;
     if (aged && !await _e2eIsSignedSuccessor(key,previous,hdr,connId,true)) continue;
     if (!currentOffer()) return false;
     offer = hdr;
@@ -6203,7 +6298,7 @@ function _e2eTargetStateOf(k, t, opts) {
   // An incoming gesture may use the previously approved session during manual
   // setup. Sending, first contact and disputed identities still wait.
   const receiveOnPinnedSession = opts?.receivedReaction && stDm?.on===1 && !!tr?.fingerprint &&
-    !tr.keyChanged && _e2eSessFpCached(s)===tr.fingerprint;
+    !tr.keyChanged && _e2eSessPinIs(s,tr.fingerprint)===true;
   // Checking an ordinary nick for the first time does not turn the chat on.
   const receivingDuringDiscovery = opts?.incomingPlain && pend?.settled && !pend.answered &&
     !s && !stDm?.on && !tr?.fingerprint && !E2E.state?.trust?.[k]?.fp && !srvPeers.includes(k);
@@ -7078,7 +7173,7 @@ async function e2eDecryptIncoming(from, target, text, opts = {}) {
         }
         const resumedSession = E2E.dmSessions[fk];
         if (!resumed || !request.current() || !allowed() || E2E.trustStore[fk]?.fingerprint!==pin || E2E.trustStore[fk]?.keyChanged ||
-            E2E._pendingOn?.[fk]?.closing || !resumedSession?.RK || resumedSession._unusable || _e2eSessFpCached(resumedSession)!==pin ||
+            E2E._pendingOn?.[fk]?.closing || !resumedSession?.RK || resumedSession._unusable || _e2eSessPinIs(resumedSession,pin)!==true ||
             !_e2eAllowHeldDm(opts.conn_id,from,opts.prefix)) {
           return {plaintext:`🔐 Signal is off for ${from}. Run /encrypt on ${from} if you want to resume encrypted messages.`,encrypted:true};
         }
@@ -8322,12 +8417,29 @@ async function _e2eRunEncryptCommand(args, conn_id, target, viewTarget, migratio
       if (!session || session._unusable) { e2eSysMsg(target,`No E2E session with ${nick}`); return; }
       // #2: verify the PINNED long-term identity DH key (theirIdentityPub), NOT the ratchet key.
       if (!session.theirIdentityPub) { e2eSysMsg(target,`Session with ${nick} not yet established (no pinned identity)`); return; }
-      const myPub  = await exportPub(E2E.identityKeys.dhKeyPair.publicKey, 'ECDH');
-      const phrase = await safetyPhrase(myPub, session.theirIdentityPub);
-      const fp     = E2E.trustStore[k]?.fingerprint || await computeFingerprint(session.theirIdentityPub);
-      e2eSysMsg(target,`🔐 Safety phrase with ${nick}: ${phrase}`);
-      e2eSysMsg(target,`Read this over voice. If they see the same words → /encrypt trust ${nick}`);
-      e2eSysMsg(target,`Their fingerprint: ${fp}`);
+      const [myDh, mySign] = await _e2ePublicIdentity(E2E.identityKeys);
+      const legacyPhrase = await safetyPhrase(myDh, session.theirIdentityPub);
+      const bothKeys = await e2eValidIdentityKeys(session.theirIdentityPub, session.theirSignPub);
+      if (bothKeys) {
+        e2eSysMsg(target,`🔐 Safety phrase with ${nick} (both identity keys): ${await safetyPhraseV2(myDh, mySign, session.theirIdentityPub, session.theirSignPub)}`);
+        e2eSysMsg(target,`Read this over voice. If they see the same words → /encrypt trust ${nick}`);
+        e2eSysMsg(target,`  (earlier CryptIRC releases show a DH-key-only phrase instead: ${legacyPhrase})`);
+      } else {
+        e2eSysMsg(target,`🔐 Legacy safety phrase with ${nick} (DH key only, does not cover the signing key): ${legacyPhrase}`);
+      }
+      // Unpinned: show the v2 value peers see under /encrypt fingerprint, never the
+      // DH-only digest (which looks like a full pin from an earlier release).
+      const pin = E2E.trustStore[k]?.fingerprint;
+      if (pin) {
+        e2eSysMsg(target,`Their fingerprint: ${pin}`);
+        if (e2eIsLegacyFingerprint(pin) && await e2ePinMatchesIdentity(pin, session.theirIdentityPub, session.theirSignPub))
+          e2eSysMsg(target,`  (current CryptIRC releases show it as: ${await computeIdentityFingerprint(session.theirIdentityPub, session.theirSignPub)})`);
+      } else if (bothKeys) {
+        e2eSysMsg(target,`Their fingerprint: ${await computeIdentityFingerprint(session.theirIdentityPub, session.theirSignPub)}`);
+        e2eSysMsg(target,`  (earlier CryptIRC releases show it as: ${await e2eLegacyIdentityFingerprint(session.theirIdentityPub, session.theirSignPub)})`);
+      } else {
+        e2eSysMsg(target,`Their legacy DH-key-only fingerprint (not comparable with /encrypt fingerprint): ${await computeFingerprint(session.theirIdentityPub)}`);
+      }
       if (E2E.trustStore[k]?.pendingFingerprint) e2eSysMsg(target,`⚠️ A DIFFERENT key is pending for ${nick}: ${E2E.trustStore[k].pendingFingerprint}`);
       break;
     }
@@ -8342,13 +8454,15 @@ async function _e2eRunEncryptCommand(args, conn_id, target, viewTarget, migratio
       if (!t) { e2eSysMsg(target,`🔐 No identity for ${nick} has been confirmed on this device yet — start a session first (/encrypt on ${nick})`); return; }
       if (t.keyChanged) { e2eSysMsg(target,`⚠️ ${nick}'s identity key changed — /encrypt accept or /encrypt reject first`); return; }
       if (!s || s._unusable || !s.theirIdentityPub) { e2eSysMsg(target,`🔐 No E2E session with ${nick} — /encrypt on ${nick} first`); return; }
-      if (s.theirSignPub && await computeIdentityFingerprint(s.theirIdentityPub, s.theirSignPub) !== t.fingerprint) {
+      if (!await e2ePinMatchesIdentity(t.fingerprint, s.theirIdentityPub, s.theirSignPub)) {
         e2eSysMsg(target,`⚠️ The session with ${nick} does not use the pinned identity — not marking verified`); return;
       }
-      const myPub  = await exportPub(E2E.identityKeys.dhKeyPair.publicKey, 'ECDH');
-      const phrase = await safetyPhrase(myPub, s.theirIdentityPub);
+      const [myDh, mySign] = await _e2ePublicIdentity(E2E.identityKeys);
+      const phrase = await safetyPhraseV2(myDh, mySign, s.theirIdentityPub, s.theirSignPub);
+      const legacyPhrase = await safetyPhrase(myDh, s.theirIdentityPub);
       const ok = typeof confirm === 'function' && confirm(
-        `Mark ${nick} as VERIFIED?\n\nFingerprint:\n${t.fingerprint}\n\nSafety phrase:\n${phrase}\n\n` +
+        `Mark ${nick} as VERIFIED?\n\nFingerprint:\n${t.fingerprint}\n\nSafety phrase (both identity keys):\n${phrase}\n\n` +
+        `(Earlier CryptIRC releases show a DH-key-only phrase: ${legacyPhrase})\n\n` +
         `Only do this after ${nick} read you the same safety phrase over a trusted channel (voice / in person).`);
       if (!ok) { e2eSysMsg(target,'Not marked as verified'); return; }
       if (e2eMarkVerified(k)) e2eSysMsg(target,`✓ ${nick} marked as verified`);
@@ -8378,10 +8492,12 @@ async function _e2eRunEncryptCommand(args, conn_id, target, viewTarget, migratio
         if (pin?.fp && pin.fp!==prior && pin.fp!==approved) return null;
         const retired = await _e2eCloseSessionSlot(k,k,commandGen,async session=>{
           const actual = await _e2eSessFp(session);
-          if (actual===approved) return 'keep';
+          if (actual && actual===approved) return 'keep';
           if (!session.theirIdentityPub) return session.identityAD ? null : 'close';
-          const dh = await computeIdentityFingerprint(session.theirIdentityPub,null);
-          return actual===prior || dh===prior ? 'close' : null;
+          // Retiring (never trusting) a session under the old pin: a pre-#11 pin
+          // confirmed the DH key alone.
+          const dh = await e2eLegacyIdentityFingerprint(session.theirIdentityPub,null);
+          return _e2eSessPinIs(session,prior)===true || dh===prior ? 'close' : null;
         },current);
         if (!retired || !current()) return null;
         t.fingerprint = approved; t.pendingFingerprint = null; t.keyChanged = false;
@@ -8509,6 +8625,8 @@ async function _e2eRunEncryptCommand(args, conn_id, target, viewTarget, migratio
       // #11: show the combined (dh+sign) identity fingerprint — the same value
       // peers pin via TOFU — so an out-of-band match is meaningful.
       e2eSysMsg(target,`🔑 Your fingerprint: ${await _e2eOwnFingerprint()}`);
+      // Contacts pinned by an earlier CryptIRC release see this identity in that form.
+      e2eSysMsg(target,`   (shown by earlier CryptIRC releases as: ${await e2eLegacyIdentityFingerprint(...await _e2ePublicIdentity(E2E.identityKeys))})`);
       break;
     }
     default:
